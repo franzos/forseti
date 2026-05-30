@@ -1,0 +1,16 @@
+{# Rendered when require_admin rejects (non-admin email). We don't use the
+   admin/base shell because the user isn't allowed inside — pure base
+   layout, no admin sidebar. #}
+{% extends "base.html" %}
+
+{% block title %}{{ title }} &middot; {{ chrome.brand.name }}{% endblock %}
+
+{% block content %}
+<div class="max-w-prose mx-auto py-margin-desktop text-center flex flex-col gap-stack-md">
+    <h1 class="font-headline-lg text-headline-lg text-on-surface">{{ title }}</h1>
+    <p class="font-body-md text-body-md text-on-surface-variant">{{ body }}</p>
+    <div>
+        <a href="/" class="font-label-md text-label-md text-primary border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">Back to dashboard</a>
+    </div>
+</div>
+{% endblock %}

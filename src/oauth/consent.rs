@@ -1,0 +1,807 @@
+//! `/oauth/consent` — Hydra's consent challenge handler (GET renders the
+//! consent screen or auto-grants; POST processes the user's allow/deny
+//! decision and folds identity traits into the id_token claims).
+
+use askama::Template;
+use axum::extract::{Query, State};
+use axum::http::HeaderMap;
+use axum::response::{IntoResponse, Redirect, Response};
+use axum_extra::extract::Form;
+use serde::Deserialize;
+
+use crate::audit::{self, action, severity, target_kind, AuditCtx, AuditEvent};
+use crate::audit_metadata;
+use crate::extractors::{Csrf, OptionalSession};
+use crate::oauth_client_metadata;
+use crate::ory;
+use crate::page_chrome::PageChrome;
+use crate::render::render;
+use crate::state::AppState;
+
+/// View-model for a single requested OAuth2 scope on the consent screen.
+struct ConsentScopeView {
+    name: String,
+    description: String,
+    /// `true` when un-checking the scope would break the protocol — currently
+    /// only `openid`. The template disables the checkbox and emits a hidden
+    /// duplicate so the value is still POSTed.
+    required: bool,
+}
+
+#[derive(Template)]
+#[template(path = "consent.html")]
+struct ConsentTemplate {
+    chrome: PageChrome,
+    consent_intro: String,
+    client_name: String,
+    /// Subject email shown in the "Signed in as ..." line above the
+    /// scopes. Distinct from the chrome's `user_email` because consent
+    /// runs out-of-band from the Kratos session cookie — we look up the
+    /// subject directly via the admin API.
+    subject_email: String,
+    challenge: String,
+    scopes: Vec<ConsentScopeView>,
+    /// True when an admin has explicitly verified the client (or the
+    /// client predates the `oauth_client_metadata` table and so defaults
+    /// to verified — see the missing-row fallback below). Drives the
+    /// consent-screen badge: verified clients get a subtle "Reviewed by
+    /// your administrator" checkmark; unverified clients get a
+    /// prominent caution banner. Replaces the previous `dcr_registered`
+    /// flag — verification is now a first-class state, not implied by
+    /// DCR provenance.
+    verified: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct OAuthConsentQuery {
+    consent_challenge: String,
+}
+
+pub(crate) async fn oauth_consent(
+    State(state): State<AppState>,
+    Query(query): Query<OAuthConsentQuery>,
+    headers: HeaderMap,
+    csrf: Csrf,
+    session: OptionalSession,
+    actx: AuditCtx,
+) -> Response {
+    let challenge = query.consent_challenge;
+    let req = match ory::hydra::get_consent_request(&state.ory, &challenge).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!(error = ?e, "hydra get_consent_request failed");
+            return Redirect::to("/error").into_response();
+        }
+    };
+
+    let requested_scope = req.requested_scope.clone().unwrap_or_default();
+    let requested_audience = req
+        .requested_access_token_audience
+        .clone()
+        .unwrap_or_default();
+    let subject = req.subject.clone().unwrap_or_default();
+
+    let client_skip_consent = req
+        .client
+        .as_ref()
+        .and_then(|c| c.skip_consent)
+        .unwrap_or(false);
+    let hydra_skip = req.skip.unwrap_or(false);
+
+    // Verification lookup must happen *before* the auto-grant decision
+    // (M1). The trust-boundary rule is "an unverified client must show
+    // the caution banner on every consent" — neither Hydra-side `skip`
+    // (remembered consent grant) nor client-side `skip_consent` (admin-
+    // flagged trusted) gets to bypass that, otherwise an admin who
+    // flipped `skip_consent: true` on a self-registered client would
+    // also implicitly verify it. Verification lives in the Forseti-owned
+    // `oauth_client_metadata` table — see `src/oauth_client_metadata.rs`
+    // for why the trust-boundary state can't live on the Hydra client.
+    // Default for a missing row is "verified": clients without a Forseti
+    // row predate this table or came in via the admin UI, both of which
+    // are implicitly trusted. Self-registered DCR clients always have a
+    // row inserted with `verification = "unverified"` by the proxy.
+    let client_id_lookup = req
+        .client
+        .as_ref()
+        .and_then(|c| c.client_id.as_deref())
+        .unwrap_or_default();
+    let verified = if client_id_lookup.is_empty() {
+        true
+    } else {
+        match oauth_client_metadata::get(&state.db, client_id_lookup).await {
+            Ok(Some(row)) => row.is_verified(),
+            Ok(None) => true,
+            Err(e) => {
+                // Fail closed: a DB blip must not silently auto-grant a
+                // DCR-registered client that hasn't been admin-reviewed.
+                tracing::error!(
+                    error = ?e,
+                    client_id = %client_id_lookup,
+                    "consent: oauth_client_metadata lookup failed; treating client as unverified"
+                );
+                let ev = AuditEvent::new(action::CONSENT_VERIFICATION_LOOKUP_FAILED)
+                    .target(target_kind::OAUTH_CLIENT, client_id_lookup.to_string())
+                    .with_ctx(&actx)
+                    .severity(severity::WARNING)
+                    .failed(e.to_string());
+                let _ = audit::log(&state.db, ev).await;
+                false
+            }
+        }
+    };
+
+    // Auto-grant path: Hydra already remembers the user's consent, or the
+    // client is flagged trusted. Either way, no UI; fold the id_token claims
+    // and redirect straight to the relying party.
+    //
+    // Before auto-granting, verify the active Kratos session matches the
+    // subject Hydra claims this consent belongs to. Without this check a
+    // crafted consent link tied to one identity could be auto-granted while
+    // a different identity is signed in — the consent screen would never
+    // appear, leaving the requesting client with tokens issued for the
+    // wrong user. Mismatch → reject with `access_denied` rather than
+    // silently granting.
+    //
+    // Unverified clients never auto-grant (M1): we always want the user
+    // to see the caution banner.
+    if verified && (hydra_skip || client_skip_consent) {
+        // Subject comparison is independent of AAL — InsufficientAal means
+        // a session exists, we just couldn't read it here. Treating that
+        // as "no subject" keeps the mismatch check conservative (rejects
+        // rather than silently grants), which is the safer default.
+        let session_subject = session.identity_id().unwrap_or_default();
+        if session_subject != subject || subject.is_empty() {
+            tracing::warn!(
+                consent_subject = %subject,
+                session_subject = %session_subject,
+                "rejecting auto-grant: session subject mismatch"
+            );
+            match ory::hydra::reject_consent_request(
+                &state.ory,
+                &challenge,
+                "access_denied",
+                "Consent subject does not match the signed-in identity.",
+            )
+            .await
+            {
+                Ok(redirect) => return Redirect::to(&redirect.redirect_to).into_response(),
+                Err(e) => {
+                    tracing::error!(error = ?e, "hydra reject_consent_request (mismatch) failed");
+                    return Redirect::to("/error").into_response();
+                }
+            }
+        }
+        return finalize_consent(
+            &state,
+            &challenge,
+            &subject,
+            requested_scope,
+            requested_audience,
+            false,
+            &headers,
+        )
+        .await
+        .into_response();
+    }
+
+    let client_name = req
+        .client
+        .as_ref()
+        .and_then(|c| c.client_name.clone().filter(|n| !n.is_empty()))
+        .or_else(|| req.client.as_ref().and_then(|c| c.client_id.clone()))
+        .unwrap_or_else(|| "this application".to_string());
+
+    let scopes: Vec<ConsentScopeView> = requested_scope
+        .iter()
+        .map(|s| ConsentScopeView {
+            name: s.clone(),
+            description: state
+                .cfg
+                .oauth
+                .scope_descriptions
+                .get(s)
+                .cloned()
+                .unwrap_or_else(|| s.clone()),
+            // `openid` is mandatory for OIDC flows — Hydra rejects the
+            // consent acceptance if it's missing from `grant_scope`. We
+            // disable the checkbox (visually) and emit a hidden duplicate
+            // (in the template) so even if the user un-checks it the value
+            // still makes it into the POST body. Other scopes are
+            // user-controlled.
+            required: s == "openid",
+        })
+        .collect();
+
+    // Best-effort subject email lookup for the "Signed in as ..." line.
+    // Done via the admin API since /oauth/consent reaches us out-of-band
+    // (Hydra sets its own cookie, but the Kratos session cookie isn't
+    // guaranteed to be in scope here — and we already trust `subject`
+    // from Hydra).
+    let subject_email = match ory::kratos::admin_get_identity(&state.ory, &subject).await {
+        Ok(id) => id
+            .traits
+            .and_then(|t| t.get("email").and_then(|v| v.as_str()).map(str::to_string))
+            .unwrap_or_default(),
+        Err(e) => {
+            tracing::warn!(error = ?e, subject, "failed to fetch identity for consent display");
+            String::new()
+        }
+    };
+
+    render(&ConsentTemplate {
+        chrome: PageChrome::from_parts(&state, subject_email.clone(), csrf.0),
+        consent_intro: state.cfg.brand.consent_intro.clone(),
+        client_name,
+        subject_email,
+        challenge,
+        scopes,
+        verified,
+    })
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct OAuthConsentForm {
+    #[serde(rename = "_csrf")]
+    csrf: Option<String>,
+    consent_challenge: String,
+    decision: String,
+    /// `Vec<String>` because the same field name is repeated once per
+    /// granted scope. Axum's form extractor handles this when the field is
+    /// declared as a `Vec`.
+    #[serde(default, rename = "grant_scope")]
+    grant_scope: Vec<String>,
+    remember: Option<String>,
+}
+
+pub(crate) async fn oauth_consent_submit(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    actx: AuditCtx,
+    Form(form): Form<OAuthConsentForm>,
+) -> Response {
+    if let Some(resp) = crate::extractors::verify_csrf_or_forbid(&headers, form.csrf.as_deref()) {
+        return resp;
+    }
+
+    let remember = form.remember.as_deref() == Some("true");
+
+    if form.decision == "deny" {
+        // Best-effort lookup of subject + client for the audit row;
+        // failure here doesn't block the reject (Hydra will still get
+        // told the user said no).
+        let (subject, client_id) =
+            match ory::hydra::get_consent_request(&state.ory, &form.consent_challenge).await {
+                Ok(r) => (
+                    r.subject.clone().unwrap_or_default(),
+                    r.client
+                        .as_ref()
+                        .and_then(|c| c.client_id.clone())
+                        .unwrap_or_default(),
+                ),
+                Err(_) => (String::new(), String::new()),
+            };
+        let actor_email = lookup_identity_email(&state, &subject).await;
+        match ory::hydra::reject_consent_request(
+            &state.ory,
+            &form.consent_challenge,
+            "access_denied",
+            "The resource owner denied the request.",
+        )
+        .await
+        {
+            Ok(redirect) => {
+                let mut ev = AuditEvent::new(action::OAUTH_CONSENT_DENIED).with_ctx(&actx);
+                if !subject.is_empty() {
+                    ev = ev.actor_user(&subject, &actor_email);
+                }
+                if !client_id.is_empty() {
+                    ev = ev.target(target_kind::OAUTH_CLIENT, client_id);
+                }
+                let _ = audit::log(&state.db, ev).await;
+                return Redirect::to(&redirect.redirect_to).into_response();
+            }
+            Err(e) => {
+                tracing::error!(error = ?e, "hydra reject_consent_request failed");
+                return Redirect::to("/error").into_response();
+            }
+        }
+    }
+
+    let req = match ory::hydra::get_consent_request(&state.ory, &form.consent_challenge).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!(error = ?e, "hydra get_consent_request failed during accept");
+            return Redirect::to("/error").into_response();
+        }
+    };
+
+    let subject = req.subject.clone().unwrap_or_default();
+    let client_id = req
+        .client
+        .as_ref()
+        .and_then(|c| c.client_id.clone())
+        .unwrap_or_default();
+    let requested_audience = req
+        .requested_access_token_audience
+        .clone()
+        .unwrap_or_default();
+    // Snapshot the bits we need for the lazy `resource_url` provenance
+    // capture below. `request_url` carries the original `/oauth2/auth`
+    // URL Hydra received — RFC 8707 clients like Claude send
+    // `?resource=<url>` there. `requested_audience` is Hydra's parsed
+    // audience list, which we fall back to for clients that used
+    // Hydra's non-standard `audience=` param at the auth endpoint
+    // instead of `resource=`.
+    let request_url = req.request_url.clone().unwrap_or_default();
+    let captured_audience = requested_audience.clone();
+    let grant_scope_for_audit = form.grant_scope.clone();
+
+    let outcome = finalize_consent(
+        &state,
+        &form.consent_challenge,
+        &subject,
+        form.grant_scope,
+        requested_audience,
+        remember,
+        &headers,
+    )
+    .await;
+
+    let redirect = match outcome {
+        FinalizeOutcome::Granted { redirect } => redirect,
+        FinalizeOutcome::RedirectedToError { redirect } => return redirect,
+    };
+
+    let actor_email = lookup_identity_email(&state, &subject).await;
+    let mut ev = AuditEvent::new(action::OAUTH_CONSENT_GRANTED)
+        .actor_user(&subject, &actor_email)
+        .with_ctx(&actx)
+        .metadata(audit_metadata!(
+            "scope" => grant_scope_for_audit.join(" "),
+            "remember" => remember,
+        ));
+    if !client_id.is_empty() {
+        ev = ev.target(target_kind::OAUTH_CLIENT, client_id.clone());
+    }
+    let _ = audit::log(&state.db, ev).await;
+
+    // Lazy provenance capture (capture point 2): record the resource
+    // URL the client is actually being granted access to, if we can
+    // figure one out and the row doesn't already carry one. First
+    // observed value wins — see
+    // `oauth_client_metadata::upsert_resource_url_if_missing` for the
+    // race semantics. Fires for every client (DCR + admin-created)
+    // because even for operator-created clients the captured URL is
+    // useful provenance for "what got used on the wire".
+    if !client_id.is_empty() {
+        if let Some(url) = extract_resource_url(request_url.as_str(), captured_audience.as_slice())
+        {
+            if let Err(e) =
+                oauth_client_metadata::upsert_resource_url_if_missing(&state.db, &client_id, &url)
+                    .await
+            {
+                tracing::error!(
+                    error = ?e,
+                    client_id = %client_id,
+                    "consent: failed to capture resource_url provenance",
+                );
+            }
+        }
+    }
+    redirect
+}
+
+/// Pick a single resource-URL string to stamp on
+/// `oauth_client_metadata.resource_url`. RFC 8707 clients (Claude and
+/// friends) send `?resource=<url>` on the original auth URL, which Hydra
+/// exposes verbatim via `request_url`. Older / non-RFC-8707 clients use
+/// Hydra's non-standard `audience=` query param, which Hydra parses into
+/// `requested_access_token_audience` — we fall back to the first entry
+/// of that list.
+///
+/// Returns `None` when neither source yields a non-empty string. We
+/// don't try to normalise or validate the URL here — provenance is
+/// "what we observed", not "what we'd accept as a valid resource
+/// identifier".
+fn extract_resource_url(request_url: &str, requested_audience: &[String]) -> Option<String> {
+    // (a) Parse the original auth URL and look for `?resource=<url>`.
+    // If the caller sent multiple `resource=` values (RFC 8707 §2 allows
+    // multiple), take the first — first-writer-wins applies at the row
+    // level anyway. URL parsing handles percent-decoding on the way out.
+    if !request_url.is_empty() {
+        if let Ok(url) = url::Url::parse(request_url) {
+            if let Some(resource) = url
+                .query_pairs()
+                .find(|(k, _)| k == "resource")
+                .map(|(_, v)| v.into_owned())
+            {
+                let trimmed = resource.trim();
+                if !trimmed.is_empty() {
+                    return Some(trimmed.to_string());
+                }
+            }
+        }
+    }
+    // (b) Fall back to the first parsed audience entry.
+    requested_audience
+        .iter()
+        .map(|s| s.trim())
+        .find(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// Best-effort lookup of the identity's email for the audit row. Empty
+/// `subject` or any lookup failure returns an empty string — the audit row
+/// still carries `actor_id`, the email field is just for human display.
+async fn lookup_identity_email(state: &AppState, subject: &str) -> String {
+    if subject.is_empty() {
+        return String::new();
+    }
+    match ory::kratos::admin_get_identity(&state.ory, subject).await {
+        Ok(id) => id
+            .traits
+            .and_then(|t| t.get("email").and_then(|v| v.as_str()).map(str::to_string))
+            .unwrap_or_default(),
+        Err(_) => String::new(),
+    }
+}
+
+/// Tagged result of `finalize_consent`. The caller needs to know whether
+/// Hydra actually accepted the grant before emitting `OAUTH_CONSENT_GRANTED`
+/// audit rows or capturing resource-URL provenance — both must only fire on
+/// a confirmed accept.
+enum FinalizeOutcome {
+    Granted { redirect: Response },
+    RedirectedToError { redirect: Response },
+}
+
+impl FinalizeOutcome {
+    fn into_response(self) -> Response {
+        match self {
+            FinalizeOutcome::Granted { redirect } => redirect,
+            FinalizeOutcome::RedirectedToError { redirect } => redirect,
+        }
+    }
+}
+
+/// Build the id_token claim set from identity traits + granted scopes, then
+/// accept the consent challenge with Hydra. Shared between the auto-grant
+/// path and the explicit Allow-button path.
+async fn finalize_consent(
+    state: &AppState,
+    challenge: &str,
+    subject: &str,
+    grant_scope: Vec<String>,
+    grant_audience: Vec<String>,
+    remember: bool,
+    headers: &axum::http::HeaderMap,
+) -> FinalizeOutcome {
+    // Fan out identity + org memberships in parallel — both are
+    // independent I/O hops on the user-facing consent path. The
+    // membership fetch is skipped entirely unless the grant scope
+    // actually consumes it (the common scope set is just `openid email`).
+    let needs_org_claims = grant_scope.iter().any(|s| s == "org" || s == "orgs");
+    let identity_fut = ory::kratos::admin_get_identity(&state.ory, subject);
+    let (identity_res, memberships) = if needs_org_claims {
+        let memberships_fut = crate::orgs::list_memberships_limited(
+            &state.db,
+            subject,
+            crate::orgs::nav::ORGS_CLAIM_CAP as i64,
+        );
+        let (id_res, mem_res) = tokio::join!(identity_fut, memberships_fut);
+        (id_res, mem_res.unwrap_or_default())
+    } else {
+        (identity_fut.await, Vec::new())
+    };
+    let identity = match identity_res {
+        Ok(id) => Some(id),
+        Err(e) => {
+            tracing::warn!(error = ?e, subject, "admin_get_identity failed; id_token will be minimal");
+            None
+        }
+    };
+    let active = crate::orgs::cookie::read_active_org_cookie(
+        headers,
+        &state.cookie_secret,
+        state.cfg.orgs.active_org_cookie_ttl_seconds,
+    )
+    .and_then(|id| memberships.iter().find(|m| m.org_id == id).cloned())
+    .or_else(|| memberships.first().cloned());
+
+    // Pre-fetch the Forseti-owned profile when both the feature is on
+    // AND the grant includes a scope that consumes it. Skips the DB hit
+    // entirely for OSS deployments and for grants that only carry name +
+    // email (the common case).
+    let profile_needed = state.cfg.profiles.enabled
+        && grant_scope
+            .iter()
+            .any(|s| s == "profile" || s == "extended_profile");
+    let profile = if profile_needed {
+        Some(
+            crate::profiles::fetch(&state.db, subject)
+                .await
+                .unwrap_or_default(),
+        )
+    } else {
+        None
+    };
+
+    let id_token_session = build_id_token_claims(
+        identity.as_ref(),
+        &grant_scope,
+        &memberships,
+        active.as_ref(),
+        profile.as_ref(),
+    );
+
+    match ory::hydra::accept_consent_request(
+        &state.ory,
+        challenge,
+        grant_scope,
+        grant_audience,
+        remember,
+        id_token_session,
+    )
+    .await
+    {
+        Ok(redirect) => FinalizeOutcome::Granted {
+            redirect: Redirect::to(&redirect.redirect_to).into_response(),
+        },
+        Err(e) => {
+            tracing::error!(error = ?e, "hydra accept_consent_request failed");
+            FinalizeOutcome::RedirectedToError {
+                redirect: Redirect::to("/error").into_response(),
+            }
+        }
+    }
+}
+
+/// Fold identity traits into an id_token claims object, scoped by what the
+/// relying party asked for. `openid` carries no extra claims (Hydra sets
+/// `sub` itself from the accepted subject). `email` adds `email` /
+/// `email_verified`. `profile` adds `name`, plus `picture` + `website`
+/// from the Forseti-owned profile when one exists. `extended_profile`
+/// adds non-standard `bio`, `pronouns`, `links`. `org` adds an
+/// `{ id, slug, role, name }` object for the active org. `orgs` adds the
+/// full membership list, capped at 32 entries.
+fn build_id_token_claims(
+    identity: Option<&ory::Identity>,
+    grant_scope: &[String],
+    memberships: &[crate::orgs::Membership],
+    active_org: Option<&crate::orgs::Membership>,
+    profile: Option<&crate::profiles::Profile>,
+) -> serde_json::Value {
+    let scopes: std::collections::HashSet<&str> = grant_scope.iter().map(String::as_str).collect();
+    let mut claims = serde_json::Map::new();
+
+    if scopes.contains("org") {
+        if let Some(m) = active_org {
+            if let Ok(role) = m.role.parse::<crate::orgs::Role>() {
+                claims.insert(
+                    "org".to_string(),
+                    serde_json::json!({
+                        "id": m.org_id,
+                        "slug": m.slug,
+                        "role": role.as_str(),
+                        "name": m.name,
+                    }),
+                );
+            } else {
+                tracing::warn!(
+                    org_id = %m.org_id,
+                    role = %m.role,
+                    "consent: skipping `org` claim for membership with unknown role",
+                );
+            }
+        }
+    }
+    if scopes.contains("orgs") {
+        let arr: Vec<serde_json::Value> = memberships
+            .iter()
+            .filter_map(|m| {
+                let role = m
+                    .role
+                    .parse::<crate::orgs::Role>()
+                    .map_err(|_| {
+                        tracing::warn!(
+                            org_id = %m.org_id,
+                            role = %m.role,
+                            "consent: skipping `orgs[]` entry for membership with unknown role",
+                        );
+                    })
+                    .ok()?;
+                Some(serde_json::json!({
+                    "id": m.org_id,
+                    "slug": m.slug,
+                    "role": role.as_str(),
+                    "name": m.name,
+                }))
+            })
+            .collect();
+        claims.insert("orgs".to_string(), serde_json::Value::Array(arr));
+    }
+
+    let Some(identity) = identity else {
+        return serde_json::Value::Object(claims);
+    };
+    let traits = identity.traits.as_ref();
+
+    if scopes.contains("email") {
+        if let Some(email) = traits.and_then(|t| t.get("email")).and_then(|v| v.as_str()) {
+            claims.insert(
+                "email".to_string(),
+                serde_json::Value::String(email.to_string()),
+            );
+        }
+        if let Some(addrs) = identity.verifiable_addresses.as_ref() {
+            // The primary email is verified if any verifiable address with
+            // value == traits.email is verified. Falling back to `false`
+            // when unclear keeps us conservative.
+            let email = traits.and_then(|t| t.get("email")).and_then(|v| v.as_str());
+            let verified = match email {
+                Some(e) => addrs.iter().any(|a| a.value == e && a.verified),
+                None => addrs.iter().any(|a| a.verified),
+            };
+            claims.insert(
+                "email_verified".to_string(),
+                serde_json::Value::Bool(verified),
+            );
+        }
+    }
+
+    if scopes.contains("profile") {
+        if let Some(name) = traits.and_then(|t| t.get("name")) {
+            // Identity schema stores `name` as either a string or
+            // `{first, last}` — flatten both into a single `name` claim.
+            if let Some(s) = name.as_str() {
+                if !s.is_empty() {
+                    claims.insert("name".to_string(), serde_json::Value::String(s.to_string()));
+                }
+            } else if let Some(obj) = name.as_object() {
+                let first = obj.get("first").and_then(|v| v.as_str()).unwrap_or("");
+                let last = obj.get("last").and_then(|v| v.as_str()).unwrap_or("");
+                let joined = format!("{first} {last}").trim().to_string();
+                if !joined.is_empty() {
+                    claims.insert("name".to_string(), serde_json::Value::String(joined));
+                }
+                if !first.is_empty() {
+                    claims.insert(
+                        "given_name".to_string(),
+                        serde_json::Value::String(first.to_string()),
+                    );
+                }
+                if !last.is_empty() {
+                    claims.insert(
+                        "family_name".to_string(),
+                        serde_json::Value::String(last.to_string()),
+                    );
+                }
+            }
+        }
+        // Standard OIDC slots from the Forseti-owned profile, when set.
+        // Avatar comes through as `picture`; website as `website`.
+        if let Some(p) = profile {
+            if let Some(url) = p.avatar_url.as_deref().filter(|s| !s.is_empty()) {
+                claims.insert(
+                    "picture".to_string(),
+                    serde_json::Value::String(url.to_string()),
+                );
+            }
+            if let Some(w) = p.website.as_deref().filter(|s| !s.is_empty()) {
+                claims.insert(
+                    "website".to_string(),
+                    serde_json::Value::String(w.to_string()),
+                );
+            }
+        }
+    }
+
+    if scopes.contains("extended_profile") {
+        if let Some(p) = profile {
+            if let Some(bio) = p.bio.as_deref().filter(|s| !s.is_empty()) {
+                claims.insert(
+                    "bio".to_string(),
+                    serde_json::Value::String(bio.to_string()),
+                );
+            }
+            if let Some(pronouns) = p.pronouns.as_deref().filter(|s| !s.is_empty()) {
+                claims.insert(
+                    "pronouns".to_string(),
+                    serde_json::Value::String(pronouns.to_string()),
+                );
+            }
+            if !p.links.is_empty() {
+                let arr: Vec<serde_json::Value> = p
+                    .links
+                    .iter()
+                    .map(|l| serde_json::json!({"label": l.label, "url": l.url}))
+                    .collect();
+                claims.insert("links".to_string(), serde_json::Value::Array(arr));
+            }
+        }
+    }
+
+    serde_json::Value::Object(claims)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_resource_url;
+
+    #[test]
+    fn extract_resource_url_picks_rfc8707_resource_param() {
+        let request_url =
+            "https://hydra.example.com/oauth2/auth?client_id=x&resource=https%3A%2F%2Fapi.example.com";
+        let audience = vec![];
+        assert_eq!(
+            extract_resource_url(request_url, &audience),
+            Some("https://api.example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_resource_url_falls_back_to_requested_audience() {
+        let request_url = "https://hydra.example.com/oauth2/auth?client_id=x";
+        let audience = vec!["https://api.example.com".to_string()];
+        assert_eq!(
+            extract_resource_url(request_url, &audience),
+            Some("https://api.example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_resource_url_prefers_resource_when_both_present() {
+        let request_url = "https://hydra.example.com/oauth2/auth?resource=https%3A%2F%2Fa.example";
+        let audience = vec!["https://b.example".to_string()];
+        assert_eq!(
+            extract_resource_url(request_url, &audience),
+            Some("https://a.example".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_resource_url_neither_present_returns_none() {
+        let request_url = "https://hydra.example.com/oauth2/auth?client_id=x";
+        let audience: Vec<String> = vec![];
+        assert_eq!(extract_resource_url(request_url, &audience), None);
+    }
+
+    #[test]
+    fn extract_resource_url_empty_request_url_uses_audience() {
+        let audience = vec!["https://api.example.com".to_string()];
+        assert_eq!(
+            extract_resource_url("", &audience),
+            Some("https://api.example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_resource_url_skips_empty_audience_entries() {
+        let audience = vec!["".to_string(), "  ".to_string(), "https://api".to_string()];
+        assert_eq!(
+            extract_resource_url("", &audience),
+            Some("https://api".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_resource_url_handles_unparseable_url() {
+        // Non-URL request_url with no `resource=` falls through to audience.
+        let audience = vec!["https://api".to_string()];
+        assert_eq!(
+            extract_resource_url("garbage", &audience),
+            Some("https://api".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_resource_url_trims_resource_value() {
+        let request_url =
+            "https://hydra.example.com/oauth2/auth?resource=%20%20https%3A%2F%2Fapi%20";
+        assert_eq!(
+            extract_resource_url(request_url, &[]),
+            Some("https://api".to_string())
+        );
+    }
+}

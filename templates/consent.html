@@ -1,0 +1,91 @@
+{% extends "card.html" %}
+
+{% block title %}Authorize {{ client_name }} &middot; {{ chrome.brand.name }}{% endblock %}
+
+{% block card_icon %}
+<div class="w-12 h-12 bg-primary rounded-lg flex items-center justify-center mb-stack-sm" aria-hidden="true">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-6 h-6 text-on-primary">
+        <path d="M9 12l2 2 4-4" />
+        <circle cx="12" cy="12" r="10" />
+    </svg>
+</div>
+{% endblock %}
+
+{% block card_title %}Authorize {{ client_name }}{% endblock %}
+{% block card_subtitle %}{{ consent_intro }}{% endblock %}
+
+{% block card_body %}
+<p class="font-body-sm text-body-sm text-on-surface-variant">
+    Signed in as <strong class="text-on-surface">{{ subject_email }}</strong>.
+</p>
+
+{% if verified %}
+<p class="flex items-center gap-1 font-label-sm text-label-sm text-on-surface-variant" title="Reviewed by your administrator">
+    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="w-4 h-4 shrink-0 text-tertiary" aria-hidden="true">
+        <path d="M9 12l2 2 4-4" />
+        <circle cx="12" cy="12" r="10" />
+    </svg>
+    Reviewed by your administrator
+</p>
+{% else %}
+<div class="bg-error-container border border-error rounded-lg p-3 flex items-start gap-stack-sm">
+    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="w-4 h-4 shrink-0 mt-0.5 text-error" aria-hidden="true">
+        <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z" />
+        <line x1="12" y1="9" x2="12" y2="13" />
+        <line x1="12" y1="17" x2="12.01" y2="17" />
+    </svg>
+    <p class="font-body-sm text-body-sm text-on-error-container"><strong>This application has not been reviewed by an administrator.</strong> Only proceed if you trust it.</p>
+</div>
+{% endif %}
+
+<form method="POST" action="/oauth/consent" class="flex flex-col gap-stack-md">
+    <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+    <input type="hidden" name="consent_challenge" value="{{ challenge }}">
+
+    <div class="bg-surface-container-low border border-outline-variant rounded-lg p-stack-md flex flex-col gap-stack-sm">
+        <p class="font-label-sm text-label-sm text-on-surface uppercase tracking-wider">This app is requesting</p>
+        <ul class="flex flex-col gap-stack-sm">
+            {% for scope in scopes %}
+            <li class="flex items-start gap-stack-sm">
+                {# Required scopes (currently only `openid`) are disabled and
+                   duplicated as a hidden input so they're always submitted —
+                   Hydra rejects the consent acceptance if `openid` is missing
+                   from `grant_scope` on an OIDC flow. #}
+                {% if scope.required %}
+                <input type="hidden" name="grant_scope" value="{{ scope.name }}">
+                <input type="checkbox" id="scope-{{ scope.name }}" checked disabled
+                       class="mt-0.5 rounded border-outline-variant text-primary focus:ring-primary disabled:opacity-60">
+                <label for="scope-{{ scope.name }}" class="flex-1 font-body-sm text-body-sm text-on-surface">
+                    {{ scope.description }}
+                    <span class="block font-label-sm text-label-sm text-on-surface-variant" title="Required for sign-in">Required for sign-in</span>
+                </label>
+                {% else %}
+                <input type="checkbox" id="scope-{{ scope.name }}" name="grant_scope" value="{{ scope.name }}" checked
+                       class="mt-0.5 rounded border-outline-variant text-primary focus:ring-primary">
+                <label for="scope-{{ scope.name }}" class="flex-1 font-body-sm text-body-sm text-on-surface">
+                    {{ scope.description }}
+                </label>
+                {% endif %}
+            </li>
+            {% endfor %}
+        </ul>
+    </div>
+
+    <label class="flex items-start gap-stack-sm font-body-sm text-body-sm text-on-surface">
+        <input type="checkbox" name="remember" value="true" class="mt-0.5 rounded border-outline-variant text-primary focus:ring-primary">
+        <span class="flex-1">
+            Remember my decision for this application
+            <span class="block font-label-sm text-label-sm text-on-surface-variant mt-0.5">Skip this screen next time. You can revoke access anytime from <a href="/settings/authorized-apps" class="underline hover:text-on-surface">Authorized apps</a>.</span>
+        </span>
+    </label>
+
+    <button type="submit" name="decision" value="accept"
+            class="w-full bg-primary text-on-primary font-label-md text-label-md py-stack-md px-stack-lg rounded-lg hover:bg-on-surface focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2 transition-colors">
+        Allow
+    </button>
+    <button type="submit" name="decision" value="deny"
+            class="w-full bg-surface-container-lowest border border-outline-variant text-on-surface font-label-md text-label-md py-stack-md px-stack-lg rounded-lg hover:bg-surface-container-low focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2 transition-colors">
+        Deny
+    </button>
+</form>
+{% endblock %}

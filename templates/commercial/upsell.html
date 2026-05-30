@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+
+{% block title %}{{ feature_label }} &middot; {{ chrome.brand.name }}{% endblock %}
+
+{% block content %}
+<div class="max-w-2xl mx-auto flex flex-col gap-stack-lg py-margin-desktop">
+    <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg flex flex-col gap-stack-md">
+        <div class="flex items-center gap-3">
+            <span class="w-12 h-12 rounded-full bg-secondary-container flex items-center justify-center text-on-secondary-container shrink-0">
+                <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+            </span>
+            <div>
+                <p class="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">{{ required_tier_label }} feature</p>
+                <h1 class="font-headline-lg text-headline-lg text-on-surface">{{ feature_label }}</h1>
+            </div>
+        </div>
+
+        {% if has_license %}
+        <p class="font-body-md text-body-md text-on-surface-variant">Your current <strong>{{ current_tier_label }}</strong> license doesn't include {{ feature_label }}. Upgrade to <strong>{{ required_tier_label }}</strong> to enable it for this installation.</p>
+        {% else %}
+        <p class="font-body-md text-body-md text-on-surface-variant">{{ feature_label }} is part of the {{ required_tier_label }} tier of the {{ chrome.brand.name }} commercial offering. Activate a license to unlock it for this installation.</p>
+        {% endif %}
+
+        <div class="flex flex-wrap gap-stack-md items-center">
+            {% if !purchase_url.is_empty() && purchase_url != "#" %}
+            <a href="{{ purchase_url }}" target="_blank" rel="noopener noreferrer" class="font-label-md text-label-md bg-primary text-on-primary rounded-lg px-4 py-2 hover:opacity-90 transition-opacity">
+                {% if has_license %}Upgrade your plan{% else %}Get a license{% endif %} &rarr;
+            </a>
+            {% endif %}
+            <a href="/admin/license" class="font-label-md text-label-md text-primary border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">Activate an existing license</a>
+        </div>
+    </div>
+
+    <div>
+        <a href="/" class="font-label-md text-label-md text-on-secondary-fixed-variant hover:text-primary transition-colors">&larr; Back to dashboard</a>
+    </div>
+</div>
+{% endblock %}

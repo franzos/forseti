@@ -1,0 +1,381 @@
+version: v1.3.0
+
+dsn: postgres://kratos:secret@postgres:5432/kratos?sslmode=disable&max_conns=20&max_idle_conns=4
+
+# Kratos's `whoami` defaults to `required_aal: highest_available`, which
+# returns 403 for an AAL1 session on any identity that has a second factor
+# enrolled. That collapses "session exists, needs step-up" into the same
+# error shape as "no session at all" — every protected route bounces to
+# /login without an aal=aal2 hint, livelocking the user. Lower it to
+# aal1 so the portal sees the real session and decides per-route which
+# AAL it actually needs (admin gate already enforces aal2 explicitly).
+session:
+  whoami:
+    required_aal: aal1
+
+serve:
+  public:
+    base_url: http://localhost:4433/
+    cors:
+      enabled: true
+      allowed_origins:
+        - http://localhost:3000
+        - http://localhost:4455
+      allowed_methods: [POST, GET, PUT, PATCH, DELETE]
+      allowed_headers: [Authorization, Cookie, Content-Type]
+      exposed_headers: [Content-Type, Set-Cookie]
+  admin:
+    base_url: http://kratos:4434/
+
+selfservice:
+  default_browser_return_url: http://localhost:3000/
+  allowed_return_urls:
+    - http://localhost:3000
+    - http://localhost:4455
+
+  methods:
+    password:
+      enabled: true
+    # `code` (magic-link / email code) is enabled here for the playground so
+    # the portal's `groups.code` render branch gets exercised during dev. In
+    # production, operators decide whether to expose it.
+    code:
+      enabled: true
+      config:
+        lifespan: 15m
+    totp:
+      enabled: true
+      config:
+        issuer: forseti
+    lookup_secret:
+      enabled: true
+    webauthn:
+      enabled: true
+      config:
+        passwordless: false
+        rp:
+          id: localhost
+          display_name: forseti
+          origins:
+            - http://localhost:3000
+    passkey:
+      enabled: true
+      config:
+        rp:
+          id: localhost
+          display_name: forseti
+          origins:
+            - http://localhost:3000
+
+    # ---------------------------------------------------------------------
+    # OIDC upstream providers (Google / GitHub / Microsoft) — commented out
+    # because the playground has no real OAuth app credentials. To enable:
+    #
+    # 1. Register an OAuth app at each provider with the callback URL
+    #      http://localhost:4433/self-service/methods/oidc/callback/<id>
+    # 2. Export the client_id + secret as env vars and uncomment below.
+    # 3. Restart Kratos.
+    #
+    # oidc:
+    #   enabled: true
+    #   config:
+    #     providers:
+    #       - id: google
+    #         provider: google
+    #         client_id: "${GOOGLE_CLIENT_ID}"
+    #         client_secret: "${GOOGLE_CLIENT_SECRET}"
+    #         mapper_url: file:///etc/config/kratos/oidc.google.jsonnet
+    #         scope: [openid, email, profile]
+    #       - id: github
+    #         provider: github
+    #         client_id: "${GITHUB_CLIENT_ID}"
+    #         client_secret: "${GITHUB_CLIENT_SECRET}"
+    #         mapper_url: file:///etc/config/kratos/oidc.github.jsonnet
+    #         scope: [user:email]
+    #       - id: microsoft
+    #         provider: microsoft
+    #         client_id: "${MICROSOFT_CLIENT_ID}"
+    #         client_secret: "${MICROSOFT_CLIENT_SECRET}"
+    #         mapper_url: file:///etc/config/kratos/oidc.microsoft.jsonnet
+    #         scope: [openid, email, profile]
+    #         microsoft_tenant: common
+
+  flows:
+    error:
+      ui_url: http://localhost:3000/error
+
+    settings:
+      ui_url: http://localhost:3000/settings
+      privileged_session_max_age: 15m
+      # Read-only settings pages (profile, sessions, linked-providers,
+      # authorized-apps) shouldn't force an AAL2 step-up just to view.
+      # Destructive operations are still gated by `privileged_session_max_age`
+      # above (re-prove password within 15m), and TOTP disable has its own
+      # method-internal rule that requires submitting the current code.
+      # Without this, Kratos's default of `highest_available` blocks every
+      # /settings/* init for any identity with a second factor enrolled.
+      required_aal: aal1
+      after:
+        password:
+          hooks:
+            - hook: web_hook
+              config:
+                url: http://host.docker.internal:8081/internal/audit/kratos?action=password.changed
+                method: POST
+                body: file:///etc/config/kratos/audit_event.jsonnet
+                can_interrupt: false
+                auth:
+                  type: api_key
+                  config:
+                    name: Authorization
+                    value: "Bearer dev-playground-token-change-me"
+                    in: header
+        totp:
+          hooks:
+            - hook: web_hook
+              config:
+                url: http://host.docker.internal:8081/internal/audit/kratos?action=mfa.totp.enrolled
+                method: POST
+                body: file:///etc/config/kratos/audit_event.jsonnet
+                can_interrupt: false
+                auth:
+                  type: api_key
+                  config:
+                    name: Authorization
+                    value: "Bearer dev-playground-token-change-me"
+                    in: header
+        lookup_secret:
+          hooks:
+            - hook: web_hook
+              config:
+                url: http://host.docker.internal:8081/internal/audit/kratos?action=mfa.lookup.regenerated
+                method: POST
+                body: file:///etc/config/kratos/audit_event.jsonnet
+                can_interrupt: false
+                auth:
+                  type: api_key
+                  config:
+                    name: Authorization
+                    value: "Bearer dev-playground-token-change-me"
+                    in: header
+        webauthn:
+          hooks:
+            - hook: web_hook
+              config:
+                url: http://host.docker.internal:8081/internal/audit/kratos?action=mfa.webauthn.added
+                method: POST
+                body: file:///etc/config/kratos/audit_event.jsonnet
+                can_interrupt: false
+                auth:
+                  type: api_key
+                  config:
+                    name: Authorization
+                    value: "Bearer dev-playground-token-change-me"
+                    in: header
+        profile:
+          hooks:
+            - hook: web_hook
+              config:
+                url: http://host.docker.internal:8081/internal/audit/kratos?action=profile.updated
+                method: POST
+                body: file:///etc/config/kratos/audit_event.jsonnet
+                can_interrupt: false
+                auth:
+                  type: api_key
+                  config:
+                    name: Authorization
+                    value: "Bearer dev-playground-token-change-me"
+                    in: header
+
+    recovery:
+      enabled: true
+      ui_url: http://localhost:3000/recovery
+      after:
+        default_browser_return_url: http://localhost:3000/
+        hooks:
+          - hook: web_hook
+            config:
+              url: http://host.docker.internal:8081/internal/audit/kratos?action=password.recovered
+              method: POST
+              body: file:///etc/config/kratos/audit_event.jsonnet
+              can_interrupt: false
+              auth:
+                type: api_key
+                config:
+                  name: Authorization
+                  value: "Bearer dev-playground-token-change-me"
+                  in: header
+
+    verification:
+      enabled: true
+      ui_url: http://localhost:3000/verification
+      after:
+        default_browser_return_url: http://localhost:3000/
+        hooks:
+          - hook: web_hook
+            config:
+              url: http://host.docker.internal:8081/internal/audit/kratos?action=verification.completed
+              method: POST
+              body: file:///etc/config/kratos/audit_event.jsonnet
+              can_interrupt: false
+              auth:
+                type: api_key
+                config:
+                  name: Authorization
+                  value: "Bearer dev-playground-token-change-me"
+                  in: header
+
+    logout:
+      after:
+        default_browser_return_url: http://localhost:3000/login
+
+    login:
+      ui_url: http://localhost:3000/login
+      lifespan: 10m
+      after:
+        # `auth.login` is emitted after successful authentication on a
+        # primary credential (password or passkey). AAL2 step-up methods
+        # (totp / lookup_secret / webauthn) intentionally don't fire this
+        # hook — they're a step-up on an existing session, not a fresh
+        # login, and we don't want one logical sign-in producing two
+        # audit rows. If you need step-up visibility, add a dedicated
+        # `auth.aal2.completed` action in `src/audit/kratos_webhook.rs`
+        # and wire it up here.
+        password:
+          hooks:
+            - hook: web_hook
+              config:
+                url: http://host.docker.internal:8081/internal/audit/kratos?action=auth.login
+                method: POST
+                body: file:///etc/config/kratos/audit_event.jsonnet
+                can_interrupt: false
+                auth:
+                  type: api_key
+                  config:
+                    name: Authorization
+                    value: "Bearer dev-playground-token-change-me"
+                    in: header
+        passkey:
+          hooks:
+            - hook: web_hook
+              config:
+                url: http://host.docker.internal:8081/internal/audit/kratos?action=auth.login
+                method: POST
+                body: file:///etc/config/kratos/audit_event.jsonnet
+                can_interrupt: false
+                auth:
+                  type: api_key
+                  config:
+                    name: Authorization
+                    value: "Bearer dev-playground-token-change-me"
+                    in: header
+
+    registration:
+      lifespan: 10m
+      ui_url: http://localhost:3000/registration
+      after:
+        # `session` auto-logs the new user in so they land on the dashboard
+        # rather than getting bounced to /login with a credential they just
+        # created. Email verification is NOT enforced here — the dashboard
+        # surfaces an "unverified" banner that prompts the user to verify
+        # at their leisure. Operators wanting stricter onboarding (banks,
+        # healthcare, etc.) can add `{ hook: show_verification_ui }` to
+        # each method to force verification before dashboard access.
+        #
+        # The `web_hook` on each method fires the portal's
+        # /internal/audit/kratos receiver on the internal listener
+        # (:8081) so the audit log captures the registration event
+        # durably (Kratos's admin API doesn't fire webhooks for
+        # admin-driven identity writes, so the portal handles those
+        # separately). Default-org auto-join is lazy on the portal side
+        # — it fires on the user's first authenticated request, so no
+        # webhook wiring is required for org membership.
+        password:
+          hooks:
+            - hook: session
+            - hook: web_hook
+              config:
+                url: http://host.docker.internal:8081/internal/audit/kratos?action=identity.created
+                method: POST
+                body: file:///etc/config/kratos/audit_event.jsonnet
+                can_interrupt: false
+                auth:
+                  type: api_key
+                  config:
+                    name: Authorization
+                    value: "Bearer dev-playground-token-change-me"
+                    in: header
+        passkey:
+          hooks:
+            - hook: session
+            - hook: web_hook
+              config:
+                url: http://host.docker.internal:8081/internal/audit/kratos?action=identity.created
+                method: POST
+                body: file:///etc/config/kratos/audit_event.jsonnet
+                can_interrupt: false
+                auth:
+                  type: api_key
+                  config:
+                    name: Authorization
+                    value: "Bearer dev-playground-token-change-me"
+                    in: header
+        webauthn:
+          hooks:
+            - hook: session
+            - hook: web_hook
+              config:
+                url: http://host.docker.internal:8081/internal/audit/kratos?action=identity.created
+                method: POST
+                body: file:///etc/config/kratos/audit_event.jsonnet
+                can_interrupt: false
+                auth:
+                  type: api_key
+                  config:
+                    name: Authorization
+                    value: "Bearer dev-playground-token-change-me"
+                    in: header
+        code:
+          hooks:
+            - hook: session
+            - hook: web_hook
+              config:
+                url: http://host.docker.internal:8081/internal/audit/kratos?action=identity.created
+                method: POST
+                body: file:///etc/config/kratos/audit_event.jsonnet
+                can_interrupt: false
+                auth:
+                  type: api_key
+                  config:
+                    name: Authorization
+                    value: "Bearer dev-playground-token-change-me"
+                    in: header
+
+log:
+  level: info
+  format: text
+  leak_sensitive_values: false
+
+secrets:
+  cookie:
+    - please-change-me-32-chars-long-xx
+  cipher:
+    - 32-LONG-SECRET-NOT-SECURE-AT-ALL
+
+ciphers:
+  algorithm: xchacha20-poly1305
+
+hashers:
+  algorithm: bcrypt
+  bcrypt:
+    cost: 8
+
+identity:
+  default_schema_id: default
+  schemas:
+    - id: default
+      url: file:///etc/config/kratos/identity.schema.json
+
+courier:
+  smtp:
+    connection_uri: smtp://mailslurper:1025/?disable_starttls=true

@@ -1,0 +1,89 @@
+serve:
+  cookies:
+    same_site_mode: Lax
+
+urls:
+  self:
+    # Issuer must be reachable under the same hostname from BOTH the host
+    # browser and other containers (e.g. formshive in the mono stack) so the
+    # `iss` claim in id_tokens validates everywhere. `host.containers.internal`
+    # is injected into Podman containers by default; on the host it requires
+    # `127.0.0.1 host.containers.internal` in /etc/hosts.
+    issuer: http://host.containers.internal:4444
+  consent: http://localhost:3000/oauth/consent
+  login:   http://localhost:3000/oauth/login
+  logout:  http://localhost:3000/oauth/logout
+
+secrets:
+  system:
+    - please-change-me-32-chars-long-xx
+
+oidc:
+  subject_identifiers:
+    supported_types: [pairwise, public]
+    pairwise:
+      salt: please-change-me-32-chars-long-xx
+
+  # Dynamic Client Registration (RFC 7591). Claude Code refuses any
+  # authorization server that doesn't expose `/oauth2/register`, even
+  # when a `client_id` is pre-configured — so we have to enable it for
+  # MCP to work end-to-end.
+  #
+  # `enabled: true` opens Hydra's own `/oauth2/register` on the public
+  # port. We don't expose that publicly — the portal advertises
+  # *itself* as the registration_endpoint (see `client_registration_url`
+  # below) and gates inbound requests with an Initial Access Token
+  # before forwarding to Hydra. See `src/oauth/register.rs` and
+  # `src/admin/dcr_tokens.rs`.
+  #
+  # `default_scope` is the scope list applied to self-registered clients
+  # that don't post their own `scope` field. We include MCP-style
+  # discovery scopes plus the OIDC essentials so a fresh DCR registration
+  # can immediately run the auth-code + PKCE flow.
+  dynamic_client_registration:
+    enabled: true
+    default_scope:
+      - openid
+      - offline
+      - offline_access
+
+webfinger:
+  oidc_discovery:
+    # Surfaces `registration_endpoint` in /.well-known/openid-configuration.
+    # MCP clients (per the spec) read it to decide whether the AS supports
+    # self-registration; without it set, Hydra's discovery doc omits the
+    # field and Claude refuses to proceed.
+    #
+    # Points at the portal, not Hydra. The portal's `POST /oauth2/register`
+    # validates an Initial Access Token before forwarding to Hydra —
+    # without that gate the endpoint is anonymous.
+    client_registration_url: http://localhost:3000/oauth2/register
+
+oauth2:
+  expose_internal_errors: true
+  # MCP 2025-06-18 requires PKCE with S256 for all clients. Globally
+  # enforce on public clients so a misconfigured client (auth method
+  # `none` without PKCE) is rejected by Hydra rather than silently
+  # weakening the flow. Confidential clients aren't required to use
+  # PKCE by spec, so this stays scoped to public.
+  pkce:
+    enforced_for_public_clients: true
+
+# Access tokens are JWTs by default. Resource servers (MCP servers,
+# downstream APIs) validate locally against Hydra's JWKS — no admin-API
+# reach-through, no introspection round-trip. This is the documented
+# default in `docs/integration-guide.md` and `docs/operator-guide.md`.
+#
+# If you'd rather have immediate revocation (opaque tokens validated via
+# introspection), flip this to `opaque` AND ensure every RS has a route
+# to Hydra's admin API on :4445 — that endpoint is private and MUST NOT
+# be exposed publicly. See operator-guide.md for the tradeoff.
+strategies:
+  access_token: jwt
+
+# Access tokens are intentionally short-lived (5m) so the JWT model's
+# revocation lag is bounded to minutes, not hours. Refresh tokens stay
+# at Hydra's 720h default with rotation on — clients refresh through
+# `/oauth2/token`, which is the natural revocation choke-point.
+ttl:
+  access_token: 5m

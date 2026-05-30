@@ -1,0 +1,143 @@
+[package]
+name = "forseti"
+version = "0.1.0"
+edition = "2021"
+description = "Self-service UI and Hydra login/consent bridge for Ory Kratos + Hydra"
+# Forseti is dual-licensed: everything outside `src/commercial/` is
+# AGPL-3.0-or-later (LICENSE), and `src/commercial/` is proprietary
+# source-available under the Forseti Commercial License 1.0
+# (LICENSE-COMMERCIAL). The crate-level `license` field below names the
+# AGPL portion because Forseti is an application, not a library on
+# crates.io; the commercial subdirectory is documented in README.md
+# and enforced at runtime by `LicenseHandle::feature`.
+license = "AGPL-3.0-or-later"
+
+[dependencies]
+axum = { version = "0.8", features = ["macros"] }
+axum-extra = { version = "0.12", features = ["cookie", "form"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+tokio-util = { version = "0.7", default-features = false }
+# `StreamExt::for_each_concurrent` drives the bounded webhook-delivery pump
+# (`webhook/worker.rs`). Already in the tree transitively; declared directly
+# with a trimmed feature set so the combinator is a supported API.
+futures-util = { version = "0.3", default-features = false, features = ["std", "async-await"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "compression-br", "fs"] }
+# Per-IP rate limiting on the DCR proxy. `default-features = false` then
+# `features = ["axum"]` drops the `tonic` dep we don't need.
+tower_governor = { version = "0.8", default-features = false, features = ["axum"] }
+askama = "0.16"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# No `cookies` feature: every reqwest::Client in `src/` is a
+# server-to-server caller (Hydra admin, webhook delivery) where a
+# persistent cookie jar would let upstream `Set-Cookie` responses leak
+# across unrelated requests. Tests carry their own `cookies`-enabled
+# reqwest under `[dev-dependencies]` because they drive flows like a
+# browser would.
+reqwest = { version = "0.13", default-features = false, features = ["json", "form", "rustls"] }
+# `ory_client` 1.22 pins reqwest 0.12 internally. To set a timeout on the
+# SDK's HTTP client we need a 0.12 client instance; rename the older
+# version under a distinct ident so the rest of the codebase keeps using
+# 0.13. Once `ory_client` ships a reqwest-0.13 release this dep goes.
+ory_reqwest = { package = "reqwest", version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+anyhow = "1"
+figment = { version = "0.10", features = ["toml", "env"] }
+ory-client = "1.22"
+rand = "0.9"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
+diesel = { version = "2.2", features = ["sqlite", "postgres", "chrono", "serde_json", "r2d2"] }
+diesel_migrations = { version = "2.2", features = ["sqlite", "postgres"] }
+deadpool-diesel = { version = "0.6", features = ["sqlite", "postgres", "rt_tokio_1"] }
+libsqlite3-sys = { version = "0.37", features = ["bundled"] }
+url = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
+hmac = "0.13"
+# HKDF-SHA256 (RFC 5869) derives the per-cookie signing subkey in
+# `signed_cookie`. Pinned to the `hmac 0.13` / `digest 0.11` line so it
+# shares the same `Sha256` type as the rest of the crypto deps.
+hkdf = "0.13"
+# Constant-time equality for tokens / CSRF / OTP codes.
+subtle = "2"
+sha2 = "0.11"
+hex = "0.4"
+base64 = "0.22"
+# Account-deletion webhooks ship as RFC 8417 Security Event Tokens —
+# compact JWS bodies signed with the Forseti-owned Ed25519 key
+# (`[webhook] signing_key_path` in config). EdDSA per RFC 8037; chosen
+# over RSA-2048 because NIST SP 800-131A Rev 3 §5.6.4 retires 2048-bit
+# RSA after 2030 for persistent signing keys. `jsonwebtoken` does the
+# JWS encode + JWKS decode for tests; the `pkcs8` / `pem` /
+# `rand_core` features on `ed25519-dalek` cover on-disk PEM I/O and
+# fresh-key generation.
+jsonwebtoken = "9"
+# NFKC normalisation for the DCR reserved-name denylist. Tiny dep, used
+# only by `oauth::register::normalise_for_reserved_check` to fold
+# fullwidth / decomposed / wrapped-in-zero-width spoofs back into the
+# ASCII shape the substring match expects.
+unicode-normalization = "0.1"
+# UTS 39 confusable skeleton for the DCR reserved-name denylist. Folds
+# cross-script homoglyphs (Cyrillic `а`, Greek lookalikes, …) onto the
+# same skeleton as the ASCII reserved names so a self-registered client
+# can't impersonate one with a mixed-script spoof.
+unicode-security = "0.1"
+# Ed25519 powers two unrelated surfaces:
+#   - Commercial-tier license verify (`src/commercial/`) — verify-only,
+#     pubkey baked in via `include_bytes!`.
+#   - Outbound webhook SET signing (`src/webhook/signing.rs`) —
+#     generate + PKCS#8 PEM I/O + sign.
+# `pkcs8` + `pem` give us PKCS#8 PEM read/write for the on-disk key;
+# `rand_core` exposes `SigningKey::generate` for fresh-key minting.
+ed25519-dalek = { version = "2", default-features = false, features = ["std", "zeroize", "fast", "pkcs8", "pem", "rand_core"] }
+ciborium = "0.2"
+serde_bytes = "0.11"
+arc-swap = "1"
+# SMTP send for Forseti-originated mail (invite + claim-email). Kratos's
+# courier doesn't expose a one-off POST endpoint, so Forseti speaks
+# SMTP directly. `rustls-tls` keeps the dep tree native-tls-free.
+lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "tokio1", "tokio1-rustls-tls", "builder"] }
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1
+
+[dev-dependencies]
+# Integration test deps. `reqwest` and `tokio` are pulled from the main
+# dependency graph; the cookie store feature is enabled there. The integration
+# tests live under `tests/integration.rs` (single binary; see tests/README.md).
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "form", "rustls", "cookies"] }
+serde_json = "1"
+regex = "1"
+# DCR integration tests reach into the Forseti-owned sqlite DB to mint IATs
+# and flip verification state without driving the admin UI. `bundled` mirrors
+# the main `libsqlite3-sys` choice so we don't need system sqlite headers.
+rusqlite = { version = "0.39", features = ["bundled"] }
+# Sibling to Forseti's `sha2` — used to hash IATs before INSERT. Pulled in
+# as a dev-dep so the test surface doesn't accidentally start depending on
+# the main crate's hashing helpers.
+sha2 = "0.11"
+base64 = "0.22"
+hex = "0.4"
+axum = "0.8"
+uuid = { version = "1", features = ["v4"] }
+rand = "0.9"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+# JWS verification on the receiver side of the account-deletion webhook
+# fan-out test. Forseti signs the SET with RS256; the test fetches
+# the JWKS from `/.well-known/webhook-jwks.json` and verifies via the
+# same `jsonwebtoken` crate.
+jsonwebtoken = "9"
+# Compute fresh TOTP codes for the admin-gated integration tests.
+# Kratos rejects code reuse, so we can't pass a single `_CODE` env var
+# across the suite — the helper takes the base32 `_SECRET` instead and
+# derives a per-call code via RFC 6238 (SHA1 / 30s / 6 digits).
+totp-lite = "2"
+base32 = "0.5"
+
+[[test]]
+name = "integration"
+path = "tests/integration.rs"
+harness = true

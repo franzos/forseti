@@ -1,0 +1,49 @@
+{# Render a single Kratos UI input node. Caller sets `node` in scope.
+
+   Style is picked by `input_type`:
+     - hidden  → bare hidden input.
+     - submit  → primary filled button when `node.is_primary` is set by the
+                 handler (i.e. this submit is the form's main CTA), otherwise
+                 a secondary outline button (OIDC providers, code shortcut,
+                 alternative methods).
+     - checkbox → labelled checkbox.
+     - default → text-style input with the form's standard styling. #}
+
+{% if node.input_type == "hidden" %}
+<input type="hidden" name="{{ node.name }}" value="{{ node.value }}">
+{% else if node.input_type == "submit" || node.input_type == "button" %}
+    {% if node.is_primary %}
+        <button type="{{ node.input_type }}" name="{{ node.name }}" value="{{ node.value }}"{% if node.disabled %} disabled{% endif %}
+            {% match node.onclick %}{% when Some with (js) %}onclick="{{ js }}"{% when None %}{% endmatch %}
+            class="w-full bg-primary text-on-primary font-label-md text-label-md py-stack-md px-stack-lg rounded-lg hover:bg-on-surface focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2 transition-colors flex items-center justify-center gap-base disabled:opacity-50 disabled:cursor-not-allowed">
+            {% match node.label %}{% when Some with (l) %}{{ l }}{% when None %}Continue{% endmatch %}
+        </button>
+    {% else %}
+        {# Secondary actions (Back, passkey, OIDC) post to Kratos but must not be gated by required fields they don't use. #}
+        <button type="{{ node.input_type }}" name="{{ node.name }}" value="{{ node.value }}" formnovalidate{% if node.disabled %} disabled{% endif %}
+            {% match node.onclick %}{% when Some with (js) %}onclick="{{ js }}"{% when None %}{% endmatch %}
+            class="w-full flex items-center justify-center gap-stack-md bg-surface-container-lowest border border-outline-variant text-on-surface font-label-md text-label-md py-stack-md px-stack-lg rounded-lg hover:bg-surface-container-low focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2 transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+            {% match node.label %}{% when Some with (l) %}{{ l }}{% when None %}Continue{% endmatch %}
+        </button>
+    {% endif %}
+{% else if node.input_type == "checkbox" %}
+<label class="flex items-center gap-stack-sm font-body-sm text-body-sm text-on-surface">
+    <input type="checkbox" name="{{ node.name }}" value="true"{% if node.value == "true" %} checked{% endif %}{% if node.required %} required{% endif %}{% if node.disabled %} disabled{% endif %}
+        class="rounded border-outline-variant text-primary focus:ring-primary">
+    {% match node.label %}{% when Some with (l) %}{{ l }}{% when None %}{{ node.name }}{% endmatch %}
+</label>
+{% else %}
+{# `maxlength` is intentionally NOT emitted: when the input also has the
+   live-trim JS in base/card.html, a paste with leading whitespace gets
+   truncated by the browser *before* the trim runs, dropping the last digit.
+   The `pattern` attribute keeps the value digits-only, and Kratos validates
+   length server-side, so there's no reason to clamp the field client-side. #}
+<input id="{{ node.name }}" name="{{ node.name }}" type="{{ node.input_type }}"
+    value="{{ node.value }}"
+    {% match node.autocomplete %}{% when Some with (a) %}autocomplete="{{ a }}"{% when None %}{% endmatch %}
+    {% match node.pattern %}{% when Some with (p) %}pattern="{{ p }}"{% when None %}{% endmatch %}
+    {% match node.inputmode %}{% when Some with (m) %}inputmode="{{ m }}"{% when None %}{% endmatch %}
+    {% if node.required %}required{% endif %}
+    {% if node.disabled %}disabled{% endif %}
+    class="w-full bg-surface-container-lowest border border-outline-variant text-on-surface font-body-md text-body-md rounded-lg py-stack-md px-stack-md focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary placeholder-outline transition-all disabled:opacity-50 disabled:cursor-not-allowed">
+{% endif %}

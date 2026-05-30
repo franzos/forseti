@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}{{ chrome.brand.name }}{% endblock %}</title>
+    <link rel="preconnect" href="https://fonts.bunny.net" crossorigin>
+    <link rel="stylesheet" href="https://fonts.bunny.net/css?family=geist:400,600,700|jetbrains-mono:400&display=swap">
+    <style>
+      :root {
+        --brand-name: "{{ chrome.brand.name }}";
+        {% match chrome.brand.logo_url %}{% when Some with (url) %}--brand-logo-url: url("{{ url }}");{% when None %}{% endmatch %}
+      }
+    </style>
+    <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body class="bg-background min-h-screen flex flex-col font-body-md text-on-background">
+    <main class="flex-grow flex items-center justify-center p-margin-mobile md:p-margin-desktop">
+        <div class="w-full max-w-[440px] bg-surface-container-lowest rounded-xl shadow-[0_4px_6px_-1px_rgba(0,0,0,0.1)] border border-outline-variant p-stack-lg md:p-[40px] flex flex-col gap-stack-lg">
+            <div class="flex flex-col items-center text-center gap-stack-sm">
+                {% block card_icon %}
+                <div class="w-12 h-12 bg-primary rounded-lg flex items-center justify-center mb-stack-sm" aria-hidden="true">
+                    {# Minimal inline SVG keyhole/lock to avoid icon font dependency. #}
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-6 h-6 text-on-primary">
+                        <rect x="3" y="11" width="18" height="11" rx="2" />
+                        <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+                    </svg>
+                </div>
+                {% endblock %}
+                <h1 class="font-headline-md text-headline-md text-on-surface">{% block card_title %}{{ chrome.brand.name }}{% endblock %}</h1>
+                <p class="font-body-sm text-body-sm text-on-surface-variant">{% block card_subtitle %}{% endblock %}</p>
+            </div>
+
+            {% block card_body %}{% endblock %}
+        </div>
+    </main>
+
+    <footer class="bg-surface-container-low border-t border-outline-variant py-stack-lg mt-auto w-full">
+        <div class="flex flex-col md:flex-row justify-between items-center px-margin-desktop max-w-container-max mx-auto gap-stack-md">
+            <span class="font-label-sm text-label-sm text-on-surface font-bold">&copy; {{ chrome.brand.name }}</span>
+            <nav class="flex flex-wrap gap-stack-lg justify-center">
+                <span class="font-label-sm text-label-sm text-on-secondary-fixed-variant opacity-80">v{{ chrome.version }}</span>
+            </nav>
+        </div>
+    </footer>
+    {# See base.html for rationale. Mirrored here because card.html is a
+       separate root template. #}
+    <script>
+      document.addEventListener('input', function(e) {
+        var i = e.target;
+        if (!(i instanceof HTMLInputElement)) return;
+        if (i.type !== 'text' && i.type !== 'email' && i.type !== 'tel' && i.type !== 'search' && i.type !== 'url') return;
+        var trimmed = i.value.replace(/^\s+|\s+$/g, '');
+        if (trimmed !== i.value) i.value = trimmed;
+      });
+    </script>
+</body>
+</html>

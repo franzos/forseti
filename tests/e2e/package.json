@@ -1,0 +1,15 @@
+{
+  "name": "forseti-e2e",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Playwright browser e2e tests for Forseti. Runs inside Microsoft's Playwright Docker image (mcr.microsoft.com/playwright). Hosts the playground stack on the host; tests reach it via host.containers.internal.",
+  "scripts": {
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "show-trace": "playwright show-trace"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.60.0",
+    "otplib": "^12.0.1"
+  }
+}

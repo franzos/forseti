@@ -1,0 +1,47 @@
+/target
+/Cargo.lock.bak
+.DS_Store
+*.swp
+*.swo
+node_modules/
+e2e/test-results/
+e2e/playwright-report/
+
+# Playwright browser e2e (tests/e2e/) — node deps + per-run reports
+tests/e2e/node_modules/
+tests/e2e/test-results/
+tests/e2e/playwright-report/
+
+# Signed license blobs for the e2e buckets — sensitive: anyone with one
+# can paste it into any Forseti sharing the same pubkey. Mint locally via
+# `make license-fixtures`.
+tests/fixtures/license/
+
+# Forseti scaffold
+/.bin/
+/config.toml
+/static/styles.css
+
+# Forseti-owned sqlite (default backend). Repo-local file is for `cargo run`
+# only; production sqlite installs keep the .db outside the working tree.
+/forseti.db
+/forseti.db-journal
+/forseti.db-wal
+/forseti.db-shm
+# Legacy ory-portal filenames — kept so prior dev installs don't accidentally commit them.
+/portal.db
+/portal.db-journal
+/portal.db-wal
+/portal.db-shm
+
+# Runtime artifacts from `make run` / CI: the backgrounded Forseti's stdout
+# log and its pid file (see .github/workflows/ci.yml).
+/forseti.log
+/forseti.run.log
+/forseti.pid
+
+# Forseti-owned RSA signing key for outbound SET webhooks
+# (`[webhook].signing_key_path`). Auto-generated on first boot. Keep
+# out of the repo even though the file is mode 0600 — backups belong
+# in the operator's secrets store, not git history.
+/data/

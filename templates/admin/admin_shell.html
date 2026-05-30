@@ -1,0 +1,24 @@
+{# Admin shell. Extends the public base template but adds an "Admin" banner
+   so operators always know they're on a privileged surface, plus a left
+   sidebar listing the admin sections. Every admin template carries an
+   `admin_active` field (one of "status" | "clients" | "identities" |
+   "sessions" | "audit") that drives the sidebar highlight. #}
+{% extends "base.html" %}
+
+{% block title %}{% block admin_title %}Admin{% endblock %} &middot; {{ chrome.brand.name }}{% endblock %}
+
+{% block content %}
+<div class="bg-error-container border border-error rounded-xl px-4 py-2 mb-stack-md flex items-center gap-3">
+    <span class="font-label-md text-label-md text-on-error-container font-bold">ADMIN</span>
+    <span class="font-body-sm text-body-sm text-on-error-container">You're on a privileged surface. Actions here are audit-logged.</span>
+</div>
+
+<div class="flex flex-col md:flex-row gap-stack-lg">
+    {% let active = admin_active.as_slug() %}
+    {% include "partials/admin_nav.html" %}
+
+    <section class="flex-1 min-w-0">
+        {% block admin_content %}{% endblock %}
+    </section>
+</div>
+{% endblock %}

@@ -1,0 +1,123 @@
+{% extends "admin/admin_shell.html" %}
+
+{% block admin_title %}Audit{% endblock %}
+
+{% block admin_content %}
+<div class="mb-stack-lg">
+    <h1 class="font-display-lg text-display-lg text-on-surface">Audit</h1>
+    <p class="font-body-lg text-body-lg text-on-surface-variant mt-2">Append-only event log. Records Forseti-side admin actions, OAuth grants, session changes, and Kratos-flow completions delivered via webhook. Retention is operator-configured (`[audit].audit_retention_days`); pruning is a CLI subcommand, not automated.</p>
+</div>
+
+<form method="GET" action="/admin/audit" class="mb-stack-md flex flex-wrap items-end gap-stack-sm">
+    <label class="flex flex-col gap-1">
+        <span class="font-label-md text-label-md text-on-surface">Email contains</span>
+        <input type="text" name="email" value="{{ filter_email }}" class="font-body-md text-body-md bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2">
+    </label>
+    <label class="flex flex-col gap-1">
+        <span class="font-label-md text-label-md text-on-surface">Action prefix</span>
+        <input type="text" name="action" value="{{ filter_action }}" placeholder="admin." class="font-body-md text-body-md bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2 font-mono">
+    </label>
+    <label class="flex flex-col gap-1">
+        <span class="font-label-md text-label-md text-on-surface">Severity</span>
+        <select name="severity" class="font-body-md text-body-md bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2">
+            <option value=""{% if filter_severity == "" %} selected{% endif %}>Any</option>
+            <option value="info"{% if filter_severity == "info" %} selected{% endif %}>Info</option>
+            <option value="warning"{% if filter_severity == "warning" %} selected{% endif %}>Warning</option>
+            <option value="error"{% if filter_severity == "error" %} selected{% endif %}>Error</option>
+            <option value="critical"{% if filter_severity == "critical" %} selected{% endif %}>Critical</option>
+        </select>
+    </label>
+    <label class="flex flex-col gap-1">
+        <span class="font-label-md text-label-md text-on-surface">Since</span>
+        <input type="datetime-local" name="since" value="{{ filter_since }}" class="font-body-md text-body-md bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2 font-mono">
+    </label>
+    <button type="submit" class="font-label-md text-label-md text-primary border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">Filter</button>
+</form>
+
+{% if !filter_error.is_empty() %}
+<div class="bg-error-container border border-error rounded-xl p-4 mb-stack-md">
+    <p class="font-body-md text-body-md text-on-error-container">{{ filter_error }}</p>
+</div>
+{% endif %}
+
+<div class="bg-surface-container-lowest border border-outline-variant rounded-xl overflow-x-auto">
+    <table class="w-full text-left">
+        <thead class="bg-surface-container-low">
+            <tr>
+                <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Target</th>
+                <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Severity</th>
+                <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">When</th>
+                <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Actor</th>
+                <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Action</th>
+                <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest text-right">Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% if rows.is_empty() %}
+            <tr><td colspan="6" class="px-4 py-6 text-center font-body-md text-body-md text-on-surface-variant">No events match the current filters.</td></tr>
+            {% else %}
+            {% for r in rows %}
+            <tr class="border-t border-outline-variant hover:bg-surface-container-low{% if !r.success %} bg-error-container/30{% endif %}">
+                <td class="px-4 py-3 font-body-sm text-body-sm">
+                    {% if !r.target_kind.is_empty() %}
+                    <span class="font-label-sm text-label-sm text-on-surface-variant">{{ r.target_kind }}</span>
+                    {% if !r.target_link.is_empty() %}
+                    <a href="{{ r.target_link }}" class="ml-1 font-mono text-xs text-primary hover:underline" title="{{ r.target_id }}">{{ r.target_id_short }}&hellip;</a>
+                    {% else if !r.target_id.is_empty() %}
+                    <span class="ml-1 font-mono text-xs text-on-surface-variant" title="{{ r.target_id }}">{{ r.target_id_short }}&hellip;</span>
+                    {% endif %}
+                    {% else %}
+                    <span class="text-on-surface-variant">—</span>
+                    {% endif %}
+                </td>
+                <td class="px-4 py-3 font-label-sm text-label-sm">
+                    {% if r.severity == "critical" %}
+                    <span class="inline-block px-2 py-0.5 rounded-full bg-error-container text-on-error-container">critical</span>
+                    {% else if r.severity == "error" %}
+                    <span class="inline-block px-2 py-0.5 rounded-full bg-error-container/60 text-on-error-container">error</span>
+                    {% else if r.severity == "warning" %}
+                    <span class="inline-block px-2 py-0.5 rounded-full bg-tertiary-container text-on-tertiary-container">warning</span>
+                    {% else %}
+                    <span class="text-on-surface-variant">{{ r.severity }}</span>
+                    {% endif %}
+                </td>
+                <td class="px-4 py-3 font-body-sm text-body-sm text-on-surface-variant whitespace-nowrap" title="{{ r.when }}">{{ r.when_pretty }}</td>
+                <td class="px-4 py-3 font-body-md text-body-md">
+                    {% if !r.actor_id.is_empty() %}
+                    <a href="/admin/identities/{{ r.actor_id }}" class="text-primary font-bold hover:underline">{{ r.actor_email }}</a>
+                    {% else if !r.actor_email.is_empty() %}
+                    <span>{{ r.actor_email }}</span>
+                    {% else %}
+                    <span class="text-on-surface-variant">—</span>
+                    {% endif %}
+                </td>
+                <td class="px-4 py-3 font-body-sm text-body-sm text-on-surface font-mono">{{ r.action }}</td>
+                <td class="px-4 py-3 text-right whitespace-nowrap">
+                    <a href="/admin/audit/{{ r.id }}" class="font-label-sm text-label-sm text-primary border border-outline-variant rounded-lg px-3 py-1 hover:bg-surface-container-high transition-colors" title="{{ r.id }}">View</a>
+                </td>
+            </tr>
+            {% endfor %}
+            {% endif %}
+        </tbody>
+    </table>
+</div>
+{% if total > 0 %}
+<p class="font-body-sm text-body-sm text-on-surface-variant mt-stack-sm">Showing {{ offset + 1 }}–{{ offset + rows.len() as i64 }} of {{ total }} rows.</p>
+{% endif %}
+
+{% if has_prev || has_next %}
+<div class="mt-stack-md flex justify-between items-center">
+    {% if has_prev %}
+    <a href="/admin/audit{{ prev_query }}" class="font-label-md text-label-md text-on-surface-variant border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">&lsaquo; Prev</a>
+    {% else %}
+    <span></span>
+    {% endif %}
+    <span class="font-body-sm text-body-sm text-on-surface-variant">Page {{ page }}</span>
+    {% if has_next %}
+    <a href="/admin/audit{{ next_query }}" class="font-label-md text-label-md text-primary border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">Next &rsaquo;</a>
+    {% else %}
+    <span></span>
+    {% endif %}
+</div>
+{% endif %}
+{% endblock %}

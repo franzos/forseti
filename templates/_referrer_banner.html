@@ -1,0 +1,36 @@
+{# Banner rendered above the global navigation when an external OAuth
+   client has handed the user off via /handoff. Settings templates pull
+   it in via `{% include "_referrer_banner.html" %}` inside their
+   `referrer_banner` block override. Inherits `referrer_banner` and
+   `csrf_token` from the parent template's scope. #}
+{% if let Some(b) = referrer_banner.as_ref() %}
+<aside aria-label="External application referrer"
+       class="bg-tertiary-container text-on-tertiary-container border-b border-outline-variant">
+  <div class="flex flex-wrap items-center justify-between gap-stack-md w-full max-w-container-max mx-auto px-margin-mobile md:px-margin-desktop py-stack-sm">
+    <div class="flex items-center gap-stack-md min-w-0">
+      {% match b.logo_uri %}
+        {% when Some with (url) %}
+          <img src="{{ url }}" alt="" class="h-8 w-8 rounded object-contain bg-surface-container-lowest" />
+        {% when None %}
+      {% endmatch %}
+      <p class="font-body-md text-body-md min-w-0 truncate">
+        Continuing from <strong class="font-bold">{{ b.client_name }}</strong>.
+      </p>
+    </div>
+    <div class="flex items-center gap-stack-sm">
+      <a href="/handoff/return"
+         class="font-label-md text-label-md text-on-tertiary-container font-bold underline hover:opacity-80 transition-opacity">
+        Return to {{ b.client_name }} &rarr;
+      </a>
+      <form method="POST" action="/handoff/dismiss" class="inline">
+        <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+        <button type="submit"
+                aria-label="Dismiss referrer banner"
+                class="font-label-md text-label-md text-on-tertiary-container hover:opacity-80 transition-opacity px-stack-xs">
+          &times;
+        </button>
+      </form>
+    </div>
+  </div>
+</aside>
+{% endif %}

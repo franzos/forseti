@@ -1,0 +1,40 @@
+{% extends "card.html" %}
+
+{% block title %}Claim email &middot; {{ chrome.brand.name }}{% endblock %}
+
+{% block card_title %}Claim email address{% endblock %}
+{% block card_subtitle %}If someone registered your email but never verified it, you can take ownership by confirming you receive mail on this address.{% endblock %}
+
+{% block card_body %}
+{% match error %}{% when Some with (msg) %}
+<div class="bg-error-container/40 border border-error rounded-lg px-stack-md py-stack-sm text-on-error-container font-body-sm text-body-sm">{{ msg }}</div>
+{% when None %}{% endmatch %}
+{% match info %}{% when Some with (msg) %}
+<div class="bg-surface-container border border-outline-variant rounded-lg px-stack-md py-stack-sm text-on-surface font-body-sm text-body-sm">{{ msg }}</div>
+{% when None %}{% endmatch %}
+
+<form method="POST" action="/claim-email" class="flex flex-col gap-stack-lg">
+    <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+    <div class="flex flex-col gap-stack-sm">
+        <label for="email" class="font-label-md text-label-md text-on-surface">Email</label>
+        <input
+            id="email"
+            type="email"
+            name="email"
+            required
+            class="w-full bg-surface-container-lowest border border-outline-variant text-on-surface font-body-md text-body-md rounded-lg py-stack-md px-stack-md focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary placeholder-outline transition-all">
+    </div>
+    <button
+        type="submit"
+        class="w-full bg-primary text-on-primary font-label-md text-label-md py-stack-md px-stack-lg rounded-lg hover:bg-on-surface focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2 transition-colors">
+        Send code
+    </button>
+</form>
+
+<div class="text-center mt-stack-sm">
+    <p class="font-body-sm text-body-sm text-on-surface-variant">
+        Changed your mind?
+        <a href="/registration" class="font-label-md text-label-md text-primary hover:underline transition-colors">Back to sign up</a>
+    </p>
+</div>
+{% endblock %}

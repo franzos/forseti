@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+
+{% block referrer_banner %}{% include "_referrer_banner.html" %}{% endblock %}
+
+{% block title %}Authorized apps &middot; {{ chrome.brand.name }}{% endblock %}
+
+{% block nav_settings_class %}text-primary font-bold border-b-2 border-primary{% endblock %}
+
+{% block content %}
+<div class="flex flex-col md:flex-row gap-stack-lg">
+    {% let active = "authorized-apps" %}
+    {% include "partials/settings_nav.html" %}
+
+    <section class="flex-1 flex flex-col gap-stack-lg">
+        <div>
+            <h1 class="font-headline-lg text-headline-lg text-on-surface">Authorized apps</h1>
+            <p class="font-body-md text-body-md text-on-surface-variant mt-1">Apps you've granted access to your account. Revoke any you no longer use — they'll have to ask for permission again next time you sign in.</p>
+        </div>
+
+        {% if !flash.is_empty() %}
+        <div class="bg-tertiary-container border border-outline-variant rounded-lg p-stack-md">
+            <p class="font-body-sm text-body-sm text-on-tertiary-container">{{ flash }}</p>
+        </div>
+        {% endif %}
+
+        {% if apps.is_empty() %}
+        <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg">
+            <p class="font-body-md text-body-md text-on-surface-variant">No apps have been granted access to your account yet.</p>
+        </div>
+        {% else %}
+        <ul class="flex flex-col gap-stack-md">
+            {% for app in apps %}
+            <li class="bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg flex flex-col sm:flex-row sm:items-start justify-between gap-stack-md">
+                <div class="flex items-start gap-stack-md min-w-0">
+                    {% if !app.logo_uri.is_empty() %}
+                    <img src="{{ app.logo_uri }}" alt="" class="w-10 h-10 rounded-lg object-cover shrink-0 border border-outline-variant" referrerpolicy="no-referrer">
+                    {% else %}
+                    <div class="w-10 h-10 rounded-lg bg-surface-container flex items-center justify-center shrink-0" aria-hidden="true">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-5 h-5 text-on-surface-variant">
+                            <rect x="3" y="3" width="18" height="18" rx="2" />
+                            <path d="M3 9h18" />
+                            <path d="M9 21V9" />
+                        </svg>
+                    </div>
+                    {% endif %}
+
+                    <div class="min-w-0 flex flex-col gap-stack-sm">
+                        <div class="flex items-center gap-2 flex-wrap">
+                            <h2 class="font-headline-sm text-headline-sm text-on-surface truncate">{{ app.client_name }}</h2>
+                            {% if app.verified %}
+                            <span class="inline-flex items-center gap-1 font-label-sm text-label-sm text-tertiary" title="Reviewed by your administrator">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="w-3.5 h-3.5 shrink-0" aria-hidden="true">
+                                    <path d="M9 12l2 2 4-4" />
+                                    <circle cx="12" cy="12" r="10" />
+                                </svg>
+                                Verified
+                            </span>
+                            {% endif %}
+                        </div>
+
+                        {% if !app.client_uri.is_empty() %}
+                        <a href="{{ app.client_uri }}" target="_blank" rel="noopener noreferrer" class="font-body-sm text-body-sm text-primary hover:underline truncate">{{ app.client_uri }}</a>
+                        {% endif %}
+
+                        <p class="font-label-sm text-label-sm text-on-surface-variant" title="{{ app.granted_at }}">Access granted {{ app.granted_at_pretty }}</p>
+
+                        {% if !app.scopes.is_empty() %}
+                        <ul class="flex flex-wrap gap-1.5 mt-1">
+                            {% for scope in app.scopes %}
+                            <li class="font-label-sm text-label-sm bg-surface-container border border-outline-variant rounded-full px-2.5 py-0.5 text-on-surface-variant" title="{{ scope.name }}">{{ scope.description }}</li>
+                            {% endfor %}
+                        </ul>
+                        {% endif %}
+                    </div>
+                </div>
+
+                <form method="POST" action="/settings/authorized-apps/{{ app.client_id }}/revoke" class="shrink-0">
+                    <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+                    <button type="submit" class="font-label-md text-label-md text-error border border-error rounded-lg px-4 py-2 hover:bg-error-container hover:text-on-error-container transition-colors focus:outline-none focus:ring-2 focus:ring-error focus:ring-offset-2">Revoke access</button>
+                </form>
+            </li>
+            {% endfor %}
+        </ul>
+        {% endif %}
+
+        <div>
+            <a href="/settings" class="font-label-md text-label-md text-on-secondary-fixed-variant hover:text-primary transition-colors">&larr; Back to settings</a>
+        </div>
+    </section>
+</div>
+{% endblock %}

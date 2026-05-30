@@ -1,0 +1,155 @@
+/*
+ * Tailwind v4 entry. Design tokens declared in @theme map to the
+ * Forseti design system (see design/.../DESIGN.md).
+ *
+ * Brand-configurable values are exposed as CSS variables under :root
+ * so a deployment can override them at runtime without recompiling CSS.
+ */
+
+@import "tailwindcss";
+
+/* Tailwind v4 auto-detects sources from the working directory, but we
+ * pin the template glob explicitly so the CLI scans the right tree
+ * regardless of where it's invoked from. */
+@source "../templates/**/*.html";
+
+/* Web fonts are loaded by the templates via <link rel="preconnect"> +
+ * <link rel="stylesheet"> in <head>. See `templates/base.html`. */
+
+@theme {
+  /* --- Colors (mapped from DESIGN.md) ------------------------------------ */
+  --color-background: #fcf8fa;
+  --color-on-background: #1b1b1d;
+  --color-surface: #fcf8fa;
+  --color-surface-dim: #dcd9db;
+  --color-surface-bright: #fcf8fa;
+  --color-surface-container-lowest: #ffffff;
+  --color-surface-container-low: #f6f3f4;
+  --color-surface-container: #f0edef;
+  --color-surface-container-high: #eae7e9;
+  --color-surface-container-highest: #e4e2e3;
+  --color-surface-variant: #e4e2e3;
+  --color-surface-tint: #565e71;
+  --color-on-surface: #1b1b1d;
+  --color-on-surface-variant: #45474c;
+  --color-inverse-surface: #303032;
+  --color-inverse-on-surface: #f3f0f1;
+  --color-outline: #76777d;
+  --color-outline-variant: #c6c6cd;
+
+  /* Brand colors (overridable via :root CSS variables at runtime) */
+  --color-primary: var(--brand-primary, #000000);
+  --color-on-primary: var(--brand-on-primary, #ffffff);
+  --color-primary-container: #141b2c;
+  --color-on-primary-container: #7c8498;
+  --color-inverse-primary: #bfc6dc;
+  --color-primary-fixed: #dbe2f9;
+  --color-primary-fixed-dim: #bfc6dc;
+  --color-on-primary-fixed: #141b2c;
+  --color-on-primary-fixed-variant: #3f4759;
+
+  --color-secondary: var(--brand-secondary, #555f73);
+  --color-on-secondary: #ffffff;
+  --color-secondary-container: #d6e0f8;
+  --color-on-secondary-container: #596377;
+  --color-secondary-fixed: #d9e3fb;
+  --color-secondary-fixed-dim: #bdc7de;
+  --color-on-secondary-fixed: #111c2d;
+  --color-on-secondary-fixed-variant: #3d475a;
+
+  --color-tertiary: #000000;
+  --color-on-tertiary: #ffffff;
+  --color-tertiary-container: #261903;
+  --color-on-tertiary-container: #968061;
+  --color-tertiary-fixed: #fadeba;
+  --color-tertiary-fixed-dim: #dcc3a0;
+  --color-on-tertiary-fixed: #261903;
+  --color-on-tertiary-fixed-variant: #564429;
+
+  --color-error: #ba1a1a;
+  --color-on-error: #ffffff;
+  --color-error-container: #ffdad6;
+  --color-on-error-container: #93000a;
+
+  /* --- Fonts ------------------------------------------------------------- */
+  --font-display-lg: "Geist", system-ui, sans-serif;
+  --font-headline-lg: "Geist", system-ui, sans-serif;
+  --font-headline-lg-mobile: "Geist", system-ui, sans-serif;
+  --font-headline-md: "Geist", system-ui, sans-serif;
+  --font-body-lg: "Geist", system-ui, sans-serif;
+  --font-body-md: "Geist", system-ui, sans-serif;
+  --font-body-sm: "Geist", system-ui, sans-serif;
+  --font-label-md: "Geist", system-ui, sans-serif;
+  --font-label-sm: "Geist", system-ui, sans-serif;
+  --font-code-md: "JetBrains Mono", ui-monospace, monospace;
+
+  /* --- Type scale -------------------------------------------------------- */
+  --text-display-lg: 48px;
+  --text-display-lg--line-height: 60px;
+  --text-display-lg--letter-spacing: -0.02em;
+  --text-display-lg--font-weight: 700;
+
+  --text-headline-lg: 32px;
+  --text-headline-lg--line-height: 40px;
+  --text-headline-lg--letter-spacing: -0.01em;
+  --text-headline-lg--font-weight: 600;
+
+  --text-headline-lg-mobile: 24px;
+  --text-headline-lg-mobile--line-height: 32px;
+  --text-headline-lg-mobile--font-weight: 600;
+
+  --text-headline-md: 24px;
+  --text-headline-md--line-height: 32px;
+  --text-headline-md--font-weight: 600;
+
+  --text-body-lg: 18px;
+  --text-body-lg--line-height: 28px;
+  --text-body-lg--font-weight: 400;
+
+  --text-body-md: 16px;
+  --text-body-md--line-height: 24px;
+  --text-body-md--font-weight: 400;
+
+  --text-body-sm: 14px;
+  --text-body-sm--line-height: 20px;
+  --text-body-sm--font-weight: 400;
+
+  --text-label-md: 14px;
+  --text-label-md--line-height: 20px;
+  --text-label-md--font-weight: 600;
+
+  --text-label-sm: 12px;
+  --text-label-sm--line-height: 18px;
+  --text-label-sm--letter-spacing: 0.05em;
+  --text-label-sm--font-weight: 600;
+
+  --text-code-md: 14px;
+  --text-code-md--line-height: 20px;
+  --text-code-md--font-weight: 400;
+
+  /* --- Spacing tokens ---------------------------------------------------- */
+  --spacing-base: 8px;
+  --spacing-container-max: 1280px;
+  --spacing-gutter: 24px;
+  --spacing-margin-mobile: 16px;
+  --spacing-margin-desktop: 32px;
+  --spacing-stack-sm: 4px;
+  --spacing-stack-md: 12px;
+  --spacing-stack-lg: 24px;
+
+  /* --- Radii ------------------------------------------------------------- */
+  --radius-sm: 0.125rem;
+  --radius: 0.25rem;
+  --radius-md: 0.375rem;
+  --radius-lg: 0.5rem;
+  --radius-xl: 0.75rem;
+  --radius-full: 9999px;
+}
+
+/* Brand-configurable runtime variables. Templates emit overrides under
+ * :root in the document <head>; defaults declared here. */
+:root {
+  --brand-primary: #000000;
+  --brand-on-primary: #ffffff;
+  --brand-secondary: #555f73;
+}

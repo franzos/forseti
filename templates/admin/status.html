@@ -1,0 +1,127 @@
+{% extends "admin/admin_shell.html" %}
+
+{% block admin_title %}Status{% endblock %}
+
+{% block admin_content %}
+<div class="mb-stack-lg">
+    <h1 class="font-display-lg text-display-lg text-on-surface">System status</h1>
+    <p class="font-body-lg text-body-lg text-on-surface-variant mt-2">Live health of the IdP components, courier queue, and build versions.</p>
+</div>
+
+{% if sqlite_prod_warning %}
+<div class="mb-stack-lg bg-error-container text-on-error-container border border-error rounded-xl p-4">
+    <p class="font-label-md text-label-md font-semibold uppercase tracking-widest">Database</p>
+    <p class="font-body-md text-body-md mt-1">sqlite + production-looking deployment. Multi-instance setups will corrupt the database. Switch to Postgres for HA.</p>
+</div>
+{% endif %}
+
+{% if dead_webhook_count > 0 %}
+<div class="mb-stack-lg bg-error-container text-on-error-container border border-error rounded-xl p-4">
+    <p class="font-label-md text-label-md font-semibold uppercase tracking-widest">Webhook fan-out</p>
+    <p class="font-body-md text-body-md mt-1">{{ dead_webhook_count }} dead-lettered account-deletion webhook row{% if dead_webhook_count == 1 %}{% else %}s{% endif %} — receivers are not being notified. <a href="/admin/webhooks" class="underline">Open /admin/webhooks</a> to requeue or discard.</p>
+</div>
+{% endif %}
+
+<section class="mb-stack-lg">
+    <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest">Services</h2>
+    <div class="bg-surface-container-lowest border border-outline-variant rounded-xl overflow-hidden">
+        <table class="w-full text-left">
+            <thead class="bg-surface-container-low">
+                <tr>
+                    <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Service</th>
+                    <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">State</th>
+                    <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Detail</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for s in services %}
+                <tr class="border-t border-outline-variant">
+                    <td class="px-4 py-3 font-body-md text-body-md text-on-surface">{{ s.name }}</td>
+                    <td class="px-4 py-3">
+                        {% if s.state == "up" %}
+                        <span class="inline-block px-2.5 py-0.5 rounded-full bg-tertiary-fixed text-on-tertiary-fixed font-label-sm text-label-sm font-semibold">up</span>
+                        {% else %}
+                        <span class="inline-block px-2 py-0.5 rounded-full bg-error-container text-on-error-container font-label-sm text-label-sm">down</span>
+                        {% endif %}
+                    </td>
+                    <td class="px-4 py-3 font-body-sm text-body-sm text-on-surface-variant truncate max-w-xl">{{ s.detail }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+
+<section class="mb-stack-lg">
+    <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest">Courier queue</h2>
+    <div class="grid grid-cols-1 sm:grid-cols-3 gap-gutter">
+        <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4">
+            <p class="font-label-sm text-label-sm text-on-surface-variant">Pending (queued)</p>
+            <p class="font-headline-md text-headline-md text-on-surface mt-1">
+                {% match courier_pending %}{% when Some with (n) %}{{ n }}{% when None %}—{% endmatch %}
+            </p>
+        </div>
+        <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4">
+            <p class="font-label-sm text-label-sm text-on-surface-variant">Failed (abandoned)</p>
+            <p class="font-headline-md text-headline-md text-on-surface mt-1">
+                {% match courier_failed %}{% when Some with (n) %}{{ n }}{% when None %}—{% endmatch %}
+            </p>
+        </div>
+        <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4">
+            <p class="font-label-sm text-label-sm text-on-surface-variant">Last audit webhook</p>
+            <p class="font-headline-md text-headline-md text-on-surface mt-1" {% match last_kratos_webhook_full %}{% when Some with (s) %}title="{{ s }}"{% when None %}{% endmatch %}>
+                {% match last_kratos_webhook_pretty %}{% when Some with (s) %}{{ s }}{% when None %}never{% endmatch %}
+            </p>
+        </div>
+    </div>
+</section>
+
+<section class="mb-stack-lg">
+    <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest">Audit</h2>
+    <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4">
+        <p class="font-label-sm text-label-sm text-on-surface-variant">Audit write failures (since boot)</p>
+        <p class="font-headline-md text-headline-md text-on-surface mt-1">{{ audit_write_failures }}</p>
+        {% if audit_write_failures > 0 %}
+        <p class="font-body-sm text-body-sm text-on-surface-variant mt-2">Rows are recoverable from the structured <code>audit_fallback</code> stderr lines emitted by Forseti at the time of failure.</p>
+        {% endif %}
+    </div>
+</section>
+
+<section class="mb-stack-lg">
+    <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest">License</h2>
+    <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4 flex items-center gap-4">
+        <span class="inline-block px-2.5 py-0.5 rounded-full font-label-sm text-label-sm font-semibold
+            {% if license_state == "Active" %}bg-tertiary-fixed text-on-tertiary-fixed
+            {% else if license_state == "Grace" %}bg-secondary-container text-on-secondary-container
+            {% else if license_state == "Expired" %}bg-error-container text-on-error-container
+            {% else %}bg-surface-container-low text-on-surface-variant{% endif %}">
+            {{ license_state }}
+        </span>
+        <p class="font-body-md text-body-md text-on-surface-variant">
+            {% match license_detail %}{% when Some with (s) %}{{ s }}{% when None %}OSS-tier deployment. <a href="/admin/license" class="underline">Activate a license</a> to unlock premium features.{% endmatch %}
+        </p>
+    </div>
+</section>
+
+<section>
+    <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest">Build versions</h2>
+    <dl class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4 grid grid-cols-2 sm:grid-cols-4 gap-4">
+        <div>
+            <dt class="font-label-sm text-label-sm text-on-surface-variant">Forseti</dt>
+            <dd class="font-body-md text-body-md text-on-surface mt-1">v{{ forseti_version }}</dd>
+        </div>
+        <div>
+            <dt class="font-label-sm text-label-sm text-on-surface-variant">Kratos</dt>
+            <dd class="font-body-md text-body-md text-on-surface mt-1">{{ kratos_version }}</dd>
+        </div>
+        <div>
+            <dt class="font-label-sm text-label-sm text-on-surface-variant">Hydra</dt>
+            <dd class="font-body-md text-body-md text-on-surface mt-1">{{ hydra_version }}</dd>
+        </div>
+        <div>
+            <dt class="font-label-sm text-label-sm text-on-surface-variant">Database</dt>
+            <dd class="font-body-md text-body-md text-on-surface mt-1">{{ database_backend }}</dd>
+        </div>
+    </dl>
+</section>
+{% endblock %}

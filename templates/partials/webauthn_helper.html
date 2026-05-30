@@ -1,0 +1,137 @@
+{# WebAuthn / passkey UX helper.
+
+   This runs after Kratos's served `webauthn.js`. Two responsibilities:
+
+   1. **Platform-credential detection.** Some browsers (LibreWolf/Firefox on
+      Linux without TPM, older Android WebViews, etc.) advertise WebAuthn
+      support but lack any platform authenticator. Clicking a passkey
+      button there produces a silent DOMException. We detect this at page
+      load and disable any passkey trigger with an inline explanation,
+      rather than letting users hit a broken button.
+
+   2. **Runtime error surfacing.** Kratos's reference webauthn.js does
+      `.catch(err => console.error(err))` — failures are silent from the
+      user's POV. We override `console.error` (lightly) to forward
+      DOMException-shaped errors to a visible banner above the form. The
+      override preserves the original behaviour (logs still appear in
+      devtools); it just adds a user-visible signal.
+
+   No-op when no passkey/webauthn buttons are present on the page. #}
+
+<script>
+(async () => {
+  // Locate the form whose buttons are passkey/webauthn triggers. If none,
+  // this helper is dead weight on this page — bail out.
+  const triggerSelectors = [
+    'button[onclick*="oryPasskey"]',
+    'button[onclick*="oryWebAuthn"]',
+  ];
+  const triggers = Array.from(
+    document.querySelectorAll(triggerSelectors.join(", "))
+  );
+  if (triggers.length === 0) return;
+
+  // Insert an error banner just above each form that contains a trigger.
+  // One banner per form; deduped by Set.
+  const forms = new Set(triggers.map(b => b.closest("form")).filter(Boolean));
+  const banners = new Map();
+  for (const form of forms) {
+    const banner = document.createElement("div");
+    banner.setAttribute("role", "alert");
+    banner.style.display = "none";
+    banner.className =
+      "bg-error-container text-on-error-container border border-error rounded-lg " +
+      "p-stack-md font-body-sm text-body-sm mb-stack-md";
+    form.insertAdjacentElement("beforebegin", banner);
+    banners.set(form, banner);
+  }
+  const showError = (form, msg) => {
+    const b = banners.get(form) || banners.values().next().value;
+    if (!b) return;
+    b.textContent = msg;
+    b.style.display = "";
+  };
+
+  // -- 1. Platform-credential detection --------------------------------
+  const hasPubKey = !!window.PublicKeyCredential;
+  let hasPlatform = false;
+  if (hasPubKey && PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable) {
+    try {
+      hasPlatform = await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable();
+    } catch (_) {
+      hasPlatform = false;
+    }
+  }
+
+  // Passkey buttons need a platform credential. WebAuthn (security key)
+  // buttons can use cross-platform authenticators (USB keys, etc.) so they
+  // only need `PublicKeyCredential` itself, not the platform check.
+  const passkeyButtons = triggers.filter(b =>
+    /oryPasskey/.test(b.getAttribute("onclick") || "")
+  );
+  const webauthnButtons = triggers.filter(b =>
+    /oryWebAuthn/.test(b.getAttribute("onclick") || "")
+  );
+
+  const disable = (btn, message) => {
+    btn.disabled = true;
+    btn.classList.add("opacity-50", "cursor-not-allowed");
+    btn.removeAttribute("onclick");
+    const note = document.createElement("p");
+    note.className =
+      "font-body-sm text-body-sm text-on-surface-variant mt-stack-sm";
+    note.textContent = message;
+    btn.insertAdjacentElement("afterend", note);
+  };
+
+  if (!hasPubKey) {
+    for (const b of triggers) disable(b, "Your browser does not support WebAuthn / passkeys.");
+  } else {
+    if (!hasPlatform) {
+      for (const b of passkeyButtons) {
+        disable(b, "Passkey sign-in needs a platform credential on this device " +
+                   "(Touch ID, Windows Hello, an Android device, or a synced passkey). " +
+                   "Your browser does not have one set up.");
+      }
+      // WebAuthn buttons can still work via cross-platform authenticators
+      // (USB security key, etc.), so we leave them enabled. The runtime
+      // error banner will catch any actual failure.
+    }
+  }
+
+  // -- 2. Runtime error banner ----------------------------------------
+  // Kratos's webauthn.js .catch handlers log to console.error. We forward
+  // DOMException-shaped errors into a visible banner. Non-DOMException
+  // logs pass through unchanged.
+  const origError = console.error;
+  console.error = function (...args) {
+    const first = args[0];
+    if (first instanceof DOMException) {
+      let msg;
+      switch (first.name) {
+        case "NotAllowedError":
+          msg = "The credential request was cancelled, timed out, or no matching credential was available.";
+          break;
+        case "SecurityError":
+          msg = "Your browser refused the security operation. Check that the site is loaded over a trusted origin and the registered identifier matches.";
+          break;
+        case "InvalidStateError":
+          msg = "A credential is already registered with this device. Try signing in instead, or use a different device.";
+          break;
+        case "NotSupportedError":
+          msg = "Your browser does not support the requested credential parameters.";
+          break;
+        case "AbortError":
+          msg = "The credential request was aborted before it completed.";
+          break;
+        default:
+          msg = `Authenticator error: ${first.message || first.name}.`;
+      }
+      // We don't know which form errored, so populate the first banner.
+      const form = forms.values().next().value;
+      showError(form, msg);
+    }
+    return origError.apply(console, args);
+  };
+})();
+</script>

@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+
+{% block title %}
+    {% if !display_name.is_empty() %}{{ display_name }}{% else %}{{ email }}{% endif %} &middot; {{ chrome.brand.name }}
+{% endblock %}
+
+{% block org_nav %}{% include "partials/org_switcher.html" %}{% endblock %}
+
+{% block content %}
+<div class="max-w-3xl mx-auto flex flex-col gap-stack-lg">
+    <article class="bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg flex flex-col md:flex-row gap-stack-lg">
+        <div class="flex-shrink-0 w-24 h-24 rounded-xl overflow-hidden bg-surface-container">
+            {% if !avatar_url.is_empty() %}
+            <img src="{{ avatar_url }}" alt="" class="w-full h-full object-cover">
+            {% else %}
+            {{ identicon|safe }}
+            {% endif %}
+        </div>
+        <div class="flex-1 flex flex-col gap-stack-sm">
+            <header class="flex flex-col gap-1">
+                <h1 class="font-headline-lg-mobile md:font-headline-lg text-headline-lg-mobile md:text-headline-lg text-on-surface">
+                    {% if !display_name.is_empty() %}{{ display_name }}{% else %}{{ email }}{% endif %}
+                </h1>
+                <div class="flex flex-wrap items-baseline gap-stack-sm">
+                    {% if !display_name.is_empty() %}<span class="font-body-md text-body-md text-on-surface-variant font-mono">{{ email }}</span>{% endif %}
+                    {% if !pronouns.is_empty() %}<span class="font-body-sm text-body-sm text-on-surface-variant">({{ pronouns }})</span>{% endif %}
+                </div>
+                {% if !location.is_empty() %}
+                <p class="font-body-sm text-body-sm text-on-surface-variant">{{ location }}</p>
+                {% endif %}
+            </header>
+
+            {% if !bio.is_empty() %}
+            <p class="font-body-md text-body-md text-on-surface mt-stack-sm whitespace-pre-line">{{ bio }}</p>
+            {% endif %}
+
+            {% if !website.is_empty() || !links.is_empty() %}
+            <ul class="flex flex-col gap-1 mt-stack-sm">
+                {% if !website.is_empty() %}
+                <li><a href="{{ website }}" rel="noopener noreferrer" target="_blank" class="text-primary hover:underline font-label-md">{{ website }}</a></li>
+                {% endif %}
+                {% for link in links %}
+                <li><a href="{{ link.url }}" rel="noopener noreferrer" target="_blank" class="text-primary hover:underline font-label-md">{{ link.label }}</a> <span class="text-on-surface-variant font-body-sm">&middot; {{ link.url }}</span></li>
+                {% endfor %}
+            </ul>
+            {% endif %}
+
+            {% if !shared_org_names.is_empty() %}
+            <div class="flex flex-wrap gap-stack-sm mt-stack-md">
+                {% for org in shared_org_names %}
+                <span class="bg-secondary-container text-on-secondary-container rounded-full px-3 py-1 font-label-sm text-label-sm">{{ org }}</span>
+                {% endfor %}
+            </div>
+            {% endif %}
+
+            <p class="font-body-sm text-body-sm text-on-surface-variant mt-stack-md">Profile updated {{ updated_humanised }}.</p>
+        </div>
+    </article>
+</div>
+{% endblock %}

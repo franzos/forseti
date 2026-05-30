@@ -1,0 +1,133 @@
+{% extends "base.html" %}
+
+{% block title %}Members &middot; {{ org.name }} &middot; {{ chrome.brand.name }}{% endblock %}
+
+{% block nav_settings_class %}text-primary font-bold border-b-2 border-primary{% endblock %}
+
+{% block org_nav %}{% include "partials/org_switcher.html" %}{% endblock %}
+
+{% block content %}
+<div class="flex flex-col md:flex-row gap-stack-lg">
+    {% let active = "organization" %}
+    {% include "partials/settings_nav.html" %}
+
+    <section class="flex-1 flex flex-col gap-stack-lg">
+        <header class="mt-2 mb-stack-lg">
+            <h1 class="font-headline-lg-mobile md:font-headline-lg text-headline-lg-mobile md:text-headline-lg text-on-surface">Members &middot; {{ org.name }}</h1>
+            <p class="font-body-md text-body-md text-on-surface-variant mt-1">Owners can promote / demote members and remove anyone except the last owner.</p>
+        </header>
+
+        {% if is_owner %}
+        <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg">
+            <h2 class="font-headline-md text-headline-md text-on-surface mb-stack-md">Invite by email</h2>
+            <form method="POST" action="{% if is_default %}/settings/organization/members/invite{% else %}/settings/organizations/{{ org.slug }}/members/invite{% endif %}" class="flex flex-col md:flex-row gap-stack-md items-end">
+                <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+                <label class="flex flex-col gap-1 flex-1">
+                    <span class="font-label-sm text-label-sm text-on-surface-variant">Email</span>
+                    <input type="email" name="email" required class="border border-outline-variant rounded-lg px-3 py-2 bg-surface-container-low">
+                </label>
+                <label class="flex flex-col gap-1">
+                    <span class="font-label-sm text-label-sm text-on-surface-variant">Role</span>
+                    <select name="role" class="border border-outline-variant rounded-lg px-3 py-2 bg-surface-container-low">
+                        <option value="member">Member</option>
+                        <option value="owner">Owner</option>
+                    </select>
+                </label>
+                <button type="submit" class="bg-primary text-on-primary rounded-lg px-4 py-2 font-label-md text-label-md">Send invite</button>
+            </form>
+        </div>
+        {% endif %}
+
+        <div class="bg-surface-container-lowest border border-outline-variant rounded-xl overflow-hidden">
+            <table class="w-full">
+                <thead class="bg-surface-container-low text-left">
+                    <tr>
+                        <th class="px-stack-md py-stack-sm font-label-sm text-label-sm text-on-surface-variant">Name</th>
+                        <th class="px-stack-md py-stack-sm font-label-sm text-label-sm text-on-surface-variant">Email</th>
+                        <th class="px-stack-md py-stack-sm font-label-sm text-label-sm text-on-surface-variant">Role</th>
+                        <th class="px-stack-md py-stack-sm font-label-sm text-label-sm text-on-surface-variant">Joined</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for m in members %}
+                    <tr class="border-t border-outline-variant">
+                        <td class="px-stack-md py-stack-sm font-body-md text-body-md">
+                            <div class="flex items-center gap-3">
+                                <span class="inline-block w-6 h-6 rounded-md overflow-hidden bg-surface-container flex-shrink-0">
+                                    {% if !m.avatar_url.is_empty() %}
+                                    <img src="{{ m.avatar_url }}" alt="" class="w-full h-full object-cover">
+                                    {% else %}
+                                    {{ m.identicon_svg|safe }}
+                                    {% endif %}
+                                </span>
+                                <span>
+                                    {% if profiles_enabled %}
+                                    <a href="/users/{{ m.identity_id }}" class="text-primary hover:underline">{% if !m.display_name.is_empty() %}{{ m.display_name }}{% else %}{{ m.email }}{% endif %}</a>
+                                    {% else if !m.display_name.is_empty() %}
+                                    {{ m.display_name }}
+                                    {% else %}
+                                    <span class="text-on-surface-variant">&mdash;</span>
+                                    {% endif %}
+                                    {% if m.is_self %} <span class="text-on-surface-variant">(you)</span>{% endif %}
+                                </span>
+                            </div>
+                        </td>
+                        <td class="px-stack-md py-stack-sm font-body-md text-body-md font-mono">{{ m.email }}</td>
+                        <td class="px-stack-md py-stack-sm">
+                            {% if is_owner %}
+                            <form method="POST" action="{% if is_default %}/settings/organization/members/{{ m.identity_id }}/role{% else %}/settings/organizations/{{ org.slug }}/members/{{ m.identity_id }}/role{% endif %}" class="inline-flex gap-2">
+                                <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+                                <select name="role" class="border border-outline-variant rounded px-2 py-1 bg-surface-container-low">
+                                    <option value="member" {% if m.role == "member" %}selected{% endif %}>Member</option>
+                                    <option value="owner" {% if m.role == "owner" %}selected{% endif %}>Owner</option>
+                                </select>
+                                <button type="submit" class="font-label-sm text-primary">Update</button>
+                            </form>
+                            {% else %}
+                            {{ m.role }}
+                            {% endif %}
+                        </td>
+                        <td class="px-stack-md py-stack-sm font-body-sm text-on-surface-variant">{{ m.added_at }}</td>
+                        <td class="px-stack-md py-stack-sm text-right">
+                            {% if is_owner && !m.is_self %}
+                            <form method="POST" action="{% if is_default %}/settings/organization/members/{{ m.identity_id }}/remove{% else %}/settings/organizations/{{ org.slug }}/members/{{ m.identity_id }}/remove{% endif %}" onsubmit="return confirm('Remove {{ m.email }}?');" class="inline">
+                                <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+                                <button type="submit" class="text-error font-label-sm">Remove</button>
+                            </form>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+
+        {% if invites.len() > 0 %}
+        <div class="bg-surface-container-lowest border border-outline-variant rounded-xl overflow-hidden">
+            <h2 class="px-stack-md pt-stack-md font-headline-md text-headline-md text-on-surface">Pending invites</h2>
+            <table class="w-full mt-stack-md">
+                <thead class="bg-surface-container-low text-left">
+                    <tr>
+                        <th class="px-stack-md py-stack-sm font-label-sm text-label-sm text-on-surface-variant">Email</th>
+                        <th class="px-stack-md py-stack-sm font-label-sm text-label-sm text-on-surface-variant">Role</th>
+                        <th class="px-stack-md py-stack-sm font-label-sm text-label-sm text-on-surface-variant">Sent</th>
+                        <th class="px-stack-md py-stack-sm font-label-sm text-label-sm text-on-surface-variant">Expires</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for inv in invites %}
+                    <tr class="border-t border-outline-variant">
+                        <td class="px-stack-md py-stack-sm font-body-md">{{ inv.email }}</td>
+                        <td class="px-stack-md py-stack-sm font-body-md">{{ inv.role }}</td>
+                        <td class="px-stack-md py-stack-sm font-body-sm text-on-surface-variant">{{ inv.invited_at }}</td>
+                        <td class="px-stack-md py-stack-sm font-body-sm text-on-surface-variant">{{ inv.expires_at }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% endif %}
+    </section>
+</div>
+{% endblock %}

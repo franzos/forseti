@@ -1,0 +1,154 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: secret
+    volumes:
+      - ./init-db.sh:/docker-entrypoint-initdb.d/init.sh:ro
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - ory
+
+  kratos-migrate:
+    image: oryd/kratos:v26.2.0
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - DSN=postgres://kratos:secret@postgres:5432/kratos?sslmode=disable
+    volumes:
+      - ./kratos:/etc/config/kratos
+    command: -c /etc/config/kratos/kratos.yml migrate sql -e --yes
+    restart: on-failure
+    networks:
+      - ory
+
+  kratos:
+    image: oryd/kratos:v26.2.0
+    depends_on:
+      kratos-migrate:
+        condition: service_completed_successfully
+    ports:
+      - "4433:4433"  # public API
+      - "4434:4434"  # admin API
+    environment:
+      - DSN=postgres://kratos:secret@postgres:5432/kratos?sslmode=disable
+      - LOG_LEVEL=info
+    # Kratos webhooks need to reach the portal, which runs on the host
+    # (not in compose). `host.docker.internal` resolves to the host
+    # gateway on Docker Desktop natively, and the `extra_hosts` line
+    # extends that to Docker Engine on Linux.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./kratos:/etc/config/kratos
+    command: serve -c /etc/config/kratos/kratos.yml --dev --watch-courier
+    restart: unless-stopped
+    networks:
+      - ory
+
+  # kratos-ui: kept as reference; the Rust portal at :3000 is the actual UI.
+  # Useful during M1 development to compare flow rendering and node shapes
+  # against Ory's reference implementation. Safe to remove once the portal
+  # is feature-complete.
+  kratos-ui:
+    image: oryd/kratos-selfservice-ui-node:v26.2.0
+    depends_on:
+      - kratos
+    ports:
+      - "4455:4455"
+    environment:
+      - PORT=4455
+      - KRATOS_PUBLIC_URL=http://kratos:4433
+      - KRATOS_BROWSER_URL=http://127.0.0.1:4433
+      - COOKIE_SECRET=please-change-me-32-chars-long-xx
+      - CSRF_COOKIE_NAME=ory_csrf_ui
+      - CSRF_COOKIE_SECRET=please-change-me-32-chars-long-xx
+    restart: unless-stopped
+    networks:
+      - ory
+
+  hydra-migrate:
+    image: oryd/hydra:v26.2.0
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - DSN=postgres://hydra:secret@postgres:5432/hydra?sslmode=disable
+    volumes:
+      - ./hydra:/etc/config/hydra
+    command: migrate -c /etc/config/hydra/hydra.yml sql -e --yes
+    restart: on-failure
+    networks:
+      - ory
+
+  hydra:
+    image: oryd/hydra:v26.2.0
+    depends_on:
+      hydra-migrate:
+        condition: service_completed_successfully
+    ports:
+      - "4444:4444"  # public OAuth2 endpoints
+      - "4445:4445"  # admin API
+    environment:
+      - DSN=postgres://hydra:secret@postgres:5432/hydra?sslmode=disable
+      - SECRETS_SYSTEM=please-change-me-32-chars-long-xx
+    volumes:
+      - ./hydra:/etc/config/hydra
+    command: serve -c /etc/config/hydra/hydra.yml all --dev
+    restart: unless-stopped
+    networks:
+      - ory
+
+  # Portal (Rust + Axum + Askama) will be added here once scaffolded.
+  # It will listen on :3000 and implement Hydra login/consent/logout handlers
+  # plus Kratos self-service UI. Hydra's hydra.yml already points login_url,
+  # consent_url, and logout_url at http://127.0.0.1:3000.
+
+  mailslurper:
+    # mailcrab: plaintext SMTP on 1025 + web UI on 1080. Replaces
+    # oryd/mailslurper which only ships an `-smtps` tag with a TLS cert
+    # too old for rustls (UnsupportedCertVersion). The container name is
+    # kept as `mailslurper` because Kratos's smtp uri points at it by
+    # hostname inside the `ory` network.
+    image: marlonb/mailcrab:latest
+    ports:
+      - "1025:1025"  # plaintext SMTP — host-side portal mailer talks here
+      - "4436:1080"  # web UI (host port preserved; mailcrab serves on 1080)
+    networks:
+      - ory
+
+  # Portal-owned database. Separate from the Kratos/Hydra Postgres above
+  # (TODO §0: schema isolation, independent backups, no risk of colliding
+  # with Ory's migrations). Exposed on 127.0.0.1:5443 so the portal —
+  # which runs on the host, not in the compose network — can connect.
+  portal-postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: portal
+      POSTGRES_PASSWORD: secret
+      POSTGRES_DB: portal
+    ports:
+      - "127.0.0.1:5450:5432"
+    volumes:
+      - portal-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U portal"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - ory
+
+networks:
+  ory:
+
+volumes:
+  postgres-data:
+  portal-postgres-data:

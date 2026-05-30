@@ -1,0 +1,166 @@
+{% extends "card.html" %}
+
+{% block title %}Sign in &middot; {{ chrome.brand.name }}{% endblock %}
+
+{% block card_title %}Sign in to your account{% endblock %}
+{% block card_subtitle %}Welcome back to {{ chrome.brand.name }}.{% endblock %}
+
+{% block card_body %}
+{# AAL2 step-up requested but the identity has no second factor enrolled.
+   Kratos's flow has no input nodes we can render — short-circuit with an
+   explanatory CTA pointing at the settings page where the user can enrol
+   one. Skips the rest of the body entirely. #}
+{% if aal2_unavailable %}
+<div class="flex flex-col gap-stack-md">
+    <p class="font-body-md text-body-md text-on-surface">
+        This area requires two-factor authentication, but your account doesn't have a second factor set up yet.
+    </p>
+    <p class="font-body-sm text-body-sm text-on-surface-variant">
+        Set up an authenticator app, security key, or recovery codes in settings, then come back.
+    </p>
+    <a href="/settings/2fa" class="w-full bg-primary text-on-primary font-label-md text-label-md py-stack-md px-stack-lg rounded-lg hover:bg-on-surface focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2 transition-colors flex items-center justify-center gap-base text-center">
+        Set up two-factor authentication
+    </a>
+    <div class="text-center mt-stack-sm">
+        <form method="POST" action="/logout" class="inline">
+            <button type="submit" class="font-label-sm text-label-sm text-on-secondary-fixed-variant hover:text-primary transition-colors underline">
+                Sign out
+            </button>
+        </form>
+    </div>
+</div>
+{% else %}
+{# Flow-level messages (e.g. "Login failed", "Account locked"). Rendered above the form. #}
+{% if !flow_messages.is_empty() %}
+<div class="flex flex-col gap-stack-sm">
+    {% for msg in flow_messages %}
+    <p class="font-body-sm text-body-sm {% if msg.severity == "error" %}text-error{% else if msg.severity == "success" %}text-tertiary{% else %}text-on-surface-variant{% endif %}">
+        {{ msg.text }}
+    </p>
+    {% endfor %}
+</div>
+{% endif %}
+
+<form method="{{ form_method }}" action="{{ form_action }}" class="flex flex-col gap-stack-lg">
+    {# `default` group — CSRF token (hidden) plus, for password/code methods,
+       the shared `identifier` (e-mail / username) field. We split it: hidden
+       inputs go up top before the methods, visible inputs go into the
+       credential form alongside the password group. #}
+    {% for node in groups.default %}
+        {% if node.input_type == "hidden" %}
+            {% include "partials/flow_node.html" %}
+        {% endif %}
+    {% endfor %}
+
+    {# OIDC upstream provider buttons. Empty when no providers are enabled. #}
+    {% if !groups.oidc.is_empty() %}
+    <div class="flex flex-col gap-stack-sm">
+        {% for node in groups.oidc %}{% include "partials/flow_node.html" %}{% endfor %}
+    </div>
+    {% endif %}
+
+    {# Code-method shortcut. Single submit button labelled per Kratos's meta label. #}
+    {% if !groups.code.is_empty() %}
+    {% for node in groups.code %}{% include "partials/flow_node.html" %}{% endfor %}
+    {% endif %}
+
+    {# OR divider — only shown when there's an alternative method above AND a
+       credential form below (identifier+password). #}
+    {% if (!groups.oidc.is_empty() || !groups.code.is_empty()) && (!groups.password.is_empty() || has_visible_default) %}
+    <div class="flex items-center gap-stack-md">
+        <div class="flex-grow h-px bg-outline-variant"></div>
+        <span class="font-label-sm text-label-sm text-outline uppercase tracking-wider">Or continue with</span>
+        <div class="flex-grow h-px bg-outline-variant"></div>
+    </div>
+    {% endif %}
+
+    {# Credential form: identifier (from `default`) + password fields + submit. #}
+    {% if !groups.password.is_empty() || has_visible_default %}
+    <div class="flex flex-col gap-stack-md">
+        {# Visible default-group inputs (typically `identifier`). #}
+        {% for node in groups.default %}
+            {% if node.input_type != "hidden" %}
+                <div class="flex flex-col gap-stack-sm">
+                    <label for="{{ node.name }}" class="font-label-md text-label-md text-on-surface">
+                        {% match node.label %}{% when Some with (l) %}{{ l }}{% when None %}{{ node.name }}{% endmatch %}
+                    </label>
+                    {% include "partials/flow_node.html" %}
+                    {% for m in node.messages %}
+                    <p class="font-body-sm text-body-sm {% if m.severity == "error" %}text-error{% else %}text-on-surface-variant{% endif %}">{{ m.text }}</p>
+                    {% endfor %}
+                </div>
+            {% endif %}
+        {% endfor %}
+        {# Password method nodes. #}
+        {% for node in groups.password %}
+            {% if node.input_type == "submit" || node.input_type == "hidden" %}
+                {% include "partials/flow_node.html" %}
+            {% else %}
+                <div class="flex flex-col gap-stack-sm">
+                    {% if node.input_type == "password" %}
+                    <div class="flex justify-between items-center">
+                        <label for="{{ node.name }}" class="font-label-md text-label-md text-on-surface">
+                            {% match node.label %}{% when Some with (l) %}{{ l }}{% when None %}{{ node.name }}{% endmatch %}
+                        </label>
+                        <a href="/recovery{{ return_to_qs }}" class="font-label-sm text-label-sm text-on-secondary-container hover:text-primary transition-colors underline">Forgot password?</a>
+                    </div>
+                    {% else %}
+                    <label for="{{ node.name }}" class="font-label-md text-label-md text-on-surface">
+                        {% match node.label %}{% when Some with (l) %}{{ l }}{% when None %}{{ node.name }}{% endmatch %}
+                    </label>
+                    {% endif %}
+                    {% include "partials/flow_node.html" %}
+                    {% for m in node.messages %}
+                    <p class="font-body-sm text-body-sm {% if m.severity == "error" %}text-error{% else %}text-on-surface-variant{% endif %}">{{ m.text }}</p>
+                    {% endfor %}
+                </div>
+            {% endif %}
+        {% endfor %}
+    </div>
+    {% endif %}
+
+    {# Anything Kratos sent that didn't fit a known group — TOTP, lookup_secret, etc. Rendered generically. #}
+    {% if !groups.other.is_empty() %}
+    <div class="flex flex-col gap-stack-md">
+        {% for node in groups.other %}
+            {% if node.input_type == "hidden" || node.input_type == "submit" || node.input_type == "button" %}
+                {% include "partials/flow_node.html" %}
+            {% else %}
+                <div class="flex flex-col gap-stack-sm">
+                    {% match node.label %}{% when Some with (l) %}
+                    <label for="{{ node.name }}" class="font-label-md text-label-md text-on-surface">{{ l }}</label>
+                    {% when None %}{% endmatch %}
+                    {% include "partials/flow_node.html" %}
+                    {% for m in node.messages %}
+                    <p class="font-body-sm text-body-sm {% if m.severity == "error" %}text-error{% else %}text-on-surface-variant{% endif %}">{{ m.text }}</p>
+                    {% endfor %}
+                </div>
+            {% endif %}
+        {% endfor %}
+    </div>
+    {% endif %}
+</form>
+
+<div class="text-center mt-stack-sm">
+    <p class="font-body-sm text-body-sm text-on-surface-variant">
+        Don't have an account?
+        <a href="/registration{{ return_to_qs }}" class="font-label-md text-label-md text-primary hover:underline transition-colors">Create account</a>
+    </p>
+</div>
+
+{# WebAuthn / passkey helper. Kratos serves the script and the flow tells us
+   exactly which URL + integrity hash to use; we render it verbatim. Without
+   this, the trigger buttons' onclick handlers reference undefined functions
+   like `window.oryWebAuthnLogin` / `window.oryPasskeyLogin`. #}
+{% for s in webauthn_scripts %}
+<script src="{{ s.src }}"
+    {% match s.integrity %}{% when Some with (v) %}integrity="{{ v }}"{% when None %}{% endmatch %}
+    {% match s.crossorigin %}{% when Some with (v) %}crossorigin="{{ v }}"{% when None %}{% endmatch %}
+    {% match s.referrerpolicy %}{% when Some with (v) %}referrerpolicy="{{ v }}"{% when None %}{% endmatch %}
+    {% match s.id %}{% when Some with (v) %}id="{{ v }}"{% when None %}{% endmatch %}
+    {% match s.nonce %}{% when Some with (v) %}nonce="{{ v }}"{% when None %}{% endmatch %}
+    {% if s.is_async %}async{% endif %}></script>
+{% endfor %}
+{% include "partials/webauthn_helper.html" %}
+{% endif %}
+{% endblock %}

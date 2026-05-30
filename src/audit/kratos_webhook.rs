@@ -1,0 +1,287 @@
+//! `POST /internal/audit/kratos` — Kratos flow-hook receiver.
+//!
+//! Kratos's self-service flows (registration, settings, recovery,
+//! verification) support `web_hook` actions that fire a normalised JSON
+//! payload on flow completion. We register the same hook URL on every
+//! flow with a per-hook `action` wrapper field, so the receiver parses
+//! one stable shape regardless of which flow fired.
+//!
+//! ## Auth
+//!
+//! Bearer token (`Authorization: Bearer <token>`) matched against
+//! `[audit].webhook_token`. The endpoint should be reachable only from
+//! the trust boundary (the internal listener bound to loopback / a
+//! private interface; see `[internal] bind` in `config.toml`); the token
+//! is defence-in-depth, not the primary boundary. Forseti refuses to
+//! boot when `webhook_token` is empty, so by the time a request reaches
+//! this handler the token is guaranteed non-empty.
+//!
+//! ## Replay protection
+//!
+//! Bearer alone lets anyone who intercepts a single request replay it
+//! arbitrarily later — fabricating audit history. The receiver adds a
+//! freshness window on top of the bearer: the jsonnet body surfaces
+//! `ctx.flow.issued_at` (RFC 3339), and the receiver rejects payloads
+//! whose `issued_at` is more than `MAX_PAYLOAD_AGE` (5 min) old, or
+//! skewed more than `MAX_PAYLOAD_SKEW` (1 min) into the future. Payloads
+//! missing `issued_at` are accepted but logged — older Kratos versions
+//! omit the field on some hooks.
+//!
+//! Duplicate rows in an append-only audit log are harmless, so the
+//! receiver doesn't dedupe: it runs on the internal listener behind the
+//! bearer, and the freshness window is the real replay guard.
+//!
+//! Full HMAC-of-body signing is the standard webhook pattern (Stripe /
+//! GitHub), but Kratos's `web_hook` action ships static headers only —
+//! it can't compute an HMAC at send time. Closing that gap requires a
+//! reverse proxy in front of Kratos to sign, or upstream support in
+//! Kratos. The current mitigation is therefore partial: it stops the
+//! "captured payload replayed hours later" case but not a real-time
+//! MITM with both the bearer and the live freshness window.
+//!
+//! ## Responses
+//!
+//! - `204 No Content` on accept
+//! - `401 Unauthorized` on missing / wrong token
+//! - `400 Bad Request` on malformed body, unknown action, or a
+//!   stale / future-dated payload (a freshness reject is not an auth
+//!   failure, so 401 would wrongly trigger a Kratos retry / replay)
+//!
+//! Never returns 5xx — a failing audit write logs internally; Kratos
+//! sees an accept and never blocks the user flow regardless
+//! (`can_interrupt: false` on the Kratos side).
+//!
+//! ## Events covered
+//!
+//! Flow-driven only: `identity.created` (registration), `password.changed`
+//! (settings.password), `password.recovered` (recovery),
+//! `verification.completed` (verification), `mfa.*` (settings.{totp,
+//! webauthn, lookup}), `auth.login` / `auth.login_failed` (login flow).
+//! Admin-API identity writes (update/delete) are emitted from Forseti's
+//! own admin handlers — Kratos doesn't fire flow hooks for admin-API
+//! operations.
+
+use axum::{
+    extract::{Json, Query, State},
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    routing::post,
+    Router,
+};
+use chrono::{DateTime, Utc};
+use serde::Deserialize;
+
+use crate::audit::{self, action, target_kind, AuditEvent, SafeMetadata};
+use crate::state::AppState;
+
+/// Reject payloads whose `issued_at` is older than this. Mirrors the
+/// Stripe / GitHub webhook tolerance.
+const MAX_PAYLOAD_AGE: chrono::Duration = chrono::Duration::minutes(5);
+
+/// Tolerance for `issued_at` skew into the future — Kratos and Forseti
+/// may run on different hosts with drifting clocks.
+const MAX_PAYLOAD_SKEW: chrono::Duration = chrono::Duration::minutes(1);
+
+/// Build the sub-router. Mounted from `app::run`.
+pub fn router() -> Router<AppState> {
+    Router::new().route("/internal/audit/kratos", post(receive))
+}
+
+/// Stable payload shape produced by the shared `audit_event.jsonnet`
+/// template. Per-flow ctx differences are flattened into this struct in
+/// the template, so the receiver doesn't branch on which flow fired.
+#[derive(Debug, Deserialize)]
+pub struct KratosAuditPayload {
+    /// Identity that completed the flow. Optional because some flows
+    /// (e.g. failed login on an unknown email) don't yield an id.
+    #[serde(default)]
+    pub actor_id: Option<String>,
+    #[serde(default)]
+    pub actor_email: Option<String>,
+    /// Target of the action. For identity-shaped events this echoes
+    /// `actor_id`; included so the template stays uniform.
+    #[serde(default)]
+    pub target_id: Option<String>,
+    /// RFC 3339 timestamp the Kratos flow was issued at. Populated by
+    /// the jsonnet template from `ctx.flow.issued_at`. Used as the
+    /// freshness lower bound — see the "Replay protection" section in
+    /// the module docs. `None` when the flow ctx didn't carry the
+    /// field (older Kratos versions omit it on some hooks).
+    #[serde(default)]
+    pub issued_at: Option<DateTime<Utc>>,
+    /// Free-form metadata bag from the jsonnet (flow_id, method, etc.).
+    /// Goes through `SafeMetadata` so any sensitive-looking key the
+    /// template accidentally surfaces is rejected at write time.
+    #[serde(default)]
+    pub metadata: serde_json::Value,
+}
+
+/// Per-hook action selector, passed as `?action=...` on the webhook URL.
+/// Kratos's web_hook ctx doesn't carry the hook identity, and a single
+/// jsonnet template is materially simpler than one-per-hook — so we
+/// route the action through the URL.
+#[derive(Debug, Deserialize)]
+pub struct ActionQuery {
+    pub action: String,
+}
+
+/// Bearer-token auth + payload → audit event.
+///
+/// Default-org auto-join is no longer driven by a webhook — see
+/// `crate::orgs::ensure_default_membership` and its caller in
+/// `crate::orgs::middleware::auto_join_default_org`. This receiver is purely the
+/// audit-write side.
+pub async fn receive(
+    State(state): State<AppState>,
+    Query(q): Query<ActionQuery>,
+    headers: axum::http::HeaderMap,
+    body: Result<Json<KratosAuditPayload>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let action_str_opt = map_action(&q.action);
+
+    // `app::run` refuses to boot with an empty token, so this is never
+    // empty at runtime. Keep the explicit check anyway as defence in
+    // depth against a future code path that constructs `AuditConfig`
+    // outside the boot path.
+    let configured = state.cfg.audit.webhook_token.as_str();
+    if configured.is_empty() {
+        return (
+            StatusCode::UNAUTHORIZED,
+            "audit webhook token not configured",
+        )
+            .into_response();
+    }
+    // Case-insensitive scheme match per RFC 6750 §2.1 — mirrors the DCR
+    // `parse_authorization` helper in `oauth/register/iat.rs`.
+    let Some(presented) = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.split_once(' '))
+        .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("Bearer"))
+        .map(|(_, token)| token.trim())
+        .filter(|t| !t.is_empty())
+    else {
+        return (StatusCode::UNAUTHORIZED, "missing bearer token").into_response();
+    };
+    // Hash both sides before ct_eq: subtle's slice impl short-circuits on
+    // unequal lengths, which would leak a length oracle for the configured
+    // token. Fixed-length digests dodge that.
+    use sha2::Digest;
+    let presented_hash = sha2::Sha256::digest(presented.as_bytes());
+    let configured_hash = sha2::Sha256::digest(configured.as_bytes());
+    if !bool::from(subtle::ConstantTimeEq::ct_eq(
+        presented_hash.as_slice(),
+        configured_hash.as_slice(),
+    )) {
+        return (StatusCode::UNAUTHORIZED, "bad token").into_response();
+    }
+
+    let action_str = match action_str_opt {
+        Some(s) => s,
+        None => {
+            tracing::warn!(action = %q.action, "kratos audit webhook: unknown action");
+            return (StatusCode::BAD_REQUEST, "unknown action").into_response();
+        }
+    };
+
+    let payload = match body {
+        Ok(Json(p)) => p,
+        Err(_) => {
+            tracing::warn!("kratos audit webhook: malformed body");
+            return (StatusCode::BAD_REQUEST, "malformed body").into_response();
+        }
+    };
+
+    // Freshness check. Missing `issued_at` is accepted but logged —
+    // older Kratos versions omit the field on some hooks and we don't
+    // want to drop legitimate events.
+    let now = Utc::now();
+    if let Some(issued_at) = payload.issued_at {
+        let age = now.signed_duration_since(issued_at);
+        if age > MAX_PAYLOAD_AGE {
+            tracing::warn!(
+                action = action_str,
+                age_secs = age.num_seconds(),
+                "kratos audit webhook: stale payload rejected"
+            );
+            // 400, not 401: a stale payload isn't an auth failure. Returning
+            // 401 makes Kratos treat it as a hook-endpoint auth error and
+            // retry, replaying the stale event.
+            return (StatusCode::BAD_REQUEST, "stale payload").into_response();
+        }
+        if age < -MAX_PAYLOAD_SKEW {
+            tracing::warn!(
+                action = action_str,
+                skew_secs = (-age).num_seconds(),
+                "kratos audit webhook: future-dated payload rejected"
+            );
+            return (StatusCode::BAD_REQUEST, "future-dated payload").into_response();
+        }
+    } else {
+        tracing::debug!(
+            action = action_str,
+            "kratos audit webhook: payload missing issued_at; freshness check skipped"
+        );
+    }
+
+    let metadata = build_safe_metadata(payload.metadata.clone());
+    let event = build_kratos_event(action_str, &payload, metadata);
+    let _ = audit::log(&state.db, event).await;
+    audit::record_kratos_webhook_received();
+
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// Map an inbound action string onto the typed vocabulary. Unknown values
+/// are rejected at the receiver rather than leaked through `Box::leak` —
+/// keeps the action column tightly scoped to the agreed set and avoids
+/// memory growth from a misconfigured Kratos.
+fn map_action(s: &str) -> Option<&'static str> {
+    Some(match s {
+        "identity.created" => action::IDENTITY_CREATED,
+        "password.changed" => action::PASSWORD_CHANGED,
+        "password.recovered" => action::PASSWORD_RECOVERED,
+        "verification.completed" => action::VERIFICATION_COMPLETED,
+        "auth.login" => action::AUTH_LOGIN,
+        "auth.login_failed" => action::AUTH_LOGIN_FAILED,
+        "mfa.totp.enrolled" => action::MFA_TOTP_ENROLLED,
+        "mfa.totp.disabled" => action::MFA_TOTP_DISABLED,
+        "mfa.lookup.regenerated" => action::MFA_LOOKUP_REGENERATED,
+        "mfa.webauthn.added" => action::MFA_WEBAUTHN_ADDED,
+        "mfa.webauthn.removed" => action::MFA_WEBAUTHN_REMOVED,
+        "profile.updated" => action::PROFILE_UPDATED,
+        _ => return None,
+    })
+}
+
+/// Build the event. Flow-driven events have the user as actor (since the
+/// user initiated the flow); the webhook is merely the delivery channel.
+/// If the payload doesn't carry an identity (e.g. failed login on an
+/// unknown email) we fall back to `actor_webhook("kratos")` so the row
+/// has *some* attribution.
+fn build_kratos_event(
+    action_str: &'static str,
+    payload: &KratosAuditPayload,
+    metadata: SafeMetadata,
+) -> AuditEvent {
+    let mut event = AuditEvent::new(action_str);
+    event = match payload.actor_id.as_deref() {
+        Some(id) => event.actor_user(id, payload.actor_email.as_deref().unwrap_or("")),
+        None => event.actor_webhook("kratos"),
+    };
+    let target_id = payload.target_id.as_deref().or(payload.actor_id.as_deref());
+    if let Some(t) = target_id {
+        event = event.target(target_kind::IDENTITY, t.to_string());
+    }
+    event.metadata(metadata)
+}
+
+/// Convert freeform JSON metadata to `SafeMetadata`. Top-level object
+/// keys go through the deny-list; anything that's not an object becomes
+/// `{ "value": <json> }`.
+fn build_safe_metadata(value: serde_json::Value) -> SafeMetadata {
+    match value {
+        serde_json::Value::Object(map) => SafeMetadata::from_json_object(map),
+        other => SafeMetadata::from_pairs(&[("value", other)]),
+    }
+}

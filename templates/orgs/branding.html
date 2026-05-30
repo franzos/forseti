@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+
+{% block title %}Branding &middot; {{ org.name }} &middot; {{ chrome.brand.name }}{% endblock %}
+
+{% block nav_settings_class %}text-primary font-bold border-b-2 border-primary{% endblock %}
+
+{% block org_nav %}{% include "partials/org_switcher.html" %}{% endblock %}
+
+{% block content %}
+<div class="flex flex-col md:flex-row gap-stack-lg">
+    {% let active = "organization" %}
+    {% include "partials/settings_nav.html" %}
+
+    <section class="flex-1 flex flex-col gap-stack-lg">
+        <header class="mt-2 mb-stack-lg">
+            <h1 class="font-headline-lg-mobile md:font-headline-lg text-headline-lg-mobile md:text-headline-lg text-on-surface">Branding</h1>
+            <p class="font-body-md text-body-md text-on-surface-variant mt-1">Override Forseti's default brand with this organization's logo and support email. Falls back to <code class="bg-surface-container-high px-1 rounded">[brand]</code> in <code class="bg-surface-container-high px-1 rounded">config.toml</code> when unset.</p>
+        </header>
+
+        <form method="POST" action="{% if is_default %}/settings/organization/branding{% else %}/settings/organizations/{{ org.slug }}/branding{% endif %}" class="flex flex-col gap-stack-md bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg">
+            <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+            <label class="flex flex-col gap-1">
+                <span class="font-label-sm text-label-sm text-on-surface-variant">Logo URL</span>
+                {% match org.logo_url %}{% when Some with (v) %}<input type="url" name="logo_url" value="{{ v }}" class="border border-outline-variant rounded-lg px-3 py-2 bg-surface-container-low">{% when None %}<input type="url" name="logo_url" value="" class="border border-outline-variant rounded-lg px-3 py-2 bg-surface-container-low">{% endmatch %}
+            </label>
+            <label class="flex flex-col gap-1">
+                <span class="font-label-sm text-label-sm text-on-surface-variant">Support email</span>
+                {% match org.support_email %}{% when Some with (v) %}<input type="email" name="support_email" value="{{ v }}" class="border border-outline-variant rounded-lg px-3 py-2 bg-surface-container-low">{% when None %}<input type="email" name="support_email" value="" class="border border-outline-variant rounded-lg px-3 py-2 bg-surface-container-low">{% endmatch %}
+            </label>
+            <div>
+                <button type="submit" class="bg-primary text-on-primary rounded-lg px-4 py-2 font-label-md text-label-md">Save</button>
+            </div>
+        </form>
+    </section>
+</div>
+{% endblock %}
