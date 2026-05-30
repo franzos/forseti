@@ -1,0 +1,239 @@
+# Forseti — example configuration.
+#
+# Copy to `config.toml` (gitignored) and adjust for your deployment.
+# Every value is overridable via env var with the `FORSETI_` prefix and a
+# double-underscore section separator, e.g. `FORSETI_KRATOS__PUBLIC_URL`.
+
+[kratos]
+# Browser-facing public API. Forseti forwards user cookies to this URL.
+public_url = "http://localhost:4433"
+# Server-only admin API. Reachable only from within the trust boundary.
+admin_url  = "http://localhost:4434"
+
+[hydra]
+public_url = "http://localhost:4444"
+admin_url  = "http://localhost:4445"
+
+[self]
+# Forseti's own externally reachable URL. Used to build `return_to` round-trips.
+url = "http://localhost:3000"
+
+[brand]
+name          = "Forseti"
+support_email = "support@example.com"
+# logo_url    = "https://example.com/logo.svg"
+# consent_intro = "The application below is requesting access to your account."
+
+# Dashboard "Your apps" cards. Empty list (or omitted section) hides the entire
+# section on the dashboard.
+# [[apps]]
+# name        = "Example App"
+# description = "A short description of what this app does."
+# url         = "https://app.example.com"
+
+# OAuth2 bridge settings.
+#
+# `dcr_reserved_names` is the DCR (Dynamic Client Registration) `client_name`
+# denylist. Case-insensitive substring match — any pattern that appears
+# anywhere in the posted `client_name` causes the registration to be rejected
+# with `invalid_client_metadata`. Stops self-registered clients from
+# impersonating your own brand or common IDPs on the consent screen
+# ("Microsoft Login", "Forseti Admin", etc).
+#
+# `dcr_ip_rate_per_minute` / `dcr_ip_rate_per_hour` cap requests to
+# `POST /oauth2/register` from a single IP. In-memory, per-process; the
+# bucket refills to full over the named window. Defaults are 10/min and
+# 100/hour. Set to 0 to disable that bucket entirely. Both run in
+# parallel — a request must satisfy both.
+#
+# `dcr_iat_daily_limit` caps successful registrations per IAT over a
+# rolling 24h window opened on the first successful use. Belt-and-
+# suspenders to `uses_remaining`: even an "unlimited" token (`uses=NULL`)
+# is capped here. Default 50. Set to 0 to disable.
+#
+# Rate-limit values are clamped at config-load time to sanity ceilings
+# (per-minute: 1_000, per-hour: 10_000, per-day: 100_000) so an operator
+# typo can't silently disable protection. A clamped value emits a
+# `tracing::warn!` at boot.
+#
+# Whether the per-IP DCR rate limiter (and the audit middleware, and
+# the handoff + claim-email limiters) trust client-sent forwarded-for
+# headers is now a single deployment-wide knob: `[proxy]
+# trust_forwarded_for` — see further down this file.
+#
+# If the key is omitted, the code-baked default shown below is used. To
+# override, uncomment and edit — the list replaces the default wholesale
+# (there is no merge-with-extras mode by design; copy the entries you want
+# to keep).
+# [oauth]
+# dcr_ip_rate_per_minute = 10
+# dcr_ip_rate_per_hour   = 100
+# dcr_iat_daily_limit    = 50
+# dcr_reserved_names = [
+#   # Own + upstream brands
+#   "ory", "hydra", "kratos",
+#   # Consumer IDPs
+#   "google", "apple", "microsoft", "github", "gitlab",
+#   # AI vendors
+#   "anthropic", "claude", "openai", "chatgpt",
+#   # Identity vendors
+#   "okta", "auth0",
+#   # Privilege / infrastructure names
+#   "admin", "forseti", "portal", "system", "root",
+# ]
+
+# Human-readable descriptions for OAuth2 scopes surfaced on the consent screen.
+# Unknown scopes fall back to the raw scope name (the admin client show page
+# surfaces a warning banner for any scope registered on a client that isn't
+# documented here).
+# [oauth.scope_descriptions]
+# openid           = "Sign you in with your account"
+# email            = "Access your verified email address"
+# profile          = "View your basic profile (name, avatar, website)"
+# offline          = "Stay signed in by issuing refresh tokens"
+# extended_profile = "View your bio, pronouns, and personal links"
+#
+# MCP scope convention: `<app>:<resource>:<verb>`. Each MCP server documents
+# its own scopes; describe them here so the consent screen reads naturally.
+# Examples:
+# "formshive:forms:read"  = "Read your forms and submissions"
+# "formshive:forms:write" = "Create and modify your forms"
+# "formshive:mcp:invoke"  = "Call your formshive MCP tools on your behalf"
+
+# Admin surface (M3). `/admin/*` requires AAL2 + a session email in this list.
+# Empty list (or omitted section) = `/admin/*` is closed to everyone.
+# [admin]
+# allowed_emails = ["admin@example.com"]
+
+# Forseti-owned database. Separate from the Kratos/Hydra Postgres. Both sqlite
+# and Postgres are real backends — sqlite for single-binary self-hosters,
+# Postgres for HA deployments. Defaults to sqlite at ./forseti.db.
+# [database]
+# url = "sqlite://./forseti.db"
+# url = "postgres://forseti:forseti@localhost:5432/forseti"
+# skip_migrations = false  # set true to gate schema changes through a pipeline
+
+# Internal HTTP listener for machine-to-machine endpoints (today: the
+# Kratos audit webhook receiver). Defaults to loopback so the surface
+# stays invisible from outside the host. Override `bind` to e.g.
+# `0.0.0.0:8081` when running inside a container where the trust
+# boundary is the docker / pod network. NEVER expose this listener on
+# a public interface — the bearer token is defence-in-depth, not the
+# primary boundary.
+# [internal]
+# bind = "127.0.0.1:8081"
+
+# Forseti-owned per-identity profiles (bio, location, pronouns, website,
+# avatar URL, links). When `enabled = true`:
+#   * `/settings/profile` grows a "Public profile" form for the editable
+#     fields.
+#   * `/users/{identity_id}` renders a profile view to anyone sharing an
+#     org with the target.
+#   * The members roster on `/settings/organization/members` links each
+#     row with non-empty profile data to that page.
+#   * `profile` OIDC scope adds `picture` (avatar) + `website`.
+#   * `extended_profile` OIDC scope adds `bio`, `pronouns`, `links`.
+# Off by default — appropriate for SaaS deployments where org-mates
+# shouldn't see each other's profile data; flip on for intranet /
+# team-collaboration use cases.
+# [profiles]
+# enabled = false
+
+# Forseti-originated mail (invite + claim-email). Kratos's courier handles
+# its own self-service mail (verification, recovery, MFA) — this transport
+# is only for mails Forseti itself sends. Disabled by default; when
+# `enabled = false`, callers log + skip and the underlying token/code
+# remains in the DB for hand-delivery.
+# [smtp]
+# enabled = true
+# host = "smtp.example.com"
+# port = 587
+# scheme = "starttls"   # one of: plaintext, starttls, smtps
+# username = ""
+# password = ""
+# from = "noreply@example.com"
+# skip_tls_verify = false
+
+# Append-only audit log. `webhook_token` is REQUIRED — Forseti refuses
+# to boot with it empty. Kratos's flow webhooks send this token in the
+# Authorization header to the `/internal/audit/kratos` receiver on the
+# internal listener. Rotate by stopping Forseti, updating both this
+# value and the `auth.config.value` fields in `infra/kratos/kratos.yml`,
+# then starting both back up.
+# [audit]
+# webhook_token = "change-me-32-bytes-of-secret-entropy"
+# ip_salt = ""                 # optional override; derived from [self].url when unset
+# audit_retention_days = 90    # default for the `forseti audit-prune` CLI
+
+# Deployment-shape: is Forseti behind a trusted reverse proxy that
+# strips and re-adds `X-Forwarded-For` / `X-Real-IP` / `Forwarded`?
+# Flipping this on tells the audit middleware (audited client IP) and
+# the per-IP rate limiters (DCR proxy, handoff, claim-email) to honour
+# the forwarded-for chain. Default `false` — secure when Forseti's
+# public listener is exposed directly. Set to `true` ONLY when the
+# upstream proxy is configured to STRIP client-sent forwarded-for
+# headers before re-adding its own; otherwise a direct caller can
+# forge the header and spoof their IP. See
+# `docs/operator-guide-proxy.md` for haproxy / nginx sketches that do
+# the strip correctly.
+# [proxy]
+# trust_forwarded_for = false
+
+# Outbound webhook signing. Forseti signs every account-lifecycle
+# webhook (today: account-purged) as an RFC 8417 Security Event Token
+# (EdDSA / Ed25519 JWS, RFC 8037) with the key at `signing_key_path`.
+# Receivers verify against the JWKS published at
+# `/.well-known/webhook-jwks.json` — same shape and verification path
+# as Hydra-issued id_tokens.
+#
+# When the file is missing at boot, Forseti generates a fresh
+# Ed25519 key, writes it as a PKCS#8 PEM with `0600` permissions,
+# and logs a warning. Back up that file with the rest of your Forseti
+# state — losing it forces every integrator to reload their JWKS cache
+# on the next delivery. A file at this path that isn't a valid Ed25519
+# PKCS#8 PEM is a hard startup error: remove or replace it.
+# [webhook]
+# signing_key_path = "data/webhook-signing-key.pem"
+# tick_seconds = 5              # how often the worker polls the outbox
+# max_attempts = 12             # delivery attempts before dead-lettering
+# max_age_hours = 72            # hard age cap — older rows dead-letter
+# backoff_cap_seconds = 21600   # 6h — exponential-backoff ceiling
+# claim_lease_seconds = 60      # how long a claim hides a row from peers
+
+# Per-IP rate limits on the Forseti-owned `/claim-email` flow. The
+# 6-digit OTP is ~20 bits of entropy; per-IP bucketing bounds
+# distributed grinding to "days, not hours". Defaults below match the
+# code-side defaults — uncomment and dial up only if your deployment
+# has a legitimate-traffic source that trips them. Values are clamped
+# at load time to 1_000/min and 10_000/hour (sanity ceiling).
+# [claim_email]
+# rate_limit_per_minute = 5
+# rate_limit_per_hour = 30
+
+# Per-IP rate limits on the RP-initiated handoff entry endpoint
+# (`/handoff`). The handler hits Hydra's admin API on every entry, so
+# this caps probing of which `client_id` values exist. Defaults below
+# match the code-side defaults — dial up only if your deployment
+# legitimately fans through many handoffs per IP. Clamped at load time
+# to 1_000/min and 10_000/hour.
+# [handoff]
+# rate_limit_per_minute = 30
+# rate_limit_per_hour = 300
+# referrer_cookie_ttl_seconds = 3600  # 1h — drives the "Return to <App>"
+#                                     # banner. After this elapses the
+#                                     # banner stops appearing.
+
+# One-shot flash + secret-reveal TTLs (seconds). Both defaulted to 60s
+# — long enough for a slow-network redirect, short enough that an
+# admin who navigates away loses the reveal.
+# [flash]
+# cookie_ttl_seconds = 60
+# reveal_ttl_seconds = 60
+
+# Organizations subsystem TTLs. `active_org_cookie_ttl_seconds` is how
+# long the signed switcher cookie stays valid (default 30d).
+# `invite_ttl_days` is how long a fresh org invite can be redeemed
+# before it expires (default 7 days).
+# [orgs]
+# active_org_cookie_ttl_seconds = 2592000   # 30 days
+# invite_ttl_days = 7

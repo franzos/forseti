@@ -1,0 +1,135 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: check + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # Mirrors `make check` (cargo check + clippy -D warnings). No fmt gate —
+      # the repo doesn't enforce rustfmt and the tree isn't fmt-clean; add a
+      # `cargo fmt --check` step once a one-time `cargo fmt` pass has landed.
+      - run: make check
+
+  integration:
+    name: rust integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # The host-side test client reaches Hydra at its issuer host
+      # (host.containers.internal:4444, see tests/integration/common.rs). A dev
+      # box resolves that via /etc/hosts; the runner doesn't, so map it here.
+      # Kratos -> host webhooks use host.docker.internal, handled inside the
+      # container by the compose `extra_hosts: host-gateway` mapping.
+      - name: Map Hydra issuer host to loopback
+        run: echo "127.0.0.1 host.containers.internal" | sudo tee -a /etc/hosts
+
+      # Clean slate every run: stack-up brings the playground up and blocks
+      # until Kratos + Hydra report ready.
+      - name: Bring up Ory playground
+        run: make stack-up COMPOSE="docker compose"
+
+      # Plant a deterministic admin (password + TOTP) so the admin-gated tests
+      # run. Exports FORSETI_ADMIN_TEST_* to $GITHUB_ENV for later steps; the
+      # seeded email matches config.ci.toml's [admin].allowed_emails.
+      - name: Seed admin identity
+        run: make seed-admin COMPOSE="docker compose"
+
+      - name: Build Forseti
+        run: cargo build --locked --bin forseti
+
+      - name: Start Forseti and wait for health
+        run: |
+          FORSETI_CONFIG_PATH=config.ci.toml ./target/debug/forseti > forseti.log 2>&1 &
+          echo $! > forseti.pid
+          for i in $(seq 1 45); do
+            if curl -fsS http://127.0.0.1:3000/healthz >/dev/null 2>&1; then
+              echo "Forseti healthy"; exit 0
+            fi
+            sleep 2
+          done
+          echo "Forseti failed to become healthy:"; cat forseti.log; exit 1
+
+      - name: Run integration tests
+        run: make test-integration
+
+      - name: Forseti logs
+        if: always()
+        run: cat forseti.log || true
+
+      - name: Tear down playground
+        if: always()
+        run: make stack-down COMPOSE="docker compose"
+
+  e2e:
+    name: playwright (unlicensed)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Map Hydra issuer host to loopback
+        run: echo "127.0.0.1 host.containers.internal" | sudo tee -a /etc/hosts
+
+      - name: Bring up Ory playground
+        run: make stack-up COMPOSE="docker compose"
+
+      - name: Seed admin identity
+        run: make seed-admin COMPOSE="docker compose"
+
+      - name: Build Forseti
+        run: cargo build --locked --bin forseti
+
+      - name: Start Forseti and wait for health
+        run: |
+          FORSETI_CONFIG_PATH=config.ci.toml ./target/debug/forseti > forseti.log 2>&1 &
+          echo $! > forseti.pid
+          for i in $(seq 1 45); do
+            if curl -fsS http://127.0.0.1:3000/healthz >/dev/null 2>&1; then
+              echo "Forseti healthy"; exit 0
+            fi
+            sleep 2
+          done
+          echo "Forseti failed to become healthy:"; cat forseti.log; exit 1
+
+      # `make e2e` drives the unlicensed Playwright bucket inside the Microsoft
+      # Playwright image. It reads FORSETI_ADMIN_TEST_* (exported by the seed
+      # step) to drive the AAL2 admin sign-in.
+      - name: Run Playwright (unlicensed)
+        run: make e2e
+
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: tests/e2e/playwright-report/
+          if-no-files-found: ignore
+
+      - name: Forseti logs
+        if: always()
+        run: cat forseti.log || true
+
+      - name: Tear down playground
+        if: always()
+        run: make stack-down COMPOSE="docker compose"

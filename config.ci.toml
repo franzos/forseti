@@ -1,0 +1,66 @@
+# Forseti — CI / playground configuration.
+#
+# Committed (unlike config.toml, which is gitignored) so CI can boot Forseti
+# against the infra/ docker-compose playground deterministically. Point at it
+# with FORSETI_CONFIG_PATH=config.ci.toml. NOT production values.
+
+[kratos]
+public_url = "http://localhost:4433"
+admin_url  = "http://localhost:4434"
+
+[hydra]
+public_url = "http://localhost:4444"
+admin_url  = "http://localhost:4445"
+
+[self]
+url = "http://localhost:3000"
+
+[brand]
+name          = "Forseti CI"
+support_email = "support@example.com"
+
+# Playground / integration-test overrides (NOT production values).
+# tests/integration/dcr.rs fires 20+ DCR registrations from one host IP in a
+# few seconds, so the production 10/min default would throttle the suite.
+# `dcr_iat_daily_limit = 2` is the value `dcr_per_iat_daily_limit_returns_429`
+# asserts against.
+[oauth]
+dcr_ip_rate_per_minute = 1000
+dcr_ip_rate_per_hour   = 10000
+dcr_iat_daily_limit    = 2
+
+# `make seed-admin` plants this identity (password + TOTP) so admin-gated
+# integration + Playwright tests run unattended. Keep this list in sync with
+# SEED_ADMIN_EMAIL in infra/seed-admin.sh.
+[admin]
+allowed_emails = ["admin@example.com"]
+
+# Kratos runs in the compose network and reaches the audit webhook receiver
+# via host.docker.internal:8081 (compose maps that to the host gateway), so
+# the internal listener must bind on all interfaces — loopback-only would
+# stall flow responses by ~90s on the webhook retry timeout.
+[internal]
+bind = "0.0.0.0:8081"
+
+[smtp]
+enabled = true
+host = "127.0.0.1"
+port = 1025
+scheme = "plaintext"
+username = ""
+password = ""
+from = "no-reply@forseti.test"
+skip_tls_verify = true
+
+# Shared bearer with infra/kratos/kratos.yml (`auth.config.value`). Required —
+# Forseti refuses to boot with it empty.
+[audit]
+webhook_token = "dev-playground-token-change-me"
+ip_salt = ""
+audit_retention_days = 90
+
+# Relaxed so the suite's repeat /claim-email hits don't 429 on the shared
+# loopback bucket.
+[claim_email]
+rate_limit_per_minute = 100
+rate_limit_per_hour = 1000

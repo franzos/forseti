@@ -1,28 +1,45 @@
+# syntax=docker/dockerfile:1
+
 # --- CSS stage: build static/styles.css with the Tailwind v4 standalone CLI.
-FROM alpine:3.20 AS css
+FROM debian:bookworm-slim AS css
 WORKDIR /src
-RUN apk add --no-cache curl libgcc libstdc++
-ARG TAILWIND_VERSION=v4.3.0
-RUN curl -fsSL -o /usr/local/bin/tailwindcss \
-      "https://github.com/tailwindlabs/tailwindcss/releases/download/${TAILWIND_VERSION}/tailwindcss-linux-x64-musl" \
+ARG TAILWIND_VERSION=v4.1.16
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -fsSL -o /usr/local/bin/tailwindcss \
+        "https://github.com/tailwindlabs/tailwindcss/releases/download/${TAILWIND_VERSION}/tailwindcss-linux-x64" \
     && chmod +x /usr/local/bin/tailwindcss
 COPY assets ./assets
 COPY templates ./templates
 RUN tailwindcss -i assets/input.css -o /styles.css --minify
 
 # --- Rust build stage.
-FROM rust:1-alpine AS build
-RUN apk add --no-cache musl-dev pkgconfig openssl-dev
+# Debian (glibc), not alpine/musl: pq-sys links dynamically against libpq and
+# libsqlite3-sys compiles bundled C, both of which are painful to static-link
+# under musl. reqwest/lettre use rustls, so no OpenSSL is needed.
+FROM rust:1-bookworm AS build
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libpq-dev pkg-config \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
-COPY Cargo.toml Cargo.lock* ./
+COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY templates ./templates
+COPY migrations ./migrations
 RUN cargo build --release --locked
 
 # --- Runtime image.
-FROM gcr.io/distroless/static:nonroot
-COPY --from=build /src/target/release/forseti /forseti
-COPY templates /templates
-COPY --from=css /styles.css /static/styles.css
+FROM debian:bookworm-slim AS runtime
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libpq5 ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --uid 10001 forseti
+WORKDIR /app
+COPY --from=build /src/target/release/forseti /usr/local/bin/forseti
+COPY --from=css /styles.css ./static/styles.css
+USER forseti
+# Forseti reads ./config.toml (override with FORSETI_CONFIG_PATH) and serves
+# ./static relative to the working directory.
 EXPOSE 3000
-ENTRYPOINT ["/forseti"]
+ENTRYPOINT ["forseti"]

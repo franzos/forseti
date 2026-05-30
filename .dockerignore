@@ -1,0 +1,16 @@
+target/
+dist/
+.git/
+.github/
+bin/
+.bin/
+node_modules/
+tests/e2e/node_modules/
+tests/e2e/playwright-report/
+tests/fixtures/
+*.db
+*.db-shm
+*.db-wal
+*.pid
+*.log
+.cargo-home/

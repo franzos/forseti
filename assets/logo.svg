@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 470 120" fill="none">
+  <defs>
+    <linearGradient id="beam" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#60a5fa"/>
+      <stop offset="100%" stop-color="#7c3aed"/>
+    </linearGradient>
+    <linearGradient id="pan" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#fbbf24"/>
+      <stop offset="100%" stop-color="#d97706"/>
+    </linearGradient>
+  </defs>
+
+  <g transform="translate(6, 8)">
+    <circle cx="50" cy="20" r="5" fill="url(#beam)"/>
+    <rect x="47.5" y="20" width="5" height="56" rx="2.5" fill="url(#beam)"/>
+    <path d="M34 86 L42 76 L58 76 L66 86 Z" fill="url(#beam)" opacity="0.9"/>
+    <rect x="30" y="86" width="40" height="5" rx="2.5" fill="url(#beam)"/>
+    <rect x="18" y="29" width="64" height="4.5" rx="2.25" fill="url(#beam)"/>
+    <path d="M22 33 L22 44 M22 33 L14 44 M22 33 L30 44" stroke="#94a3b8" stroke-width="1.6" stroke-linecap="round"/>
+    <path d="M78 33 L78 44 M78 33 L70 44 M78 33 L86 44" stroke="#94a3b8" stroke-width="1.6" stroke-linecap="round"/>
+    <path d="M12 44 A10 6 0 0 0 32 44 Z" fill="url(#pan)" opacity="0.9"/>
+    <path d="M68 44 A10 6 0 0 0 88 44 Z" fill="url(#pan)" opacity="0.9"/>
+  </g>
+
+  <text x="124" y="66" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="54" font-weight="700" fill="#e2e8f0" letter-spacing="-1.5">Forseti</text>
+  <text x="126" y="90" font-family="system-ui, -apple-system, sans-serif" font-size="14" fill="#94a3b8">identity &amp; access for Ory Kratos + Hydra</text>
+</svg>
