@@ -75,6 +75,10 @@ test('self-delete confirm page lists granted apps, enforces email confirm, and d
     .click();
   await navPromise;
 
+  // The dead REDIRECT_URI leaves Chrome mid-navigation to chrome-error://;
+  // let it settle so it can't interrupt the goto below.
+  await page.waitForURL('chrome-error://chromewebdata/', { timeout: 5_000 }).catch(() => {});
+
   // 3. Navigate to /settings/account/delete. This handler is gated by
   //    the privileged-session window (`fetch_settings_subpage` ↔
   //    `privileged_session_max_age: 15m`). We're well inside that
