@@ -22,7 +22,8 @@ PASSWORD="${SEED_ADMIN_PASSWORD:-Sup3rSecretAdminPw!9}"
 SECRET="${SEED_ADMIN_TOTP_SECRET:-JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP}"
 
 kratos_psql() {
-	"$COMPOSE" -f "$COMPOSE_FILE" exec -T postgres psql -U kratos -d kratos "$@"
+	# shellcheck disable=SC2086 # unquoted so `docker compose` word-splits
+	$COMPOSE -f "$COMPOSE_FILE" exec -T postgres psql -U kratos -d kratos "$@"
 }
 
 # 1. Idempotency: drop any existing identity with this email so a reseed is a
