@@ -8,6 +8,7 @@
   [![CI](https://github.com/franzos/forseti/actions/workflows/ci.yml/badge.svg)](https://github.com/franzos/forseti/actions/workflows/ci.yml)
   [![Release](https://github.com/franzos/forseti/actions/workflows/release.yml/badge.svg)](https://github.com/franzos/forseti/actions/workflows/release.yml)
   [![License: AGPL v3](https://img.shields.io/badge/license-AGPLv3-blue.svg)](LICENSE)
+  [![Container](https://img.shields.io/badge/ghcr.io-forseti-097aba?logo=docker&logoColor=white)](https://github.com/franzos/forseti/pkgs/container/forseti)
 
 </div>
 
@@ -26,7 +27,7 @@ cp config.example.toml config.toml   # then edit it
 ./forseti
 ```
 
-Or pull the container image from the GitHub Container Registry:
+Or pull the [container image](https://github.com/franzos/forseti/pkgs/container/forseti) from the GitHub Container Registry:
 
 ```bash
 podman pull ghcr.io/franzos/forseti:latest
