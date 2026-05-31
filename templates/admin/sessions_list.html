@@ -3,75 +3,100 @@
 {% block admin_title %}Sessions{% endblock %}
 
 {% block admin_content %}
-<header class="mt-2 mb-stack-lg">
-    <h1 class="font-headline-lg-mobile md:font-headline-lg text-headline-lg-mobile md:text-headline-lg text-on-surface">Sessions</h1>
-    <p class="font-body-md text-body-md text-on-surface-variant mt-1">Every session known to Kratos, across all identities.</p>
-</header>
+  <header class="mt-2 mb-stack-lg">
+    <h1 class="font-headline-lg-mobile md:font-headline-lg text-headline-lg-mobile md:text-headline-lg text-on-surface">
+      Sessions
+    </h1>
+    <p class="font-body-md text-body-md text-on-surface-variant mt-1">
+      Every session known to Kratos, across all identities.
+    </p>
+  </header>
 
-{% if !flash.is_empty() %}
-<div class="bg-surface-container border border-outline-variant rounded-xl p-4 mb-stack-md">
-    <p class="font-body-md text-body-md text-on-surface">{{ flash }}</p>
-</div>
-{% endif %}
+  {% if !flash.is_empty() %}
+    <div class="bg-surface-container border border-outline-variant rounded-xl p-4 mb-stack-md">
+      <p class="font-body-md text-body-md text-on-surface">{{ flash }}</p>
+    </div>
+  {% endif %}
 
-<form method="GET" action="/admin/sessions" class="mb-stack-md flex items-center gap-stack-sm">
+  <form method="GET"
+        action="/admin/sessions"
+        class="mb-stack-md flex items-center gap-stack-sm">
     <label class="flex items-center gap-2">
-        <input type="checkbox" name="active_only" value="1" {% if active_only %}checked{% endif %} onchange="this.form.submit()">
-        <span class="font-label-md text-label-md text-on-surface">Active sessions only</span>
+      <input type="checkbox"
+             name="active_only"
+             value="1"
+             {% if active_only %}checked{% endif %}
+             onchange="this.form.submit()">
+      <span class="font-label-md text-label-md text-on-surface">Active sessions only</span>
     </label>
-</form>
+  </form>
 
-<div class="bg-surface-container-lowest border border-outline-variant rounded-xl overflow-x-auto">
+  <div class="bg-surface-container-lowest border border-outline-variant rounded-xl overflow-x-auto">
     <table class="w-full text-left">
-        <thead class="bg-surface-container-low">
-            <tr>
-                <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Identity</th>
-                <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Authenticated</th>
-                <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Expires</th>
-                <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Device</th>
-                <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest"></th>
-            </tr>
-        </thead>
-        <tbody>
-            {% if rows.is_empty() %}
-            <tr><td colspan="5" class="px-4 py-6 text-center font-body-md text-body-md text-on-surface-variant">No sessions to show.</td></tr>
-            {% else %}
-            {% for r in rows %}
+      <thead class="bg-surface-container-low">
+        <tr>
+          <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Identity</th>
+          <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Authenticated</th>
+          <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Expires</th>
+          <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Device</th>
+          <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest"></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% if rows.is_empty() %}
+          <tr>
+            <td colspan="5"
+                class="px-4 py-6 text-center font-body-md text-body-md text-on-surface-variant">
+              No sessions to show.
+            </td>
+          </tr>
+        {% else %}
+          {% for r in rows %}
             <tr class="border-t border-outline-variant hover:bg-surface-container-low">
-                <td class="px-4 py-3">
-                    {% if !r.identity_id.is_empty() %}
-                    <a href="/admin/identities/{{ r.identity_id }}" class="font-body-md text-body-md text-primary font-bold hover:underline">{{ r.identity_email }}</a>
-                    <p class="font-label-sm text-label-sm text-outline mt-1 font-mono">{{ r.identity_id }}</p>
-                    {% else %}
-                    <span class="font-body-sm text-body-sm text-on-surface-variant">—</span>
-                    {% endif %}
-                </td>
-                <td class="px-4 py-3 font-body-sm text-body-sm text-on-surface-variant" title="{{ r.authenticated_at }}">{{ r.authenticated_at_pretty }}</td>
-                <td class="px-4 py-3 font-body-sm text-body-sm text-on-surface-variant" title="{{ r.expires_at }}">{{ r.expires_at_pretty }}</td>
-                <td class="px-4 py-3 font-body-sm text-body-sm text-on-surface-variant" title="{{ r.user_agent }}">
-                    {{ r.user_agent_pretty }}
-                    {% if !r.ip_address.is_empty() %}<br><span class="font-mono">{{ r.ip_address }}</span>{% endif %}
-                </td>
-                <td class="px-4 py-3">
-                    <a href="/admin/sessions/{{ r.id }}/revoke" class="font-label-md text-label-md text-error border border-error rounded-lg px-3 py-1 hover:bg-error-container hover:text-on-error-container transition-colors">Revoke</a>
-                </td>
+              <td class="px-4 py-3">
+                {% if !r.identity_id.is_empty() %}
+                  <a href="/admin/identities/{{ r.identity_id }}"
+                     class="font-body-md text-body-md text-primary font-bold hover:underline">{{ r.identity_email }}</a>
+                  <p class="font-label-sm text-label-sm text-outline mt-1 font-mono">{{ r.identity_id }}</p>
+                {% else %}
+                  <span class="font-body-sm text-body-sm text-on-surface-variant">—</span>
+                {% endif %}
+              </td>
+              <td class="px-4 py-3 font-body-sm text-body-sm text-on-surface-variant"
+                  title="{{ r.authenticated_at }}">{{ r.authenticated_at_pretty }}</td>
+              <td class="px-4 py-3 font-body-sm text-body-sm text-on-surface-variant"
+                  title="{{ r.expires_at }}">{{ r.expires_at_pretty }}</td>
+              <td class="px-4 py-3 font-body-sm text-body-sm text-on-surface-variant"
+                  title="{{ r.user_agent }}">
+                {{ r.user_agent_pretty }}
+                {% if !r.ip_address.is_empty() %}
+                  <br>
+                  <span class="font-mono">{{ r.ip_address }}</span>
+                {% endif %}
+              </td>
+              <td class="px-4 py-3">
+                <a href="/admin/sessions/{{ r.id }}/revoke"
+                   class="font-label-md text-label-md text-error border border-error rounded-lg px-3 py-1 hover:bg-error-container hover:text-on-error-container transition-colors">Revoke</a>
+              </td>
             </tr>
-            {% endfor %}
-            {% endif %}
-        </tbody>
+          {% endfor %}
+        {% endif %}
+      </tbody>
     </table>
-</div>
+  </div>
 
-{% if has_prev || !next_page_token.is_empty() %}
-<div class="mt-stack-md flex justify-between items-center">
-    {% if has_prev %}
-    <a href="/admin/sessions{% if active_only %}?active_only=1{% endif %}" class="font-label-md text-label-md text-on-surface-variant border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">&larr; Back to start</a>
-    {% else %}
-    <span></span>
-    {% endif %}
-    {% if !next_page_token.is_empty() %}
-    <a href="/admin/sessions?page_token={{ next_page_token }}{% if active_only %}&active_only=1{% endif %}" class="font-label-md text-label-md text-primary border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">Next page &rarr;</a>
-    {% endif %}
-</div>
-{% endif %}
+  {% if has_prev || !next_page_token.is_empty() %}
+    <div class="mt-stack-md flex justify-between items-center">
+      {% if has_prev %}
+        <a href="/admin/sessions{% if active_only %}?active_only=1{% endif %}"
+           class="font-label-md text-label-md text-on-surface-variant border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">&larr; Back to start</a>
+      {% else %}
+        <span></span>
+      {% endif %}
+      {% if !next_page_token.is_empty() %}
+        <a href="/admin/sessions?page_token={{ next_page_token }}{% if active_only %}&active_only=1{% endif %}"
+           class="font-label-md text-label-md text-primary border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">Next page &rarr;</a>
+      {% endif %}
+    </div>
+  {% endif %}
 {% endblock %}

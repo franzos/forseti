@@ -5,20 +5,23 @@
    "sessions" | "audit") that drives the sidebar highlight. #}
 {% extends "base.html" %}
 
-{% block title %}{% block admin_title %}Admin{% endblock %} &middot; {{ chrome.brand.name }}{% endblock %}
+{% block title %}
+  {% block admin_title %}Admin{% endblock %}
+  &middot; {{ chrome.brand.name }}
+{% endblock %}
 
 {% block content %}
-<div class="bg-error-container border border-error rounded-xl px-4 py-2 mb-stack-md flex items-center gap-3">
+  <div class="bg-error-container border border-error rounded-xl px-4 py-2 mb-stack-md flex items-center gap-3">
     <span class="font-label-md text-label-md text-on-error-container font-bold">ADMIN</span>
     <span class="font-body-sm text-body-sm text-on-error-container">You're on a privileged surface. Actions here are audit-logged.</span>
-</div>
+  </div>
 
-<div class="flex flex-col md:flex-row gap-stack-lg">
+  <div class="flex flex-col md:flex-row gap-stack-lg">
     {% let active = admin_active.as_slug() %}
     {% include "partials/admin_nav.html" %}
 
     <section class="flex-1 min-w-0">
-        {% block admin_content %}{% endblock %}
+      {% block admin_content %}{% endblock %}
     </section>
-</div>
+  </div>
 {% endblock %}

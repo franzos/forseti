@@ -3,117 +3,186 @@
 {% block admin_title %}License{% endblock %}
 
 {% block admin_content %}
-<section class="flex-1 flex flex-col gap-stack-lg">
-        <div>
-            <h1 class="font-headline-lg text-headline-lg text-on-surface">License</h1>
-            <p class="font-body-md text-body-md text-on-surface-variant mt-1">Activate a commercial-tier license to unlock organizations, SAML connectors, SCIM provisioning, and more. The open-source build runs everything else.</p>
+  <section class="flex-1 flex flex-col gap-stack-lg">
+    <div>
+      <h1 class="font-headline-lg text-headline-lg text-on-surface">License</h1>
+      <p class="font-body-md text-body-md text-on-surface-variant mt-1">
+        Activate a commercial-tier license to unlock organizations, SAML connectors, SCIM provisioning, and more. The open-source build runs everything else.
+      </p>
+    </div>
+
+    {% if !flash.is_empty() %}
+      <div class="bg-tertiary-container border border-outline-variant rounded-lg p-stack-md">
+        <p class="font-body-sm text-body-sm text-on-tertiary-container">{{ flash }}</p>
+      </div>
+    {% endif %}
+
+    {% if banner_kind == "warning" %}
+      <div class="bg-secondary-container border border-outline-variant rounded-xl p-stack-md flex items-start gap-stack-md">
+        <svg xmlns="http://www.w3.org/2000/svg"
+             width="20"
+             height="20"
+             viewBox="0 0 24 24"
+             fill="none"
+             stroke="currentColor"
+             stroke-width="2"
+             stroke-linecap="round"
+             stroke-linejoin="round"
+             class="shrink-0 mt-0.5 text-on-secondary-container">
+          <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+          <line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" />
+        </svg>
+        <p class="font-body-sm text-body-sm text-on-secondary-container">{{ banner_message }}</p>
+      </div>
+    {% else if banner_kind == "danger" %}
+      <div class="bg-error-container border border-outline-variant rounded-xl p-stack-md flex items-start gap-stack-md">
+        <svg xmlns="http://www.w3.org/2000/svg"
+             width="20"
+             height="20"
+             viewBox="0 0 24 24"
+             fill="none"
+             stroke="currentColor"
+             stroke-width="2"
+             stroke-linecap="round"
+             stroke-linejoin="round"
+             class="shrink-0 mt-0.5 text-on-error-container">
+          <circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" />
+        </svg>
+        <p class="font-body-sm text-body-sm text-on-error-container">{{ banner_message }}</p>
+      </div>
+    {% endif %}
+
+    <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg flex flex-col gap-stack-md">
+      <div class="flex items-center justify-between flex-wrap gap-stack-md">
+        <div class="flex items-center gap-3">
+          <h2 class="font-headline-sm text-headline-sm text-on-surface">Status</h2>
+          {% if state_label == "Active" %}
+            <span class="inline-flex items-center font-label-sm text-label-sm bg-tertiary-fixed text-on-tertiary-fixed rounded-full px-3 py-0.5">{{ state_label }}</span>
+          {% else if state_label == "Grace" %}
+            <span class="inline-flex items-center font-label-sm text-label-sm bg-secondary-container text-on-secondary-container rounded-full px-3 py-0.5">{{ state_label }}</span>
+          {% else if state_label == "Expired" %}
+            <span class="inline-flex items-center font-label-sm text-label-sm bg-error-container text-on-error-container rounded-full px-3 py-0.5">{{ state_label }}</span>
+          {% else %}
+            <span class="inline-flex items-center font-label-sm text-label-sm bg-surface-container text-on-surface-variant rounded-full px-3 py-0.5">{{ state_label }}</span>
+          {% endif %}
         </div>
 
-        {% if !flash.is_empty() %}
-        <div class="bg-tertiary-container border border-outline-variant rounded-lg p-stack-md">
-            <p class="font-body-sm text-body-sm text-on-tertiary-container">{{ flash }}</p>
-        </div>
+        {% if has_license %}
+          <form method="POST" action="/admin/license/deactivate">
+            <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+            <button type="submit"
+                    class="font-label-md text-label-md text-error border border-error rounded-lg px-4 py-2 hover:bg-error-container hover:text-on-error-container transition-colors focus:outline-none focus:ring-2 focus:ring-error focus:ring-offset-2">
+              Deactivate
+            </button>
+          </form>
         {% endif %}
+      </div>
 
-        {% if banner_kind == "warning" %}
-        <div class="bg-secondary-container border border-outline-variant rounded-xl p-stack-md flex items-start gap-stack-md">
-            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 mt-0.5 text-on-secondary-container"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-            <p class="font-body-sm text-body-sm text-on-secondary-container">{{ banner_message }}</p>
-        </div>
-        {% else if banner_kind == "danger" %}
-        <div class="bg-error-container border border-outline-variant rounded-xl p-stack-md flex items-start gap-stack-md">
-            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 mt-0.5 text-on-error-container"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-            <p class="font-body-sm text-body-sm text-on-error-container">{{ banner_message }}</p>
-        </div>
+      {% if has_license %}
+        <dl class="grid grid-cols-1 sm:grid-cols-2 gap-stack-md">
+          <div>
+            <dt class="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-wide">Customer</dt>
+            <dd class="font-body-md text-body-md text-on-surface">
+              {{ customer }}
+            </dd>
+          </div>
+          <div>
+            <dt class="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-wide">Contact</dt>
+            <dd class="font-body-md text-body-md text-on-surface">
+              {{ email }}
+            </dd>
+          </div>
+          <div>
+            <dt class="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-wide">Tier</dt>
+            <dd class="font-body-md text-body-md text-on-surface">
+              {{ tier_label }}
+            </dd>
+          </div>
+          <div>
+            <dt class="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-wide">Issued</dt>
+            <dd class="font-body-md text-body-md text-on-surface">
+              {{ issued_at }}
+            </dd>
+          </div>
+          <div>
+            <dt class="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-wide">Expires</dt>
+            <dd class="font-body-md text-body-md text-on-surface">
+              {% if is_lifetime %}
+                Lifetime
+              {% else %}
+                {{ expires_at }}
+              {% endif %}
+            </dd>
+          </div>
+          <div>
+            <dt class="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-wide">Max organizations</dt>
+            <dd class="font-body-md text-body-md text-on-surface">
+              {{ max_orgs_label }}
+            </dd>
+          </div>
+          <div class="sm:col-span-2">
+            <dt class="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-wide">Unlocked features</dt>
+            <dd class="flex flex-wrap gap-1.5 mt-1">
+              {% if features.is_empty() %}
+                <span class="font-body-sm text-body-sm text-on-surface-variant">None</span>
+              {% else %}
+                {% for f in features %}
+                  <span class="font-label-sm text-label-sm bg-surface-container border border-outline-variant rounded-full px-2.5 py-0.5 text-on-surface-variant">{{ f }}</span>
+                {% endfor %}
+              {% endif %}
+            </dd>
+          </div>
+        </dl>
+      {% else %}
+        <p class="font-body-md text-body-md text-on-surface-variant">
+          No commercial license is active. Premium features are gated until a valid license is activated below.
+        </p>
+      {% endif %}
+    </div>
+
+    <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg flex flex-col gap-stack-md">
+      <h2 class="font-headline-sm text-headline-sm text-on-surface">
+        {% if has_license %}
+          Replace license
+        {% else %}
+          Activate license
         {% endif %}
-
-        <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg flex flex-col gap-stack-md">
-            <div class="flex items-center justify-between flex-wrap gap-stack-md">
-                <div class="flex items-center gap-3">
-                    <h2 class="font-headline-sm text-headline-sm text-on-surface">Status</h2>
-                    {% if state_label == "Active" %}
-                    <span class="inline-flex items-center font-label-sm text-label-sm bg-tertiary-fixed text-on-tertiary-fixed rounded-full px-3 py-0.5">{{ state_label }}</span>
-                    {% else if state_label == "Grace" %}
-                    <span class="inline-flex items-center font-label-sm text-label-sm bg-secondary-container text-on-secondary-container rounded-full px-3 py-0.5">{{ state_label }}</span>
-                    {% else if state_label == "Expired" %}
-                    <span class="inline-flex items-center font-label-sm text-label-sm bg-error-container text-on-error-container rounded-full px-3 py-0.5">{{ state_label }}</span>
-                    {% else %}
-                    <span class="inline-flex items-center font-label-sm text-label-sm bg-surface-container text-on-surface-variant rounded-full px-3 py-0.5">{{ state_label }}</span>
-                    {% endif %}
-                </div>
-
-                {% if has_license %}
-                <form method="POST" action="/admin/license/deactivate">
-                    <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
-                    <button type="submit" class="font-label-md text-label-md text-error border border-error rounded-lg px-4 py-2 hover:bg-error-container hover:text-on-error-container transition-colors focus:outline-none focus:ring-2 focus:ring-error focus:ring-offset-2">Deactivate</button>
-                </form>
-                {% endif %}
-            </div>
-
-            {% if has_license %}
-            <dl class="grid grid-cols-1 sm:grid-cols-2 gap-stack-md">
-                <div>
-                    <dt class="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-wide">Customer</dt>
-                    <dd class="font-body-md text-body-md text-on-surface">{{ customer }}</dd>
-                </div>
-                <div>
-                    <dt class="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-wide">Contact</dt>
-                    <dd class="font-body-md text-body-md text-on-surface">{{ email }}</dd>
-                </div>
-                <div>
-                    <dt class="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-wide">Tier</dt>
-                    <dd class="font-body-md text-body-md text-on-surface">{{ tier_label }}</dd>
-                </div>
-                <div>
-                    <dt class="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-wide">Issued</dt>
-                    <dd class="font-body-md text-body-md text-on-surface">{{ issued_at }}</dd>
-                </div>
-                <div>
-                    <dt class="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-wide">Expires</dt>
-                    <dd class="font-body-md text-body-md text-on-surface">{% if is_lifetime %}Lifetime{% else %}{{ expires_at }}{% endif %}</dd>
-                </div>
-                <div>
-                    <dt class="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-wide">Max organizations</dt>
-                    <dd class="font-body-md text-body-md text-on-surface">{{ max_orgs_label }}</dd>
-                </div>
-                <div class="sm:col-span-2">
-                    <dt class="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-wide">Unlocked features</dt>
-                    <dd class="flex flex-wrap gap-1.5 mt-1">
-                        {% if features.is_empty() %}
-                        <span class="font-body-sm text-body-sm text-on-surface-variant">None</span>
-                        {% else %}
-                        {% for f in features %}
-                        <span class="font-label-sm text-label-sm bg-surface-container border border-outline-variant rounded-full px-2.5 py-0.5 text-on-surface-variant">{{ f }}</span>
-                        {% endfor %}
-                        {% endif %}
-                    </dd>
-                </div>
-            </dl>
-            {% else %}
-            <p class="font-body-md text-body-md text-on-surface-variant">No commercial license is active. Premium features are gated until a valid license is activated below.</p>
-            {% endif %}
+      </h2>
+      <p class="font-body-sm text-body-sm text-on-surface-variant">
+        Paste the license blob you received from sales. Activation runs locally — the signature is verified against this binary's baked-in public key. Nothing is sent over the network.
+      </p>
+      <form method="POST"
+            action="/admin/license/activate"
+            class="flex flex-col gap-stack-md">
+        <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+        <label class="flex flex-col gap-stack-sm">
+          <span class="font-label-sm text-label-sm text-on-surface-variant">License key</span>
+          <textarea name="blob"
+                    rows="6"
+                    required
+                    spellcheck="false"
+                    autocomplete="off"
+                    placeholder="Paste your base64 license key here..."
+                    class="font-mono text-body-sm bg-surface-container border border-outline-variant rounded-lg p-stack-md focus:outline-none focus:ring-2 focus:ring-primary"></textarea>
+        </label>
+        <div class="flex items-center gap-stack-md">
+          <button type="submit"
+                  class="font-label-md text-label-md bg-primary text-on-primary rounded-lg px-4 py-2 hover:opacity-90 transition-opacity focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2">
+            Activate
+          </button>
+          {% if !purchase_url.is_empty() && purchase_url != "#" %}
+            <a href="{{ purchase_url }}"
+               target="_blank"
+               rel="noopener noreferrer"
+               class="font-label-md text-label-md text-primary hover:underline">Get a license &rarr;</a>
+          {% endif %}
         </div>
+      </form>
+    </div>
 
-        <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg flex flex-col gap-stack-md">
-            <h2 class="font-headline-sm text-headline-sm text-on-surface">{% if has_license %}Replace license{% else %}Activate license{% endif %}</h2>
-            <p class="font-body-sm text-body-sm text-on-surface-variant">Paste the license blob you received from sales. Activation runs locally — the signature is verified against this binary's baked-in public key. Nothing is sent over the network.</p>
-            <form method="POST" action="/admin/license/activate" class="flex flex-col gap-stack-md">
-                <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
-                <label class="flex flex-col gap-stack-sm">
-                    <span class="font-label-sm text-label-sm text-on-surface-variant">License key</span>
-                    <textarea name="blob" rows="6" required spellcheck="false" autocomplete="off" placeholder="Paste your base64 license key here..." class="font-mono text-body-sm bg-surface-container border border-outline-variant rounded-lg p-stack-md focus:outline-none focus:ring-2 focus:ring-primary"></textarea>
-                </label>
-                <div class="flex items-center gap-stack-md">
-                    <button type="submit" class="font-label-md text-label-md bg-primary text-on-primary rounded-lg px-4 py-2 hover:opacity-90 transition-opacity focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2">Activate</button>
-                    {% if !purchase_url.is_empty() && purchase_url != "#" %}
-                    <a href="{{ purchase_url }}" target="_blank" rel="noopener noreferrer" class="font-label-md text-label-md text-primary hover:underline">Get a license &rarr;</a>
-                    {% endif %}
-                </div>
-            </form>
-        </div>
-
-        <div>
-            <a href="/admin/status" class="font-label-md text-label-md text-on-secondary-fixed-variant hover:text-primary transition-colors">&larr; Back to admin</a>
-        </div>
-    </section>
+    <div>
+      <a href="/admin/status"
+         class="font-label-md text-label-md text-on-secondary-fixed-variant hover:text-primary transition-colors">&larr; Back to admin</a>
+    </div>
+  </section>
 {% endblock %}

@@ -1,33 +1,38 @@
 {% extends "base.html" %}
 
-{% block referrer_banner %}{% include "_referrer_banner.html" %}{% endblock %}
+{% block referrer_banner %}
+  {% include "_referrer_banner.html" %}
+{% endblock %}
 
 {% block title %}Account &middot; {{ chrome.brand.name }}{% endblock %}
 
 {% block nav_settings_class %}text-primary font-bold border-b-2 border-primary{% endblock %}
 
 {% block content %}
-<div class="flex flex-col md:flex-row gap-stack-lg">
+  <div class="flex flex-col md:flex-row gap-stack-lg">
     {% let active = "account" %}
     {% include "partials/settings_nav.html" %}
 
     <section class="flex-1">
-        <header class="mt-2 mb-stack-lg">
-            <h1 class="font-headline-lg-mobile md:font-headline-lg text-headline-lg-mobile md:text-headline-lg text-on-surface">Account</h1>
-            <p class="font-body-md text-body-md text-on-surface-variant mt-1">Permanent changes to your account.</p>
-        </header>
+      <header class="mt-2 mb-stack-lg">
+        <h1 class="font-headline-lg-mobile md:font-headline-lg text-headline-lg-mobile md:text-headline-lg text-on-surface">
+          Account
+        </h1>
+        <p class="font-body-md text-body-md text-on-surface-variant mt-1">Permanent changes to your account.</p>
+      </header>
 
-        <div class="bg-error-container border border-error rounded-xl p-6">
-            <h2 class="font-headline-md text-headline-md text-on-error-container mb-stack-sm">Delete account</h2>
-            <p class="font-body-md text-body-md text-on-error-container">
-                Permanently delete your account, every active session, and all 2FA / recovery state.
-                Apps that hold copies of your data are notified so they can clear their side.
-                This cannot be undone.
-            </p>
-            <a href="/settings/account/delete" class="mt-stack-md inline-flex items-center justify-center gap-2 bg-error text-on-error hover:bg-error/90 px-5 py-3 rounded-xl font-label-lg text-label-lg font-semibold">
-                Delete my account
-            </a>
-        </div>
+      <div class="bg-error-container border border-error rounded-xl p-6">
+        <h2 class="font-headline-md text-headline-md text-on-error-container mb-stack-sm">Delete account</h2>
+        <p class="font-body-md text-body-md text-on-error-container">
+          Permanently delete your account, every active session, and all 2FA / recovery state.
+          Apps that hold copies of your data are notified so they can clear their side.
+          This cannot be undone.
+        </p>
+        <a href="/settings/account/delete"
+           class="mt-stack-md inline-flex items-center justify-center gap-2 bg-error text-on-error hover:bg-error/90 px-5 py-3 rounded-xl font-label-lg text-label-lg font-semibold">
+          Delete my account
+        </a>
+      </div>
     </section>
-</div>
+  </div>
 {% endblock %}

@@ -3,55 +3,72 @@
 {% block admin_title %}Webhooks{% endblock %}
 
 {% block admin_content %}
-<div class="mb-stack-lg">
+  <div class="mb-stack-lg">
     <h1 class="font-headline-lg text-headline-lg text-on-surface">Dead-lettered webhooks</h1>
-    <p class="font-body-md text-body-md text-on-surface-variant mt-1">Account-deletion notifications that exhausted retries (12 attempts or 72 hours, whichever comes first). Click a row for the full payload and last error, or requeue from the summary if you know the receiver is healthy again.</p>
-</div>
+    <p class="font-body-md text-body-md text-on-surface-variant mt-1">
+      Account-deletion notifications that exhausted retries (12 attempts or 72 hours, whichever comes first). Click a row for the full payload and last error, or requeue from the summary if you know the receiver is healthy again.
+    </p>
+  </div>
 
-{% if rows.is_empty() %}
-<div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-6 text-center">
-    <p class="font-body-md text-body-md text-on-surface-variant">No dead-lettered rows. Everything's getting through.</p>
-</div>
-{% else %}
-<div class="bg-surface-container-lowest border border-outline-variant rounded-xl overflow-x-auto">
-    <table class="w-full text-left">
+  {% if rows.is_empty() %}
+    <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-6 text-center">
+      <p class="font-body-md text-body-md text-on-surface-variant">No dead-lettered rows. Everything's getting through.</p>
+    </div>
+  {% else %}
+    <div class="bg-surface-container-lowest border border-outline-variant rounded-xl overflow-x-auto">
+      <table class="w-full text-left">
         <thead class="bg-surface-container-low">
-            <tr>
-                <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Client</th>
-                <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Event</th>
-                <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Attempts</th>
-                <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Age</th>
-                <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest text-right">Actions</th>
-            </tr>
+          <tr>
+            <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Client</th>
+            <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Event</th>
+            <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Attempts</th>
+            <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Age</th>
+            <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest text-right">
+              Actions
+            </th>
+          </tr>
         </thead>
         <tbody>
-            {% for r in rows %}
+          {% for r in rows %}
             <tr class="border-t border-outline-variant hover:bg-surface-container-low">
-                <td class="px-4 py-3">
-                    {% if r.client_exists %}
-                    <a href="/admin/clients/{{ r.client_id }}" class="font-body-md text-body-md text-primary font-bold hover:underline" title="{{ r.client_id }}">{{ r.client_name }}</a>
-                    {% else %}
-                    <span class="font-body-md text-body-md text-on-surface-variant italic" title="{{ r.client_id }}">{{ r.client_name }}</span>
-                    <span class="font-label-sm text-label-sm text-on-error-container ml-1">(deleted)</span>
-                    {% endif %}
-                </td>
-                <td class="px-4 py-3">
-                    <a href="/admin/webhooks/{{ r.id }}" class="font-mono text-xs text-primary hover:underline" title="{{ r.event_id }}">{{ r.event_id_short }}&hellip;</a>
-                </td>
-                <td class="px-4 py-3 font-body-sm text-body-sm text-on-surface">{{ r.attempts }}</td>
-                <td class="px-4 py-3 font-body-sm text-body-sm text-on-surface-variant whitespace-nowrap">{{ r.created_at_pretty }}</td>
-                <td class="px-4 py-3 text-right whitespace-nowrap">
-                    <a href="/admin/webhooks/{{ r.id }}" class="font-label-sm text-label-sm text-primary border border-outline-variant rounded-lg px-3 py-1 hover:bg-surface-container-high transition-colors">View</a>
-                    <form method="POST" action="/admin/webhooks/{{ r.id }}/requeue" class="inline ml-2">
-                        <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
-                        <input type="hidden" name="confirm" value="yes">
-                        <button type="submit" class="font-label-sm text-label-sm text-primary border border-outline-variant rounded-lg px-3 py-1 hover:bg-surface-container-high transition-colors">Requeue</button>
-                    </form>
-                </td>
+              <td class="px-4 py-3">
+                {% if r.client_exists %}
+                  <a href="/admin/clients/{{ r.client_id }}"
+                     class="font-body-md text-body-md text-primary font-bold hover:underline"
+                     title="{{ r.client_id }}">{{ r.client_name }}</a>
+                {% else %}
+                  <span class="font-body-md text-body-md text-on-surface-variant italic"
+                        title="{{ r.client_id }}">{{ r.client_name }}</span>
+                  <span class="font-label-sm text-label-sm text-on-error-container ml-1">(deleted)</span>
+                {% endif %}
+              </td>
+              <td class="px-4 py-3">
+                <a href="/admin/webhooks/{{ r.id }}"
+                   class="font-mono text-xs text-primary hover:underline"
+                   title="{{ r.event_id }}">{{ r.event_id_short }}&hellip;</a>
+              </td>
+              <td class="px-4 py-3 font-body-sm text-body-sm text-on-surface">{{ r.attempts }}</td>
+              <td class="px-4 py-3 font-body-sm text-body-sm text-on-surface-variant whitespace-nowrap">
+                {{ r.created_at_pretty }}
+              </td>
+              <td class="px-4 py-3 text-right whitespace-nowrap">
+                <a href="/admin/webhooks/{{ r.id }}"
+                   class="font-label-sm text-label-sm text-primary border border-outline-variant rounded-lg px-3 py-1 hover:bg-surface-container-high transition-colors">View</a>
+                <form method="POST"
+                      action="/admin/webhooks/{{ r.id }}/requeue"
+                      class="inline ml-2">
+                  <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+                  <input type="hidden" name="confirm" value="yes">
+                  <button type="submit"
+                          class="font-label-sm text-label-sm text-primary border border-outline-variant rounded-lg px-3 py-1 hover:bg-surface-container-high transition-colors">
+                    Requeue
+                  </button>
+                </form>
+              </td>
             </tr>
-            {% endfor %}
+          {% endfor %}
         </tbody>
-    </table>
-</div>
-{% endif %}
+      </table>
+    </div>
+  {% endif %}
 {% endblock %}

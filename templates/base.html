@@ -1,12 +1,15 @@
 <!DOCTYPE html>
 <html lang="en">
-<head>
+  <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{% block title %}{{ chrome.brand.name }}{% endblock %}</title>
+    <title>
+      {% block title %}{{ chrome.brand.name }}{% endblock %}
+    </title>
     {# Fonts (Bunny Fonts — privacy-friendly Google Fonts drop-in; self-host for prod). #}
     <link rel="preconnect" href="https://fonts.bunny.net" crossorigin>
-    <link rel="stylesheet" href="https://fonts.bunny.net/css?family=geist:400,600,700|jetbrains-mono:400&display=swap">
+    <link rel="stylesheet"
+          href="https://fonts.bunny.net/css?family=geist:400,600,700|jetbrains-mono:400&display=swap">
     {# Brand-configurable CSS variables. Tokens consumed by Tailwind classes via @theme. #}
     <style>
       :root {
@@ -15,8 +18,8 @@
       }
     </style>
     <link rel="stylesheet" href="/static/styles.css">
-</head>
-<body class="bg-background min-h-screen flex flex-col font-body-md text-on-background">
+  </head>
+  <body class="bg-background min-h-screen flex flex-col font-body-md text-on-background">
     {# RP-initiated account management banner. Settings templates
        override this block to render the partial when the
        `forseti_app_referrer` cookie is present. Empty by default so
@@ -24,38 +27,46 @@
        unaffected. #}
     {% block referrer_banner %}{% endblock %}
     <header class="bg-surface-container-lowest w-full top-0 sticky border-b border-outline-variant z-50">
-        <div class="flex justify-between items-center w-full h-16 px-margin-mobile md:px-margin-desktop max-w-container-max mx-auto">
-            <a href="/" class="font-headline-md text-headline-md font-extrabold text-on-surface tracking-tight">{{ chrome.brand.name }}</a>
-            <nav class="hidden md:flex items-end h-full gap-stack-lg">
-                <a href="/" class="{% block nav_dashboard_class %}text-on-secondary-fixed-variant hover:text-primary{% endblock %} transition-colors pb-4 px-1 font-label-md text-label-md">Dashboard</a>
-                <a href="/settings" class="{% block nav_settings_class %}text-on-secondary-fixed-variant hover:text-primary{% endblock %} transition-colors pb-4 px-1 font-label-md text-label-md">Settings</a>
-                {% block org_nav %}{% endblock %}
-            </nav>
-            <div class="flex items-center gap-stack-lg">
-                {% block user_indicator %}
-                {% if !chrome.user_email.is_empty() %}
-                <div class="hidden md:flex items-center font-label-sm text-label-sm text-on-surface-variant">{{ chrome.user_email }}</div>
-                <form method="POST" action="/logout" class="inline">
-                    <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
-                    <button type="submit" class="font-label-md text-label-md text-primary font-bold hover:opacity-80 transition-opacity">Sign out</button>
-                </form>
-                {% endif %}
-                {% endblock %}
-            </div>
+      <div class="flex justify-between items-center w-full h-16 px-margin-mobile md:px-margin-desktop max-w-container-max mx-auto">
+        <a href="/"
+           class="font-headline-md text-headline-md font-extrabold text-on-surface tracking-tight">{{ chrome.brand.name }}</a>
+        <nav class="hidden md:flex items-end h-full gap-stack-lg">
+          <a href="/"
+             class="{% block nav_dashboard_class %}text-on-secondary-fixed-variant hover:text-primary{% endblock %} transition-colors pb-4 px-1 font-label-md text-label-md">Dashboard</a>
+          <a href="/settings"
+             class="{% block nav_settings_class %}text-on-secondary-fixed-variant hover:text-primary{% endblock %} transition-colors pb-4 px-1 font-label-md text-label-md">Settings</a>
+          {% block org_nav %}{% endblock %}
+        </nav>
+        <div class="flex items-center gap-stack-lg">
+          {% block user_indicator %}
+            {% if !chrome.user_email.is_empty() %}
+              <div class="hidden md:flex items-center font-label-sm text-label-sm text-on-surface-variant">
+                {{ chrome.user_email }}
+              </div>
+              <form method="POST" action="/logout" class="inline">
+                <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+                <button type="submit"
+                        class="font-label-md text-label-md text-primary font-bold hover:opacity-80 transition-opacity">
+                  Sign out
+                </button>
+              </form>
+            {% endif %}
+          {% endblock %}
         </div>
+      </div>
     </header>
 
     <main class="flex-1 w-full max-w-container-max mx-auto px-margin-mobile md:px-margin-desktop py-margin-desktop flex flex-col gap-stack-lg">
-        {% block content %}{% endblock %}
+      {% block content %}{% endblock %}
     </main>
 
     <footer class="bg-surface-container-low border-t border-outline-variant py-stack-lg mt-auto w-full">
-        <div class="flex flex-col md:flex-row justify-between items-center px-margin-desktop max-w-container-max mx-auto gap-stack-md">
-            <span class="font-label-sm text-label-sm text-on-surface font-bold">&copy; {{ chrome.brand.name }}</span>
-            <nav class="flex flex-wrap gap-stack-lg justify-center">
-                <span class="font-label-sm text-label-sm text-on-secondary-fixed-variant opacity-80">v{{ chrome.version }}</span>
-            </nav>
-        </div>
+      <div class="flex flex-col md:flex-row justify-between items-center px-margin-desktop max-w-container-max mx-auto gap-stack-md">
+        <span class="font-label-sm text-label-sm text-on-surface font-bold">&copy; {{ chrome.brand.name }}</span>
+        <nav class="flex flex-wrap gap-stack-lg justify-center">
+          <span class="font-label-sm text-label-sm text-on-secondary-fixed-variant opacity-80">v{{ chrome.version }}</span>
+        </nav>
+      </div>
     </footer>
     {# Trim leading/trailing whitespace on text-style inputs as the user
        types/pastes. Has to run on `input` (not `submit`) because the
@@ -72,5 +83,5 @@
         if (trimmed !== i.value) i.value = trimmed;
       });
     </script>
-</body>
+  </body>
 </html>

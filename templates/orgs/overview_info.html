@@ -4,51 +4,68 @@
 
 {% block nav_settings_class %}text-primary font-bold border-b-2 border-primary{% endblock %}
 
-{% block org_nav %}{% include "partials/org_switcher.html" %}{% endblock %}
+{% block org_nav %}
+  {% include "partials/org_switcher.html" %}
+{% endblock %}
 
 {% block content %}
-<div class="flex flex-col md:flex-row gap-stack-lg">
+  <div class="flex flex-col md:flex-row gap-stack-lg">
     {% let active = "organization" %}
     {% include "partials/settings_nav.html" %}
 
     <section class="flex-1 flex flex-col gap-stack-lg">
-        <header class="mt-2 mb-stack-lg">
-            <h1 class="font-headline-lg-mobile md:font-headline-lg text-headline-lg-mobile md:text-headline-lg text-on-surface">{{ org.name }}</h1>
-            <p class="font-body-md text-body-md text-on-surface-variant mt-1">
-                {% if is_default %}This is the default organization for this {{ chrome.brand.name }} install. You're a member.{% else %}You're a member of this organization.{% endif %}
-            </p>
-        </header>
+      <header class="mt-2 mb-stack-lg">
+        <h1 class="font-headline-lg-mobile md:font-headline-lg text-headline-lg-mobile md:text-headline-lg text-on-surface">
+          {{ org.name }}
+        </h1>
+        <p class="font-body-md text-body-md text-on-surface-variant mt-1">
+          {% if is_default %}
+            This is the default organization for this {{ chrome.brand.name }} install. You're a member.
+          {% else %}
+            You're a member of this organization.
+          {% endif %}
+        </p>
+      </header>
 
-        <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg">
-            <h2 class="font-headline-md text-headline-md text-on-surface mb-stack-md">Organization</h2>
-            <dl class="grid grid-cols-2 gap-stack-md">
-                <dt class="font-label-sm text-label-sm text-on-surface-variant">Name</dt>
-                <dd class="font-body-md text-body-md">{{ org.name }}</dd>
-                <dt class="font-label-sm text-label-sm text-on-surface-variant">Slug</dt>
-                <dd class="font-body-md text-body-md font-mono">{{ org.slug }}</dd>
-                <dt class="font-label-sm text-label-sm text-on-surface-variant">Members</dt>
-                <dd class="font-body-md text-body-md">{{ member_count }}</dd>
-            </dl>
-        </div>
+      <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg">
+        <h2 class="font-headline-md text-headline-md text-on-surface mb-stack-md">Organization</h2>
+        <dl class="grid grid-cols-2 gap-stack-md">
+          <dt class="font-label-sm text-label-sm text-on-surface-variant">Name</dt>
+          <dd class="font-body-md text-body-md">
+            {{ org.name }}
+          </dd>
+          <dt class="font-label-sm text-label-sm text-on-surface-variant">Slug</dt>
+          <dd class="font-body-md text-body-md font-mono">
+            {{ org.slug }}
+          </dd>
+          <dt class="font-label-sm text-label-sm text-on-surface-variant">Members</dt>
+          <dd class="font-body-md text-body-md">
+            {{ member_count }}
+          </dd>
+        </dl>
+      </div>
 
-        <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg">
-            <h2 class="font-headline-md text-headline-md text-on-surface mb-stack-md">Quick links</h2>
-            <ul class="flex flex-col gap-stack-sm">
-                <li><a href="{% if is_default %}/settings/organization/members{% else %}/settings/organizations/{{ org.slug }}/members{% endif %}" class="text-primary font-label-md">Members ({{ member_count }}) &rarr;</a></li>
-            </ul>
-        </div>
+      <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg">
+        <h2 class="font-headline-md text-headline-md text-on-surface mb-stack-md">Quick links</h2>
+        <ul class="flex flex-col gap-stack-sm">
+          <li>
+            <a href="{% if is_default %}/settings/organization/members{% else %}/settings/organizations/{{ org.slug }}/members{% endif %}"
+               class="text-primary font-label-md">Members ({{ member_count }}) &rarr;</a>
+          </li>
+        </ul>
+      </div>
 
-        {% if !owner_emails.is_empty() %}
+      {% if !owner_emails.is_empty() %}
         <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg">
-            <h2 class="font-headline-md text-headline-md text-on-surface mb-stack-md">Managed by</h2>
-            <p class="font-body-sm text-body-sm text-on-surface-variant mb-stack-sm">Contact an owner for changes to org name, branding, or membership.</p>
-            <ul class="flex flex-col gap-1">
-                {% for email in owner_emails %}
-                <li class="font-body-md text-body-md font-mono">{{ email }}</li>
-                {% endfor %}
-            </ul>
+          <h2 class="font-headline-md text-headline-md text-on-surface mb-stack-md">Managed by</h2>
+          <p class="font-body-sm text-body-sm text-on-surface-variant mb-stack-sm">
+            Contact an owner for changes to org name, branding, or membership.
+          </p>
+          <ul class="flex flex-col gap-1">
+            {% for email in owner_emails %}<li class="font-body-md text-body-md font-mono">{{ email }}</li>{% endfor %}
+          </ul>
         </div>
-        {% endif %}
+      {% endif %}
     </section>
-</div>
+  </div>
 {% endblock %}

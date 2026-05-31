@@ -3,117 +3,138 @@
 {% block title %}Verify your email &middot; {{ chrome.brand.name }}{% endblock %}
 
 {% block card_title %}
-{% if state == "passed_challenge" %}Email verified
-{% else if state == "sent_email" %}Check your email
-{% else %}Verify your email{% endif %}
+  {% if state == "passed_challenge" %}
+    Email verified
+  {% else if state == "sent_email" %}
+    Check your email
+  {% else %}
+    Verify your email
+  {% endif %}
 {% endblock %}
 
 {% block card_subtitle %}
-{% if state == "passed_challenge" %}Your email has been confirmed. You can close this tab or continue.
-{% else if state == "sent_email" %}We sent a verification code to your inbox. Enter it below to confirm.
-{% else %}Enter your email to receive a verification code.{% endif %}
+  {% if state == "passed_challenge" %}
+    Your email has been confirmed. You can close this tab or continue.
+  {% else if state == "sent_email" %}
+    We sent a verification code to your inbox. Enter it below to confirm.
+  {% else %}
+    Enter your email to receive a verification code.
+  {% endif %}
 {% endblock %}
 
 {% block card_body %}
-{# Flow-level messages — "Verification email sent", "Code expired", etc. #}
-{% if !flow_messages.is_empty() %}
-<div class="flex flex-col gap-stack-sm">
-    {% for msg in flow_messages %}
-    <p class="font-body-sm text-body-sm {% if msg.severity == "error" %}text-error{% else if msg.severity == "success" %}text-tertiary{% else %}text-on-surface-variant{% endif %}">
-        {{ msg.text }}
-    </p>
-    {% endfor %}
-</div>
-{% endif %}
+  {# Flow-level messages — "Verification email sent", "Code expired", etc. #}
+  {% if !flow_messages.is_empty() %}
+    <div class="flex flex-col gap-stack-sm">
+      {% for msg in flow_messages %}
+        <p class="font-body-sm text-body-sm {% if msg.severity == "error" %}text-error{% else if msg.severity == "success" %}text-tertiary{% else %}text-on-surface-variant{% endif %}">
+          {{ msg.text }}
+        </p>
+      {% endfor %}
+    </div>
+  {% endif %}
 
-<form method="{{ form_method }}" action="{{ form_action }}" class="flex flex-col gap-stack-lg">
+  <form method="{{ form_method }}"
+        action="{{ form_action }}"
+        class="flex flex-col gap-stack-lg">
     {# Hidden inputs from `default` (CSRF token). #}
     {% for node in groups.default %}
-        {% if node.input_type == "hidden" %}
-            {% include "partials/flow_node.html" %}
-        {% endif %}
+      {% if node.input_type == "hidden" %}
+        {% include "partials/flow_node.html" %}
+      {% endif %}
     {% endfor %}
 
     {# Visible `default` inputs — uncommon for verification, but render if present. #}
     {% if has_visible_default %}
-    <div class="flex flex-col gap-stack-md">
+      <div class="flex flex-col gap-stack-md">
         {% for node in groups.default %}
-            {% if node.input_type != "hidden" %}
-                <div class="flex flex-col gap-stack-sm">
-                    <label for="{{ node.name }}" class="font-label-md text-label-md text-on-surface">
-                        {% match node.label %}{% when Some with (l) %}{{ l }}{% when None %}{{ node.name }}{% endmatch %}
-                    </label>
-                    {% include "partials/flow_node.html" %}
-                    {% for m in node.messages %}
-                    <p class="font-body-sm text-body-sm {% if m.severity == "error" %}text-error{% else %}text-on-surface-variant{% endif %}">{{ m.text }}</p>
-                    {% endfor %}
-                </div>
-            {% endif %}
+          {% if node.input_type != "hidden" %}
+            <div class="flex flex-col gap-stack-sm">
+              <label for="{{ node.name }}"
+                     class="font-label-md text-label-md text-on-surface">
+                {% match node.label %}{% when Some with (l) %}{{ l }}{% when None %}{{ node.name }}{% endmatch %}
+              </label>
+              {% include "partials/flow_node.html" %}
+              {% for m in node.messages %}
+                <p class="font-body-sm text-body-sm {% if m.severity == "error" %}text-error{% else %}text-on-surface-variant{% endif %}">
+                  {{ m.text }}
+                </p>
+              {% endfor %}
+            </div>
+          {% endif %}
         {% endfor %}
-    </div>
+      </div>
     {% endif %}
 
     {# Code method: email input on `choose_method`, code input on `sent_email`. #}
     {% if !groups.code.is_empty() %}
-    <div class="flex flex-col gap-stack-md">
+      <div class="flex flex-col gap-stack-md">
         {% for node in groups.code %}
-            {% if node.input_type == "submit" || node.input_type == "hidden" %}
-                {% include "partials/flow_node.html" %}
-            {% else %}
-                <div class="flex flex-col gap-stack-sm">
-                    <label for="{{ node.name }}" class="font-label-md text-label-md text-on-surface">
-                        {% match node.label %}{% when Some with (l) %}{{ l }}{% when None %}{{ node.name }}{% endmatch %}
-                    </label>
-                    {% include "partials/flow_node.html" %}
-                    {% for m in node.messages %}
-                    <p class="font-body-sm text-body-sm {% if m.severity == "error" %}text-error{% else %}text-on-surface-variant{% endif %}">{{ m.text }}</p>
-                    {% endfor %}
-                </div>
-            {% endif %}
+          {% if node.input_type == "submit" || node.input_type == "hidden" %}
+            {% include "partials/flow_node.html" %}
+          {% else %}
+            <div class="flex flex-col gap-stack-sm">
+              <label for="{{ node.name }}"
+                     class="font-label-md text-label-md text-on-surface">
+                {% match node.label %}{% when Some with (l) %}{{ l }}{% when None %}{{ node.name }}{% endmatch %}
+              </label>
+              {% include "partials/flow_node.html" %}
+              {% for m in node.messages %}
+                <p class="font-body-sm text-body-sm {% if m.severity == "error" %}text-error{% else %}text-on-surface-variant{% endif %}">
+                  {{ m.text }}
+                </p>
+              {% endfor %}
+            </div>
+          {% endif %}
         {% endfor %}
-    </div>
+      </div>
     {% endif %}
 
     {# Anything else (TOTP/lookup_secret recovery paths, etc.). #}
     {% if !groups.other.is_empty() %}
-    <div class="flex flex-col gap-stack-md">
+      <div class="flex flex-col gap-stack-md">
         {% for node in groups.other %}
-            {% if node.input_type == "hidden" || node.input_type == "submit" || node.input_type == "button" %}
-                {% include "partials/flow_node.html" %}
-            {% else %}
-                <div class="flex flex-col gap-stack-sm">
-                    {% match node.label %}{% when Some with (l) %}
-                    <label for="{{ node.name }}" class="font-label-md text-label-md text-on-surface">{{ l }}</label>
-                    {% when None %}{% endmatch %}
-                    {% include "partials/flow_node.html" %}
-                    {% for m in node.messages %}
-                    <p class="font-body-sm text-body-sm {% if m.severity == "error" %}text-error{% else %}text-on-surface-variant{% endif %}">{{ m.text }}</p>
-                    {% endfor %}
-                </div>
-            {% endif %}
+          {% if node.input_type == "hidden" || node.input_type == "submit" || node.input_type == "button" %}
+            {% include "partials/flow_node.html" %}
+          {% else %}
+            <div class="flex flex-col gap-stack-sm">
+              {% match node.label %}{% when Some with (l) %}
+              <label for="{{ node.name }}"
+                     class="font-label-md text-label-md text-on-surface">{{ l }}</label>
+              {% when None %}{% endmatch %}
+              {% include "partials/flow_node.html" %}
+              {% for m in node.messages %}
+                <p class="font-body-sm text-body-sm {% if m.severity == "error" %}text-error{% else %}text-on-surface-variant{% endif %}">
+                  {{ m.text }}
+                </p>
+              {% endfor %}
+            </div>
+          {% endif %}
         {% endfor %}
-    </div>
+      </div>
     {% endif %}
-</form>
+  </form>
 
-{% if state == "sent_email" %}
-{# Codes are bound to a single Kratos flow. If a user starts a fresh
+  {% if state == "sent_email" %}
+    {# Codes are bound to a single Kratos flow. If a user starts a fresh
    /verification flow (e.g. they opened a new tab), the older code from
    their inbox stops working — Kratos surfaces a generic "code is
    invalid or has already been used" which isn't actionable on its own. #}
-<p class="font-body-sm text-body-sm text-on-surface-variant text-center mt-stack-sm">
-    Use the code from the most recent verification email, or open the
-    link in that email instead of typing the code by hand.
-</p>
-{% endif %}
-
-<div class="text-center mt-stack-sm">
-    <p class="font-body-sm text-body-sm text-on-surface-variant">
-        {% if is_logged_in %}
-        <a href="/" class="font-label-md text-label-md text-primary hover:underline transition-colors">Back to dashboard</a>
-        {% else %}
-        <a href="/login{{ return_to_qs }}" class="font-label-md text-label-md text-primary hover:underline transition-colors">Back to sign in</a>
-        {% endif %}
+    <p class="font-body-sm text-body-sm text-on-surface-variant text-center mt-stack-sm">
+      Use the code from the most recent verification email, or open the
+      link in that email instead of typing the code by hand.
     </p>
-</div>
+  {% endif %}
+
+  <div class="text-center mt-stack-sm">
+    <p class="font-body-sm text-body-sm text-on-surface-variant">
+      {% if is_logged_in %}
+        <a href="/"
+           class="font-label-md text-label-md text-primary hover:underline transition-colors">Back to dashboard</a>
+      {% else %}
+        <a href="/login{{ return_to_qs }}"
+           class="font-label-md text-label-md text-primary hover:underline transition-colors">Back to sign in</a>
+      {% endif %}
+    </p>
+  </div>
 {% endblock %}

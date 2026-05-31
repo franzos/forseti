@@ -5,15 +5,21 @@
 {% block admin_title %}{{ title }}{% endblock %}
 
 {% block admin_content %}
-<div class="max-w-prose">
+  <div class="max-w-prose">
     <h1 class="font-headline-lg text-headline-lg text-on-surface">{{ title }}</h1>
     <p class="font-body-md text-body-md text-on-surface-variant mt-stack-md">{{ body }}</p>
 
-    <form method="POST" action="{{ action_url }}" class="mt-stack-lg flex items-center gap-stack-md">
-        <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
-        <input type="hidden" name="confirm" value="yes">
-        <button type="submit" class="bg-error text-on-error font-label-md text-label-md font-bold px-4 py-2 rounded-lg hover:opacity-90 transition-opacity">{{ submit_label }}</button>
-        <a href="{{ cancel_url }}" class="font-label-md text-label-md text-on-surface-variant border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">Cancel</a>
+    <form method="POST"
+          action="{{ action_url }}"
+          class="mt-stack-lg flex items-center gap-stack-md">
+      <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+      <input type="hidden" name="confirm" value="yes">
+      <button type="submit"
+              class="bg-error text-on-error font-label-md text-label-md font-bold px-4 py-2 rounded-lg hover:opacity-90 transition-opacity">
+        {{ submit_label }}
+      </button>
+      <a href="{{ cancel_url }}"
+         class="font-label-md text-label-md text-on-surface-variant border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">Cancel</a>
     </form>
-</div>
+  </div>
 {% endblock %}

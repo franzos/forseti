@@ -1,56 +1,73 @@
 {% extends "base.html" %}
 
-{% block referrer_banner %}{% include "_referrer_banner.html" %}{% endblock %}
+{% block referrer_banner %}
+  {% include "_referrer_banner.html" %}
+{% endblock %}
 
 {% block title %}Confirm delete &middot; {{ chrome.brand.name }}{% endblock %}
 
 {% block nav_settings_class %}text-primary font-bold border-b-2 border-primary{% endblock %}
 
 {% block content %}
-<div class="flex flex-col md:flex-row gap-stack-lg">
+  <div class="flex flex-col md:flex-row gap-stack-lg">
     {% let active = "account" %}
     {% include "partials/settings_nav.html" %}
 
     <section class="flex-1 max-w-2xl">
-        <header class="mt-2 mb-stack-lg">
-            <h1 class="font-headline-lg-mobile md:font-headline-lg text-headline-lg-mobile md:text-headline-lg text-on-surface">Delete your account?</h1>
-            <p class="font-body-md text-body-md text-on-surface-variant mt-1">This permanently removes <span class="font-semibold text-on-surface">{{ chrome.user_email }}</span> and every session, recovery code, and credential attached to it.</p>
-        </header>
+      <header class="mt-2 mb-stack-lg">
+        <h1 class="font-headline-lg-mobile md:font-headline-lg text-headline-lg-mobile md:text-headline-lg text-on-surface">
+          Delete your account?
+        </h1>
+        <p class="font-body-md text-body-md text-on-surface-variant mt-1">
+          This permanently removes <span class="font-semibold text-on-surface">{{ chrome.user_email }}</span> and every session, recovery code, and credential attached to it.
+        </p>
+      </header>
 
-        {% if notified_apps.len() > 0 %}
+      {% if notified_apps.len() > 0 %}
         <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-5 mb-stack-md">
-            <h2 class="font-label-md text-label-md text-on-surface-variant uppercase tracking-widest mb-stack-sm">These apps will be told you're gone</h2>
-            <ul class="font-body-md text-body-md text-on-surface space-y-1">
-                {% for app in notified_apps %}
-                <li>&middot; {{ app.name }}</li>
-                {% endfor %}
-            </ul>
-            <p class="font-body-sm text-body-sm text-on-surface-variant mt-stack-sm">Apps copy data they need (profile, settings) and keep it linked to your account ID. We notify them via the deletion webhook they registered so they can clear their copy.</p>
+          <h2 class="font-label-md text-label-md text-on-surface-variant uppercase tracking-widest mb-stack-sm">
+            These apps will be told you're gone
+          </h2>
+          <ul class="font-body-md text-body-md text-on-surface space-y-1">
+            {% for app in notified_apps %}<li>&middot; {{ app.name }}</li>{% endfor %}
+          </ul>
+          <p class="font-body-sm text-body-sm text-on-surface-variant mt-stack-sm">
+            Apps copy data they need (profile, settings) and keep it linked to your account ID. We notify them via the deletion webhook they registered so they can clear their copy.
+          </p>
         </div>
-        {% else %}
+      {% else %}
         <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-5 mb-stack-md">
-            <p class="font-body-md text-body-md text-on-surface-variant">No third-party apps have copies of your data right now — nothing to notify.</p>
+          <p class="font-body-md text-body-md text-on-surface-variant">
+            No third-party apps have copies of your data right now — nothing to notify.
+          </p>
         </div>
-        {% endif %}
+      {% endif %}
 
-        <form method="post" action="/settings/account/delete?flow={{ flow_id }}" class="bg-error-container border border-error rounded-xl p-6">
-            <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
-            <label class="block font-label-md text-label-md text-on-error-container mb-stack-sm" for="confirm-email">
-                To confirm, type your email below:
-            </label>
-            <input id="confirm-email" name="confirm_email" type="email" required autocomplete="off"
-                   placeholder="Type your email to confirm"
-                   class="w-full bg-surface text-on-surface px-4 py-3 rounded-xl border border-outline focus:border-primary outline-none font-body-md text-body-md">
+      <form method="post"
+            action="/settings/account/delete?flow={{ flow_id }}"
+            class="bg-error-container border border-error rounded-xl p-6">
+        <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+        <label class="block font-label-md text-label-md text-on-error-container mb-stack-sm"
+               for="confirm-email">To confirm, type your email below:</label>
+        <input id="confirm-email"
+               name="confirm_email"
+               type="email"
+               required
+               autocomplete="off"
+               placeholder="Type your email to confirm"
+               class="w-full bg-surface text-on-surface px-4 py-3 rounded-xl border border-outline focus:border-primary outline-none font-body-md text-body-md">
 
-            <div class="mt-stack-md flex gap-stack-sm">
-                <button type="submit" class="bg-error text-on-error hover:bg-error/90 px-5 py-3 rounded-xl font-label-lg text-label-lg font-semibold">
-                    Yes, delete my account
-                </button>
-                <a href="/settings/account" class="bg-surface text-on-surface border border-outline px-5 py-3 rounded-xl font-label-lg text-label-lg">
-                    Cancel
-                </a>
-            </div>
-        </form>
+        <div class="mt-stack-md flex gap-stack-sm">
+          <button type="submit"
+                  class="bg-error text-on-error hover:bg-error/90 px-5 py-3 rounded-xl font-label-lg text-label-lg font-semibold">
+            Yes, delete my account
+          </button>
+          <a href="/settings/account"
+             class="bg-surface text-on-surface border border-outline px-5 py-3 rounded-xl font-label-lg text-label-lg">
+            Cancel
+          </a>
+        </div>
+      </form>
     </section>
-</div>
+  </div>
 {% endblock %}

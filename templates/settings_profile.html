@@ -1,115 +1,167 @@
 {% extends "base.html" %}
 
-{% block referrer_banner %}{% include "_referrer_banner.html" %}{% endblock %}
+{% block referrer_banner %}
+  {% include "_referrer_banner.html" %}
+{% endblock %}
 
 {% block title %}Profile &middot; {{ chrome.brand.name }}{% endblock %}
 
 {% block nav_settings_class %}text-primary font-bold border-b-2 border-primary{% endblock %}
 
 {% block content %}
-<div class="flex flex-col md:flex-row gap-stack-lg">
+  <div class="flex flex-col md:flex-row gap-stack-lg">
     {% let active = "profile" %}
     {% include "partials/settings_nav.html" %}
 
     <section class="flex-1">
-        <div class="mb-stack-lg">
-            <h1 class="font-headline-lg text-headline-lg text-on-surface">Profile</h1>
-            <p class="font-body-md text-body-md text-on-surface-variant mt-1">Update your email address and display name.</p>
-        </div>
+      <div class="mb-stack-lg">
+        <h1 class="font-headline-lg text-headline-lg text-on-surface">Profile</h1>
+        <p class="font-body-md text-body-md text-on-surface-variant mt-1">Update your email address and display name.</p>
+      </div>
 
-        {% if !flow_messages.is_empty() %}
+      {% if !flow_messages.is_empty() %}
         <div class="flex flex-col gap-stack-sm mb-stack-md">
-            {% for msg in flow_messages %}
-            <p class="font-body-sm text-body-sm {% if msg.severity == "error" %}text-error{% else if msg.severity == "success" %}text-tertiary{% else %}text-on-surface-variant{% endif %}">{{ msg.text }}</p>
-            {% endfor %}
+          {% for msg in flow_messages %}
+            <p class="font-body-sm text-body-sm {% if msg.severity == "error" %}text-error{% else if msg.severity == "success" %}text-tertiary{% else %}text-on-surface-variant{% endif %}">
+              {{ msg.text }}
+            </p>
+          {% endfor %}
         </div>
-        {% endif %}
+      {% endif %}
 
-        <form method="{{ form_method }}" action="{{ form_action }}" class="flex flex-col gap-stack-lg bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg">
-            {# Hidden inputs from the `default` group — CSRF token, etc. #}
-            {% for node in groups.default %}
-                {% if node.input_type == "hidden" %}{% include "partials/flow_node.html" %}{% endif %}
-            {% endfor %}
+      <form method="{{ form_method }}"
+            action="{{ form_action }}"
+            class="flex flex-col gap-stack-lg bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg">
+        {# Hidden inputs from the `default` group — CSRF token, etc. #}
+        {% for node in groups.default %}
+          {% if node.input_type == "hidden" %}
+            {% include "partials/flow_node.html" %}
+          {% endif %}
+        {% endfor %}
 
-            {# Profile-group fields (the actual editable traits). #}
-            {% for node in groups.profile %}
-                {% if node.input_type == "submit" || node.input_type == "hidden" %}
-                    {% include "partials/flow_node.html" %}
-                {% else %}
-                <div class="flex flex-col gap-stack-sm">
-                    <label for="{{ node.name }}" class="font-label-md text-label-md text-on-surface">
-                        {% match node.label %}{% when Some with (l) %}{{ l }}{% when None %}{{ node.name }}{% endmatch %}
-                    </label>
-                    {% include "partials/flow_node.html" %}
-                    {% if node.name == "traits.email" && !email_verified %}
-                    <p class="font-body-sm text-body-sm text-error">
-                        Not verified &middot;
-                        <a href="/verification" class="underline hover:no-underline transition-colors">Send verification email &rarr;</a>
-                    </p>
-                    {% endif %}
-                    {% for m in node.messages %}
-                    <p class="font-body-sm text-body-sm {% if m.severity == "error" %}text-error{% else %}text-on-surface-variant{% endif %}">{{ m.text }}</p>
-                    {% endfor %}
-                </div>
-                {% endif %}
-            {% endfor %}
+        {# Profile-group fields (the actual editable traits). #}
+        {% for node in groups.profile %}
+          {% if node.input_type == "submit" || node.input_type == "hidden" %}
+            {% include "partials/flow_node.html" %}
+          {% else %}
+            <div class="flex flex-col gap-stack-sm">
+              <label for="{{ node.name }}"
+                     class="font-label-md text-label-md text-on-surface">
+                {% match node.label %}{% when Some with (l) %}{{ l }}{% when None %}{{ node.name }}{% endmatch %}
+              </label>
+              {% include "partials/flow_node.html" %}
+              {% if node.name == "traits.email" && !email_verified %}
+                <p class="font-body-sm text-body-sm text-error">
+                  Not verified &middot;
+                  <a href="/verification"
+                     class="underline hover:no-underline transition-colors">Send verification email &rarr;</a>
+                </p>
+              {% endif %}
+              {% for m in node.messages %}
+                <p class="font-body-sm text-body-sm {% if m.severity == "error" %}text-error{% else %}text-on-surface-variant{% endif %}">
+                  {{ m.text }}
+                </p>
+              {% endfor %}
+            </div>
+          {% endif %}
+        {% endfor %}
 
-            {# Explicit `method=profile` hidden field — Kratos uses this to
+        {# Explicit `method=profile` hidden field — Kratos uses this to
                discriminate which settings method to execute. The flow's UI
                nodes usually include this already, but we emit it
                unconditionally to make the form's intent explicit. #}
-            <input type="hidden" name="method" value="profile">
-        </form>
+        <input type="hidden" name="method" value="profile">
+      </form>
 
-        {% if profiles_enabled %}
+      {% if profiles_enabled %}
         <div class="mt-stack-lg bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg">
-            <h2 class="font-headline-md text-headline-md text-on-surface mb-stack-sm">Public profile</h2>
-            <p class="font-body-sm text-body-sm text-on-surface-variant mb-stack-md">Visible to org-mates on your <code>/users/{id}</code> page and to apps you grant the <code>profile</code> or <code>extended_profile</code> OAuth scopes. Leave any field blank to hide it.</p>
+          <h2 class="font-headline-md text-headline-md text-on-surface mb-stack-sm">Public profile</h2>
+          <p class="font-body-sm text-body-sm text-on-surface-variant mb-stack-md">
+            Visible to org-mates on your <code>/users/{id}</code> page and to apps you grant the <code>profile</code> or <code>extended_profile</code> OAuth scopes. Leave any field blank to hide it.
+          </p>
 
-            {% if extended_saved %}
-            <div class="mb-stack-md bg-tertiary-container/40 border border-outline-variant rounded-lg px-stack-md py-stack-sm font-body-sm text-body-sm text-on-tertiary-container">Profile saved.</div>
-            {% endif %}
+          {% if extended_saved %}
+            <div class="mb-stack-md bg-tertiary-container/40 border border-outline-variant rounded-lg px-stack-md py-stack-sm font-body-sm text-body-sm text-on-tertiary-container">
+              Profile saved.
+            </div>
+          {% endif %}
 
-            <form method="POST" action="/settings/profile/extended" class="flex flex-col gap-stack-md">
-                <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
-                <div class="flex flex-col gap-stack-sm">
-                    <label for="bio" class="font-label-md text-label-md text-on-surface">Bio</label>
-                    <textarea id="bio" name="bio" rows="3" maxlength="280" class="w-full bg-surface-container-lowest border border-outline-variant text-on-surface font-body-md text-body-md rounded-lg py-stack-md px-stack-md focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary">{{ bio }}</textarea>
-                </div>
-                <div class="grid grid-cols-1 md:grid-cols-2 gap-stack-md">
-                    <div class="flex flex-col gap-stack-sm">
-                        <label for="location" class="font-label-md text-label-md text-on-surface">Location</label>
-                        <input id="location" type="text" name="location" value="{{ location }}" class="w-full bg-surface-container-lowest border border-outline-variant text-on-surface rounded-lg py-stack-md px-stack-md focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary">
-                    </div>
-                    <div class="flex flex-col gap-stack-sm">
-                        <label for="pronouns" class="font-label-md text-label-md text-on-surface">Pronouns</label>
-                        <input id="pronouns" type="text" name="pronouns" value="{{ pronouns }}" class="w-full bg-surface-container-lowest border border-outline-variant text-on-surface rounded-lg py-stack-md px-stack-md focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary">
-                    </div>
-                </div>
-                <div class="flex flex-col gap-stack-sm">
-                    <label for="website" class="font-label-md text-label-md text-on-surface">Website</label>
-                    <input id="website" type="url" name="website" value="{{ website }}" placeholder="https://example.com" class="w-full bg-surface-container-lowest border border-outline-variant text-on-surface rounded-lg py-stack-md px-stack-md focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary">
-                </div>
-                <div class="flex flex-col gap-stack-sm">
-                    <label for="avatar_url" class="font-label-md text-label-md text-on-surface">Avatar URL</label>
-                    <input id="avatar_url" type="url" name="avatar_url" value="{{ avatar_url }}" placeholder="https://example.com/me.png" class="w-full bg-surface-container-lowest border border-outline-variant text-on-surface rounded-lg py-stack-md px-stack-md focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary">
-                    <p class="font-body-sm text-body-sm text-on-surface-variant">Optional. Leave blank to use the auto-generated identicon.</p>
-                </div>
-                <div class="flex flex-col gap-stack-sm">
-                    <label for="links" class="font-label-md text-label-md text-on-surface">Links</label>
-                    <textarea id="links" name="links" rows="4" placeholder="GitHub|https://github.com/you&#10;Mastodon|https://m.example/@you" class="w-full bg-surface-container-lowest border border-outline-variant text-on-surface font-mono text-body-md rounded-lg py-stack-md px-stack-md focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary">{{ links_text }}</textarea>
-                    <p class="font-body-sm text-body-sm text-on-surface-variant">One per line, in the format <code>Label|https://url</code>.</p>
-                </div>
-                <div>
-                    <button type="submit" class="bg-primary text-on-primary rounded-lg px-stack-lg py-stack-md font-label-md text-label-md">Save profile</button>
-                </div>
-            </form>
+          <form method="POST"
+                action="/settings/profile/extended"
+                class="flex flex-col gap-stack-md">
+            <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+            <div class="flex flex-col gap-stack-sm">
+              <label for="bio" class="font-label-md text-label-md text-on-surface">Bio</label>
+              <textarea id="bio"
+                        name="bio"
+                        rows="3"
+                        maxlength="280"
+                        class="w-full bg-surface-container-lowest border border-outline-variant text-on-surface font-body-md text-body-md rounded-lg py-stack-md px-stack-md focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary">{{ bio }}</textarea>
+            </div>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-stack-md">
+              <div class="flex flex-col gap-stack-sm">
+                <label for="location" class="font-label-md text-label-md text-on-surface">Location</label>
+                <input id="location"
+                       type="text"
+                       name="location"
+                       value="{{ location }}"
+                       class="w-full bg-surface-container-lowest border border-outline-variant text-on-surface rounded-lg py-stack-md px-stack-md focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary">
+              </div>
+              <div class="flex flex-col gap-stack-sm">
+                <label for="pronouns" class="font-label-md text-label-md text-on-surface">Pronouns</label>
+                <input id="pronouns"
+                       type="text"
+                       name="pronouns"
+                       value="{{ pronouns }}"
+                       class="w-full bg-surface-container-lowest border border-outline-variant text-on-surface rounded-lg py-stack-md px-stack-md focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary">
+              </div>
+            </div>
+            <div class="flex flex-col gap-stack-sm">
+              <label for="website" class="font-label-md text-label-md text-on-surface">Website</label>
+              <input id="website"
+                     type="url"
+                     name="website"
+                     value="{{ website }}"
+                     placeholder="https://example.com"
+                     class="w-full bg-surface-container-lowest border border-outline-variant text-on-surface rounded-lg py-stack-md px-stack-md focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary">
+            </div>
+            <div class="flex flex-col gap-stack-sm">
+              <label for="avatar_url" class="font-label-md text-label-md text-on-surface">Avatar URL</label>
+              <input id="avatar_url"
+                     type="url"
+                     name="avatar_url"
+                     value="{{ avatar_url }}"
+                     placeholder="https://example.com/me.png"
+                     class="w-full bg-surface-container-lowest border border-outline-variant text-on-surface rounded-lg py-stack-md px-stack-md focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary">
+              <p class="font-body-sm text-body-sm text-on-surface-variant">
+                Optional. Leave blank to use the auto-generated identicon.
+              </p>
+            </div>
+            <div class="flex flex-col gap-stack-sm">
+              <label for="links" class="font-label-md text-label-md text-on-surface">Links</label>
+              <textarea id="links"
+                        name="links"
+                        rows="4"
+                        placeholder="GitHub|https://github.com/you&#10;Mastodon|https://m.example/@you"
+                        class="w-full bg-surface-container-lowest border border-outline-variant text-on-surface font-mono text-body-md rounded-lg py-stack-md px-stack-md focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary">{{ links_text }}</textarea>
+              <p class="font-body-sm text-body-sm text-on-surface-variant">
+                One per line, in the format <code>Label|https://url</code>.
+              </p>
+            </div>
+            <div>
+              <button type="submit"
+                      class="bg-primary text-on-primary rounded-lg px-stack-lg py-stack-md font-label-md text-label-md">
+                Save profile
+              </button>
+            </div>
+          </form>
         </div>
-        {% endif %}
+      {% endif %}
 
-        <div class="mt-stack-md">
-            <a href="/settings" class="font-label-md text-label-md text-on-secondary-fixed-variant hover:text-primary transition-colors">&larr; Back to settings</a>
-        </div>
+      <div class="mt-stack-md">
+        <a href="/settings"
+           class="font-label-md text-label-md text-on-secondary-fixed-variant hover:text-primary transition-colors">&larr; Back to settings</a>
+      </div>
     </section>
-</div>
+  </div>
 {% endblock %}

@@ -4,16 +4,27 @@
    through to the default hover state. The Account entry is for the
    danger-zone page and highlights in error tones when active. #}
 <aside class="md:w-60 md:shrink-0 md:border-r md:border-outline-variant md:pr-stack-lg">
-    <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest mt-2">Sections</h2>
-    <nav class="flex flex-col gap-stack-sm">
-        <a href="/settings" class="flex items-center gap-3 px-4 py-3 rounded-xl font-label-md text-label-md {% if active == "hub" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">Overview</a>
-        <a href="/settings/profile" class="flex items-center gap-3 px-4 py-3 rounded-xl font-label-md text-label-md {% if active == "profile" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">Profile</a>
-        <a href="/settings/password" class="flex items-center gap-3 px-4 py-3 rounded-xl font-label-md text-label-md {% if active == "password" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">Password</a>
-        <a href="/settings/2fa" class="flex items-center gap-3 px-4 py-3 rounded-xl font-label-md text-label-md {% if active == "2fa" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">2FA</a>
-        <a href="/settings/sessions" class="flex items-center gap-3 px-4 py-3 rounded-xl font-label-md text-label-md {% if active == "sessions" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">Sessions</a>
-        <a href="/settings/authorized-apps" class="flex items-center gap-3 px-4 py-3 rounded-xl font-label-md text-label-md {% if active == "authorized-apps" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">Authorized apps</a>
-        <a href="/settings/linked-providers" class="flex items-center gap-3 px-4 py-3 rounded-xl font-label-md text-label-md {% if active == "linked-providers" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">Linked providers</a>
-        <a href="/settings/organization" class="flex items-center gap-3 px-4 py-3 rounded-xl font-label-md text-label-md {% if active == "organization" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">Organization</a>
-        <a href="/settings/account" class="flex items-center gap-3 px-4 py-3 rounded-xl font-label-md text-label-md {% if active == "account" %}bg-error-container text-on-error-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">Account</a>
-    </nav>
+  <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest mt-2">
+    Sections
+  </h2>
+  <nav class="flex flex-col gap-stack-sm">
+    <a href="/settings"
+       class="flex items-center gap-3 px-4 py-3 rounded-xl font-label-md text-label-md {% if active == "hub" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">Overview</a>
+    <a href="/settings/profile"
+       class="flex items-center gap-3 px-4 py-3 rounded-xl font-label-md text-label-md {% if active == "profile" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">Profile</a>
+    <a href="/settings/password"
+       class="flex items-center gap-3 px-4 py-3 rounded-xl font-label-md text-label-md {% if active == "password" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">Password</a>
+    <a href="/settings/2fa"
+       class="flex items-center gap-3 px-4 py-3 rounded-xl font-label-md text-label-md {% if active == "2fa" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">2FA</a>
+    <a href="/settings/sessions"
+       class="flex items-center gap-3 px-4 py-3 rounded-xl font-label-md text-label-md {% if active == "sessions" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">Sessions</a>
+    <a href="/settings/authorized-apps"
+       class="flex items-center gap-3 px-4 py-3 rounded-xl font-label-md text-label-md {% if active == "authorized-apps" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">Authorized apps</a>
+    <a href="/settings/linked-providers"
+       class="flex items-center gap-3 px-4 py-3 rounded-xl font-label-md text-label-md {% if active == "linked-providers" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">Linked providers</a>
+    <a href="/settings/organization"
+       class="flex items-center gap-3 px-4 py-3 rounded-xl font-label-md text-label-md {% if active == "organization" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">Organization</a>
+    <a href="/settings/account"
+       class="flex items-center gap-3 px-4 py-3 rounded-xl font-label-md text-label-md {% if active == "account" %}bg-error-container text-on-error-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">Account</a>
+  </nav>
 </aside>

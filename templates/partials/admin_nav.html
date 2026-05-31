@@ -2,18 +2,26 @@
    "status" | "clients" | "dcr-tokens" | "identities" | "sessions" | "audit" | "webhooks".
    Mirrors the structure of `partials/settings_nav.html`. #}
 <aside class="md:w-64 md:shrink-0 md:border-r md:border-outline-variant md:pr-stack-lg">
-    <div class="mb-stack-lg">
-        <h2 class="font-headline-md text-headline-md text-on-surface">Admin</h2>
-        <p class="font-body-sm text-body-sm text-on-surface-variant">Operator tools</p>
-    </div>
-    <nav class="flex flex-col gap-stack-sm">
-        <a href="/admin/status" class="flex items-center gap-3 px-4 py-3 rounded-xl font-label-md text-label-md {% if active == "status" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">Status</a>
-        <a href="/admin/clients" class="flex items-center gap-3 px-4 py-3 rounded-xl font-label-md text-label-md {% if active == "clients" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">OAuth2 clients</a>
-        <a href="/admin/dcr-tokens" class="flex items-center gap-3 px-4 py-3 rounded-xl font-label-md text-label-md {% if active == "dcr-tokens" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">DCR tokens</a>
-        <a href="/admin/identities" class="flex items-center gap-3 px-4 py-3 rounded-xl font-label-md text-label-md {% if active == "identities" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">Identities</a>
-        <a href="/admin/sessions" class="flex items-center gap-3 px-4 py-3 rounded-xl font-label-md text-label-md {% if active == "sessions" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">Sessions</a>
-        <a href="/admin/audit" class="flex items-center gap-3 px-4 py-3 rounded-xl font-label-md text-label-md {% if active == "audit" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">Audit</a>
-        <a href="/admin/webhooks" class="flex items-center gap-3 px-4 py-3 rounded-xl font-label-md text-label-md {% if active == "webhooks" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">Webhooks</a>
-        <a href="/admin/license" class="flex items-center gap-3 px-4 py-3 rounded-xl font-label-md text-label-md {% if active == "license" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">License</a>
-    </nav>
+  <div class="mb-stack-lg">
+    <h2 class="font-headline-md text-headline-md text-on-surface">Admin</h2>
+    <p class="font-body-sm text-body-sm text-on-surface-variant">Operator tools</p>
+  </div>
+  <nav class="flex flex-col gap-stack-sm">
+    <a href="/admin/status"
+       class="flex items-center gap-3 px-4 py-3 rounded-xl font-label-md text-label-md {% if active == "status" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">Status</a>
+    <a href="/admin/clients"
+       class="flex items-center gap-3 px-4 py-3 rounded-xl font-label-md text-label-md {% if active == "clients" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">OAuth2 clients</a>
+    <a href="/admin/dcr-tokens"
+       class="flex items-center gap-3 px-4 py-3 rounded-xl font-label-md text-label-md {% if active == "dcr-tokens" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">DCR tokens</a>
+    <a href="/admin/identities"
+       class="flex items-center gap-3 px-4 py-3 rounded-xl font-label-md text-label-md {% if active == "identities" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">Identities</a>
+    <a href="/admin/sessions"
+       class="flex items-center gap-3 px-4 py-3 rounded-xl font-label-md text-label-md {% if active == "sessions" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">Sessions</a>
+    <a href="/admin/audit"
+       class="flex items-center gap-3 px-4 py-3 rounded-xl font-label-md text-label-md {% if active == "audit" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">Audit</a>
+    <a href="/admin/webhooks"
+       class="flex items-center gap-3 px-4 py-3 rounded-xl font-label-md text-label-md {% if active == "webhooks" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">Webhooks</a>
+    <a href="/admin/license"
+       class="flex items-center gap-3 px-4 py-3 rounded-xl font-label-md text-label-md {% if active == "license" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">License</a>
+  </nav>
 </aside>

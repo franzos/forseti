@@ -4,13 +4,15 @@
    `referrer_banner` block override. Inherits `referrer_banner` and
    `csrf_token` from the parent template's scope. #}
 {% if let Some(b) = referrer_banner.as_ref() %}
-<aside aria-label="External application referrer"
-       class="bg-tertiary-container text-on-tertiary-container border-b border-outline-variant">
-  <div class="flex flex-wrap items-center justify-between gap-stack-md w-full max-w-container-max mx-auto px-margin-mobile md:px-margin-desktop py-stack-sm">
-    <div class="flex items-center gap-stack-md min-w-0">
-      {% match b.logo_uri %}
+  <aside aria-label="External application referrer"
+         class="bg-tertiary-container text-on-tertiary-container border-b border-outline-variant">
+    <div class="flex flex-wrap items-center justify-between gap-stack-md w-full max-w-container-max mx-auto px-margin-mobile md:px-margin-desktop py-stack-sm">
+      <div class="flex items-center gap-stack-md min-w-0">
+        {% match b.logo_uri %}
         {% when Some with (url) %}
-          <img src="{{ url }}" alt="" class="h-8 w-8 rounded object-contain bg-surface-container-lowest" />
+        <img src="{{ url }}"
+             alt=""
+             class="h-8 w-8 rounded object-contain bg-surface-container-lowest" />
         {% when None %}
       {% endmatch %}
       <p class="font-body-md text-body-md min-w-0 truncate">

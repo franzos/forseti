@@ -3,19 +3,27 @@
 {% block title %}Accept invite &middot; {{ chrome.brand.name }}{% endblock %}
 
 {% block content %}
-<div class="max-w-2xl mx-auto flex flex-col gap-stack-lg py-margin-desktop">
+  <div class="max-w-2xl mx-auto flex flex-col gap-stack-lg py-margin-desktop">
     <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg flex flex-col gap-stack-md">
-        <h1 class="font-headline-lg text-headline-lg text-on-surface">Join {{ org_name }}</h1>
-        <p class="font-body-md text-on-surface-variant">You've been invited to join <strong>{{ org_name }}</strong> as <strong>{{ role }}</strong>. The invite was sent to <strong>{{ invited_email }}</strong>.</p>
-        {% if can_accept_now %}
-        <form method="POST" action="/invite/accept" class="flex flex-col gap-stack-md">
-            <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
-            <input type="hidden" name="token" value="{{ token }}">
-            <button type="submit" class="bg-primary text-on-primary rounded-lg px-4 py-2 font-label-md text-label-md self-start">{{ cta_label }}</button>
+      <h1 class="font-headline-lg text-headline-lg text-on-surface">Join {{ org_name }}</h1>
+      <p class="font-body-md text-on-surface-variant">
+        You've been invited to join <strong>{{ org_name }}</strong> as <strong>{{ role }}</strong>. The invite was sent to <strong>{{ invited_email }}</strong>.
+      </p>
+      {% if can_accept_now %}
+        <form method="POST"
+              action="/invite/accept"
+              class="flex flex-col gap-stack-md">
+          <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+          <input type="hidden" name="token" value="{{ token }}">
+          <button type="submit"
+                  class="bg-primary text-on-primary rounded-lg px-4 py-2 font-label-md text-label-md self-start">
+            {{ cta_label }}
+          </button>
         </form>
-        {% else %}
-        <a href="{{ cta_url }}" class="bg-primary text-on-primary rounded-lg px-4 py-2 font-label-md text-label-md inline-block w-fit">{{ cta_label }}</a>
-        {% endif %}
+      {% else %}
+        <a href="{{ cta_url }}"
+           class="bg-primary text-on-primary rounded-lg px-4 py-2 font-label-md text-label-md inline-block w-fit">{{ cta_label }}</a>
+      {% endif %}
     </div>
-</div>
+  </div>
 {% endblock %}

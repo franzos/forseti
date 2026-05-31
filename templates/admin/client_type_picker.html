@@ -3,21 +3,25 @@
 {% block admin_title %}New client{% endblock %}
 
 {% block admin_content %}
-<div class="mb-stack-lg">
+  <div class="mb-stack-lg">
     <h1 class="font-headline-lg text-headline-lg text-on-surface">New OAuth2 client</h1>
-    <p class="font-body-md text-body-md text-on-surface-variant mt-1">Pick the application type. The next page is the same form, with the right defaults already filled in — so you can't accidentally land on a broken combination.</p>
-</div>
+    <p class="font-body-md text-body-md text-on-surface-variant mt-1">
+      Pick the application type. The next page is the same form, with the right defaults already filled in — so you can't accidentally land on a broken combination.
+    </p>
+  </div>
 
-<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-stack-md">
+  <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-stack-md">
     {% for opt in options %}
-    <a href="/admin/clients/new?type={{ opt.slug }}" class="block p-stack-md bg-surface-container-lowest border border-outline-variant rounded-2xl hover:border-primary hover:bg-surface-container-low transition-colors">
+      <a href="/admin/clients/new?type={{ opt.slug }}"
+         class="block p-stack-md bg-surface-container-lowest border border-outline-variant rounded-2xl hover:border-primary hover:bg-surface-container-low transition-colors">
         <h2 class="font-headline-sm text-headline-sm text-on-surface mb-2">{{ opt.label }}</h2>
         <p class="font-body-sm text-body-sm text-on-surface-variant">{{ opt.blurb }}</p>
-    </a>
+      </a>
     {% endfor %}
-</div>
+  </div>
 
-<div class="mt-stack-lg">
-    <a href="/admin/clients" class="font-label-md text-label-md text-on-surface-variant border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">Cancel</a>
-</div>
+  <div class="mt-stack-lg">
+    <a href="/admin/clients"
+       class="font-label-md text-label-md text-on-surface-variant border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">Cancel</a>
+  </div>
 {% endblock %}

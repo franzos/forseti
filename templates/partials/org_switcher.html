@@ -4,24 +4,37 @@
    entirely when the user has zero memberships (e.g. unauthenticated
    pages embedding the base layout). #}
 {% if nav.memberships.len() > 0 %}
-<details class="relative">
+  <details class="relative">
     <summary class="cursor-pointer list-none flex items-center gap-2 pb-4 px-1 font-label-md text-label-md text-on-secondary-fixed-variant hover:text-primary transition-colors">
-        <span class="font-bold">{% if let Some(name) = nav.active_name() %}{{ name }}{% endif %}</span>
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+      <span class="font-bold">
+        {% if let Some(name) = nav.active_name() %}{{ name }}{% endif %}
+      </span>
+      <svg width="14"
+           height="14"
+           viewBox="0 0 24 24"
+           fill="none"
+           stroke="currentColor"
+           stroke-width="2">
+        <polyline points="6 9 12 15 18 9" />
+      </svg>
     </summary>
     <div class="absolute right-0 top-12 z-50 min-w-56 bg-surface-container-lowest border border-outline-variant rounded-xl shadow-lg p-stack-sm flex flex-col gap-1">
-        <p class="font-label-sm text-label-sm text-on-surface-variant px-3 pt-2 uppercase tracking-widest">Switch organization</p>
-        {% for m in nav.memberships %}
+      <p class="font-label-sm text-label-sm text-on-surface-variant px-3 pt-2 uppercase tracking-widest">
+        Switch organization
+      </p>
+      {% for m in nav.memberships %}
         <form method="POST" action="/orgs/switch">
-            <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
-            <input type="hidden" name="org_id" value="{{ m.org_id }}">
-            <button type="submit" class="w-full text-left px-3 py-2 rounded-lg font-body-md hover:bg-surface-container-high {% if nav.active_slug() == Some(m.slug.as_str()) %}text-primary font-bold{% endif %}">
-                {{ m.name }} <span class="text-on-surface-variant font-label-sm">({{ m.role }})</span>
-            </button>
+          <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+          <input type="hidden" name="org_id" value="{{ m.org_id }}">
+          <button type="submit"
+                  class="w-full text-left px-3 py-2 rounded-lg font-body-md hover:bg-surface-container-high {% if nav.active_slug() == Some(m.slug.as_str()) %}text-primary font-bold{% endif %}">
+            {{ m.name }} <span class="text-on-surface-variant font-label-sm">({{ m.role }})</span>
+          </button>
         </form>
-        {% endfor %}
-        <hr class="border-outline-variant my-2">
-        <a href="/settings/organizations" class="px-3 py-2 rounded-lg font-label-md text-primary hover:bg-surface-container-high">Manage organizations &rarr;</a>
+      {% endfor %}
+      <hr class="border-outline-variant my-2">
+      <a href="/settings/organizations"
+         class="px-3 py-2 rounded-lg font-label-md text-primary hover:bg-surface-container-high">Manage organizations &rarr;</a>
     </div>
-</details>
+  </details>
 {% endif %}

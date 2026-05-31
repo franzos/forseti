@@ -1,79 +1,92 @@
 {% extends "base.html" %}
 
-{% block referrer_banner %}{% include "_referrer_banner.html" %}{% endblock %}
+{% block referrer_banner %}
+  {% include "_referrer_banner.html" %}
+{% endblock %}
 
 {% block title %}Settings &middot; {{ chrome.brand.name }}{% endblock %}
 
 {% block nav_settings_class %}text-primary font-bold border-b-2 border-primary{% endblock %}
 
 {% block content %}
-<div class="flex flex-col md:flex-row gap-stack-lg">
+  <div class="flex flex-col md:flex-row gap-stack-lg">
     {% let active = "hub" %}
     {% include "partials/settings_nav.html" %}
 
     <section class="flex-1">
-        <header class="mt-2 mb-stack-lg">
-            <h1 class="font-headline-lg-mobile md:font-headline-lg text-headline-lg-mobile md:text-headline-lg text-on-surface">Settings</h1>
-            <p class="font-body-md text-body-md text-on-surface-variant mt-1">Manage your account preferences, security settings, and active sessions.</p>
-        </header>
+      <header class="mt-2 mb-stack-lg">
+        <h1 class="font-headline-lg-mobile md:font-headline-lg text-headline-lg-mobile md:text-headline-lg text-on-surface">
+          Settings
+        </h1>
+        <p class="font-body-md text-body-md text-on-surface-variant mt-1">
+          Manage your account preferences, security settings, and active sessions.
+        </p>
+      </header>
 
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-gutter">
-            <a href="/settings/profile" class="group block bg-surface-container-lowest border border-outline-variant rounded-xl p-6 hover:ring-2 hover:ring-primary hover:ring-offset-2 transition-all flex flex-col justify-between">
-                <div>
-                    <h3 class="font-headline-md text-headline-md text-on-surface mb-stack-sm">Profile</h3>
-                    <p class="font-body-md text-body-md text-on-surface-variant">Update your email address and display name.</p>
-                </div>
-                <span class="font-label-md text-label-md text-primary mt-stack-md">Manage profile &rarr;</span>
-            </a>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-gutter">
+        <a href="/settings/profile"
+           class="group block bg-surface-container-lowest border border-outline-variant rounded-xl p-6 hover:ring-2 hover:ring-primary hover:ring-offset-2 transition-all flex flex-col justify-between">
+          <div>
+            <h3 class="font-headline-md text-headline-md text-on-surface mb-stack-sm">Profile</h3>
+            <p class="font-body-md text-body-md text-on-surface-variant">Update your email address and display name.</p>
+          </div>
+          <span class="font-label-md text-label-md text-primary mt-stack-md">Manage profile &rarr;</span>
+        </a>
 
-            <a href="/settings/password" class="group block bg-surface-container-lowest border border-outline-variant rounded-xl p-6 hover:ring-2 hover:ring-primary hover:ring-offset-2 transition-all flex flex-col justify-between">
-                <div>
-                    <h3 class="font-headline-md text-headline-md text-on-surface mb-stack-sm">Password</h3>
-                    <p class="font-body-md text-body-md text-on-surface-variant">Change your account password.</p>
-                </div>
-                <span class="font-label-md text-label-md text-primary mt-stack-md">Change password &rarr;</span>
-            </a>
+        <a href="/settings/password"
+           class="group block bg-surface-container-lowest border border-outline-variant rounded-xl p-6 hover:ring-2 hover:ring-primary hover:ring-offset-2 transition-all flex flex-col justify-between">
+          <div>
+            <h3 class="font-headline-md text-headline-md text-on-surface mb-stack-sm">Password</h3>
+            <p class="font-body-md text-body-md text-on-surface-variant">Change your account password.</p>
+          </div>
+          <span class="font-label-md text-label-md text-primary mt-stack-md">Change password &rarr;</span>
+        </a>
 
-            <a href="/settings/2fa" class="group block bg-surface-container-lowest border border-outline-variant rounded-xl p-6 hover:ring-2 hover:ring-primary hover:ring-offset-2 transition-all flex flex-col justify-between">
-                <div>
-                    <h3 class="font-headline-md text-headline-md text-on-surface mb-stack-sm">Two-factor auth</h3>
-                    <p class="font-body-md text-body-md text-on-surface-variant">Set up TOTP, recovery codes, and security keys.</p>
-                </div>
-                <span class="font-label-md text-label-md text-primary mt-stack-md">Manage 2FA &rarr;</span>
-            </a>
+        <a href="/settings/2fa"
+           class="group block bg-surface-container-lowest border border-outline-variant rounded-xl p-6 hover:ring-2 hover:ring-primary hover:ring-offset-2 transition-all flex flex-col justify-between">
+          <div>
+            <h3 class="font-headline-md text-headline-md text-on-surface mb-stack-sm">Two-factor auth</h3>
+            <p class="font-body-md text-body-md text-on-surface-variant">Set up TOTP, recovery codes, and security keys.</p>
+          </div>
+          <span class="font-label-md text-label-md text-primary mt-stack-md">Manage 2FA &rarr;</span>
+        </a>
 
-            <a href="/settings/sessions" class="group block bg-surface-container-lowest border border-outline-variant rounded-xl p-6 hover:ring-2 hover:ring-primary hover:ring-offset-2 transition-all flex flex-col justify-between">
-                <div>
-                    <h3 class="font-headline-md text-headline-md text-on-surface mb-stack-sm">Active sessions</h3>
-                    <p class="font-body-md text-body-md text-on-surface-variant">Review devices logged into your account.</p>
-                </div>
-                <span class="font-label-md text-label-md text-primary mt-stack-md">View sessions &rarr;</span>
-            </a>
+        <a href="/settings/sessions"
+           class="group block bg-surface-container-lowest border border-outline-variant rounded-xl p-6 hover:ring-2 hover:ring-primary hover:ring-offset-2 transition-all flex flex-col justify-between">
+          <div>
+            <h3 class="font-headline-md text-headline-md text-on-surface mb-stack-sm">Active sessions</h3>
+            <p class="font-body-md text-body-md text-on-surface-variant">Review devices logged into your account.</p>
+          </div>
+          <span class="font-label-md text-label-md text-primary mt-stack-md">View sessions &rarr;</span>
+        </a>
 
-            <a href="/settings/authorized-apps" class="group block bg-surface-container-lowest border border-outline-variant rounded-xl p-6 hover:ring-2 hover:ring-primary hover:ring-offset-2 transition-all flex flex-col justify-between">
-                <div>
-                    <h3 class="font-headline-md text-headline-md text-on-surface mb-stack-sm">Authorized apps</h3>
-                    <p class="font-body-md text-body-md text-on-surface-variant">Review and revoke OAuth apps you've granted access to.</p>
-                </div>
-                <span class="font-label-md text-label-md text-primary mt-stack-md">Manage apps &rarr;</span>
-            </a>
+        <a href="/settings/authorized-apps"
+           class="group block bg-surface-container-lowest border border-outline-variant rounded-xl p-6 hover:ring-2 hover:ring-primary hover:ring-offset-2 transition-all flex flex-col justify-between">
+          <div>
+            <h3 class="font-headline-md text-headline-md text-on-surface mb-stack-sm">Authorized apps</h3>
+            <p class="font-body-md text-body-md text-on-surface-variant">Review and revoke OAuth apps you've granted access to.</p>
+          </div>
+          <span class="font-label-md text-label-md text-primary mt-stack-md">Manage apps &rarr;</span>
+        </a>
 
-            <a href="/settings/linked-providers" class="group block bg-surface-container-lowest border border-outline-variant rounded-xl p-6 hover:ring-2 hover:ring-primary hover:ring-offset-2 transition-all flex flex-col justify-between">
-                <div>
-                    <h3 class="font-headline-md text-headline-md text-on-surface mb-stack-sm">Linked providers</h3>
-                    <p class="font-body-md text-body-md text-on-surface-variant">Connect or remove third-party sign-in providers.</p>
-                </div>
-                <span class="font-label-md text-label-md text-primary mt-stack-md">Manage providers &rarr;</span>
-            </a>
+        <a href="/settings/linked-providers"
+           class="group block bg-surface-container-lowest border border-outline-variant rounded-xl p-6 hover:ring-2 hover:ring-primary hover:ring-offset-2 transition-all flex flex-col justify-between">
+          <div>
+            <h3 class="font-headline-md text-headline-md text-on-surface mb-stack-sm">Linked providers</h3>
+            <p class="font-body-md text-body-md text-on-surface-variant">Connect or remove third-party sign-in providers.</p>
+          </div>
+          <span class="font-label-md text-label-md text-primary mt-stack-md">Manage providers &rarr;</span>
+        </a>
 
-            <a href="/settings/account" class="group block bg-surface-container-lowest border border-outline-variant rounded-xl p-6 hover:ring-2 hover:ring-error hover:ring-offset-2 transition-all flex flex-col justify-between">
-                <div>
-                    <h3 class="font-headline-md text-headline-md text-on-surface mb-stack-sm">Account</h3>
-                    <p class="font-body-md text-body-md text-on-surface-variant">Permanent changes — delete your account.</p>
-                </div>
-                <span class="font-label-md text-label-md text-error mt-stack-md">Danger zone &rarr;</span>
-            </a>
-        </div>
+        <a href="/settings/account"
+           class="group block bg-surface-container-lowest border border-outline-variant rounded-xl p-6 hover:ring-2 hover:ring-error hover:ring-offset-2 transition-all flex flex-col justify-between">
+          <div>
+            <h3 class="font-headline-md text-headline-md text-on-surface mb-stack-sm">Account</h3>
+            <p class="font-body-md text-body-md text-on-surface-variant">Permanent changes — delete your account.</p>
+          </div>
+          <span class="font-label-md text-label-md text-error mt-stack-md">Danger zone &rarr;</span>
+        </a>
+      </div>
     </section>
-</div>
+  </div>
 {% endblock %}

@@ -3,67 +3,91 @@
 {% block admin_title %}DCR initial access tokens{% endblock %}
 
 {% block admin_content %}
-<div class="flex items-center justify-between mt-2 mb-stack-lg">
+  <div class="flex items-center justify-between mt-2 mb-stack-lg">
     <div>
-        <h1 class="font-headline-lg-mobile md:font-headline-lg text-headline-lg-mobile md:text-headline-lg text-on-surface">DCR initial access tokens</h1>
-        <p class="font-body-md text-body-md text-on-surface-variant mt-1">Bearer tokens that authorize <code class="font-mono">POST /oauth2/register</code>. Hand one to an MCP-client author so they can self-register without you doing it manually.</p>
+      <h1 class="font-headline-lg-mobile md:font-headline-lg text-headline-lg-mobile md:text-headline-lg text-on-surface">
+        DCR initial access tokens
+      </h1>
+      <p class="font-body-md text-body-md text-on-surface-variant mt-1">
+        Bearer tokens that authorize <code class="font-mono">POST /oauth2/register</code>. Hand one to an MCP-client author so they can self-register without you doing it manually.
+      </p>
     </div>
-    <a href="/admin/dcr-tokens/new" class="bg-primary text-on-primary font-label-md text-label-md font-bold px-4 py-2 rounded-lg hover:opacity-90 transition-opacity">Issue token</a>
-</div>
+    <a href="/admin/dcr-tokens/new"
+       class="bg-primary text-on-primary font-label-md text-label-md font-bold px-4 py-2 rounded-lg hover:opacity-90 transition-opacity">Issue token</a>
+  </div>
 
-{% match revealed_token %}
-{% when Some with (tok) %}
-<div class="bg-tertiary-container border border-tertiary rounded-xl p-4 mb-stack-lg">
-    <p class="font-label-md text-label-md text-on-tertiary-container font-bold mb-stack-sm">Initial access token (shown once)</p>
+  {% match revealed_token %}
+  {% when Some with (tok) %}
+  <div class="bg-tertiary-container border border-tertiary rounded-xl p-4 mb-stack-lg">
+    <p class="font-label-md text-label-md text-on-tertiary-container font-bold mb-stack-sm">
+      Initial access token (shown once)
+    </p>
     <pre class="font-mono text-sm bg-surface-container-lowest rounded-lg p-3 break-all">{{ tok }}</pre>
-    <p class="font-body-sm text-body-sm text-on-tertiary-container mt-stack-sm">Share this with the client author. They send it as <code class="font-mono">Authorization: Bearer &lt;token&gt;</code> when calling <code class="font-mono">POST /oauth2/register</code>. We don't store the raw value — only its SHA-256.</p>
-</div>
-{% when None %}{% endmatch %}
+    <p class="font-body-sm text-body-sm text-on-tertiary-container mt-stack-sm">
+      Share this with the client author. They send it as <code class="font-mono">Authorization: Bearer &lt;token&gt;</code> when calling <code class="font-mono">POST /oauth2/register</code>. We don't store the raw value — only its SHA-256.
+    </p>
+  </div>
+  {% when None %}{% endmatch %}
 
-<div class="bg-surface-container-lowest border border-outline-variant rounded-xl overflow-x-auto">
+  <div class="bg-surface-container-lowest border border-outline-variant rounded-xl overflow-x-auto">
     <table class="w-full text-left">
-        <thead class="bg-surface-container-low">
-            <tr>
-                <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Status</th>
-                <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Note</th>
-                <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Created by</th>
-                <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Created</th>
-                <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Expires</th>
-                <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Uses left</th>
-                <th class="px-4 py-3"></th>
-            </tr>
-        </thead>
-        <tbody>
-            {% if rows.is_empty() %}
-            <tr><td colspan="7" class="px-4 py-6 text-center font-body-md text-body-md text-on-surface-variant">No tokens issued. <a href="/admin/dcr-tokens/new" class="text-primary hover:underline">Issue one</a> to enable self-registration.</td></tr>
-            {% else %}
-            {% for r in rows %}
+      <thead class="bg-surface-container-low">
+        <tr>
+          <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Status</th>
+          <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Note</th>
+          <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Created by</th>
+          <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Created</th>
+          <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Expires</th>
+          <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Uses left</th>
+          <th class="px-4 py-3"></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% if rows.is_empty() %}
+          <tr>
+            <td colspan="7"
+                class="px-4 py-6 text-center font-body-md text-body-md text-on-surface-variant">
+              No tokens issued. <a href="/admin/dcr-tokens/new" class="text-primary hover:underline">Issue one</a> to enable self-registration.
+            </td>
+          </tr>
+        {% else %}
+          {% for r in rows %}
             <tr class="border-t border-outline-variant">
-                <td class="px-4 py-3 font-body-sm text-body-sm">
-                    {% if r.status == "active" %}
-                    <span class="font-label-sm text-label-sm bg-tertiary-fixed text-on-tertiary-fixed px-2 py-0.5 rounded-full font-semibold">Active</span>
-                    {% else if r.status == "revoked" %}
-                    <span class="font-label-sm text-label-sm bg-error-container text-on-error-container px-2 py-0.5 rounded-full font-semibold">Revoked</span>
-                    {% else if r.status == "expired" %}
-                    <span class="font-label-sm text-label-sm bg-surface-container-high text-on-surface-variant px-2 py-0.5 rounded-full font-semibold">Expired</span>
-                    {% else %}
-                    <span class="font-label-sm text-label-sm bg-surface-container-high text-on-surface-variant px-2 py-0.5 rounded-full font-semibold">Exhausted</span>
-                    {% endif %}
-                </td>
-                <td class="px-4 py-3 font-body-md text-body-md text-on-surface" title="{{ r.id }}">{% if r.note.is_empty() %}<span class="text-on-surface-variant italic">—</span>{% else %}{{ r.note }}{% endif %}</td>
-                <td class="px-4 py-3 font-body-sm text-body-sm text-on-surface-variant">{{ r.created_by }}</td>
-                <td class="px-4 py-3 font-body-sm text-body-sm text-on-surface-variant" title="{{ r.created_at }}">{{ r.created_at_pretty }}</td>
-                <td class="px-4 py-3 font-body-sm text-body-sm text-on-surface-variant" title="{{ r.expires_at }}">{{ r.expires_at_pretty }}</td>
-                <td class="px-4 py-3 font-body-sm text-body-sm text-on-surface-variant font-mono">{{ r.uses_remaining }}</td>
-                <td class="px-4 py-3 text-right">
-                    {% if r.status == "active" %}
-                    <a href="/admin/dcr-tokens/{{ r.id }}/revoke" class="font-label-sm text-label-sm text-error border border-error rounded-lg px-3 py-1 hover:bg-error-container hover:text-on-error-container transition-colors">Revoke</a>
-                    {% endif %}
-                </td>
+              <td class="px-4 py-3 font-body-sm text-body-sm">
+                {% if r.status == "active" %}
+                  <span class="font-label-sm text-label-sm bg-tertiary-fixed text-on-tertiary-fixed px-2 py-0.5 rounded-full font-semibold">Active</span>
+                {% else if r.status == "revoked" %}
+                  <span class="font-label-sm text-label-sm bg-error-container text-on-error-container px-2 py-0.5 rounded-full font-semibold">Revoked</span>
+                {% else if r.status == "expired" %}
+                  <span class="font-label-sm text-label-sm bg-surface-container-high text-on-surface-variant px-2 py-0.5 rounded-full font-semibold">Expired</span>
+                {% else %}
+                  <span class="font-label-sm text-label-sm bg-surface-container-high text-on-surface-variant px-2 py-0.5 rounded-full font-semibold">Exhausted</span>
+                {% endif %}
+              </td>
+              <td class="px-4 py-3 font-body-md text-body-md text-on-surface"
+                  title="{{ r.id }}">
+                {% if r.note.is_empty() %}
+                  <span class="text-on-surface-variant italic">—</span>
+                {% else %}
+                  {{ r.note }}
+                {% endif %}
+              </td>
+              <td class="px-4 py-3 font-body-sm text-body-sm text-on-surface-variant">{{ r.created_by }}</td>
+              <td class="px-4 py-3 font-body-sm text-body-sm text-on-surface-variant"
+                  title="{{ r.created_at }}">{{ r.created_at_pretty }}</td>
+              <td class="px-4 py-3 font-body-sm text-body-sm text-on-surface-variant"
+                  title="{{ r.expires_at }}">{{ r.expires_at_pretty }}</td>
+              <td class="px-4 py-3 font-body-sm text-body-sm text-on-surface-variant font-mono">{{ r.uses_remaining }}</td>
+              <td class="px-4 py-3 text-right">
+                {% if r.status == "active" %}
+                  <a href="/admin/dcr-tokens/{{ r.id }}/revoke"
+                     class="font-label-sm text-label-sm text-error border border-error rounded-lg px-3 py-1 hover:bg-error-container hover:text-on-error-container transition-colors">Revoke</a>
+                {% endif %}
+              </td>
             </tr>
-            {% endfor %}
-            {% endif %}
-        </tbody>
+          {% endfor %}
+        {% endif %}
+      </tbody>
     </table>
-</div>
+  </div>
 {% endblock %}
