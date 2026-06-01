@@ -17,7 +17,7 @@ jobs:
     name: check + clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -27,11 +27,24 @@ jobs:
       # `cargo fmt --check` step once a one-time `cargo fmt` pass has landed.
       - run: make check
 
+  audit:
+    name: cargo-deny advisories
+    runs-on: ubuntu-latest
+    # Warn, don't block: advisories surface as PR annotations + in the log, but
+    # an unfixed transitive CVE never stalls an unrelated PR. The GitHub Security
+    # tab / Dependabot drive remediation. Flip this off to make CVEs gate merges.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories
+
   integration:
     name: rust integration
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
@@ -84,7 +97,7 @@ jobs:
     name: playwright (unlicensed)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
@@ -120,7 +133,7 @@ jobs:
 
       - name: Upload Playwright report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: playwright-report
           path: tests/e2e/playwright-report/

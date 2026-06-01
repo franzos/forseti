@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # --- CSS stage: build static/styles.css with the Tailwind v4 standalone CLI.
-FROM debian:bookworm-slim AS css
+FROM debian:trixie-slim AS css
 WORKDIR /src
 ARG TAILWIND_VERSION=v4.1.16
 RUN apt-get update \
@@ -18,7 +18,7 @@ RUN tailwindcss -i assets/input.css -o /styles.css --minify
 # Debian (glibc), not alpine/musl: pq-sys links dynamically against libpq and
 # libsqlite3-sys compiles bundled C, both of which are painful to static-link
 # under musl. reqwest/lettre use rustls, so no OpenSSL is needed.
-FROM rust:1-bookworm AS build
+FROM rust:1-trixie AS build
 RUN apt-get update \
     && apt-get install -y --no-install-recommends libpq-dev pkg-config \
     && rm -rf /var/lib/apt/lists/*
@@ -30,7 +30,7 @@ COPY migrations ./migrations
 RUN cargo build --release --locked
 
 # --- Runtime image.
-FROM debian:bookworm-slim AS runtime
+FROM debian:trixie-slim AS runtime
 RUN apt-get update \
     && apt-get install -y --no-install-recommends libpq5 ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
