@@ -54,6 +54,8 @@ pub enum SecretReveal {
     ClientCreated {
         secret: String,
         registration_access_token: String,
+        #[serde(default)]
+        setup_note: String,
     },
     /// `/admin/clients/{id}/rotate-secret` — fresh client secret.
     ClientSecretRotated { secret: String },

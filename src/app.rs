@@ -135,6 +135,7 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         signing_key,
         license,
         cookie_secret,
+        discovery: crate::state::DiscoveryCache::default(),
     };
 
     // Forseti-owned routes that render CSRF-protected forms or handle

@@ -16,6 +16,20 @@ pub(crate) mod login;
 pub(crate) mod logout;
 pub(crate) mod register;
 
+/// Consent-screen descriptions for the standard OIDC scopes, used when the
+/// operator hasn't supplied one in `[oauth.scope_descriptions]`.
+pub(crate) fn default_scope_description(scope: &str) -> Option<&'static str> {
+    Some(match scope {
+        "openid" => "Confirm your identity",
+        "profile" => "Your basic profile (name, picture, locale)",
+        "email" => "Your email address",
+        "offline_access" => "Stay signed in when you're not actively using the app",
+        "address" => "Your postal address",
+        "phone" => "Your phone number",
+        _ => return None,
+    })
+}
+
 /// Per-IP rate-limit defaults applied to `POST /oauth2/register` when
 /// the operator hasn't overridden via config. 10/min + 100/hour is the
 /// belt-and-suspenders pairing against credential-stuffing and slow-drip
@@ -85,4 +99,31 @@ fn register_router(oauth_cfg: &OAuthConfig, proxy_cfg: &ProxyConfig) -> Router<A
         per_hour,
         register::rate_limit_error_response,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::default_scope_description;
+
+    #[test]
+    fn default_scope_description_covers_standard_scopes() {
+        for scope in [
+            "openid",
+            "profile",
+            "email",
+            "offline_access",
+            "address",
+            "phone",
+        ] {
+            assert!(
+                default_scope_description(scope).is_some(),
+                "expected built-in description for {scope}"
+            );
+        }
+    }
+
+    #[test]
+    fn default_scope_description_none_for_custom() {
+        assert!(default_scope_description("custom:thing").is_none());
+    }
 }

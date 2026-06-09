@@ -19,7 +19,7 @@
       {% else if row.severity == "error" %}
         <span class="inline-block px-3 py-1 rounded-full bg-error-container/60 text-on-error-container font-label-md text-label-md font-bold">error</span>
       {% else if row.severity == "warning" %}
-        <span class="inline-block px-3 py-1 rounded-full bg-tertiary-container text-on-tertiary-container font-label-md text-label-md font-bold">warning</span>
+        <span class="inline-block px-3 py-1 rounded-full bg-warning-container text-on-warning-container font-label-md text-label-md font-bold">warning</span>
       {% else %}
         <span class="inline-block px-3 py-1 rounded-full bg-surface-container-high text-on-surface-variant font-label-md text-label-md">{{ row.severity }}</span>
       {% endif %}

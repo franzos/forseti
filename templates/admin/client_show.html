@@ -8,7 +8,7 @@
       <div class="flex items-center gap-stack-sm flex-wrap">
         <h1 class="font-headline-lg text-headline-lg text-on-surface">{{ row.name }}</h1>
         {% if row.verified %}
-          <span class="font-label-sm text-label-sm bg-tertiary-container text-on-tertiary-container px-2.5 py-0.5 rounded-full font-semibold inline-flex items-center gap-1"
+          <span class="font-label-sm text-label-sm bg-success-container text-on-success-container px-2.5 py-0.5 rounded-full font-semibold inline-flex items-center gap-1"
                 {% if !row.verified_by.is_empty() %}title="Verified by {{ row.verified_by }}{% if !row.verified_at.is_empty() %} at {{ row.verified_at }}{% endif %}
                 "
                 {% endif %}>
@@ -67,18 +67,30 @@
   {% match secret_revealed %}
   {% when Some with (secret) %}
   <div class="bg-tertiary-container border border-tertiary rounded-xl p-4 mb-stack-lg">
-    <p class="font-label-md text-label-md text-on-tertiary-container font-bold mb-stack-sm">Client secret (shown once)</p>
+    <p class="font-label-md text-label-md text-on-tertiary-container font-bold mb-stack-sm">Credentials — shown once</p>
+    <p class="font-body-sm text-body-sm text-on-tertiary-container mb-stack-md">
+      Copy these now. They won't be shown again; reload to dismiss. The client ID
+      and endpoints above are not secret and stay visible.
+    </p>
+    {% if !setup_note.is_empty() %}
+      <div class="bg-error-container border border-error rounded-lg px-3 py-2 mb-stack-md">
+        <p class="font-body-sm text-body-sm text-on-error-container">{{ setup_note }}</p>
+      </div>
+    {% endif %}
+    <p class="font-label-sm text-label-sm text-on-tertiary-container font-semibold mb-1">Client secret</p>
     <pre class="font-mono text-sm bg-surface-container-lowest rounded-lg p-3 break-all">{{ secret }}</pre>
     {% match registration_access_token %}
     {% when Some with (rat) %}
-    <p class="font-label-md text-label-md text-on-tertiary-container font-bold mt-stack-md mb-stack-sm">
+    <p class="font-label-sm text-label-sm text-on-tertiary-container font-semibold mt-stack-md mb-1">
       Registration access token
     </p>
     <pre class="font-mono text-sm bg-surface-container-lowest rounded-lg p-3 break-all">{{ rat }}</pre>
-    {% when None %}{% endmatch %}
     <p class="font-body-sm text-body-sm text-on-tertiary-container mt-stack-sm">
-      Copy these now — they won't be shown again. Reload the page to dismiss this banner.
+      Per RFC 7592 — lets the client manage its own registration (read/update/delete)
+      via Hydra's dynamic-client-registration API. It cannot be re-issued, so if in
+      doubt, store it.
     </p>
+    {% when None %}{% endmatch %}
   </div>
   {% when None %}{% endmatch %}
 
@@ -89,10 +101,100 @@
         These scopes are registered on this client but have no entry under <code class="font-mono">[oauth.scope_descriptions]</code> in <code class="font-mono">config.toml</code>. The consent screen falls back to the raw scope name for them.
       </p>
       <ul class="list-disc list-inside font-mono text-sm text-on-tertiary-container mt-stack-sm">
-        {% for s in missing_scope_descriptions %}<li>{{ s }}</li>{% endfor %}
+        {% for s in missing_scope_descriptions %}
+          <li>{{ s }}</li>
+        {% endfor %}
       </ul>
     </div>
   {% endif %}
+
+  <section class="mb-stack-lg">
+    <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest">
+      Connection details
+    </h2>
+    <p class="font-body-sm text-body-sm text-on-surface-variant mb-stack-md">
+      Paste these into the OIDC/OAuth client configuration on the app's side.
+      {% if !discovery_ok %}
+        <span class="text-error">Couldn't reach Hydra's discovery endpoint, so the issuer and endpoints are hidden to avoid showing a wrong value — fetch them yourself from <code class="font-mono">&lt;hydra-public-url&gt;/.well-known/openid-configuration</code>.</span>
+      {% endif %}
+    </p>
+    <dl class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4 grid grid-cols-1 gap-4">
+      <div>
+        <dt class="font-label-sm text-label-sm text-on-surface-variant">Client ID</dt>
+        <dd class="font-body-md text-body-md text-on-surface mt-1 font-mono break-all">
+          {{ row.id }}
+        </dd>
+      </div>
+      {% if !conn.issuer.is_empty() %}
+        <div>
+          <dt class="font-label-sm text-label-sm text-on-surface-variant">Issuer</dt>
+          <dd class="font-body-md text-body-md text-on-surface mt-1 font-mono break-all">
+            {{ conn.issuer }}
+          </dd>
+        </div>
+      {% endif %}
+      {% if !conn.discovery_url.is_empty() %}
+        <div>
+          <dt class="font-label-sm text-label-sm text-on-surface-variant">Discovery URL</dt>
+          <dd class="font-body-md text-body-md text-on-surface mt-1 font-mono break-all">
+            {{ conn.discovery_url }}
+          </dd>
+        </div>
+      {% endif %}
+      {% if !conn.authorization_endpoint.is_empty() %}
+        <div>
+          <dt class="font-label-sm text-label-sm text-on-surface-variant">Authorization endpoint</dt>
+          <dd class="font-body-md text-body-md text-on-surface mt-1 font-mono break-all">
+            {{ conn.authorization_endpoint }}
+          </dd>
+        </div>
+      {% endif %}
+      {% if !conn.token_endpoint.is_empty() %}
+        <div>
+          <dt class="font-label-sm text-label-sm text-on-surface-variant">Token endpoint</dt>
+          <dd class="font-body-md text-body-md text-on-surface mt-1 font-mono break-all">
+            {{ conn.token_endpoint }}
+          </dd>
+        </div>
+      {% endif %}
+      {% if !conn.userinfo_endpoint.is_empty() %}
+        <div>
+          <dt class="font-label-sm text-label-sm text-on-surface-variant">Userinfo endpoint</dt>
+          <dd class="font-body-md text-body-md text-on-surface mt-1 font-mono break-all">
+            {{ conn.userinfo_endpoint }}
+          </dd>
+        </div>
+      {% endif %}
+      {% if !conn.jwks_uri.is_empty() %}
+        <div>
+          <dt class="font-label-sm text-label-sm text-on-surface-variant">JWKS URI</dt>
+          <dd class="font-body-md text-body-md text-on-surface mt-1 font-mono break-all">
+            {{ conn.jwks_uri }}
+          </dd>
+        </div>
+      {% endif %}
+      {% if !conn.end_session_endpoint.is_empty() %}
+        <div>
+          <dt class="font-label-sm text-label-sm text-on-surface-variant">End-session endpoint</dt>
+          <dd class="font-body-md text-body-md text-on-surface mt-1 font-mono break-all">
+            {{ conn.end_session_endpoint }}
+          </dd>
+        </div>
+      {% endif %}
+      <div>
+        <dt class="font-label-sm text-label-sm text-on-surface-variant">Token endpoint auth method</dt>
+        <dd class="font-body-md text-body-md text-on-surface mt-1 font-mono break-all">
+          {{ token_endpoint_auth_method }}
+        </dd>
+      </div>
+      <div>
+        <dt class="font-label-sm text-label-sm text-on-surface-variant">Scope</dt>
+        <dd class="font-body-md text-body-md text-on-surface mt-1 font-mono break-all">
+          {{ scope }}
+        </dd>
+      </div>
+    </dl>
+  </section>
 
   <section class="mb-stack-lg">
     <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest">

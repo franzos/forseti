@@ -20,6 +20,24 @@
     {% endfor %}
   </div>
 
+  {% if !app_cards.is_empty() %}
+    <div class="mt-stack-xl">
+      <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest">Popular apps</h2>
+      <p class="font-body-sm text-body-sm text-on-surface-variant mb-stack-md">
+        Pre-filled for a known app. URLs use <code class="font-mono">YOUR_DOMAIN</code> (and sometimes <code class="font-mono">PROVIDER_NAME</code>) placeholders — replace them with your app's values after landing on the form.
+      </p>
+      <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-stack-md">
+        {% for app in app_cards %}
+          <a href="/admin/clients/new?template={{ app.slug }}"
+             class="flex items-center gap-stack-sm p-stack-md bg-surface-container-lowest border border-outline-variant rounded-2xl hover:border-primary hover:bg-surface-container-low transition-colors">
+            <span class="flex items-center justify-center w-10 h-10 rounded-xl bg-surface-container-high text-on-surface font-headline-sm text-headline-sm shrink-0">{{ app.initial }}</span>
+            <span class="font-label-lg text-label-lg text-on-surface">{{ app.label }}</span>
+          </a>
+        {% endfor %}
+      </div>
+    </div>
+  {% endif %}
+
   <div class="mt-stack-lg">
     <a href="/admin/clients"
        class="font-label-md text-label-md text-on-surface-variant border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">Cancel</a>

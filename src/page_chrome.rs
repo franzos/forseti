@@ -30,24 +30,35 @@ pub(crate) struct PageChrome {
     /// in `base.html` won't render usefully without it, but it stays
     /// hidden anyway when `user_email` is empty.
     pub(crate) csrf_token: String,
+    /// True when `user_email` is in `[admin].allowed_emails`. Drives the
+    /// "Admin" top-nav link in `base.html`.
+    pub(crate) is_admin: bool,
 }
 
 impl PageChrome {
     /// Build from pre-extracted parts. `user_email` is the empty string
     /// for anonymous / error pages; `csrf_token` is the empty string
-    /// outside CSRF middleware.
+    /// outside CSRF middleware. `is_admin` is derived from the operator
+    /// allowlist, so anonymous pages (empty email) never get the flag.
     pub(crate) fn from_parts(state: &AppState, user_email: String, csrf_token: String) -> Self {
-        Self::from_brand(state.cfg.brand.clone(), user_email, csrf_token)
+        let is_admin = state.cfg.admin.is_admin(&user_email);
+        Self::from_brand_with_admin(state.cfg.brand.clone(), user_email, csrf_token, is_admin)
     }
 
-    /// Assemble from an already-snapshotted brand. The single place the
-    /// `{ brand, version, user_email, csrf_token }` literal is built.
-    pub(crate) fn from_brand(brand: BrandConfig, user_email: String, csrf_token: String) -> Self {
+    /// Assemble from an already-snapshotted brand plus an explicit admin
+    /// verdict. The single place the chrome literal is built.
+    pub(crate) fn from_brand_with_admin(
+        brand: BrandConfig,
+        user_email: String,
+        csrf_token: String,
+        is_admin: bool,
+    ) -> Self {
         Self {
             brand,
             version: FORSETI_VERSION,
             user_email,
             csrf_token,
+            is_admin,
         }
     }
 }

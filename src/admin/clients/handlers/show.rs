@@ -26,6 +26,41 @@ use crate::admin::clients::projection::{
 };
 use crate::admin::clients::scope::RequireClientInScope;
 
+/// Provider-wide OIDC endpoints shown on the "Connection details" card.
+/// An empty doc (cold discovery failure) yields all-empty fields, which the
+/// template hides per-row — so a failed fetch never shows a wrong issuer.
+#[derive(Default)]
+struct ConnectionDetails {
+    issuer: String,
+    discovery_url: String,
+    authorization_endpoint: String,
+    token_endpoint: String,
+    userinfo_endpoint: String,
+    jwks_uri: String,
+    end_session_endpoint: String,
+}
+
+impl ConnectionDetails {
+    fn from_discovery(d: crate::ory::discovery::OidcDiscovery) -> Self {
+        Self {
+            discovery_url: if d.issuer.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "{}/.well-known/openid-configuration",
+                    d.issuer.trim_end_matches('/')
+                )
+            },
+            issuer: d.issuer,
+            authorization_endpoint: d.authorization_endpoint,
+            token_endpoint: d.token_endpoint,
+            userinfo_endpoint: d.userinfo_endpoint,
+            jwks_uri: d.jwks_uri,
+            end_session_endpoint: d.end_session_endpoint,
+        }
+    }
+}
+
 #[derive(askama::Template)]
 #[template(path = "admin/client_show.html")]
 struct ClientShowTemplate {
@@ -64,6 +99,9 @@ struct ClientShowTemplate {
     /// Hydra returns it in the response body of create/patch).
     secret_revealed: Option<String>,
     registration_access_token: Option<String>,
+    /// Required post-create step from the app template (audience step etc.).
+    /// Empty for non-template or note-less creations.
+    setup_note: String,
     /// One-shot informational banner (e.g. "Client verified.") set by a
     /// redirect from the verify / unverify handler. Empty when no flash
     /// is pending.
@@ -77,6 +115,12 @@ struct ClientShowTemplate {
     /// `resource=` URL (or fallback audience) seen at consent time.
     /// Empty when never captured.
     provenance_resource_url: String,
+    /// Provider endpoints for the integrator-facing connection card.
+    conn: ConnectionDetails,
+    /// False only on a cold discovery failure (no cached doc) → the card
+    /// hides the endpoints and shows the "couldn't reach Hydra" note. A
+    /// stale-but-cached doc still counts as true (the values stay valid).
+    discovery_ok: bool,
 }
 
 impl ClientShowTemplate {
@@ -144,6 +188,7 @@ pub async fn show(
     );
 
     let chrome = ctx.chrome(&csrf);
+    let (disc, discovery_ok) = state.openid_configuration().await;
     let tpl = build_show_view(
         client,
         meta,
@@ -151,6 +196,8 @@ pub async fn show(
         &state.cfg.oauth.scope_descriptions,
         chrome,
         flash_msg,
+        disc,
+        discovery_ok,
     );
     let resp = render(&tpl);
     attach_set_cookie(resp, clear_flash)
@@ -158,6 +205,9 @@ pub async fn show(
 
 /// Pure projection from Hydra client + Forseti metadata row + reveal flash
 /// into the show-page view-model. No DB / no cookies / no AppState.
+// Flat arg list keeps this a pure, easily-tested projection — a params
+// struct would only exist to dodge the lint.
+#[allow(clippy::too_many_arguments)]
 fn build_show_view(
     client: ory_client::models::OAuth2Client,
     meta: Option<oauth_client_metadata::Row>,
@@ -165,6 +215,8 @@ fn build_show_view(
     scope_descriptions: &std::collections::HashMap<String, String>,
     chrome: PageChrome,
     flash_msg: String,
+    discovery: crate::ory::discovery::OidcDiscovery,
+    discovery_ok: bool,
 ) -> ClientShowTemplate {
     // Provenance fields surfaced under the configuration block. Lifted
     // off the Forseti-owned `oauth_client_metadata` row before we hand
@@ -206,7 +258,11 @@ fn build_show_view(
     // screen. Sorted + deduped for stable rendering.
     let mut missing_scope_descriptions: Vec<String> = scope_str
         .split_whitespace()
-        .filter(|s| !s.is_empty() && !scope_descriptions.contains_key(*s))
+        .filter(|s| {
+            !s.is_empty()
+                && !scope_descriptions.contains_key(*s)
+                && crate::oauth::default_scope_description(s).is_none()
+        })
         .map(str::to_string)
         .collect();
     missing_scope_descriptions.sort();
@@ -215,18 +271,20 @@ fn build_show_view(
     // Same `?reveal=` channel is used by create + rotate-secret. Pattern-
     // match on the variant so the template only sees the field(s)
     // relevant to the flow that minted the reveal.
-    let (secret_revealed, registration_access_token) = match reveal {
+    let (secret_revealed, registration_access_token, setup_note) = match reveal {
         Some(SecretReveal::ClientCreated {
             secret,
             registration_access_token,
+            setup_note,
         }) => (
             Some(secret).filter(|s| !s.is_empty()),
             Some(registration_access_token).filter(|s| !s.is_empty()),
+            setup_note,
         ),
         Some(SecretReveal::ClientSecretRotated { secret }) => {
-            (Some(secret).filter(|s| !s.is_empty()), None)
+            (Some(secret).filter(|s| !s.is_empty()), None, String::new())
         }
-        _ => (None, None),
+        _ => (None, None, String::new()),
     };
 
     let account_deletion_url = client
@@ -237,6 +295,8 @@ fn build_show_view(
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .to_string();
+
+    let conn = ConnectionDetails::from_discovery(discovery);
 
     ClientShowTemplate {
         chrome,
@@ -258,9 +318,12 @@ fn build_show_view(
         missing_scope_descriptions,
         secret_revealed,
         registration_access_token,
+        setup_note,
         flash: flash_msg,
         provenance_audience,
         provenance_resource_url,
+        conn,
+        discovery_ok,
     }
 }
 
@@ -326,5 +389,41 @@ pub async fn update(
                 &format!("Could not update client: {e}"),
             )
         }
+    }
+}
+
+#[cfg(test)]
+mod connection_tests {
+    use super::*;
+    use crate::ory::discovery::OidcDiscovery;
+
+    #[test]
+    fn from_discovery_populates_endpoints_and_derives_discovery_url() {
+        let disc = OidcDiscovery {
+            issuer: "https://auth.example.com".to_string(),
+            authorization_endpoint: "https://auth.example.com/oauth2/auth".to_string(),
+            token_endpoint: "https://auth.example.com/oauth2/token".to_string(),
+            userinfo_endpoint: "https://auth.example.com/userinfo".to_string(),
+            jwks_uri: "https://auth.example.com/.well-known/jwks.json".to_string(),
+            end_session_endpoint: "https://auth.example.com/oauth2/sessions/logout".to_string(),
+            ..Default::default()
+        };
+        let conn = ConnectionDetails::from_discovery(disc);
+        assert_eq!(conn.issuer, "https://auth.example.com");
+        assert_eq!(conn.token_endpoint, "https://auth.example.com/oauth2/token");
+        assert_eq!(
+            conn.discovery_url,
+            "https://auth.example.com/.well-known/openid-configuration"
+        );
+    }
+
+    #[test]
+    fn from_discovery_empty_doc_yields_all_empty_so_rows_hide() {
+        // Cold-failure fallback: empty doc → every endpoint blank → the
+        // template's per-row `{% if !conn.x.is_empty() %}` guards hide them.
+        let conn = ConnectionDetails::from_discovery(OidcDiscovery::default());
+        assert!(conn.issuer.is_empty());
+        assert!(conn.discovery_url.is_empty());
+        assert!(conn.token_endpoint.is_empty());
     }
 }

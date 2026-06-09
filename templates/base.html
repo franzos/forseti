@@ -3,9 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>
-      {% block title %}{{ chrome.brand.name }}{% endblock %}
-    </title>
+    <title>{% block title %}{{ chrome.brand.name }}{% endblock %}</title>
     {# Fonts (Bunny Fonts — privacy-friendly Google Fonts drop-in; self-host for prod). #}
     <link rel="preconnect" href="https://fonts.bunny.net" crossorigin>
     <link rel="stylesheet"
@@ -35,6 +33,10 @@
              class="{% block nav_dashboard_class %}text-on-secondary-fixed-variant hover:text-primary{% endblock %} transition-colors pb-4 px-1 font-label-md text-label-md">Dashboard</a>
           <a href="/settings"
              class="{% block nav_settings_class %}text-on-secondary-fixed-variant hover:text-primary{% endblock %} transition-colors pb-4 px-1 font-label-md text-label-md">Settings</a>
+          {% if chrome.is_admin %}
+            <a href="/admin"
+               class="{% block nav_admin_class %}text-on-secondary-fixed-variant hover:text-primary{% endblock %} transition-colors pb-4 px-1 font-label-md text-label-md">Admin</a>
+          {% endif %}
           {% block org_nav %}{% endblock %}
         </nav>
         <div class="flex items-center gap-stack-lg">

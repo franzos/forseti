@@ -1349,10 +1349,10 @@ fn extract_input_value(html: &str, name: &str) -> Option<String> {
 }
 
 /// Pull the revealed client secret out of a /admin/clients/{id}?reveal=...
-/// page. The template renders it inside a `<code>` element; the marker
-/// before it is "Client secret (shown once)".
+/// page. The template renders it inside a `<pre>` element; the marker
+/// before it is the "Client secret" label in the reveal banner.
 fn extract_revealed_secret(html: &str) -> Option<String> {
-    let marker = "Client secret (shown once)";
+    let marker = "Client secret";
     let idx = html.find(marker)?;
     let after = &html[idx..];
     // The template renders the revealed secret in a `<pre>` block (see

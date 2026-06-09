@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- App templates on the new-client page — a "Popular apps" group pre-fills the form for ~23 known apps (GitLab, Nextcloud, Grafana, …) with their redirect URIs, scope, and auth settings
+- Connection-details card on the client detail page showing the issuer, OIDC endpoints, and a labelled client ID to paste into the app
+- Labelled one-shot secret reveal after client creation, with a short explainer for the RFC 7592 registration access token
+
 ## [0.1.2] - 2026-06-01
 
 ### Added

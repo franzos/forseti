@@ -32,6 +32,12 @@
     {% endif %}
   </div>
 
+  {% if !template_note.is_empty() %}
+    <div class="bg-secondary-container border border-secondary rounded-xl px-4 py-3 mb-stack-md">
+      <p class="font-body-sm text-body-sm text-on-secondary-container">{{ template_note }}</p>
+    </div>
+  {% endif %}
+
   {% if !error_message.is_empty() %}
     <div class="bg-error-container border border-error rounded-xl p-4 mb-stack-md">
       <p class="font-body-md text-body-md text-on-error-container">{{ error_message }}</p>
@@ -43,6 +49,7 @@
         class="flex flex-col gap-stack-md max-w-2xl">
     <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
     <input type="hidden" name="client_type" value="{{ preset_slug }}">
+    <input type="hidden" name="template" value="{{ template_slug }}">
 
     <label class="flex flex-col gap-1">
       <span class="font-label-md text-label-md text-on-surface">Client name</span>
@@ -119,6 +126,9 @@
 
     <fieldset class="flex flex-col gap-stack-sm border border-outline-variant rounded-lg p-4">
       <legend class="font-label-md text-label-md text-on-surface px-1">OIDC logout fan-out</legend>
+      {% if !template_logout_note.is_empty() %}
+        <p class="font-body-sm text-body-sm text-on-surface-variant">{{ template_logout_note }}</p>
+      {% endif %}
       <p class="font-label-sm text-label-sm text-on-surface-variant">
         When the user ends their session via Forseti, Hydra notifies clients on these URIs so each app can clear its local session. Leave blank to opt this client out of the fan-out.
       </p>

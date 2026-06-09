@@ -59,6 +59,12 @@ struct StatusTemplate {
     /// Tier + customer label rendered next to the license badge when a
     /// license is present. `None` for the OSS-tier deployment.
     license_detail: Option<String>,
+    /// OIDC issuer from Hydra's discovery doc. Empty when unknown (cold
+    /// fetch failure with no prior cache); drives the "View configuration"
+    /// teaser line.
+    issuer: String,
+    /// Whether the discovery fetch succeeded — gates the teaser line.
+    discovery_ok: bool,
 }
 
 /// One row in the services-health table.
@@ -127,6 +133,8 @@ pub async fn show(State(state): State<AppState>, admin: RequireAdmin) -> Respons
         "admin action"
     );
 
+    let (disc, discovery_ok) = state.openid_configuration().await;
+
     let db_backend = state.db.backend();
     let database_backend = match db_backend {
         DatabaseBackend::Sqlite => "sqlite",
@@ -183,6 +191,8 @@ pub async fn show(State(state): State<AppState>, admin: RequireAdmin) -> Respons
         audit_write_failures,
         license_state,
         license_detail,
+        issuer: disc.issuer,
+        discovery_ok,
     })
 }
 

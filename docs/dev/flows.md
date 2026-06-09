@@ -1319,6 +1319,27 @@ sequenceDiagram
     P-->>A: render client_show.html with secret visible (one-shot)
 ```
 
+App templates: `GET /admin/clients/new?template=<slug>` pre-fills the form
+for a known app via `seed_form_from_template`
+(`src/admin/clients/handlers/create.rs:208`) — it layers app-specific
+overrides (concrete `YOUR_DOMAIN/…` redirect URIs, scope, auth method,
+PKCE, logout/webhook URLs) on top of the base preset, then renders the same
+`client_form.html`. The chosen template is not persisted; `client_type`
+still stamps the base preset slug into client metadata. An unknown slug
+redirects back to `/admin/clients/new` (the picker) rather than rendering a
+half-filled form. The picker's "Popular apps" group is built from
+`app_template_cards()` (`src/admin/clients/app_templates.rs`).
+
+Connection-details card: `client_show.html` shows the issuer + OIDC
+endpoints the integrator needs for the other end, sourced from
+`AppState::openid_configuration()` (`src/state.rs:75`), which fetches Hydra's
+`/.well-known/openid-configuration` via `ory::discovery::fetch`
+(`src/ory/discovery.rs`) and caches it with a TTL. On a cold fetch failure
+the resolver returns an empty doc + `discovery_ok = false`; the card's
+per-row `is_empty()` guards then hide every endpoint, so a wrong issuer is
+never shown — the operator sees a "couldn't reach Hydra" note plus the
+non-endpoint client values.
+
 ### Identities
 
 `/admin/identities/*` — `src/admin/identities.rs`. Kratos identity browser.

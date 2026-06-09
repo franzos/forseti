@@ -301,6 +301,21 @@ The two-tier code lives at `src/admin/mod.rs::require_admin` (Tier 1) and `src/a
 | `/admin/license/activate`             | POST — verify a pasted signed license blob against the baked-in Ed25519 pubkey and persist.    |
 | `/admin/license/deactivate`           | POST — drop the current license row. Premium features fall back to the upsell page.             |
 
+### App templates
+
+`/admin/clients/new` shows a "Popular apps" group below the five base client types. Picking one (GitLab, Nextcloud, Grafana, …) pre-fills the create form for that app — redirect URIs, scope, token-endpoint auth method, PKCE, and any logout/webhook URLs — so you don't have to look up each app's OIDC quirks. There are around 23 templates.
+
+The pre-filled URLs use literal placeholders you must replace before saving:
+
+- `YOUR_DOMAIN` — the app's own hostname (e.g. `git.example.com`), not Forseti's. Several apps embed it in a fixed callback path.
+- `PROVIDER_NAME` — for apps where the callback path includes the provider/auth-source name you configure app-side (Gitea, Forgejo, Vikunja, Paperless-ngx, Jellyfin). Replace it with whatever name you set there; some apps are case-sensitive about it.
+
+Some templates carry a guidance banner on the form (e.g. PROVIDER_NAME notes, audience allow-list reminders) — read it before saving.
+
+The template choice is not persisted. It only seeds the form; the client's stored `client_type` records the base preset (e.g. `web_app`), so the list filter and detail-page badge are unaffected by which app you started from.
+
+After creating a client, its detail page (`/admin/clients/{id}`) shows a "Connection details" card with the issuer and OIDC endpoints (authorization, token, userinfo, JWKS, end-session) plus the client ID — everything you paste into the app's OIDC settings on the other end. The endpoints come from Hydra's discovery document; if Forseti can't reach Hydra at render time the card hides the endpoints and shows a note rather than guessing a (possibly wrong) issuer.
+
 ### Audit logging
 
 Audit events are persisted to the Forseti-owned `audit_events` table (sqlite or Postgres). The table is **append-only at the DB layer** — a BEFORE UPDATE/DELETE trigger refuses modifications unless the pruner sets a single-transaction override flag (`current_setting('app.audit_purge')` on Postgres, a sentinel row in `_forseti_meta` on sqlite). The flag is defence against application-bug clobbering history, not against a malicious operator with direct DB access.

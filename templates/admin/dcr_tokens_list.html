@@ -55,7 +55,7 @@
             <tr class="border-t border-outline-variant">
               <td class="px-4 py-3 font-body-sm text-body-sm">
                 {% if r.status == "active" %}
-                  <span class="font-label-sm text-label-sm bg-tertiary-fixed text-on-tertiary-fixed px-2 py-0.5 rounded-full font-semibold">Active</span>
+                  <span class="font-label-sm text-label-sm bg-success-container text-on-success-container px-2 py-0.5 rounded-full font-semibold">Active</span>
                 {% else if r.status == "revoked" %}
                   <span class="font-label-sm text-label-sm bg-error-container text-on-error-container px-2 py-0.5 rounded-full font-semibold">Revoked</span>
                 {% else if r.status == "expired" %}

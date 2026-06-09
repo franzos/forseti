@@ -9,6 +9,8 @@
   <nav class="flex flex-col gap-stack-sm">
     <a href="/admin/status"
        class="flex items-center gap-3 px-4 py-3 rounded-xl font-label-md text-label-md {% if active == "status" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">Status</a>
+    <a href="/admin/configuration"
+       class="flex items-center gap-3 px-4 py-3 rounded-xl font-label-md text-label-md {% if active == "configuration" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">Configuration</a>
     <a href="/admin/clients"
        class="flex items-center gap-3 px-4 py-3 rounded-xl font-label-md text-label-md {% if active == "clients" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">OAuth2 clients</a>
     <a href="/admin/dcr-tokens"

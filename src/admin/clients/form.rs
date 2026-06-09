@@ -59,6 +59,12 @@ pub(crate) struct ClientForm {
     /// Stamped into `metadata.forseti.client_type`. Empty on legacy edits.
     #[serde(default)]
     pub(super) client_type: String,
+    /// Hidden input set by the picker — app-template slug ("gitlab" etc.).
+    /// Used only to re-render the template note banner on a validation
+    /// re-render; not persisted (the base preset's slug is what gets
+    /// stamped into metadata via `client_type`).
+    #[serde(default)]
+    pub(super) template: String,
 }
 
 impl ClientForm {

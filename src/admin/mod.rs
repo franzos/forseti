@@ -36,6 +36,7 @@ pub(crate) use crate::web::FORSETI_VERSION;
 pub mod actions;
 pub mod audit;
 pub mod clients;
+pub mod configuration;
 pub mod dcr_tokens;
 pub mod identities;
 pub mod sessions;
@@ -49,6 +50,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/admin", get(redirect_to_status))
         .route("/admin/status", get(status::show))
+        .route("/admin/configuration", get(configuration::show))
         // Clients
         .route("/admin/clients", get(clients::list).post(clients::create))
         .route("/admin/clients/new", get(clients::new))
@@ -128,6 +130,11 @@ pub struct AdminCtx {
     pub email: String,
     /// Brand snapshot for templates that don't get one from state directly.
     pub brand: BrandConfig,
+    /// True when the admin's email is in `[admin].allowed_emails` (Tier 1,
+    /// Forseti-wide). False for org-scoped owners who reached an admin page
+    /// without being on the operator allowlist — they don't get the
+    /// Forseti-wide "Admin" top-nav link.
+    pub is_forseti_admin: bool,
 }
 
 impl AdminCtx {
@@ -135,7 +142,12 @@ impl AdminCtx {
     /// Used by admin template structs that embed `chrome: PageChrome`
     /// alongside their `admin_active: AdminSection` sibling field.
     pub(crate) fn chrome(&self, csrf: &crate::extractors::Csrf) -> PageChrome {
-        PageChrome::from_brand(self.brand.clone(), self.email.clone(), csrf.0.clone())
+        PageChrome::from_brand_with_admin(
+            self.brand.clone(),
+            self.email.clone(),
+            csrf.0.clone(),
+            self.is_forseti_admin,
+        )
     }
 }
 
@@ -229,11 +241,13 @@ pub async fn require_admin_with_scope(
         }
     };
 
+    let is_forseti_admin = matches!(scope, AdminScope::Forseti);
     Ok((
         AdminCtx {
             identity_id,
             email,
             brand: state.cfg.brand.clone(),
+            is_forseti_admin,
         },
         scope,
     ))
@@ -270,6 +284,7 @@ pub async fn require_admin(
         identity_id,
         email,
         brand: state.cfg.brand.clone(),
+        is_forseti_admin: true,
     })
 }
 
@@ -319,6 +334,7 @@ impl ConfirmForm {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AdminSection {
     Status,
+    Configuration,
     Clients,
     DcrTokens,
     Identities,
@@ -332,6 +348,7 @@ impl AdminSection {
     pub(crate) fn as_slug(self) -> &'static str {
         match self {
             AdminSection::Status => "status",
+            AdminSection::Configuration => "configuration",
             AdminSection::Clients => "clients",
             AdminSection::DcrTokens => "dcr-tokens",
             AdminSection::Identities => "identities",

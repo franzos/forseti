@@ -106,7 +106,7 @@
                 {% else if r.severity == "error" %}
                   <span class="inline-block px-2 py-0.5 rounded-full bg-error-container/60 text-on-error-container">error</span>
                 {% else if r.severity == "warning" %}
-                  <span class="inline-block px-2 py-0.5 rounded-full bg-tertiary-container text-on-tertiary-container">warning</span>
+                  <span class="inline-block px-2 py-0.5 rounded-full bg-warning-container text-on-warning-container">warning</span>
                 {% else %}
                   <span class="text-on-surface-variant">{{ r.severity }}</span>
                 {% endif %}
@@ -116,9 +116,11 @@
               <td class="px-4 py-3 font-body-md text-body-md">
                 {% if !r.actor_id.is_empty() %}
                   <a href="/admin/identities/{{ r.actor_id }}"
-                     class="text-primary font-bold hover:underline">{{ r.actor_email }}</a>
+                     class="text-primary font-bold hover:underline inline-block max-w-[16rem] truncate align-bottom"
+                     title="{{ r.actor_email }}">{{ r.actor_email }}</a>
                 {% else if !r.actor_email.is_empty() %}
-                  <span>{{ r.actor_email }}</span>
+                  <span class="inline-block max-w-[16rem] truncate align-bottom"
+                        title="{{ r.actor_email }}">{{ r.actor_email }}</span>
                 {% else %}
                   <span class="text-on-surface-variant">—</span>
                 {% endif %}

@@ -71,6 +71,11 @@
   --color-error-container: #ffdad6;
   --color-on-error-container: #93000a;
 
+  --color-success-container: #d4edda;
+  --color-on-success-container: #0f5132;
+  --color-warning-container: #fff3cd;
+  --color-on-warning-container: #664d03;
+
   /* --- Fonts ------------------------------------------------------------- */
   --font-display-lg: "Geist", system-ui, sans-serif;
   --font-headline-lg: "Geist", system-ui, sans-serif;
@@ -133,9 +138,11 @@
   --spacing-gutter: 24px;
   --spacing-margin-mobile: 16px;
   --spacing-margin-desktop: 32px;
+  --spacing-stack-xs: 8px;
   --spacing-stack-sm: 4px;
   --spacing-stack-md: 12px;
   --spacing-stack-lg: 24px;
+  --spacing-stack-xl: 40px;
 
   /* --- Radii ------------------------------------------------------------- */
   --radius-sm: 0.125rem;

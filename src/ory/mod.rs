@@ -27,6 +27,7 @@ pub use ory_client::models::{
     VerifiableIdentityAddress, VerificationFlow,
 };
 
+pub mod discovery;
 pub mod hydra;
 pub mod kratos;
 

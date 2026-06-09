@@ -70,7 +70,7 @@
                      class="text-primary font-bold hover:underline"
                      title="{{ r.id }}">{{ r.name }}</a>
                   {% if r.verified %}
-                    <span class="font-label-sm text-label-sm bg-tertiary-container text-on-tertiary-container px-2 py-0.5 rounded-full font-semibold"
+                    <span class="font-label-sm text-label-sm bg-success-container text-on-success-container px-2 py-0.5 rounded-full font-semibold"
                           {% if !r.verified_by.is_empty() %}title="Verified by {{ r.verified_by }}{% if !r.verified_at.is_empty() %} at {{ r.verified_at }}{% endif %}
                           "
                           {% else %}

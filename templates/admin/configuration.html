@@ -1,0 +1,259 @@
+{% extends "admin/admin_shell.html" %}
+
+{% block admin_title %}Configuration{% endblock %}
+
+{% block admin_content %}
+  <div class="mb-stack-lg">
+    <h1 class="font-display-lg text-display-lg text-on-surface">Configuration</h1>
+    <p class="font-body-lg text-body-lg text-on-surface-variant mt-2">
+      How this identity provider is configured: OIDC endpoints and capabilities, signing keys, and Kratos identity schemas.
+    </p>
+  </div>
+
+  {% if !discovery_ok %}
+    <div class="mb-stack-lg bg-error-container text-on-error-container border border-error rounded-xl p-4">
+      <p class="font-label-md text-label-md font-semibold uppercase tracking-widest">OIDC discovery</p>
+      <p class="font-body-md text-body-md mt-1">
+        Couldn't reach Hydra's discovery document. Endpoints and capabilities are hidden until it's reachable again.
+      </p>
+    </div>
+  {% endif %}
+
+  <section class="mb-stack-lg">
+    <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest">OIDC endpoints</h2>
+    <dl class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4 grid grid-cols-1 sm:grid-cols-2 gap-4">
+      {% if !disc.issuer.is_empty() %}
+        <div class="sm:col-span-2">
+          <dt class="font-label-sm text-label-sm text-on-surface-variant">Issuer</dt>
+          <dd class="font-body-md text-body-md text-on-surface mt-1 break-all">
+            {{ disc.issuer }}
+          </dd>
+        </div>
+      {% endif %}
+      {% if !discovery_url.is_empty() %}
+        <div class="sm:col-span-2">
+          <dt class="font-label-sm text-label-sm text-on-surface-variant">Discovery URL</dt>
+          <dd class="font-body-md text-body-md text-on-surface mt-1 break-all">
+            <a href="{{ discovery_url }}"
+               class="underline"
+               target="_blank"
+               rel="noreferrer">{{ discovery_url }}</a>
+          </dd>
+        </div>
+      {% endif %}
+      {% if !disc.authorization_endpoint.is_empty() %}
+        <div>
+          <dt class="font-label-sm text-label-sm text-on-surface-variant">Authorization</dt>
+          <dd class="font-body-md text-body-md text-on-surface mt-1 break-all">
+            {{ disc.authorization_endpoint }}
+          </dd>
+        </div>
+      {% endif %}
+      {% if !disc.token_endpoint.is_empty() %}
+        <div>
+          <dt class="font-label-sm text-label-sm text-on-surface-variant">Token</dt>
+          <dd class="font-body-md text-body-md text-on-surface mt-1 break-all">
+            {{ disc.token_endpoint }}
+          </dd>
+        </div>
+      {% endif %}
+      {% if !disc.userinfo_endpoint.is_empty() %}
+        <div>
+          <dt class="font-label-sm text-label-sm text-on-surface-variant">Userinfo</dt>
+          <dd class="font-body-md text-body-md text-on-surface mt-1 break-all">
+            {{ disc.userinfo_endpoint }}
+          </dd>
+        </div>
+      {% endif %}
+      {% if !disc.jwks_uri.is_empty() %}
+        <div>
+          <dt class="font-label-sm text-label-sm text-on-surface-variant">JWKS</dt>
+          <dd class="font-body-md text-body-md text-on-surface mt-1 break-all">
+            {{ disc.jwks_uri }}
+          </dd>
+        </div>
+      {% endif %}
+      {% if !disc.end_session_endpoint.is_empty() %}
+        <div>
+          <dt class="font-label-sm text-label-sm text-on-surface-variant">End session</dt>
+          <dd class="font-body-md text-body-md text-on-surface mt-1 break-all">
+            {{ disc.end_session_endpoint }}
+          </dd>
+        </div>
+      {% endif %}
+      {% if !disc.registration_endpoint.is_empty() %}
+        <div>
+          <dt class="font-label-sm text-label-sm text-on-surface-variant">Registration (DCR)</dt>
+          <dd class="font-body-md text-body-md text-on-surface mt-1 break-all">
+            {{ disc.registration_endpoint }}
+          </dd>
+        </div>
+      {% endif %}
+      {% if !disc.revocation_endpoint.is_empty() %}
+        <div>
+          <dt class="font-label-sm text-label-sm text-on-surface-variant">Revocation</dt>
+          <dd class="font-body-md text-body-md text-on-surface mt-1 break-all">
+            {{ disc.revocation_endpoint }}
+          </dd>
+        </div>
+      {% endif %}
+    </dl>
+  </section>
+
+  {% if discovery_ok %}
+    <section class="mb-stack-lg">
+      <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest">Capabilities</h2>
+      <dl class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4 grid grid-cols-1 gap-4">
+        {% if !disc.scopes_supported.is_empty() %}
+          <div>
+            <dt class="font-label-sm text-label-sm text-on-surface-variant mb-2">Scopes</dt>
+            <dd class="flex flex-wrap gap-2">
+              {% for v in disc.scopes_supported %}
+                <span class="inline-block px-2.5 py-0.5 rounded-full bg-surface-container-low text-on-surface-variant font-label-sm text-label-sm">{{ v }}</span>
+              {% endfor %}
+            </dd>
+          </div>
+        {% endif %}
+        {% if !disc.grant_types_supported.is_empty() %}
+          <div>
+            <dt class="font-label-sm text-label-sm text-on-surface-variant mb-2">Grant types</dt>
+            <dd class="flex flex-wrap gap-2">
+              {% for v in disc.grant_types_supported %}
+                <span class="inline-block px-2.5 py-0.5 rounded-full bg-surface-container-low text-on-surface-variant font-label-sm text-label-sm">{{ v }}</span>
+              {% endfor %}
+            </dd>
+          </div>
+        {% endif %}
+        {% if !disc.response_types_supported.is_empty() %}
+          <div>
+            <dt class="font-label-sm text-label-sm text-on-surface-variant mb-2">Response types</dt>
+            <dd class="flex flex-wrap gap-2">
+              {% for v in disc.response_types_supported %}
+                <span class="inline-block px-2.5 py-0.5 rounded-full bg-surface-container-low text-on-surface-variant font-label-sm text-label-sm">{{ v }}</span>
+              {% endfor %}
+            </dd>
+          </div>
+        {% endif %}
+        {% if !disc.token_endpoint_auth_methods_supported.is_empty() %}
+          <div>
+            <dt class="font-label-sm text-label-sm text-on-surface-variant mb-2">Token endpoint auth methods</dt>
+            <dd class="flex flex-wrap gap-2">
+              {% for v in disc.token_endpoint_auth_methods_supported %}
+                <span class="inline-block px-2.5 py-0.5 rounded-full bg-surface-container-low text-on-surface-variant font-label-sm text-label-sm">{{ v }}</span>
+              {% endfor %}
+            </dd>
+          </div>
+        {% endif %}
+        {% if !disc.code_challenge_methods_supported.is_empty() %}
+          <div>
+            <dt class="font-label-sm text-label-sm text-on-surface-variant mb-2">PKCE methods</dt>
+            <dd class="flex flex-wrap gap-2">
+              {% for v in disc.code_challenge_methods_supported %}
+                <span class="inline-block px-2.5 py-0.5 rounded-full bg-surface-container-low text-on-surface-variant font-label-sm text-label-sm">{{ v }}</span>
+              {% endfor %}
+            </dd>
+          </div>
+        {% endif %}
+        {% if !disc.id_token_signing_alg_values_supported.is_empty() %}
+          <div>
+            <dt class="font-label-sm text-label-sm text-on-surface-variant mb-2">ID token signing algs</dt>
+            <dd class="flex flex-wrap gap-2">
+              {% for v in disc.id_token_signing_alg_values_supported %}
+                <span class="inline-block px-2.5 py-0.5 rounded-full bg-surface-container-low text-on-surface-variant font-label-sm text-label-sm">{{ v }}</span>
+              {% endfor %}
+            </dd>
+          </div>
+        {% endif %}
+        {% if !disc.subject_types_supported.is_empty() %}
+          <div>
+            <dt class="font-label-sm text-label-sm text-on-surface-variant mb-2">Subject types</dt>
+            <dd class="flex flex-wrap gap-2">
+              {% for v in disc.subject_types_supported %}
+                <span class="inline-block px-2.5 py-0.5 rounded-full bg-surface-container-low text-on-surface-variant font-label-sm text-label-sm">{{ v }}</span>
+              {% endfor %}
+            </dd>
+          </div>
+        {% endif %}
+        <div class="grid grid-cols-2 gap-4">
+          <div>
+            <dt class="font-label-sm text-label-sm text-on-surface-variant">Back-channel logout</dt>
+            <dd class="font-body-md text-body-md text-on-surface mt-1">
+              {% if disc.backchannel_logout_supported %}
+                Yes
+              {% else %}
+                No
+              {% endif %}
+            </dd>
+          </div>
+          <div>
+            <dt class="font-label-sm text-label-sm text-on-surface-variant">Front-channel logout</dt>
+            <dd class="font-body-md text-body-md text-on-surface mt-1">
+              {% if disc.frontchannel_logout_supported %}
+                Yes
+              {% else %}
+                No
+              {% endif %}
+            </dd>
+          </div>
+        </div>
+      </dl>
+    </section>
+  {% endif %}
+
+  <section class="mb-stack-lg">
+    <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest">Signing keys (JWKS)</h2>
+    {% if !jwks_ok %}
+      <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4">
+        <p class="font-body-sm text-body-sm text-on-surface-variant">Unavailable — couldn't fetch Hydra's public keys.</p>
+      </div>
+    {% else if signing_keys.is_empty() %}
+      <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4">
+        <p class="font-body-sm text-body-sm text-on-surface-variant">Hydra advertised no signing keys.</p>
+      </div>
+    {% else %}
+      <div class="bg-surface-container-lowest border border-outline-variant rounded-xl overflow-hidden">
+        <table class="w-full text-left">
+          <thead class="bg-surface-container-low">
+            <tr>
+              <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Key ID</th>
+              <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Alg</th>
+              <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Type</th>
+              <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Use</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for k in signing_keys %}
+              <tr class="border-t border-outline-variant">
+                <td class="px-4 py-3 font-body-sm text-body-sm text-on-surface break-all">{{ k.kid }}</td>
+                <td class="px-4 py-3 font-body-md text-body-md text-on-surface">{{ k.alg }}</td>
+                <td class="px-4 py-3 font-body-md text-body-md text-on-surface">{{ k.kty }}</td>
+                <td class="px-4 py-3 font-body-md text-body-md text-on-surface-variant">{{ k.use_ }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% endif %}
+  </section>
+
+  <section class="mb-stack-lg">
+    <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest">Kratos identity schemas</h2>
+    <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4">
+      {% if !schemas_ok %}
+        <p class="font-body-sm text-body-sm text-on-surface-variant">Unavailable — couldn't fetch identity schemas from Kratos.</p>
+      {% else if identity_schemas.is_empty() %}
+        <p class="font-body-sm text-body-sm text-on-surface-variant">No identity schemas registered.</p>
+      {% else %}
+        <dd class="flex flex-wrap gap-2">
+          {% for id in identity_schemas %}
+            <span class="inline-block px-2.5 py-0.5 rounded-full bg-surface-container-low text-on-surface-variant font-label-sm text-label-sm">{{ id }}</span>
+          {% endfor %}
+        </dd>
+      {% endif %}
+    </div>
+  </section>
+
+  <section>
+    <p class="font-body-sm text-body-sm text-on-surface-variant">Forseti v{{ forseti_version }}</p>
+  </section>
+{% endblock %}

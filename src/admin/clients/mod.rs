@@ -12,6 +12,7 @@
 //! preset. The preset is stamped to `metadata.forseti.client_type` so the
 //! show page and list filter can read it back.
 
+pub(crate) mod app_templates;
 mod form;
 mod handlers;
 mod presets;

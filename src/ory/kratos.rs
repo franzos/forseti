@@ -464,6 +464,18 @@ pub async fn admin_delete_identity(clients: &OryClients, id: &str) -> Result<()>
         .map_err(|e| anyhow::anyhow!("kratos admin delete_identity failed: {e}"))
 }
 
+/// List the ids of every identity schema registered with Kratos. The admin
+/// configuration page surfaces these so operators can see which schemas
+/// drive registration / profile shape. Paging args are all `None` — Kratos
+/// returns the full set in one page for any realistic deployment.
+pub async fn list_identity_schemas(clients: &OryClients) -> Result<Vec<String>> {
+    let schemas =
+        identity_api::list_identity_schemas(&clients.kratos_admin, None, None, None, None)
+            .await
+            .map_err(|e| anyhow::anyhow!("kratos list_identity_schemas failed: {e}"))?;
+    Ok(schemas.into_iter().map(|s| s.id).collect())
+}
+
 /// Generate a one-shot recovery code for an identity. Returns the plaintext
 /// code + a recovery link; admin UI shows both once and the operator hands
 /// the code to the user out-of-band.

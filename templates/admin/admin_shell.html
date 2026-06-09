@@ -5,6 +5,8 @@
    "sessions" | "audit") that drives the sidebar highlight. #}
 {% extends "base.html" %}
 
+{% block nav_admin_class %}text-primary font-bold border-b-2 border-primary{% endblock %}
+
 {% block title %}
   {% block admin_title %}Admin{% endblock %}
   &middot; {{ chrome.brand.name }}

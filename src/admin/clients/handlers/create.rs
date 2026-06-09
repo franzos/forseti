@@ -21,6 +21,7 @@ use crate::render::render;
 use crate::state::AppState;
 
 use super::list::ListQuery;
+use crate::admin::clients::app_templates::AppTemplate;
 use crate::admin::clients::form::ClientForm;
 use crate::admin::clients::presets::{picker_cards, ClientTypeCard, Preset};
 use crate::admin::clients::scope::resolve_create_target_org;
@@ -35,6 +36,7 @@ struct ClientTypePickerTemplate {
     chrome: PageChrome,
     admin_active: AdminSection,
     options: Vec<ClientTypeCard>,
+    app_cards: Vec<crate::admin::clients::app_templates::AppCard>,
 }
 
 #[derive(askama::Template)]
@@ -86,6 +88,15 @@ struct ClientFormTemplate {
     /// Human label of the preset for the badge above the form. Empty
     /// suppresses the badge.
     preset_label: String,
+    /// App-template slug carried through as a hidden input so a validation
+    /// re-render keeps the template context. Empty when no template chosen.
+    template_slug: String,
+    /// Operator guidance banner (PROVIDER_NAME substitution etc.). Empty
+    /// suppresses the banner.
+    template_note: String,
+    /// Guidance for the OIDC logout fan-out fieldset (app-specific). Empty
+    /// suppresses it.
+    template_logout_note: String,
     /// "Create" or "Save changes" on the submit button.
     submit_label: &'static str,
     /// Inline error message ("Failed to save: …"). Empty when no error.
@@ -106,6 +117,7 @@ impl ClientFormTemplate {
         chrome: PageChrome,
         form: &ClientForm,
         preset: Option<Preset>,
+        template: Option<&AppTemplate>,
         error_message: String,
     ) -> Self {
         let defaults = preset.map(|p| p.defaults());
@@ -134,17 +146,31 @@ impl ClientFormTemplate {
             frontchannel_logout_session_required: form.frontchannel_logout_session_required_flag(),
             token_endpoint_auth_method: form.token_endpoint_auth_method.clone(),
             skip_consent: form.skip_consent_flag(),
-            // Unknown preset → render the audience textarea (legacy edits
-            // need it); a known preset honours its visibility default.
-            audience_visible: defaults
-                .as_ref()
-                .map(|d| d.audience_visible)
-                .unwrap_or(true),
+            // Template flag is authoritative when a template is present;
+            // otherwise a known preset honours its visibility default and an
+            // unknown preset (legacy edit) renders the textarea.
+            audience_visible: if let Some(t) = template {
+                t.audience_visible
+            } else {
+                defaults
+                    .as_ref()
+                    .map(|d| d.audience_visible)
+                    .unwrap_or(true)
+            },
             audience: form.audience.clone(),
             require_pkce: form.require_pkce_flag(),
             account_deletion_url: form.account_deletion_url.clone(),
             preset_slug: form.client_type.clone(),
             preset_label: preset.map(|p| p.label().to_string()).unwrap_or_default(),
+            template_slug: template.map(|t| t.slug.to_string()).unwrap_or_default(),
+            template_note: template
+                .and_then(|t| t.note)
+                .unwrap_or_default()
+                .to_string(),
+            template_logout_note: template
+                .and_then(|t| t.logout_guidance())
+                .unwrap_or_default()
+                .to_string(),
             submit_label: "Create client",
             error_message,
         }
@@ -178,15 +204,39 @@ fn seed_form_from_preset(preset: Preset) -> ClientForm {
         skip_consent: None,
         account_deletion_url: String::new(),
         client_type: preset.slug().to_string(),
+        template: String::new(),
     }
 }
 
+/// Empty form pre-loaded with an app template: base-preset technical
+/// defaults + the template's app-specific overrides (concrete redirect
+/// URIs, scope, auth method, PKCE, logout/webhook URLs). Flows through the
+/// same `from_form` assembly as presets.
+fn seed_form_from_template(t: &AppTemplate) -> ClientForm {
+    let mut form = seed_form_from_preset(t.base_preset);
+    form.name = t.client_name.to_string();
+    form.grant_types = t.grant_types.iter().map(|s| (*s).to_string()).collect();
+    form.scope = t.scope.to_string();
+    form.token_endpoint_auth_method = t.token_endpoint_auth_method.to_string();
+    form.require_pkce = t.require_pkce.then(|| "on".to_string());
+    form.redirect_uris = t.redirect_uris_joined();
+    form.post_logout_redirect_uris = t.post_logout_joined();
+    form.backchannel_logout_uri = t.backchannel_logout_uri.unwrap_or_default().to_string();
+    form.account_deletion_url = t.account_deletion_url.unwrap_or_default().to_string();
+    form.template = t.slug.to_string();
+    form
+}
+
 #[derive(Debug, Deserialize)]
-pub struct NewQuery {
+pub(crate) struct NewQuery {
     /// Preset slug — picks the application-type defaults. Absent → show
     /// the picker. Unknown → redirect back to the picker.
     #[serde(rename = "type", default)]
     type_: Option<String>,
+    /// App-template slug — picks a curated "popular app" prefill. Absent →
+    /// fall through to the preset/picker logic. Unknown → bounce to picker.
+    #[serde(default)]
+    template: Option<String>,
 }
 
 /// `GET /admin/clients/new` — picker (no `?type=`), pre-filled form
@@ -199,12 +249,30 @@ pub async fn new(
     let ctx = admin.ctx;
     let chrome = ctx.chrome(&csrf);
 
+    // App template takes precedence over a bare ?type=.
+    if let Some(slug) = query.template.as_deref().filter(|s| !s.is_empty()) {
+        return match AppTemplate::from_slug(slug) {
+            Some(t) => {
+                let seed = seed_form_from_template(t);
+                render(&ClientFormTemplate::from_form(
+                    chrome,
+                    &seed,
+                    Some(t.base_preset),
+                    Some(t),
+                    String::new(),
+                ))
+            }
+            None => Redirect::to("/admin/clients/new").into_response(),
+        };
+    }
+
     match query.type_.as_deref() {
         // No `?type=` → show the picker.
         None | Some("") => render(&ClientTypePickerTemplate {
             chrome,
             admin_active: AdminSection::Clients,
             options: picker_cards(),
+            app_cards: crate::admin::clients::app_templates::app_template_cards(),
         }),
         // Recognised slug → form pre-filled from the preset defaults.
         Some(slug) => match Preset::from_slug(slug) {
@@ -216,6 +284,7 @@ pub async fn new(
                     chrome,
                     &seed,
                     Some(preset),
+                    None,
                     String::new(),
                 ))
             }
@@ -248,10 +317,12 @@ pub async fn create(
     let rerender = |error_message: String| -> Response {
         let chrome = ctx.chrome(&csrf);
         let preset = Preset::from_slug(&form.client_type);
+        let template = AppTemplate::from_slug(&form.template);
         render(&ClientFormTemplate::from_form(
             chrome,
             &form,
             preset,
+            template,
             error_message,
         ))
     };
@@ -326,6 +397,10 @@ pub async fn create(
                     .registration_access_token
                     .clone()
                     .unwrap_or_default(),
+                setup_note: AppTemplate::from_slug(&form.template)
+                    .and_then(|t| t.post_create_note)
+                    .unwrap_or_default()
+                    .to_string(),
             };
             let token = match flash::store_secret_reveal(
                 &state.db,
@@ -371,5 +446,57 @@ pub async fn create(
             tracing::error!(error = ?e, "admin: create_client failed");
             rerender(format!("Failed to create client: {e}"))
         }
+    }
+}
+
+#[cfg(test)]
+mod template_seed_tests {
+    use super::*;
+    use crate::admin::clients::app_templates::AppTemplate;
+
+    #[test]
+    fn seed_from_gitlab_template_fills_app_fields() {
+        let t = AppTemplate::from_slug("gitlab").unwrap();
+        let form = seed_form_from_template(t);
+        assert_eq!(form.scope, "openid profile email");
+        assert_eq!(form.token_endpoint_auth_method, "client_secret_basic");
+        assert_eq!(
+            form.redirect_uris,
+            "https://YOUR_DOMAIN/users/auth/openid_connect/callback"
+        );
+        // Base preset (web_app) drives the technical defaults + the stamped type.
+        assert_eq!(form.client_type, "web_app");
+        assert!(form.grant_types.contains(&"authorization_code".to_string()));
+        // GitLab template doesn't require PKCE.
+        assert!(form.require_pkce.is_none());
+        // GitLab has no offline_access, so no refresh_token grant.
+        assert!(!form.grant_types.contains(&"refresh_token".to_string()));
+    }
+
+    #[test]
+    fn seed_from_formshive_template_fills_webhook_and_backchannel() {
+        let t = AppTemplate::from_slug("formshive").unwrap();
+        let form = seed_form_from_template(t);
+        assert_eq!(
+            form.backchannel_logout_uri,
+            "https://YOUR_DOMAIN/v1/auth/oidc/backchannel-logout"
+        );
+        assert_eq!(
+            form.account_deletion_url,
+            "https://YOUR_DOMAIN/v1/auth/oidc/account-deletion-webhook"
+        );
+        assert!(form.scope.contains("offline_access"));
+        assert_eq!(form.require_pkce.as_deref(), Some("on"));
+    }
+
+    #[test]
+    fn seed_from_immich_joins_multiple_redirects() {
+        let t = AppTemplate::from_slug("immich").unwrap();
+        let form = seed_form_from_template(t);
+        let lines: Vec<&str> = form.redirect_uris.lines().collect();
+        assert_eq!(lines.len(), 3);
+        // Custom-scheme mobile URIs are dropped (Hydra is HTTPS-only); the
+        // third URI is Immich's HTTPS mobile relay.
+        assert_eq!(lines[2], "https://YOUR_DOMAIN/api/oauth/mobile-redirect");
     }
 }

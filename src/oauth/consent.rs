@@ -202,6 +202,7 @@ pub(crate) async fn oauth_consent(
                 .scope_descriptions
                 .get(s)
                 .cloned()
+                .or_else(|| super::default_scope_description(s).map(str::to_string))
                 .unwrap_or_else(|| s.clone()),
             // `openid` is mandatory for OIDC flows — Hydra rejects the
             // consent acceptance if it's missing from `grant_scope`. We

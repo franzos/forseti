@@ -336,6 +336,35 @@ pub async fn version(clients: &OryClients) -> Result<String> {
     Ok(v.version)
 }
 
+/// One row of the configuration page's JWKS table — the public signing
+/// keys Hydra advertises at its `jwks_uri`.
+pub struct JwkSummary {
+    pub kid: String,
+    pub alg: String,
+    pub kty: String,
+    pub use_: String,
+}
+
+/// Fetch Hydra's public signing keys (the `jwks_uri` contents) and project
+/// each down to the fields the admin UI shows. Order is whatever Hydra
+/// returns.
+pub async fn signing_keys(clients: &OryClients) -> Result<Vec<JwkSummary>> {
+    let set = ory_client::apis::wellknown_api::discover_json_web_keys(&clients.hydra_public)
+        .await
+        .map_err(|e| anyhow::anyhow!("hydra discover_json_web_keys failed: {e}"))?;
+    Ok(set
+        .keys
+        .unwrap_or_default()
+        .into_iter()
+        .map(|k| JwkSummary {
+            kid: k.kid,
+            alg: k.alg,
+            kty: k.kty,
+            use_: k.r#use,
+        })
+        .collect())
+}
+
 /// Generate a random client secret. 40 alphanumerics ≈ 238 bits of
 /// entropy — comfortably above the OAuth2 spec's recommendation.
 fn generate_client_secret() -> String {

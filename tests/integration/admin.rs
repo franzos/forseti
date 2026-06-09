@@ -297,6 +297,122 @@ async fn admin_happy_clients_create_and_delete() {
     );
 }
 
+/// GET the GitLab-templated new-client form, assert it pre-fills, then POST
+/// the templated fields and confirm the client is created (lands on the show
+/// page with the reveal banner). Cleans the client back out of Hydra.
+#[tokio::test]
+async fn create_client_from_gitlab_template() {
+    if !portal_reachable().await {
+        eprintln!("portal not reachable; skipping");
+        return;
+    }
+    let Some(client) = admin_client_or_skip().await else {
+        return;
+    };
+
+    // 1. Fetch the templated form — it pre-fills scope + the GitLab callback.
+    let res = client
+        .get(format!("{PORTAL}/admin/clients/new?template=gitlab"))
+        .send()
+        .await
+        .expect("GET /admin/clients/new?template=gitlab");
+    assert_eq!(res.status().as_u16(), 200);
+    let body = res.text().await.unwrap_or_default();
+    assert!(
+        body.contains("openid profile email"),
+        "templated form should pre-fill the GitLab scope"
+    );
+    assert!(
+        body.contains("https://YOUR_DOMAIN/users/auth/openid_connect/callback"),
+        "templated form should pre-fill the GitLab redirect URI"
+    );
+    let csrf = extract_form_csrf(&body).expect("csrf in templated new client form");
+
+    // 2. POST the templated fields with a concrete redirect URI. The redirect
+    //    lands on /admin/clients/{id}?reveal=... (show page, 200).
+    let res = client
+        .post(format!("{PORTAL}/admin/clients"))
+        .form(&[
+            ("_csrf", csrf.as_str()),
+            ("name", "integration-gitlab-template"),
+            ("grant_types", "authorization_code"),
+            ("response_types", "code"),
+            ("scope", "openid profile email"),
+            (
+                "redirect_uris",
+                "https://gitlab.test/users/auth/openid_connect/callback",
+            ),
+            ("post_logout_redirect_uris", ""),
+            ("token_endpoint_auth_method", "client_secret_basic"),
+            ("client_type", "web_app"),
+            ("template", "gitlab"),
+        ])
+        .send()
+        .await
+        .expect("POST /admin/clients (gitlab template)");
+    assert_eq!(res.status().as_u16(), 200, "show page after create");
+    let show_url = res.url().clone();
+    let body = res.text().await.unwrap_or_default();
+    assert!(
+        body.contains("Client secret (shown once)") || body.contains("integration-gitlab-template"),
+        "show body must include the reveal banner or client name"
+    );
+    let client_id = show_url
+        .path()
+        .strip_prefix("/admin/clients/")
+        .map(|s| s.to_string())
+        .expect("client_id in show URL path");
+
+    // 3. Clean up — delete the client via the confirm + POST cycle.
+    let res = client
+        .get(format!("{PORTAL}/admin/clients/{client_id}/delete"))
+        .send()
+        .await
+        .expect("GET delete-confirm");
+    assert_eq!(res.status().as_u16(), 200);
+    let body = res.text().await.unwrap_or_default();
+    let csrf = extract_form_csrf(&body).expect("csrf in confirm form");
+    let res = client
+        .post(format!("{PORTAL}/admin/clients/{client_id}/delete"))
+        .form(&[("_csrf", csrf.as_str()), ("confirm", "yes")])
+        .send()
+        .await
+        .expect("POST delete");
+    assert!(res.status().is_success(), "delete status {}", res.status());
+}
+
+/// An unknown template slug bounces back to the picker rather than rendering
+/// a half-filled form. The admin client auto-follows redirects, so we assert
+/// the request landed on `/admin/clients/new` (the picker).
+#[tokio::test]
+async fn unknown_template_slug_bounces_to_picker() {
+    if !portal_reachable().await {
+        eprintln!("portal not reachable; skipping");
+        return;
+    }
+    let Some(client) = admin_client_or_skip().await else {
+        return;
+    };
+    let res = client
+        .get(format!(
+            "{PORTAL}/admin/clients/new?template=does-not-exist"
+        ))
+        .send()
+        .await
+        .expect("GET /admin/clients/new?template=does-not-exist");
+    assert_eq!(res.status().as_u16(), 200, "picker renders after bounce");
+    assert_eq!(
+        res.url().path(),
+        "/admin/clients/new",
+        "unknown template must bounce to the picker (no query string)"
+    );
+    assert!(
+        res.url().query().is_none(),
+        "bounce drops the bad ?template= query, got: {:?}",
+        res.url().query()
+    );
+}
+
 #[tokio::test]
 async fn admin_happy_identities_list() {
     if !portal_reachable().await {
