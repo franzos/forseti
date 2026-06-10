@@ -121,7 +121,7 @@ pub(crate) async fn run() -> anyhow::Result<()> {
     // Boot the license gate. `commercial::store::load` falls back to
     // `Unlicensed` on missing row or verification failure, so Forseti
     // boots cleanly on both OSS deployments and stale-key scenarios.
-    let grace_days = cfg.license.grace_days;
+    let grace_days = commercial::GRACE_DAYS;
     let initial_status = commercial::store::load(&db, grace_days).await;
     let license = LicenseHandle::new(initial_status, grace_days);
 
@@ -172,7 +172,7 @@ pub(crate) async fn run() -> anyhow::Result<()> {
             crate::orgs::middleware::auto_join_default_org,
         ));
 
-    let public_app = Router::new()
+    let mut public_app = Router::new()
         .merge(csrf_routes)
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
@@ -183,7 +183,13 @@ pub(crate) async fn run() -> anyhow::Result<()> {
             "/.well-known/webhook-jwks.json",
             get(webhook::jwks_endpoint),
         )
-        .merge(discovery::router())
+        .merge(discovery::router());
+    // SSO routes mount only when [saml] is configured; inside the audit
+    // layer, outside CSRF (Jackson's callback is a cross-site GET).
+    if state.cfg.saml.is_some() {
+        public_app = public_app.merge(crate::saml::router());
+    }
+    let public_app = public_app
         .nest_service("/static", ServeDir::new("./static"))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),

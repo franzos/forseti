@@ -1202,6 +1202,153 @@ Edge cases:
 - Kratos logout failure → log and continue; Hydra's accept is still
   attempted.
 
+## Enterprise SAML SSO (commercial)
+
+Per-org SAML login via a [SAML Jackson / Ory Polis](https://www.ory.com/docs/polis)
+bridge. Forseti never parses SAML itself — Jackson owns the SAML leg
+(assertion validation, XML-DSIG, IdP quirks) and exposes it to Forseti as a
+plain OAuth2 authorization-code exchange with a dynamic client id
+(`tenant=<org_id>&product=forseti`, `dyn_client_id` at
+`src/saml/jackson.rs:14`) paired with Jackson's instance-wide
+`CLIENT_SECRET_VERIFIER` as the client secret.
+
+The `/sso/*` routes mount only when `[saml]` is configured
+(`src/app.rs:189`). The feature is gated on `Feature::Saml`: `Locked`
+renders the neutral "SSO unavailable" page for users and the upsell page on
+the admin surface; `GraceReadOnly` keeps logins working but disables admin
+mutations.
+
+### SSO login
+
+`GET /sso/{org-slug}` — `start` (`src/saml/flow.rs:94`).
+`GET /sso/callback` — `callback` (`src/saml/flow.rs:160`).
+
+Customers wire `/sso/{org-slug}` into their IdP portal / bookmarks; it's
+the only entry point (SP-initiated only — no IdP-initiated flow in v1).
+
+`start` behaviour:
+
+1. Checks, in order: `[saml]` present, license not `Locked`, org slug
+   resolves, connection exists and is enabled. **Every** can't-start cause
+   renders one uniform neutral page (`neutral_unavailable`,
+   `src/saml/flow.rs:56`) so the URL can't be used to probe which orgs
+   have SSO configured.
+2. Mints a nonce and sets the signed `forseti_saml_state` cookie
+   (10-minute TTL, `state_cookie` at `src/saml/mod.rs:28`) carrying
+   `{nonce, org_id}` — the callback never trusts a query param for tenant
+   selection.
+3. 302 to Jackson's authorize endpoint (`authorize_url`,
+   `src/saml/jackson.rs:23`, browser-facing `jackson_url`). Jackson
+   redirects to the IdP, validates the SAML response at its ACS, and
+   redirects back with `?code=…&state=…`.
+
+`callback` behaviour:
+
+1. State validation: signed cookie decodes, its nonce matches `?state`,
+   and `?code` is non-empty. Failure → 400 + audit `saml.login.failed`
+   (`reason = state_mismatch`).
+2. Code → token → userinfo against Jackson's server-side URL
+   (`exchange_code` / `userinfo`, `src/saml/jackson.rs:61` / `:98`;
+   `jackson_internal_url` when set).
+3. Email normalised (trim, lowercase) and bounded (≤ 254 octets, RFC
+   5321); missing/oversized → error page + audit.
+4. Identity resolution (`resolve_identity`, `src/saml/flow.rs:369`), a
+   three-step decision tree:
+   - `saml_links` row for (org, email) → re-validated against Kratos
+     (stale rows pruned), use the linked identity.
+   - Verified-email match via `admin_find_identity_by_email`
+     (`src/ory/kratos.rs:553`) → link on first login + audit
+     `saml.identity.linked`. An **unverified** match fails closed to the
+     blocked page (`templates/saml_blocked.html`) + audit
+     `saml.login.blocked_unverified`.
+   - No match → JIT create via `admin_create_identity_verified`
+     (`src/ory/kratos.rs:520`, email pre-verified) + audit
+     `saml.identity.jit_created`. A 409 conflict (the verified-lookup
+     missed a passwordless/imported identity) also fails closed to the
+     blocked page.
+5. Org membership ensured (`member` role; best-effort — a DB blip must
+   not abort an otherwise valid login).
+6. Session establishment: `admin_create_recovery_link`
+   (`src/ory/kratos.rs:498`, 15-minute TTL) mints a Kratos recovery
+   (magic) link — OSS Kratos has no admin session-creation API, so the
+   browser redeems the link and receives a native `ory_kratos_session`
+   cookie. **Requires `selfservice.methods.link.enabled: true` in the
+   Kratos config.**
+7. Audit `saml.login.succeeded`, then 302 to the recovery link, plus the
+   `forseti_sso_arrival` breadcrumb cookie (60 s, `Path=/settings`).
+8. Kratos's recovery redemption lands the browser on `/settings/password`
+   (the `recovery.after` settings flow). `settings_password`
+   (`src/settings/password.rs:46`) sees the breadcrumb, clears it, and
+   bounces to `/` — the dashboard — instead of rendering the password
+   form.
+
+```mermaid
+sequenceDiagram
+    actor U as User
+    participant P as Forseti
+    participant J as Jackson
+    participant I as Corporate IdP
+    participant K as Kratos
+    U->>P: GET /sso/{org-slug}
+    P->>P: config + license + org + connection checks
+    alt any check fails
+        P-->>U: neutral "SSO unavailable" page
+    end
+    P-->>U: 302 → Jackson authorize (+ signed forseti_saml_state cookie)
+    U->>J: GET /api/oauth/authorize?client_id=tenant=…&product=forseti
+    J-->>U: 302 → IdP (SAML AuthnRequest)
+    U->>I: authenticate (incl. corporate MFA)
+    I-->>U: SAML response → POST to Jackson ACS
+    U->>J: POST /api/oauth/saml
+    J-->>U: 302 → /sso/callback?code=…&state=…
+    U->>P: GET /sso/callback
+    P->>P: verify state cookie vs ?state
+    P->>J: POST /api/oauth/token (code, client_secret_verifier)
+    P->>J: GET /api/oauth/userinfo
+    P->>K: resolve identity (link → verified match → JIT create)
+    alt unverified match or create conflict
+        P-->>U: blocked page (saml.login.blocked_unverified)
+    end
+    P->>K: admin_create_recovery_link(identity, 15m)
+    P-->>U: 302 → recovery link (+ forseti_sso_arrival cookie)
+    U->>K: redeem recovery link → ory_kratos_session cookie
+    K-->>U: 302 → /settings/password (recovery.after hook)
+    U->>P: GET /settings/password
+    P-->>U: breadcrumb seen → clear it, 302 → / (dashboard)
+```
+
+Sessions established this way are **AAL1** — MFA happens at the corporate
+IdP, and Forseti doesn't step the session up. AAL2-gated surfaces (the
+admin UI) still demand a second factor enrolled in Kratos.
+
+### Connection management (`/admin/saml`)
+
+Operator-only (Forseti-tier — SAML connections cross org boundaries, so
+org-scoped owners don't see this surface; the org overview page shows them
+a read-only status line instead). Handlers in `src/admin/saml.rs`: `list`
+(`:145`), `new` / `create` (`:218` / `:243`), `toggle` (`:372`),
+`delete_confirm` / `delete` (`:435` / `:491`). One connection per org
+(`saml_connections.org_id` is the PK).
+
+- **List** shows the SP values the operator hands to the customer's IdP
+  admin: ACS URL `{jackson_url}/api/oauth/saml` and the SP entity id
+  (Jackson's `samlAudience`, default `https://saml.boxyhq.com`), plus the
+  per-org `/sso/{slug}` URL.
+- **Create** takes exactly one of an IdP metadata URL or a raw metadata
+  XML paste (`MetadataInput`, `src/saml/jackson.rs:128`). Jackson 26.x
+  only fetches localhost or HTTPS metadata URLs — plain-HTTP IdPs need
+  the XML paste. Order: Jackson create first, then the local anchor row
+  (IdP metadata and certificates live in Jackson; Forseti keeps only
+  org ↔ connection, the enabled flag, and a display name).
+- **Toggle** flips `enabled` on the anchor row — an instant kill switch,
+  since `start` checks it before redirecting anywhere.
+- **Delete** removes the Jackson connection first, then the anchor row +
+  `saml_links` rows — a Forseti-only delete would orphan the Jackson
+  connection and keep the IdP round-trip alive.
+
+Audit rows: `admin.saml.connection_created`, `admin.saml.connection_toggled`,
+`admin.saml.connection_deleted` (critical).
+
 ## Admin Flows
 
 Mounted at `/admin/*` from `src/app.rs` (in `build_router`) via `admin::router()`

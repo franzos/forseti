@@ -105,7 +105,7 @@ For the full OAuth2 dance — register a Hydra client, run an auth-code flow, ex
 - [Operator guide](docs/operator-guide.md) — deployment topology, Kratos/Hydra config, secrets, backups
 - [Operator guide — reverse proxy](docs/operator-guide-proxy.md) — proxy topology, cookies, CSRF, CORS
 - [Integration guide](docs/integration-guide.md) — consuming Forseti as an OIDC provider
-- [Organizations](docs/organizations.md) — multi-org model, invites, branding, claims
+- [Commercial features](docs/commercial/) — licensing model, plus the [Organizations](docs/commercial/organizations.md) and [Enterprise SAML SSO](docs/commercial/saml.md) guides
 
 ## License
 

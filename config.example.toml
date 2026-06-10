@@ -237,3 +237,15 @@ support_email = "support@example.com"
 # [orgs]
 # active_org_cookie_ttl_seconds = 2592000   # 30 days
 # invite_ttl_days = 7
+
+# Enterprise SAML SSO (commercial feature — requires a license with `saml`).
+# Strictly opt-in: omit this whole section and Forseti has no SAML surface.
+# Requires a deployed SAML Jackson / Ory Polis instance; see
+# docs/commercial/saml.md.
+# [saml]
+# jackson_url = "https://sso.example.com"
+# jackson_internal_url = "http://jackson:5225"  # optional server-to-server override
+# jackson_api_key = "change-me"                 # one of Jackson's JACKSON_API_KEYS
+# client_secret_verifier = "change-me"          # Jackson's CLIENT_SECRET_VERIFIER
+# identity_schema_id = "default"                # Kratos schema for JIT identities
+# sp_entity_id = "https://saml.boxyhq.com"      # SP entity id you give the customer's IdP; must match Jackson's samlAudience

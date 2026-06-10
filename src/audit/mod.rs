@@ -151,6 +151,15 @@ pub mod action {
     // RP-initiated account management (`src/handoff/`)
     pub const APP_REFERRER_ENTERED: &str = "app.referrer.entered";
     pub const APP_REFERRER_RETURNED: &str = "app.referrer.returned";
+    // saml (commercial SSO bridge — `src/saml/`)
+    pub const SAML_LOGIN_SUCCEEDED: &str = "saml.login.succeeded";
+    pub const SAML_LOGIN_FAILED: &str = "saml.login.failed";
+    pub const SAML_LOGIN_BLOCKED_UNVERIFIED: &str = "saml.login.blocked_unverified";
+    pub const SAML_IDENTITY_JIT_CREATED: &str = "saml.identity.jit_created";
+    pub const SAML_IDENTITY_LINKED: &str = "saml.identity.linked";
+    pub const ADMIN_SAML_CONNECTION_CREATED: &str = "admin.saml.connection_created";
+    pub const ADMIN_SAML_CONNECTION_DELETED: &str = "admin.saml.connection_deleted";
+    pub const ADMIN_SAML_CONNECTION_TOGGLED: &str = "admin.saml.connection_toggled";
 }
 
 #[allow(dead_code)]
@@ -176,6 +185,7 @@ pub mod target_kind {
     pub const DCR_IAT: &str = "dcr_iat";
     pub const LICENSE: &str = "license";
     pub const ORG: &str = "org";
+    pub const SAML_CONNECTION: &str = "saml_connection";
 }
 
 // --- safe metadata -------------------------------------------------------

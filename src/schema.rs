@@ -156,5 +156,28 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    saml_connections (org_id) {
+        org_id -> Text,
+        enabled -> Integer,
+        display_name -> Text,
+        created_by -> Text,
+        created_at -> Text,
+        updated_at -> Text,
+    }
+}
+
+diesel::table! {
+    saml_links (org_id, email) {
+        org_id -> Text,
+        email -> Text,
+        identity_id -> Text,
+        created_at -> Text,
+        idp_subject -> Nullable<Text>,
+    }
+}
+
 diesel::joinable!(organization_members -> organizations (org_id));
+diesel::joinable!(saml_connections -> organizations (org_id));
 diesel::allow_tables_to_appear_in_same_query!(organizations, organization_members);
+diesel::allow_tables_to_appear_in_same_query!(organizations, saml_connections);

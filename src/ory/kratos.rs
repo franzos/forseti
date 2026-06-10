@@ -489,6 +489,90 @@ pub async fn admin_create_recovery_code(
         .map_err(|e| anyhow::anyhow!("kratos admin create_recovery_code failed: {e}"))
 }
 
+/// Mint a one-shot magic recovery link for an identity. Unlike the code
+/// variant, the link is a Kratos *public* URL — a browser GET redeems it
+/// directly: Kratos validates the token, issues a privileged session
+/// (cookie set natively), and redirects to `return_to`. This is the only
+/// OSS path from "server-side authenticated" (e.g. a validated SAML
+/// assertion) to a real browser session.
+pub async fn admin_create_recovery_link(
+    clients: &OryClients,
+    identity_id: &str,
+    expires_in: &str,
+    return_to: Option<&str>,
+) -> Result<String> {
+    let mut body = CreateRecoveryLinkForIdentityBody::new(identity_id.to_string());
+    body.expires_in = Some(expires_in.to_string());
+    let link = identity_api::create_recovery_link_for_identity(
+        &clients.kratos_admin,
+        return_to,
+        Some(body),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("kratos admin create_recovery_link failed: {e}"))?;
+    Ok(link.recovery_link)
+}
+
+/// JIT-provision an identity with a pre-verified email (SAML SSO: the
+/// corporate IdP asserted the address, so re-verification is pointless).
+/// Returns `Ok(None)` on 409 — the email already belongs to another
+/// identity — so the SSO callback can render a block page instead of a 500.
+pub async fn admin_create_identity_verified(
+    clients: &OryClients,
+    schema_id: &str,
+    email: &str,
+    first: &str,
+    last: &str,
+) -> Result<Option<Identity>> {
+    let traits = serde_json::json!({
+        "email": email,
+        "name": { "first": first, "last": last },
+    });
+    let mut body = CreateIdentityBody::new(schema_id.to_string(), traits);
+    let addr = VerifiableIdentityAddress::new(
+        "completed".to_string(),
+        email.to_string(),
+        true,
+        ory_client::models::verifiable_identity_address::ViaEnum::Email,
+    );
+    body.verifiable_addresses = Some(vec![addr]);
+    match identity_api::create_identity(&clients.kratos_admin, Some(body)).await {
+        Ok(identity) => Ok(Some(identity)),
+        Err(OryError::ResponseError(resp)) if resp.status == reqwest::StatusCode::CONFLICT => {
+            Ok(None)
+        }
+        Err(e) => Err(anyhow::anyhow!("kratos admin create_identity failed: {e}")),
+    }
+}
+
+/// Find an identity whose verifiable addresses include `email`, returning
+/// it together with whether that address is verified. Uses the
+/// `credentials_identifier` filter (matches password/oidc/code identifiers) —
+/// good enough for the link-on-first-SSO-login path; SAML-created
+/// identities are found via Forseti's `saml_links` table instead.
+pub async fn admin_find_identity_by_email(
+    clients: &OryClients,
+    email: &str,
+) -> Result<Option<(Identity, bool)>> {
+    let matches = list_identities(clients, 10, None, Some(email)).await?;
+    for identity in matches {
+        let verified = identity
+            .verifiable_addresses
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .find(|a| {
+                a.via == ory_client::models::verifiable_identity_address::ViaEnum::Email
+                    && a.value.eq_ignore_ascii_case(email)
+            })
+            .map(|a| a.verified);
+        if let Some(verified) = verified {
+            return Ok(Some((identity, verified)));
+        }
+    }
+    Ok(None)
+}
+
 /// List every session across all identities (admin view). Kratos
 /// paginates with `page_token`; we surface that to the caller as
 /// best-effort pass-through. Passes `expand=identity` so each row

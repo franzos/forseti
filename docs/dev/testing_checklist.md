@@ -258,6 +258,19 @@ These are the classic spec-violation bugs custom IdPs ship. Drive each via Chrom
 - [ ] **Pagination** on `/admin/identities`, `/admin/sessions`, `/admin/audit`, `/admin/webhooks` — first page, middle, last page, beyond-last-page (renders empty, doesn't crash)
 - [ ] Pagination `?org=<slug>` preserves the scope across page links
 
+### 6.5 Enterprise SAML SSO (license-gated; needs `make stack-up-saml` + `[saml]` in config)
+
+- [ ] Without a `saml`-featured license: `/sso/<slug>` → neutral "SSO unavailable" page; `/admin/saml` → upsell
+- [ ] `/admin/saml/new` → create a connection for Default against mock-saml: fetch `http://127.0.0.1:4480/api/saml/metadata` and paste the XML (Jackson 26.x rejects plain-HTTP non-localhost metadata URLs, so the URL field won't take `http://mock-saml:4000/…`) → row appears with SP values card (ACS URL + entity id) + `/sso/<slug>` URL
+- [ ] **Happy path:** logged-out browser → `/sso/default` → mock-saml login (any email + ACS pre-filled) → lands on the dashboard with a native `ory_kratos_session`, NOT on `/settings/password`
+- [ ] JIT identity created in Kratos with the asserted email pre-verified; member row added to the org
+- [ ] Second login with the same email reuses the linked identity (no duplicate)
+- [ ] **Blocked unverified:** register an identity, leave it unverified, SSO with that email → blocked page, no session
+- [ ] **Kill switch:** toggle the connection disabled → `/sso/default` renders the neutral unavailable page immediately; re-enable → flow works again
+- [ ] **Delete:** delete the connection → confirm page → gone from Jackson and the list; `/sso/default` → neutral page
+- [ ] SSO session is AAL1 — `/admin/*` still demands the second factor
+- [ ] Audit rows: `saml.login.succeeded`, `saml.login.blocked_unverified`, `saml.identity.jit_created`, `saml.identity.linked`, `admin.saml.connection_created` / `_toggled` / `_deleted`
+
 ## 7. Admin surface (`/admin/*`)
 
 All admin pages require AAL2 + Forseti-admin allowlist or org ownership.

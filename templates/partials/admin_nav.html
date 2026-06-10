@@ -1,5 +1,4 @@
-{# Admin left-nav. Caller sets `active` to one of:
-   "status" | "clients" | "dcr-tokens" | "identities" | "sessions" | "audit" | "webhooks".
+{# Admin left-nav. Caller sets `active` to the slug from AdminSection::as_slug().
    Mirrors the structure of `partials/settings_nav.html`. #}
 <aside class="md:w-64 md:shrink-0 md:border-r md:border-outline-variant md:pr-stack-lg">
   <div class="mb-stack-lg">
@@ -23,6 +22,8 @@
        class="flex items-center gap-3 px-4 py-3 rounded-xl font-label-md text-label-md {% if active == "audit" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">Audit</a>
     <a href="/admin/webhooks"
        class="flex items-center gap-3 px-4 py-3 rounded-xl font-label-md text-label-md {% if active == "webhooks" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">Webhooks</a>
+    <a href="/admin/saml"
+       class="flex items-center gap-3 px-4 py-3 rounded-xl font-label-md text-label-md {% if active == "saml" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">SAML SSO</a>
     <a href="/admin/license"
        class="flex items-center gap-3 px-4 py-3 rounded-xl font-label-md text-label-md {% if active == "license" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">License</a>
   </nav>

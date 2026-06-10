@@ -13,7 +13,9 @@ use serde::Serialize;
 
 use crate::db::DbPool;
 use crate::db_interact;
-use crate::schema::{organization_invites, organization_members, organizations};
+use crate::schema::{
+    organization_invites, organization_members, organizations, saml_connections, saml_links,
+};
 
 /// Projection over `organizations`. `support_email` + `logo_url` override
 /// the global `[brand]` config when set.
@@ -105,6 +107,17 @@ pub async fn org_by_slug(db: &DbPool, slug: &str) -> anyhow::Result<Option<Org>>
             .optional()
     })?;
     Ok(row)
+}
+
+pub async fn list_orgs(db: &DbPool) -> anyhow::Result<Vec<Org>> {
+    let rows: Vec<Org> = db_interact!(db, |conn| {
+        organizations::table
+            .order(organizations::name.asc())
+            .limit(MAX_ROWS_PER_LIST)
+            .select(Org::as_select())
+            .load(conn)
+    })?;
+    Ok(rows)
 }
 
 pub async fn org_by_id(db: &DbPool, id: &str) -> anyhow::Result<Option<Org>> {
@@ -344,6 +357,11 @@ pub async fn delete_org(db: &DbPool, org_id: &str) -> anyhow::Result<()> {
                 organization_invites::table.filter(organization_invites::org_id.eq(&id)),
             )
             .execute(c)?;
+            // App-level cascade (no FK): purge SAML email links + the
+            // connection before the org row so neither is orphaned.
+            diesel::delete(saml_links::table.filter(saml_links::org_id.eq(&id))).execute(c)?;
+            diesel::delete(saml_connections::table.filter(saml_connections::org_id.eq(&id)))
+                .execute(c)?;
             diesel::delete(organizations::table.filter(organizations::id.eq(&id))).execute(c)?;
             Ok(())
         })

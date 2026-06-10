@@ -146,6 +146,52 @@ services:
     networks:
       - ory
 
+  # SAML bridge (opt-in via `make stack-up-saml` / COMPOSE_PROFILES=saml).
+  # Jackson terminates SAML and re-exposes it as OAuth2 for Forseti's /sso
+  # flow. Forseti talks to it from the host at http://127.0.0.1:5225 — keep
+  # EXTERNAL_URL/NEXTAUTH_URL and the [saml] table in config.toml in sync.
+  jackson:
+    image: boxyhq/jackson:26.2.0
+    profiles: ["saml"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "5225:5225"
+    environment:
+      - EXTERNAL_URL=http://127.0.0.1:5225
+      - JACKSON_API_KEYS=dev-jackson-api-key
+      - CLIENT_SECRET_VERIFIER=dev-client-secret-verifier
+      - DB_ENGINE=sql
+      - DB_TYPE=postgres
+      - DB_URL=postgres://jackson:secret@postgres:5432/jackson?sslmode=disable
+      - NEXTAUTH_SECRET=dev-nextauth-secret-32-chars-xx
+      - NEXTAUTH_URL=http://127.0.0.1:5225
+      - NEXTAUTH_ADMIN_CREDENTIALS=admin@example.com:secret
+      - BOXYHQ_NO_ANALYTICS=1
+    restart: unless-stopped
+    networks:
+      - ory
+
+  # Mock SAML IdP for exercising the bridge. All URLs go through the host
+  # port (4480 → 4000): Jackson 26.x rejects plain-HTTP non-localhost metadata
+  # URLs, so the IdP metadata XML is fetched via the host port and pasted in
+  # (see the e2e spec). Signing keys live in mock-saml.env — throwaway dev
+  # keys, required because the image ships none.
+  mock-saml:
+    image: boxyhq/mock-saml:latest  # no versioned tags published upstream
+    profiles: ["saml"]
+    ports:
+      - "4480:4000"
+    environment:
+      - APP_URL=http://127.0.0.1:4480
+      - ENTITY_ID=https://saml.example.com/entityid
+    env_file:
+      - ./mock-saml.env
+    restart: unless-stopped
+    networks:
+      - ory
+
 networks:
   ory:
 

@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.1.4] - 2026-06-10
+
+### Added
+- Enterprise SAML SSO via a Jackson / Ory Polis bridge (commercial)
+
+### Changed
+- License grace window fixed at 30 days read-only after expiry
+
+### Docs
+- Commercial-feature docs consolidated under `docs/commercial/`
+
 ## [0.1.3] - 2026-06-09
 
 ### Added

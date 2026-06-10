@@ -1,0 +1,123 @@
+{% extends "admin/admin_shell.html" %}
+
+{% block admin_title %}SAML SSO{% endblock %}
+
+{% block admin_content %}
+  <div class="flex items-center justify-between mt-2 mb-stack-lg">
+    <div>
+      <h1 class="font-headline-lg-mobile md:font-headline-lg text-headline-lg-mobile md:text-headline-lg text-on-surface">
+        SAML SSO
+      </h1>
+      <p class="font-body-md text-body-md text-on-surface-variant mt-1">
+        Enterprise SAML connections, one per organization. IdP metadata and certificates live in Jackson; Forseti keeps the anchor row and the enable switch.
+      </p>
+    </div>
+    {% if configured %}
+      <a href="/admin/saml/new"
+         class="bg-primary text-on-primary font-label-md text-label-md font-bold px-4 py-2 rounded-lg hover:opacity-90 transition-opacity">New connection</a>
+    {% endif %}
+  </div>
+
+  {% if grace %}
+    <div class="bg-error-container border border-error rounded-lg p-3 mb-stack-md">
+      <p class="font-body-sm text-body-sm text-on-error-container">
+        License in grace period &mdash; SAML connections are read-only until the license is renewed. SSO logins keep working.
+      </p>
+    </div>
+  {% endif %}
+
+  {% if !configured %}
+    <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-6">
+      <p class="font-body-md text-body-md text-on-surface-variant">
+        <code class="font-mono">[saml]</code> isn't configured &mdash; add the Jackson bridge settings to <code class="font-mono">config.toml</code> to enable SAML SSO. See <code class="font-mono">docs/operator-guide.md</code>.
+      </p>
+    </div>
+  {% else %}
+    <div class="bg-surface-container-lowest border border-outline-variant rounded-xl overflow-x-auto">
+      <table class="w-full text-left">
+        <thead class="bg-surface-container-low">
+          <tr>
+            <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Org</th>
+            <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Connection</th>
+            <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">SSO URL</th>
+            <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Enabled</th>
+            <th class="px-4 py-3"></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% if rows.is_empty() %}
+            <tr>
+              <td colspan="5"
+                  class="px-4 py-6 text-center font-body-md text-body-md text-on-surface-variant">
+                No SAML connections yet. <a href="/admin/saml/new" class="text-primary hover:underline">Create one</a> to enable SSO for an organization.
+              </td>
+            </tr>
+          {% else %}
+            {% for r in rows %}
+              <tr class="border-t border-outline-variant">
+                <td class="px-4 py-3 font-body-md text-body-md text-on-surface"
+                    title="{{ r.org_id }}">{{ r.org_name }}</td>
+                <td class="px-4 py-3 font-body-md text-body-md text-on-surface">{{ r.display_name }}</td>
+                <td class="px-4 py-3">
+                  {% if r.sso_url.is_empty() %}
+                    <span class="font-body-sm text-body-sm text-on-surface-variant italic">&mdash;</span>
+                  {% else %}
+                    <code class="font-mono text-xs select-all">{{ r.sso_url }}</code>
+                  {% endif %}
+                </td>
+                <td class="px-4 py-3">
+                  {% if r.enabled %}
+                    <span class="font-label-sm text-label-sm bg-success-container text-on-success-container px-2 py-0.5 rounded-full font-semibold">Enabled</span>
+                  {% else %}
+                    <span class="font-label-sm text-label-sm bg-surface-container-high text-on-surface-variant px-2 py-0.5 rounded-full font-semibold">Disabled</span>
+                  {% endif %}
+                </td>
+                <td class="px-4 py-3 text-right whitespace-nowrap">
+                  <form method="POST"
+                        action="/admin/saml/{{ r.org_id }}/toggle"
+                        class="inline">
+                    <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+                    <button type="submit"
+                            class="font-label-sm text-label-sm text-primary border border-outline-variant rounded-lg px-3 py-1 hover:bg-surface-container-high transition-colors">
+                      {% if r.enabled %}
+                        Disable
+                      {% else %}
+                        Enable
+                      {% endif %}
+                    </button>
+                  </form>
+                  <a href="/admin/saml/{{ r.org_id }}/delete"
+                     class="font-label-sm text-label-sm text-error border border-error rounded-lg px-3 py-1 ml-2 hover:bg-error-container hover:text-on-error-container transition-colors">Delete</a>
+                </td>
+              </tr>
+            {% endfor %}
+          {% endif %}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-6 mt-stack-lg">
+      <h2 class="font-headline-sm text-headline-sm text-on-surface mb-stack-sm">Values for the customer's IdP admin</h2>
+      <p class="font-body-sm text-body-sm text-on-surface-variant mb-stack-md">
+        Hand these to whoever configures the SAML app on the identity-provider side. They're the same for every connection.
+      </p>
+      <dl class="flex flex-col gap-stack-sm">
+        <div>
+          <dt class="font-label-md text-label-md text-on-surface">ACS URL</dt>
+          <dd>
+            <code class="font-mono text-xs select-all">{{ acs_url }}</code>
+          </dd>
+        </div>
+        <div>
+          <dt class="font-label-md text-label-md text-on-surface">SP entity ID</dt>
+          <dd>
+            <code class="font-mono text-xs select-all">{{ entity_id }}</code>
+          </dd>
+        </div>
+      </dl>
+      <p class="font-body-sm text-body-sm text-on-surface-variant mt-stack-md">
+        The entity ID follows Jackson's <code class="font-mono">samlAudience</code> setting; change it there if you override the default.
+      </p>
+    </div>
+  {% endif %}
+{% endblock %}

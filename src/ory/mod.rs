@@ -20,11 +20,12 @@ use anyhow::Result;
 #[allow(unused_imports)]
 pub use ory_client::models::{
     AcceptOAuth2ConsentRequest, AcceptOAuth2ConsentRequestSession, AcceptOAuth2LoginRequest,
-    AuthenticatorAssuranceLevel, CourierMessageStatus, CreateRecoveryCodeForIdentityBody, Identity,
-    LoginFlow, Message, OAuth2Client, OAuth2ConsentRequest, OAuth2ConsentSession,
-    OAuth2LoginRequest, OAuth2LogoutRequest, OAuth2RedirectTo, RecoveryCodeForIdentity,
-    RecoveryFlow, RegistrationFlow, RejectOAuth2Request, Session, SettingsFlow, UpdateIdentityBody,
-    VerifiableIdentityAddress, VerificationFlow,
+    AuthenticatorAssuranceLevel, CourierMessageStatus, CreateIdentityBody,
+    CreateRecoveryCodeForIdentityBody, CreateRecoveryLinkForIdentityBody, Identity, LoginFlow,
+    Message, OAuth2Client, OAuth2ConsentRequest, OAuth2ConsentSession, OAuth2LoginRequest,
+    OAuth2LogoutRequest, OAuth2RedirectTo, RecoveryCodeForIdentity, RecoveryFlow, RegistrationFlow,
+    RejectOAuth2Request, Session, SettingsFlow, UpdateIdentityBody, VerifiableIdentityAddress,
+    VerificationFlow,
 };
 
 pub mod discovery;

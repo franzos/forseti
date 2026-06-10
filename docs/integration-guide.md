@@ -574,6 +574,18 @@ Forseti observes the `acr_values` request, looks at the user's current Kratos se
 
 Your app must inspect the returned id_token's `acr` claim and reject `aal1` for the sensitive operation. Do not assume `acr_values=aal2` was honored; verify.
 
+## Enterprise SSO (SAML)
+
+If the operator has enabled Enterprise SAML SSO (a commercial feature), some users sign in through their company's corporate IdP instead of with a Forseti password. **This is transparent to your app.** You keep doing plain OIDC against Forseti — an SSO'd user arrives as an ordinary session and `id_token`, with the same claims as any other user. There's nothing SAML-specific to handle on your side.
+
+A few things worth knowing:
+
+- **"Sign in with your company" links.** SAML is per-org, and each connected org has a deep-link of the form `https://<forseti>/sso/{org-slug}`. If you want to offer a company-branded entry point, you can link users straight to it — the operator gives each org its URL. Otherwise users just sign in normally and Forseti routes them.
+- **Org-aware authz is the `orgs` claim, same as always.** SSO doesn't introduce a new authz mechanism: an SSO'd user is a member of the org they signed in through, and that membership shows up in the `org` / `orgs` claims exactly like any other member's. Use those for tenant scoping — see the [scope reference](#scope-reference) and [Organizations](./commercial/organizations.md).
+- **SSO sessions are AAL1.** The second factor happens at the corporate IdP; Forseti doesn't see it and doesn't reflect it in `acr`. If your app gates a sensitive operation on `acr`/AAL2 (see [AAL step-up](#aal-step-up)), an SSO'd user will need a second factor enrolled in Kratos to clear it — the IdP's MFA doesn't count.
+
+The operator-side setup, JIT provisioning, and linking semantics live in [`commercial/saml.md`](./commercial/saml.md).
+
 ## Forseti discovery document
 
 Everything OAuth/OIDC-shaped lives on Hydra's `/.well-known/openid-configuration`. Forseti-specific surfaces — deep-link entry, account-management URI, the JWKS that signs outbound webhooks — are advertised on a separate document Forseti serves itself:

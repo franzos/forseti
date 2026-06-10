@@ -39,6 +39,7 @@ pub mod clients;
 pub mod configuration;
 pub mod dcr_tokens;
 pub mod identities;
+pub mod saml;
 pub mod sessions;
 pub mod status;
 pub mod webhooks;
@@ -101,6 +102,14 @@ pub fn router() -> Router<AppState> {
         .route("/admin/webhooks/{id}", get(webhooks::show_one))
         .route("/admin/webhooks/{id}/requeue", post(webhooks::requeue))
         .route("/admin/webhooks/{id}/discard", post(webhooks::discard))
+        // SAML SSO connections (commercial)
+        .route("/admin/saml", get(saml::list))
+        .route("/admin/saml/new", get(saml::new).post(saml::create))
+        .route(
+            "/admin/saml/{org_id}/delete",
+            get(saml::delete_confirm).post(saml::delete),
+        )
+        .route("/admin/saml/{org_id}/toggle", post(saml::toggle))
         // DCR initial access tokens — gate for /oauth2/register
         .route("/admin/dcr-tokens", get(dcr_tokens::list))
         .route(
@@ -341,6 +350,7 @@ pub(crate) enum AdminSection {
     Sessions,
     Audit,
     Webhooks,
+    Saml,
     License,
 }
 
@@ -355,6 +365,7 @@ impl AdminSection {
             AdminSection::Sessions => "sessions",
             AdminSection::Audit => "audit",
             AdminSection::Webhooks => "webhooks",
+            AdminSection::Saml => "saml",
             AdminSection::License => "license",
         }
     }

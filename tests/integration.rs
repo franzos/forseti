@@ -60,6 +60,9 @@ mod regressions;
 #[path = "integration/registration.rs"]
 mod registration;
 
+#[path = "integration/saml.rs"]
+mod saml;
+
 #[path = "integration/settings.rs"]
 mod settings;
 

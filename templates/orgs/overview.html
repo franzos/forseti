@@ -84,6 +84,24 @@
         </ul>
       </div>
 
+      {% if let Some(sso) = sso %}
+        <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg">
+          <h2 class="font-headline-md text-headline-md text-on-surface mb-stack-md">Enterprise SSO</h2>
+          <p class="font-body-md text-body-md text-on-surface">
+            {{ sso.display_name }}
+            (
+            {% if sso.enabled %}
+              enabled
+            {% else %}
+              disabled
+            {% endif %}
+            )
+            &mdash; <span class="font-mono">{{ sso.sso_path }}</span>
+          </p>
+          <p class="font-label-sm text-label-sm text-on-surface-variant mt-2">SSO connections are managed by the operator.</p>
+        </div>
+      {% endif %}
+
       {% if !is_default && is_owner %}
         <div class="bg-error-container/40 border border-outline-variant rounded-xl p-stack-lg">
           <h2 class="font-headline-md text-headline-md text-on-error-container mb-stack-md">Danger zone</h2>

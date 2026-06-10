@@ -97,6 +97,9 @@ pub struct AppConfig {
     /// invites.
     #[serde(default)]
     pub orgs: OrgsConfig,
+    /// SAML SSO bridge. `None` (default) = feature fully off.
+    #[serde(default)]
+    pub saml: Option<SamlConfig>,
     /// Deployment-shape knob: is Forseti behind a trusted reverse
     /// proxy that strips and re-adds `X-Forwarded-For` / `X-Real-IP`
     /// / `Forwarded`? Used by the audit middleware (audited client
@@ -519,36 +522,66 @@ fn default_audit_retention_days() -> i64 {
 }
 
 /// Commercial-tier configuration. Only two knobs the operator can tune —
-/// where to send "upgrade" CTAs and how long the post-expiry grace window
-/// runs. The signed license blob itself lives in the `forseti_license` DB
+/// where to send "upgrade" CTAs. The post-expiry grace window is a fixed
+/// 30 days ([`crate::commercial::GRACE_DAYS`]), not config-tunable. The
+/// signed license blob itself lives in the `forseti_license` DB
 /// table; activation happens at `/admin/license`, not in `config.toml`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct LicenseConfig {
     /// URL surfaced as the "Upgrade" CTA on the upsell page and lock
     /// badges. Empty default falls back to a mailto: link built from
     /// `brand.support_email` at render time.
     #[serde(default)]
     pub purchase_url: String,
-    /// Days an expired license stays in "read-only" mode before gated
-    /// features hard-gate. Default 14 — long enough that a forgotten
-    /// renewal doesn't blow up production, short enough that the
-    /// expired-banner stays scary. Override (e.g. `0`) for testing the
-    /// hard-gate path.
-    #[serde(default = "default_grace_days")]
-    pub grace_days: i64,
 }
 
-impl Default for LicenseConfig {
-    fn default() -> Self {
-        Self {
-            purchase_url: String::new(),
-            grace_days: default_grace_days(),
-        }
+/// SAML SSO bridge (commercial, strictly opt-in). Absent ⇒ the `/sso/*`
+/// routes are not mounted and Forseti has zero SAML footprint. The bridge
+/// itself (Jackson / Ory Polis) is operator-deployed; Forseti only
+/// orchestrates against it. See `docs/commercial/saml.md`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SamlConfig {
+    /// Browser-facing base URL of the Jackson instance, e.g.
+    /// `https://sso.example.com` or `http://127.0.0.1:5225` in dev.
+    pub jackson_url: String,
+    /// Server-to-server base URL override (container-network address).
+    /// Defaults to `jackson_url`.
+    #[serde(default)]
+    pub jackson_internal_url: Option<String>,
+    /// One of Jackson's `JACKSON_API_KEYS` values; authorises connection CRUD.
+    pub jackson_api_key: Redacted,
+    /// Jackson's `CLIENT_SECRET_VERIFIER`; the OAuth2 client_secret paired
+    /// with the dynamic `tenant=…&product=…` client_id.
+    pub client_secret_verifier: Redacted,
+    /// Kratos identity schema for JIT-provisioned identities.
+    #[serde(default = "default_saml_schema_id")]
+    pub identity_schema_id: String,
+    /// SP entity id handed to the customer's IdP admin; must match Jackson's
+    /// `samlAudience`. `None` ⇒ Jackson's default (`sp_entity_id()`).
+    #[serde(default)]
+    pub sp_entity_id: Option<String>,
+}
+
+/// Jackson's default `samlAudience` — the SP entity id the customer's IdP
+/// admin configures when `[saml].sp_entity_id` is unset.
+pub const DEFAULT_SP_ENTITY_ID: &str = "https://saml.boxyhq.com";
+
+impl SamlConfig {
+    pub fn internal_url(&self) -> &str {
+        self.jackson_internal_url
+            .as_deref()
+            .unwrap_or(&self.jackson_url)
+    }
+
+    /// Configured SP entity id or Jackson's default. Single source of the
+    /// default so the admin page and operator docs can't drift.
+    pub fn sp_entity_id(&self) -> &str {
+        self.sp_entity_id.as_deref().unwrap_or(DEFAULT_SP_ENTITY_ID)
     }
 }
 
-fn default_grace_days() -> i64 {
-    14
+fn default_saml_schema_id() -> String {
+    "default".to_string()
 }
 
 /// Identity-management knobs. Defaulted so the OSS deployment ships

@@ -1,25 +1,12 @@
-# Organizations
+# Organizations — internals
 
-Forseti's multi-tenant model: organizations, membership, invites, branding, the org-scoped admin surface, and the OIDC `org` / `orgs` claims.
+Contributor reference for the multi-org implementation: data model, membership/auto-join, invites, the active-org cookie, OIDC claim construction, and the commercial gate call sites. For the operator/owner/buyer-facing description of the feature, see [`commercial/organizations.md`](../commercial/organizations.md).
 
-For operators deploying Forseti, see [`operator-guide.md`](./operator-guide.md). For apps consuming org claims over OIDC, see [`integration-guide.md`](./integration-guide.md). For the underlying flows, see [`dev/flows.md`](./dev/flows.md).
+## No single-tenant branch
 
-## The shape of it
+There's no synthetic "single-tenant" code path. The migration seeds a real `organizations` row with `id = "default"` (the `DEFAULT_ORG_ID` constant, `src/orgs/mod.rs:40`), and *every* code path queries that row the same way it would query any other. OSS users get a fully working org with one tenant; a Business license just lets them `INSERT` more rows. Nothing special-cases the single-org case.
 
-Forseti is multi-org from the ground up — but OSS ships exactly **one** org, and the commercial license is what unlocks the rest.
-
-The trick is that there's no synthetic "single-tenant" branch. The migration seeds a real `organizations` row with `id = "default"` (the `DEFAULT_ORG_ID` constant, `src/orgs/mod.rs:40`), and *every* code path queries that row the same way it would query any other. OSS users get a fully working org with one tenant; a Business license just lets them `INSERT` more rows. Nothing special-cases the single-org case.
-
-| | OSS (unlicensed) | Business (`orgs` feature) |
-|---|---|---|
-| Default org | ✅ full read/write | ✅ |
-| Additional orgs | ❌ create blocked | ✅ up to `max_orgs` |
-| Invites to Default org | ✅ | ✅ |
-| Invites to named orgs | ❌ | ✅ |
-| Org-scoped admin (`?org=…`) | n/a (only Default exists) | ✅ owners see their own org |
-| `org` / `orgs` OIDC claims | Default-only | full membership |
-
-The whole feature is gated behind one license flag — `Feature::Orgs` (`src/commercial/license.rs:15-17`). See [Commercial licensing](#commercial-licensing) below.
+The whole feature is gated behind one license flag — `Feature::Orgs` (`src/commercial/license.rs:15-17`). See [Commercial gate](#commercial-gate) below.
 
 ## Data model
 
@@ -61,14 +48,9 @@ Indexed on `org_id` and `email`.
 
 ## Roles
 
-Two roles only — `owner` and `member` (`Role` enum, `src/orgs/mod.rs:48-52`), stored as lowercase strings:
+Two roles only — `owner` and `member` (`Role` enum, `src/orgs/mod.rs:48-52`), stored as lowercase strings. Role strings round-trip through one vocabulary shared by form parsing, DB storage, and OIDC claim emission (`Role::as_str` / `FromStr`). Unknown strings fail closed — `is_owner_role()` logs a warning and returns `false` (`src/orgs/mod.rs:84-92`), so a constraint bypass can't silently grant owner.
 
-- **owner** — runs governance: rename the org, edit branding, invite/remove members, change roles, delete the org, and access the [org-scoped admin surface](#org-scoped-admin).
-- **member** — read-only for org-scoped resources.
-
-Role strings round-trip through one vocabulary shared by form parsing, DB storage, and OIDC claim emission (`Role::as_str` / `FromStr`). Unknown strings fail closed — `is_owner_role()` logs a warning and returns `false` (`src/orgs/mod.rs:84-92`), so a constraint bypass can't silently grant owner.
-
-## Membership
+## Membership and auto-join
 
 Membership is **automatic on the first authenticated request** — users never "join" the Default org by hand.
 
@@ -102,7 +84,7 @@ The cookie is never trusted on its own. `active_org()` (`src/orgs/mod.rs:137-153
 
 The cookie is only *written* by `POST /orgs/switch` (`src/orgs/settings_page/switch.rs`) — a CSRF-protected target behind the nav dropdown that re-verifies membership before emitting the `Set-Cookie`. Default TTL is 30 days (`[orgs].active_org_cookie_ttl_seconds`).
 
-Downstream apps can also pin the active org at auth time with the `organization_id=<id>` parameter on the `/oauth2/auth` URL — see [Active-org selection in the integration guide](./integration-guide.md#active-org-selection-org-scope). If the user isn't a member of the named org, the param is silently ignored (no error UX), so a stale link from a deactivated member doesn't break login.
+Downstream apps can also pin the active org at auth time with the `organization_id=<id>` parameter on the `/oauth2/auth` URL. If the user isn't a member of the named org, the param is silently ignored (no error UX), so a stale link from a deactivated member doesn't break login.
 
 ## Invites
 
@@ -117,43 +99,43 @@ Full flow in `src/orgs/invite.rs`. Owner-only, and (for named orgs) license-gate
 
 Only **verified** emails can accept — the finalize path checks the identity's Kratos `verifiable_addresses`. Invite TTL defaults to 7 days (`[orgs].invite_ttl_days`); the bound `{ org_id, email, role, expires_at }` lives on the row, so a leaked URL can't be replayed after the row expires.
 
-## Branding
-
-Each org carries `logo_url` and `support_email`. When set, they override the global `[brand]` config — the active org's logo renders in the nav header and its support email surfaces on help/error pages.
+## Branding validation
 
 The branding page (`src/orgs/settings_page/branding.rs`) is owner-only and validates inputs hard:
 
 - **`logo_url`** — ≤ 2048 chars, must parse as an HTTPS URL, and must pass `validate_webhook_url()` (the same SSRF blocklist used for webhooks — rejects loopback, RFC 1918, and cloud-metadata IPs). Reusing that validator keeps the private-IP blocklist DRY.
 - **`support_email`** — a single well-formed address (one `@`, non-empty local + domain, ≤ 254 chars, no control/whitespace).
 
+When set, both override the global `[brand]` config — the active org's logo renders in the nav header and its support email surfaces on help/error pages.
+
 ## Org-scoped admin
 
-Org owners get a **scoped slice of the admin surface** for their own org, without holding the Forseti-wide admin privilege (which is the config-driven `admin.allowed_emails` allowlist).
+Org owners get a **scoped slice of the admin surface** for their own org, without holding the Forseti-wide admin privilege (the config-driven `admin.allowed_emails` allowlist).
 
 Reached by appending `?org=<slug>` to an admin URL. The `RequireAdminScoped` extractor (`src/extractors.rs:315`) reads that query param and resolves it via `resolve_admin_scope()` (`src/orgs/mod.rs:260-284`) into an `AdminScope`:
 
 - **`AdminScope::Forseti`** — no `?org` param. The full operator surface, gated by the email allowlist + AAL2, exactly as before.
 - **`AdminScope::Org { id, slug }`** — `?org=<slug>` resolved to an org the caller *owns*. Every query is then filtered to that org's rows. Unknown slug → `UnknownOrg`; not an owner → `NotOwner`.
 
-Surfaces that honour the org scope (each filters its listing to the scoped org): clients (`src/admin/clients/`), identities, sessions, audit, and webhooks. So an org owner can manage their org's OAuth clients and read their org's audit trail without seeing anyone else's.
+Surfaces that honour the org scope (each filters its listing to the scoped org): clients (`src/admin/clients/`), identities, sessions, audit, and webhooks.
 
-## OIDC claims
+## OIDC claim construction
 
 Two scopes surface org membership into OIDC tokens. Both are built in `build_id_token_claims()` (`src/oauth/consent.rs:569-624`), and the membership fetch is skipped entirely unless the grant actually includes one of them (`src/oauth/consent.rs:485`) — OSS deployments and plain `openid email` grants pay nothing.
 
 | Scope | Claim |
 |---|---|
 | `org` | A single object for the **active** org: `{ id, slug, role, name }`. The active org is resolved from the `forseti_active_org` cookie at consent time, falling back to the first membership. |
-| `orgs` | An array of `{ id, slug, role, name }` for **every** membership, capped at 32 entries (`ORGS_CLAIM_CAP`, `src/orgs/nav.rs`). Request this for a tenant-picker UI. |
+| `orgs` | An array of `{ id, slug, role, name }` for **every** membership, capped at 32 entries (`ORGS_CLAIM_CAP`, `src/orgs/nav.rs`). |
 
-Entries with an unparseable role are dropped with a `warn!` rather than emitting a malformed claim. These claims also appear at the `userinfo` endpoint. The full app-facing reference — including the `organization_id=` auth param and example tokens — lives in the [integration guide's scope reference](./integration-guide.md#scope-reference).
+Entries with an unparseable role are dropped with a `warn!` rather than emitting a malformed claim. These claims also appear at the `userinfo` endpoint. The app-facing reference lives in the [integration guide's scope reference](../integration-guide.md#scope-reference).
 
-## Commercial licensing
+## Commercial gate
 
-Multi-org is the headline `Feature::Orgs` capability (wire name `"orgs"`, `src/commercial/license.rs:31`). The runtime check is a single wait-free `ArcSwap` pointer-load, `LicenseHandle::feature(Feature::Orgs)` (`src/commercial/mod.rs`), which returns a `FeatureStatus` (`src/commercial/license.rs:128-140`):
+Multi-org is the `Feature::Orgs` capability (wire name `"orgs"`, `src/commercial/license.rs:31`). The runtime check is a single wait-free `ArcSwap` pointer-load, `LicenseHandle::feature(Feature::Orgs)` (`src/commercial/mod.rs`), which returns a `FeatureStatus` (`src/commercial/license.rs:128-140`):
 
 - **`Allowed`** — active license that includes `"orgs"`. Proceed.
-- **`GraceReadOnly`** — license past expiry but inside the grace window (`grace_days`, default 14): reads stay accessible, hard writes (create org, invite to a named org) bail.
+- **`GraceReadOnly`** — license past expiry but inside the fixed 30-day grace window (`commercial::GRACE_DAYS`): reads stay accessible, hard writes (create org, invite to a named org) bail.
 - **`Locked`** — no license, license missing the feature, or past grace. Render the upsell page.
 
 Every org **write** path funnels through one helper, `gate_orgs_feature_or_upsell()` (`src/extractors.rs:356`), and **every gate short-circuits when `org_id == DEFAULT_ORG_ID`** — so the Default org is always fully usable in OSS. Gate call sites:
@@ -166,16 +148,8 @@ Every org **write** path funnels through one helper, `gate_orgs_feature_or_upsel
 
 The license blob carries an optional `max_orgs` (`src/commercial/license.rs:83`): `None` = unlimited, `Some(n)` = hard cap. Enforced by `org_cap_allows(cap, current)` (`src/commercial/license.rs:67-69`) against a live `count_orgs()`. With no license the effective cap is `Some(0)` (`list_create.rs:62`), so the create path is closed and only the seeded Default org survives.
 
-## Configuration
+## Related
 
-The `[orgs]` table (`src/config.rs:777-799`; documented in `config.example.toml`):
-
-```toml
-[orgs]
-active_org_cookie_ttl_seconds = 2592000   # 30 days — lifetime of the signed active-org cookie
-invite_ttl_days = 7                        # how long a minted invite stays redeemable
-```
-
-Both have defaults, so the table is optional. `max_orgs` is **not** an operator config knob — it comes from the license blob itself.
-
-The org feature has no dedicated CLI verbs; invites simply expire in place (no prune subcommand). Identity deletion fans out to `remove_member_everywhere()` automatically.
+- [Organizations (operator/buyer guide)](../commercial/organizations.md) — the customer-facing description of this feature.
+- [Flow internals](flows.md) — sequence diagrams and handler references.
+- [Enterprise SAML SSO flow](flows.md#enterprise-saml-sso-commercial) — SAML internals; orgs are the tenancy unit each connection attaches to.

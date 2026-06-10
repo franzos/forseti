@@ -16,7 +16,7 @@ TAILWIND_RUN  := guix shell glibc gcc-toolchain -- bash -c 'export LD_LIBRARY_PA
 endif
 
 .PHONY: css css-watch dev build check clean run test-integration \
-	stack-up stack-wait stack-down stack-reset stack-logs seed-admin \
+	stack-up stack-up-saml stack-wait stack-down stack-reset stack-logs seed-admin \
 	e2e e2e-expired e2e-licensed e2e-trace license-fixtures
 
 # Compose engine. Defaults to podman-compose for local GUIX dev; CI overrides
@@ -75,8 +75,13 @@ test-integration: ## Rust integration suite (stack + Forseti must already be run
 # lean on unique-per-run emails rather than between-test cleanup.
 
 stack-up: ## Bring the playground up and block until Kratos + Hydra are ready
-	$(COMPOSE) -f $(COMPOSE_FILE) up -d
+	$(COMPOSE) $(COMPOSE_PROFILE_FLAGS) -f $(COMPOSE_FILE) up -d
 	@$(MAKE) stack-wait
+
+# podman-compose 1.5.0 ignores the COMPOSE_PROFILES env var, so pass the
+# profile as a flag — works for both podman-compose and docker compose.
+stack-up-saml: ## stack-up plus the Jackson + mock-saml SAML bridge
+	$(MAKE) stack-up COMPOSE_PROFILE_FLAGS="--profile saml"
 
 stack-wait: ## Block until Kratos + Hydra report ready (90s timeout per service)
 	@for url in $(ORY_READY_URLS); do \
@@ -214,11 +219,11 @@ e2e-licensed: ## Run licensed-bucket Playwright e2e (requires active license act
 license-fixtures: ## Mint tests/fixtures/license/{active,expired}.blob via the issuer CLI
 	@mkdir -p tests/fixtures/license
 	cd $(LICENSE_ISSUER_DIR) && cargo run --release --quiet -- \
-		issue --tier business --feature orgs \
+		issue --tier business --feature orgs --feature saml \
 		--customer "E2E Test" --email "e2e@example.com" \
 		> $(CURDIR)/tests/fixtures/license/active.blob
 	cd $(LICENSE_ISSUER_DIR) && cargo run --release --quiet -- \
-		issue --tier business --feature orgs \
+		issue --tier business --feature orgs --feature saml \
 		--customer "E2E Test" --email "e2e@example.com" \
 		--expires 2024-01-01 \
 		> $(CURDIR)/tests/fixtures/license/expired.blob

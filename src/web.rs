@@ -180,6 +180,7 @@ mod tests {
             handoff: HandoffConfig::default(),
             flash: FlashConfig::default(),
             orgs: OrgsConfig::default(),
+            saml: None,
             proxy: ProxyConfig::default(),
             security: SecurityConfig::default(),
         }

@@ -43,6 +43,13 @@ selfservice:
       enabled: true
       config:
         lifespan: 15m
+    # `link` enables the admin-minted magic recovery link
+    # (`POST /admin/recovery/link`) — the SAML bridge's session-establishment
+    # mechanism. Without it Kratos 404s the admin endpoint.
+    link:
+      enabled: true
+      config:
+        lifespan: 15m
     totp:
       enabled: true
       config:

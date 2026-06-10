@@ -24,6 +24,7 @@ mod page_chrome;
 mod profiles;
 mod rate_limit;
 mod render;
+mod saml;
 mod schema;
 mod session_view;
 mod settings;

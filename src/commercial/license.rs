@@ -156,6 +156,9 @@ pub(crate) fn evaluate_feature(status: &LicenseStatus, feature: Feature) -> Feat
     }
 }
 
+/// Fixed read-only window after license expiry before hard-gating; not operator-configurable.
+pub const GRACE_DAYS: i64 = 30;
+
 /// Reclassify an `Active` license against the wall clock. Called at boot
 /// (after the DB row is decoded) and on every activation. Keeps the
 /// runtime status in sync with reality without forcing every feature
@@ -264,5 +267,28 @@ mod tests {
         );
         let s = classify(l, 14, Utc::now());
         assert!(matches!(s, LicenseStatus::Expired(_)));
+    }
+
+    #[test]
+    fn grace_window_is_fixed_at_thirty_days() {
+        assert_eq!(GRACE_DAYS, 30);
+
+        let in_grace = license_with(
+            Some(Utc::now() - chrono::Duration::days(20)),
+            vec![Feature::Orgs],
+        );
+        assert!(matches!(
+            classify(in_grace, GRACE_DAYS, Utc::now()),
+            LicenseStatus::Grace(_)
+        ));
+
+        let past_grace = license_with(
+            Some(Utc::now() - chrono::Duration::days(40)),
+            vec![Feature::Orgs],
+        );
+        assert!(matches!(
+            classify(past_grace, GRACE_DAYS, Utc::now()),
+            LicenseStatus::Expired(_)
+        ));
     }
 }

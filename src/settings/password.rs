@@ -5,7 +5,7 @@
 use askama::Template;
 use axum::extract::{Query, State};
 use axum::http::HeaderMap;
-use axum::response::Response;
+use axum::response::{IntoResponse, Redirect, Response};
 
 use crate::flow_view::{GroupedNodes, MessageView};
 use crate::page_chrome::PageChrome;
@@ -51,6 +51,23 @@ pub(crate) async fn settings_password(
     csrf: crate::extractors::Csrf,
     banner: crate::handoff::ReferrerBanner,
 ) -> Response {
+    // SSO arrivals get dumped here by the recovery redemption; the
+    // breadcrumb marks them for a bounce to the dashboard instead.
+    if crate::cookies::read_cookie(&headers, "forseti_sso_arrival").is_some() {
+        let secure = if state.cfg.self_.is_https() {
+            "; Secure"
+        } else {
+            ""
+        };
+        let mut resp = Redirect::to("/").into_response();
+        crate::web::append_set_cookie(
+            &mut resp,
+            Some(format!(
+                "forseti_sso_arrival=; Path=/settings; Max-Age=0; HttpOnly; SameSite=Lax{secure}"
+            )),
+        );
+        return resp;
+    }
     settings_subpage(
         &state,
         &headers,

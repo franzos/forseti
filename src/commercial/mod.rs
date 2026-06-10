@@ -30,7 +30,7 @@
 //!    `feature()` check is a single atomic pointer load.
 //!
 //! 4. **Grace period.** Expired licenses keep gated features visible
-//!    but read-only for `license.grace_days` (default 14) so a
+//!    but read-only for a fixed 30-day window ([`GRACE_DAYS`]) so a
 //!    forgotten renewal doesn't blow up production. After the grace
 //!    window, gated features hard-gate to the upsell page.
 //!
@@ -43,7 +43,7 @@ pub mod upsell;
 pub mod verify;
 
 use license::Feature;
-pub use license::{FeatureStatus, LicenseStatus};
+pub use license::{FeatureStatus, LicenseStatus, GRACE_DAYS};
 
 use axum::Router;
 
@@ -72,9 +72,8 @@ pub const PUBLIC_KEY_BYTES: &[u8; 32] = include_bytes!("pubkey.bin");
 #[derive(Clone)]
 pub struct LicenseHandle {
     inner: Arc<ArcSwap<LicenseStatus>>,
-    /// Grace window applied to expired licenses, in days. Cached at boot
-    /// from `config.toml::license.grace_days` so feature checks don't
-    /// re-touch the config struct.
+    /// Grace window applied to expired licenses, in days. Fixed at
+    /// [`GRACE_DAYS`]; cached here so feature checks stay self-contained.
     grace_days: i64,
 }
 

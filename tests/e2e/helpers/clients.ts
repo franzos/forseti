@@ -27,7 +27,7 @@ export interface CreateClientOpts {
 /**
  * Drive `/admin/clients/new?type=web_app` to create a fresh OAuth client.
  * Returns `{ clientId, clientSecret }` parsed from the show page's
- * "Client secret (shown once)" reveal block.
+ * "Credentials — shown once" reveal block.
  *
  * Pre-requisite: the page must already be signed in at AAL2 — call
  * `signInAdminAal2(page, creds)` first.
@@ -70,7 +70,7 @@ export async function createOAuthClient(
   const clientId = page.url().match(/\/admin\/clients\/([a-f0-9-]+)/)?.[1];
   if (!clientId) throw new Error(`could not parse client_id from ${page.url()}`);
 
-  const revealHeader = page.getByText('Client secret (shown once)');
+  const revealHeader = page.getByText('Credentials — shown once');
   await revealHeader.waitFor();
   // The secret is in the first leaf `<pre>` directly after the header —
   // same selector strategy as Scenario B.

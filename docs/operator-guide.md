@@ -1286,11 +1286,11 @@ Paste the license blob you received from sales at `/admin/license` and click **A
 ```toml
 [license]
 purchase_url = "https://example.com/buy"
-grace_days   = 14
 ```
 
 - `purchase_url` — where the upsell page's CTA points. Empty default falls back to `mailto:<brand.support_email>`.
-- `grace_days` — after `expires_at`, gated features stay read-only for this many days before hard-gating. Set to `0` to disable the grace window.
+
+After `expires_at`, gated features stay read-only for a fixed **30 days** before hard-gating. This grace window is not operator-configurable.
 
 ### Revocation tradeoff
 
@@ -1383,6 +1383,10 @@ The claim-email flow lets the legitimate owner of an email reclaim it from an un
 - **TOCTOU re-check at confirm.** If the legitimate owner happens to walk through `/verification` between the moment the claim code is minted and the moment the claimer submits it, the confirm path refuses to delete (now-verified identities are off-limits). Avoids the case where a verified user gets wiped because a race-window claim was already in flight.
 
 The claim **destroys** the squatter's identity and redirects the claimer to a fresh `/registration`. The claimer does not inherit any state — they pick their own password, set their own traits, and get a new Kratos identity UUID. Email ownership proves only the right to delete + register-fresh; it does not transfer the existing account.
+
+## Commercial features
+
+Some features are gated behind a commercial license — see [`commercial/`](./commercial/) for the overview and licensing model. In particular, **Enterprise SAML SSO** (per-org `/sso/{slug}` login against a corporate IdP) is documented in [`commercial/saml.md`](./commercial/saml.md), and the multi-org model in [`commercial/organizations.md`](./commercial/organizations.md).
 
 ## Further reading
 

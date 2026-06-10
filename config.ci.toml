@@ -64,3 +64,11 @@ audit_retention_days = 90
 [claim_email]
 rate_limit_per_minute = 100
 rate_limit_per_hour = 1000
+
+# Mounts /sso/{slug} + /sso/callback so the SAML integration tests run.
+# Jackson itself is NOT in the playground; the suite only exercises the
+# Forseti-side paths (neutral pages, state validation).
+[saml]
+jackson_url = "http://127.0.0.1:5225"
+jackson_api_key = "dev-jackson-api-key"
+client_secret_verifier = "dev-client-secret-verifier"

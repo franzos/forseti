@@ -3,9 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>
-      {% block title %}{{ chrome.brand.name }}{% endblock %}
-    </title>
+    <title>{% block title %}{{ chrome.brand.name }}{% endblock %}</title>
     <link rel="preconnect" href="https://fonts.bunny.net" crossorigin>
     <link rel="stylesheet"
           href="https://fonts.bunny.net/css?family=geist:400,600,700|jetbrains-mono:400&display=swap">
@@ -42,7 +40,8 @@
             {% block card_title %}{{ chrome.brand.name }}{% endblock %}
           </h1>
           <p class="font-body-sm text-body-sm text-on-surface-variant">
-            {% block card_subtitle %}{% endblock %}
+            {% block card_subtitle %}
+            {% endblock %}
           </p>
         </div>
 

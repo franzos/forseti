@@ -1,0 +1,74 @@
+{% extends "admin/admin_shell.html" %}
+
+{% block admin_title %}New SAML connection{% endblock %}
+
+{% block admin_content %}
+  <div class="max-w-2xl">
+    <h1 class="font-headline-lg text-headline-lg text-on-surface mb-stack-sm">New SAML connection</h1>
+    <p class="font-body-md text-body-md text-on-surface-variant mb-stack-lg">
+      Connect an organization to its identity provider. Paste the IdP's metadata XML, or give a metadata URL Jackson fetches itself &mdash; exactly one of the two.
+    </p>
+
+    {% if !error_message.is_empty() %}
+      <div class="bg-error-container border border-error rounded-lg p-3 mb-stack-md">
+        <p class="font-body-sm text-body-sm text-on-error-container">{{ error_message }}</p>
+      </div>
+    {% endif %}
+
+    <form method="POST"
+          action="/admin/saml/new"
+          class="flex flex-col gap-stack-md">
+      <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+
+      <label class="flex flex-col gap-stack-xs">
+        <span class="font-label-md text-label-md text-on-surface">Organization</span>
+        <select name="org_id"
+                class="font-body-md text-body-md bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2">
+          {% for o in orgs %}
+            <option value="{{ o.id }}" {% if o.id == org_id %}selected{% endif %}>{{ o.name }} ({{ o.slug }})</option>
+          {% endfor %}
+        </select>
+        <span class="font-label-sm text-label-sm text-on-surface-variant">One connection per organization.</span>
+      </label>
+
+      <label class="flex flex-col gap-stack-xs">
+        <span class="font-label-md text-label-md text-on-surface">Connection name</span>
+        <input type="text"
+               name="display_name"
+               value="{{ display_name }}"
+               placeholder="e.g. 'Acme Okta'"
+               class="font-body-md text-body-md bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2">
+        <span class="font-label-sm text-label-sm text-on-surface-variant">For your records only; members never see this.</span>
+      </label>
+
+      <label class="flex flex-col gap-stack-xs">
+        <span class="font-label-md text-label-md text-on-surface">Metadata URL</span>
+        <input type="url"
+               name="metadata_url"
+               value="{{ metadata_url }}"
+               placeholder="https://idp.example.com/app/metadata.xml"
+               class="font-body-md text-body-md bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2">
+        <span class="font-label-sm text-label-sm text-on-surface-variant">Leave blank when pasting raw XML below.</span>
+        <span class="font-label-sm text-label-sm text-on-surface-variant">Jackson only fetches HTTPS (or localhost) metadata URLs &mdash; for plain-HTTP IdP metadata, paste the XML below instead.</span>
+      </label>
+
+      <label class="flex flex-col gap-stack-xs">
+        <span class="font-label-md text-label-md text-on-surface">Metadata XML</span>
+        <textarea name="metadata_xml"
+                  rows="8"
+                  placeholder="&lt;EntityDescriptor ...&gt;"
+                  class="font-mono text-xs bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2">{{ metadata_xml }}</textarea>
+        <span class="font-label-sm text-label-sm text-on-surface-variant">Leave blank when using a metadata URL above.</span>
+      </label>
+
+      <div class="flex items-center gap-stack-md mt-stack-sm">
+        <button type="submit"
+                class="bg-primary text-on-primary font-label-md text-label-md font-bold px-4 py-2 rounded-lg hover:opacity-90 transition-opacity">
+          Create connection
+        </button>
+        <a href="/admin/saml"
+           class="font-label-md text-label-md text-on-surface-variant border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">Cancel</a>
+      </div>
+    </form>
+  </div>
+{% endblock %}

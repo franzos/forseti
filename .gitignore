@@ -45,3 +45,6 @@ tests/fixtures/license/
 # out of the repo even though the file is mode 0600 — backups belong
 # in the operator's secrets store, not git history.
 /data/
+
+# Superpowers process artifacts (specs/plans) — not part of the product repo
+docs/superpowers/

@@ -27,9 +27,39 @@ struct OverviewTemplate {
     is_owner: bool,
     is_default: bool,
     member_count: usize,
+    /// Read-only SSO status (connections are operator-managed at
+    /// `/admin/saml`). `None` when `[saml]` is unconfigured or the org
+    /// has no connection — the card is simply absent.
+    sso: Option<SsoStatus>,
     /// Pre-built switcher view-model so the top-nav reflects the active
     /// org without each handler re-loading it.
     nav: orgs::nav::OrgNav,
+}
+
+struct SsoStatus {
+    display_name: String,
+    enabled: bool,
+    sso_path: String,
+}
+
+/// Read-only SSO status for an org's overview (owner and member views
+/// share this). `None` when `[saml]` is unconfigured or the org has no
+/// connection. Best-effort: a lookup failure logs and yields `None` so a
+/// DB blip never breaks the overview page.
+async fn sso_status(state: &AppState, org: &Org) -> Option<SsoStatus> {
+    state.cfg.saml.as_ref()?;
+    match crate::saml::db::get_connection(&state.db, &org.id).await {
+        Ok(Some(conn)) => Some(SsoStatus {
+            display_name: conn.display_name.clone(),
+            enabled: conn.is_enabled(),
+            sso_path: format!("/sso/{}", org.slug),
+        }),
+        Ok(None) => None,
+        Err(e) => {
+            tracing::warn!(error = ?e, org_id = %org.id, "org overview: saml connection lookup failed");
+            None
+        }
+    }
 }
 
 pub(super) async fn overview(
@@ -108,6 +138,7 @@ async fn render_overview_info(
             .collect()
     };
     owner_emails.sort();
+    let sso = sso_status(state, &org).await;
     let nav = build_nav(state, headers, &ctx.identity_id).await;
     render(&OverviewInfoTemplate {
         chrome: PageChrome::from_parts(state, ctx.user_email.clone(), ctx.csrf_token.clone()),
@@ -115,6 +146,7 @@ async fn render_overview_info(
         org,
         member_count: members.len(),
         owner_emails,
+        sso,
         nav,
     })
 }
@@ -129,6 +161,9 @@ struct OverviewInfoTemplate {
     /// Sorted, unique. Surfaced so members know who to contact for
     /// management issues without exposing the full roster on this page.
     owner_emails: Vec<String>,
+    /// Same read-only SSO status the owner sees — members are the ones
+    /// who log in via `/sso/{slug}` and need the URL.
+    sso: Option<SsoStatus>,
     nav: orgs::nav::OrgNav,
 }
 
@@ -142,6 +177,7 @@ async fn render_overview(
     let members = orgs::list_members(&state.db, &org.id)
         .await
         .unwrap_or_default();
+    let sso = sso_status(state, org).await;
     let nav = build_nav(state, headers, &ctx.identity_id).await;
     render(&OverviewTemplate {
         chrome: PageChrome::from_parts(state, ctx.user_email.clone(), ctx.csrf_token.clone()),
@@ -149,6 +185,7 @@ async fn render_overview(
         org: org.clone(),
         is_owner,
         member_count: members.len(),
+        sso,
         nav,
     })
 }
