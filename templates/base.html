@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" class="{{ chrome.theme_pref.css_class() }}" data-theme="{{ chrome.theme_pref.as_str() }}">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -15,6 +15,7 @@
         {% match chrome.brand.logo_url %}{% when Some with (url) %}--brand-logo-url: url("{{ url }}");{% when None %}{% endmatch %}
       }
     </style>
+    {% include "partials/_theme_head.html" %}
     <link rel="stylesheet" href="/static/styles.css">
   </head>
   <body class="bg-background min-h-screen flex flex-col font-body-md text-on-background">
@@ -30,12 +31,12 @@
            class="font-headline-md text-headline-md font-extrabold text-on-surface tracking-tight">{{ chrome.brand.name }}</a>
         <nav class="hidden md:flex items-end h-full gap-stack-lg">
           <a href="/"
-             class="{% block nav_dashboard_class %}text-on-secondary-fixed-variant hover:text-primary{% endblock %} transition-colors pb-4 px-1 font-label-md text-label-md">Dashboard</a>
+             class="{% block nav_dashboard_class %}text-on-surface-variant hover:text-primary{% endblock %} transition-colors pb-4 px-1 font-label-md text-label-md">Dashboard</a>
           <a href="/settings"
-             class="{% block nav_settings_class %}text-on-secondary-fixed-variant hover:text-primary{% endblock %} transition-colors pb-4 px-1 font-label-md text-label-md">Settings</a>
+             class="{% block nav_settings_class %}text-on-surface-variant hover:text-primary{% endblock %} transition-colors pb-4 px-1 font-label-md text-label-md">Settings</a>
           {% if chrome.is_admin %}
             <a href="/admin"
-               class="{% block nav_admin_class %}text-on-secondary-fixed-variant hover:text-primary{% endblock %} transition-colors pb-4 px-1 font-label-md text-label-md">Admin</a>
+               class="{% block nav_admin_class %}text-on-surface-variant hover:text-primary{% endblock %} transition-colors pb-4 px-1 font-label-md text-label-md">Admin</a>
           {% endif %}
           {% block org_nav %}{% endblock %}
         </nav>
@@ -54,6 +55,7 @@
               </form>
             {% endif %}
           {% endblock %}
+          {% include "partials/_theme_toggle.html" %}
         </div>
       </div>
     </header>
@@ -66,7 +68,7 @@
       <div class="flex flex-col md:flex-row justify-between items-center px-margin-desktop max-w-container-max mx-auto gap-stack-md">
         <span class="font-label-sm text-label-sm text-on-surface font-bold">&copy; {{ chrome.brand.name }}</span>
         <nav class="flex flex-wrap gap-stack-lg justify-center">
-          <span class="font-label-sm text-label-sm text-on-secondary-fixed-variant opacity-80">v{{ chrome.version }}</span>
+          <span class="font-label-sm text-label-sm text-on-surface-variant opacity-80">v{{ chrome.version }}</span>
         </nav>
       </div>
     </footer>

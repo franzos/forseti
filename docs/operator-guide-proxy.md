@@ -332,3 +332,16 @@ Ship Shape (1). It's the only one that:
 - Is explicitly endorsed in Hydra's production guide
 
 Migrate to (2) only when there's a concrete need — different rate-limit tiers per service, independent WAF rules, splitting Hydra to its own cluster. Until then the extra DNS records and CORS config buy you nothing. Skip (3) entirely.
+
+---
+
+## Content-Security-Policy
+
+Forseti does not set a `Content-Security-Policy` itself. If you add one at the
+proxy, it must allow Forseti's inline `<head>` scripts: a pre-paint theme
+resolver (reads the saved light/dark/system choice and sets the `dark` class
+before first paint) and a couple of input-handling helpers. Either permit
+inline scripts (`script-src 'unsafe-inline'`) or, if you need a strict policy,
+inject a per-request nonce. The pre-paint theme script is the one inline script
+that cannot be moved to an external file without reintroducing a flash of the
+wrong theme on load.

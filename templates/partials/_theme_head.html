@@ -1,0 +1,20 @@
+{# Pre-paint: confirm/resolve the theme before first paint so System (and any
+   cookie-stripped-iframe localStorage mirror) never flashes. For explicit
+   Light/Dark the server already rendered the class — this is a no-op. Must run
+   synchronously in <head>. #}
+<meta name="theme-color" content="#fcf8fa">
+<script>
+  (function () {
+    try {
+      var el = document.documentElement;
+      var pref = localStorage.getItem('forseti_theme') || el.getAttribute('data-theme') || 'system';
+      if (pref !== 'light' && pref !== 'dark' && pref !== 'system') pref = 'system';
+      var dark = pref === 'dark' ||
+        (pref === 'system' && matchMedia('(prefers-color-scheme: dark)').matches);
+      el.classList.toggle('dark', dark);
+      el.setAttribute('data-theme', pref);
+      var meta = document.querySelector('meta[name="theme-color"]');
+      if (meta) meta.setAttribute('content', dark ? '#131314' : '#fcf8fa');
+    } catch (e) {}
+  })();
+</script>

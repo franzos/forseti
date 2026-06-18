@@ -33,6 +33,10 @@ pub(crate) struct PageChrome {
     /// True when `user_email` is in `[admin].allowed_emails`. Drives the
     /// "Admin" top-nav link in `base.html`.
     pub(crate) is_admin: bool,
+    /// Appearance preference, read from the `forseti_theme` cookie by the
+    /// `Chrome` extractor. Defaults to `System` for directly-constructed
+    /// chrome (error boundary etc.) — the client script still applies it.
+    pub(crate) theme_pref: crate::theme::ThemePref,
 }
 
 impl PageChrome {
@@ -59,6 +63,7 @@ impl PageChrome {
             user_email,
             csrf_token,
             is_admin,
+            theme_pref: crate::theme::ThemePref::System,
         }
     }
 }
@@ -86,8 +91,8 @@ where
         let csrf = Csrf::from_request_parts(parts, state)
             .await
             .expect("Csrf extractor is infallible");
-        Ok(Chrome(PageChrome::from_parts(
-            &app_state, user_email, csrf.0,
-        )))
+        let mut chrome = PageChrome::from_parts(&app_state, user_email, csrf.0);
+        chrome.theme_pref = crate::theme::read_theme_cookie(&parts.headers);
+        Ok(Chrome(chrome))
     }
 }

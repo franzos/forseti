@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.5] - 2026-06-18
+
+### Added
+- Dark / light / system theme, selectable from the top bar (defaults to system, following the browser)
+
 ## [0.1.4] - 2026-06-10
 
 ### Added

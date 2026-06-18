@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" class="{{ chrome.theme_pref.css_class() }}" data-theme="{{ chrome.theme_pref.as_str() }}">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -13,11 +13,12 @@
         {% match chrome.brand.logo_url %}{% when Some with (url) %}--brand-logo-url: url("{{ url }}");{% when None %}{% endmatch %}
       }
     </style>
+    {% include "partials/_theme_head.html" %}
     <link rel="stylesheet" href="/static/styles.css">
   </head>
   <body class="bg-background min-h-screen flex flex-col font-body-md text-on-background">
     <main class="flex-grow flex items-center justify-center p-margin-mobile md:p-margin-desktop">
-      <div class="w-full max-w-[440px] bg-surface-container-lowest rounded-xl shadow-[0_4px_6px_-1px_rgba(0,0,0,0.1)] border border-outline-variant p-stack-lg md:p-[40px] flex flex-col gap-stack-lg">
+      <div class="w-full max-w-[440px] bg-surface-container-lowest rounded-xl shadow-[0_4px_6px_-1px_rgba(0,0,0,0.1)] dark:shadow-none border border-outline-variant p-stack-lg md:p-[40px] flex flex-col gap-stack-lg">
         <div class="flex flex-col items-center text-center gap-stack-sm">
           {% block card_icon %}
             <div class="w-12 h-12 bg-primary rounded-lg flex items-center justify-center mb-stack-sm"
@@ -53,7 +54,8 @@
       <div class="flex flex-col md:flex-row justify-between items-center px-margin-desktop max-w-container-max mx-auto gap-stack-md">
         <span class="font-label-sm text-label-sm text-on-surface font-bold">&copy; {{ chrome.brand.name }}</span>
         <nav class="flex flex-wrap gap-stack-lg justify-center">
-          <span class="font-label-sm text-label-sm text-on-secondary-fixed-variant opacity-80">v{{ chrome.version }}</span>
+          <span class="font-label-sm text-label-sm text-on-surface-variant opacity-80">v{{ chrome.version }}</span>
+          {% include "partials/_theme_toggle.html" %}
         </nav>
       </div>
     </footer>

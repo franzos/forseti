@@ -229,6 +229,22 @@ FORSETI_BRAND__NAME="Example Accounts"
 
 Recommended pattern: keep non-secret structural config in `config.toml`, load secrets from env (typically injected by your secrets manager or orchestrator).
 
+## Appearance
+
+Users choose between **System**, **Light**, and **Dark** from a control in the
+page footer (on both signed-in pages and the login/registration screens). The
+default is **System**, which follows the browser/OS setting.
+
+The choice is stored in a per-browser cookie (`forseti_theme`), not on the
+account — it doesn't follow a user across devices or browsers. The server reads
+the cookie and renders the theme directly, so there's no flash on load;
+operating the control itself requires JavaScript.
+
+Branded deployments: the dark palette flips the brand colour to a light tone by
+default. A single brand colour that passes contrast checks on a light
+background usually won't on the dark one, so set a dark-mode brand override
+under the `html.dark` scope if you ship custom brand colours.
+
 ## Admin surface
 
 Forseti exposes an operator-facing admin surface under `/admin/*` for managing the Ory stack from the same UI users sign in through. There is no separate admin binary or out-of-band tooling.
