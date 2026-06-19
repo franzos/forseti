@@ -1471,11 +1471,16 @@ for a known app via `seed_form_from_template`
 (`src/admin/clients/handlers/create.rs:208`) — it layers app-specific
 overrides (concrete `YOUR_DOMAIN/…` redirect URIs, scope, auth method,
 PKCE, logout/webhook URLs) on top of the base preset, then renders the same
-`client_form.html`. The chosen template is not persisted; `client_type`
-still stamps the base preset slug into client metadata. An unknown slug
-redirects back to `/admin/clients/new` (the picker) rather than rendering a
-half-filled form. The picker's "Popular apps" group is built from
-`app_template_cards()` (`src/admin/clients/app_templates.rs`).
+`client_form.html`. `client_type` still stamps the base preset slug into
+the Hydra client metadata; the chosen template slug is recorded separately
+Forseti-side in `oauth_client_metadata.template_slug` (resolved to a
+`&'static` slug via `AppTemplate::from_slug` before persisting, so only
+known slugs land) — purely cosmetic, to render the app logo on the list and
+picker via the `_app_logo.html` macro. It is never read for a trust or
+authorization decision. An unknown slug redirects back to
+`/admin/clients/new` (the picker) rather than rendering a half-filled form.
+The picker's "Popular apps" group is built from `app_template_cards()`
+(`src/admin/clients/app_templates.rs`).
 
 Connection-details card: `client_show.html` shows the issuer + OIDC
 endpoints the integrator needs for the other end, sourced from

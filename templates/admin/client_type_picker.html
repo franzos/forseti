@@ -1,4 +1,5 @@
 {% extends "admin/admin_shell.html" %}
+{% import "admin/_app_logo.html" as logo_macro %}
 
 {% block admin_title %}New client{% endblock %}
 
@@ -29,8 +30,12 @@
       <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-stack-md">
         {% for app in app_cards %}
           <a href="/admin/clients/new?template={{ app.slug }}"
-             class="flex items-center gap-stack-sm p-stack-md bg-surface-container-lowest border border-outline-variant rounded-2xl hover:border-primary hover:bg-surface-container-low transition-colors">
-            <span class="flex items-center justify-center w-10 h-10 rounded-xl bg-surface-container-high text-on-surface font-headline-sm text-headline-sm shrink-0">{{ app.initial }}</span>
+             class="group flex items-center gap-stack-sm p-stack-md bg-surface-container-lowest border border-outline-variant rounded-2xl hover:border-primary hover:bg-surface-container-low transition-colors">
+            {% if app.logo.is_some() %}
+              <span class="flex items-center justify-center w-10 h-10 rounded-xl bg-surface-container-high shrink-0">{{ logo_macro::app_logo(app.logo, app.logo_dark) }}</span>
+            {% else %}
+              <span class="flex items-center justify-center w-10 h-10 rounded-xl bg-surface-container-high text-on-surface font-headline-sm text-headline-sm shrink-0">{{ app.initial }}</span>
+            {% endif %}
             <span class="font-label-lg text-label-lg text-on-surface">{{ app.label }}</span>
           </a>
         {% endfor %}

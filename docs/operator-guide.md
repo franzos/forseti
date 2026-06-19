@@ -319,7 +319,20 @@ The two-tier code lives at `src/admin/mod.rs::require_admin` (Tier 1) and `src/a
 
 ### App templates
 
-`/admin/clients/new` shows a "Popular apps" group below the five base client types. Picking one (GitLab, Nextcloud, Grafana, …) pre-fills the create form for that app — redirect URIs, scope, token-endpoint auth method, PKCE, and any logout/webhook URLs — so you don't have to look up each app's OIDC quirks. There are around 23 templates.
+`/admin/clients/new` shows a "Popular apps" group below the five base client types. Picking one (GitLab, Nextcloud, Grafana, …) pre-fills the create form for that app — redirect URIs, scope, token-endpoint auth method, PKCE, and any logout/webhook URLs — so you don't have to look up each app's OIDC quirks.
+
+The picker at `/admin/clients/new` is always the source of truth, but the bundled templates are:
+
+| Category | Apps |
+| --- | --- |
+| First-party | Stackpit, Formshive, Liwan |
+| Git, CI/CD & infrastructure | GitLab, Gitea, Forgejo, Jenkins, Argo CD, Harbor, Rancher, Portainer, Proxmox VE, NetBox |
+| Files, media & knowledge | Nextcloud, Seafile, Immich, Jellyfin, Audiobookshelf, Paperless-ngx, Outline, BookStack, HedgeDoc |
+| Collaboration & productivity | Matrix Synapse, Discourse, Rocket.Chat, Mattermost\*, OpenProject\*, Plane\*, Vikunja, Mealie, Penpot, WordPress |
+| Data, monitoring & feeds | Grafana, Apache Superset, Matomo, Miniflux, Open WebUI |
+| Other | Mastodon, Vaultwarden, Actual Budget, Atlassian Data Center\* |
+
+\* OIDC login requires that app's paid/enterprise tier — the template still works, but the form's guidance banner flags the licensing requirement.
 
 The pre-filled URLs use literal placeholders you must replace before saving:
 
@@ -328,7 +341,7 @@ The pre-filled URLs use literal placeholders you must replace before saving:
 
 Some templates carry a guidance banner on the form (e.g. PROVIDER_NAME notes, audience allow-list reminders) — read it before saving.
 
-The template choice is not persisted. It only seeds the form; the client's stored `client_type` records the base preset (e.g. `web_app`), so the list filter and detail-page badge are unaffected by which app you started from.
+The template choice doesn't change the client's type: the stored `client_type` records the base preset (e.g. `web_app`), so the list filter and detail-page badge are unaffected by which app you started from. The template slug itself is recorded Forseti-side (purely so the app's logo can appear next to the client on the list) — it carries no trust or behaviour, and only clients created from a template after this shipped will show a logo.
 
 After creating a client, its detail page (`/admin/clients/{id}`) shows a "Connection details" card with the issuer and OIDC endpoints (authorization, token, userinfo, JWKS, end-session) plus the client ID — everything you paste into the app's OIDC settings on the other end. The endpoints come from Hydra's discovery document; if Forseti can't reach Hydra at render time the card hides the endpoints and shows a note rather than guessing a (possibly wrong) issuer.
 

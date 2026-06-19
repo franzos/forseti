@@ -98,6 +98,9 @@ pub struct Row {
     /// shape today so we don't have to migrate the diesel projection
     /// again when filter UIs ship.
     pub org_id: String,
+    /// Curated app-template slug stamped at admin-create time; drives the
+    /// app logo on the client list. Cosmetic only.
+    pub template_slug: Option<String>,
 }
 
 impl Row {
@@ -126,6 +129,7 @@ struct InsertRow<'a> {
     audience: Option<&'a str>,
     resource_url: Option<&'a str>,
     org_id: &'a str,
+    template_slug: Option<&'a str>,
 }
 
 /// Fetch the row for `client_id`. `Ok(None)` when no row exists — the
@@ -200,6 +204,7 @@ pub async fn insert_dcr(
                 audience: aud.as_deref(),
                 resource_url: None,
                 org_id: &org,
+                template_slug: None,
             })
             .execute(conn)
             .map(|_| ())
@@ -215,12 +220,14 @@ pub async fn insert_admin_verified(
     client_id: &str,
     admin_email: &str,
     org_id: &str,
+    template_slug: Option<&str>,
     now: chrono::DateTime<Utc>,
 ) -> anyhow::Result<()> {
     let now_str = now.to_rfc3339();
     let id = client_id.to_string();
     let admin = admin_email.to_string();
     let org = org_id.to_string();
+    let template = template_slug.map(str::to_string);
     db_interact!(db, |conn| {
         diesel::insert_into(ocm::table)
             .values(InsertRow {
@@ -235,6 +242,7 @@ pub async fn insert_admin_verified(
                 audience: None,
                 resource_url: None,
                 org_id: &org,
+                template_slug: template.as_deref(),
             })
             .execute(conn)
             .map(|_| ())
@@ -275,6 +283,7 @@ macro_rules! ensure_row_and_prior {
                         audience: None,
                         resource_url: None,
                         org_id: crate::orgs::DEFAULT_ORG_ID,
+                        template_slug: None,
                     })
                     .execute($c)?;
                 "missing".to_string()

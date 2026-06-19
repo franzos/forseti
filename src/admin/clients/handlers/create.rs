@@ -335,8 +335,34 @@ pub async fn create(
     let client_type = form.client_type.clone();
     let payload = form.to_oauth2_client(None);
     match ory::hydra::create_client(&state.ory, payload).await {
-        Ok(new) => {
+        Ok(mut new) => {
             let id = new.client_id.clone().unwrap_or_default();
+            let template = AppTemplate::from_slug(&form.template);
+
+            // rusty-common apps (Formshive) send audience=<their own
+            // client_id>; Hydra only stamps an aud the client is allow-listed
+            // for, so fold the freshly generated id into the audience and
+            // PUT it back. Hydra has already committed, so a failure here
+            // only loses the convenience — never the client.
+            let mut audience_set = false;
+            if !id.is_empty() && template.is_some_and(|t| t.self_audience) {
+                let mut audience = new.audience.clone().unwrap_or_default();
+                if !audience.iter().any(|a| a == &id) {
+                    audience.push(id.clone());
+                }
+                new.audience = Some(audience);
+                match ory::hydra::update_client(&state.ory, &id, new.clone()).await {
+                    Ok(_) => audience_set = true,
+                    Err(e) => {
+                        tracing::error!(
+                            error = ?e,
+                            client_id = %id,
+                            "admin: create_client succeeded but self-audience update failed — \
+                             operator must add the client's own ID to its audience allow-list manually",
+                        );
+                    }
+                }
+            }
             // Admin-created clients are implicitly verified — the act of
             // an operator creating the client through the form is the
             // vouching. Stamp the Forseti-side metadata row so the show
@@ -363,6 +389,9 @@ pub async fn create(
                     &id,
                     &ctx.email,
                     &target_org,
+                    // Persist the resolved compile-time slug, never the raw
+                    // operator-supplied string — junk never reaches the column.
+                    AppTemplate::from_slug(&form.template).map(|t| t.slug),
                     chrono::Utc::now(),
                 )
                 .await
@@ -397,10 +426,18 @@ pub async fn create(
                     .registration_access_token
                     .clone()
                     .unwrap_or_default(),
-                setup_note: AppTemplate::from_slug(&form.template)
-                    .and_then(|t| t.post_create_note)
-                    .unwrap_or_default()
-                    .to_string(),
+                // On a successful self-audience update the manual instruction
+                // is redundant; on failure fall back to it so the operator
+                // can fix it by hand.
+                setup_note: if template.is_some_and(|t| t.self_audience) && audience_set {
+                    "This client's ID was added to its audience allow-list automatically."
+                        .to_string()
+                } else {
+                    template
+                        .and_then(|t| t.post_create_note)
+                        .unwrap_or_default()
+                        .to_string()
+                },
             };
             let token = match flash::store_secret_reveal(
                 &state.db,

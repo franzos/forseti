@@ -3,7 +3,7 @@
 
   # Forseti
 
-  **A self-service identity portal for [Ory Kratos](https://www.ory.sh/kratos/) and [Ory Hydra](https://www.ory.sh/hydra/)** — login, registration, account recovery, MFA, OAuth2 consent, and admin tooling, all server-rendered in Rust.
+  **The web UI Ory doesn't ship.** Every self-service identity flow for [Ory Kratos](https://www.ory.sh/kratos/) and [Ory Hydra](https://www.ory.sh/hydra/) — login, registration, recovery, MFA, OAuth2 consent — plus an admin console, in a single server-rendered binary.
 
   [![CI](https://github.com/franzos/forseti/actions/workflows/ci.yml/badge.svg)](https://github.com/franzos/forseti/actions/workflows/ci.yml)
   [![Release](https://github.com/franzos/forseti/actions/workflows/release.yml/badge.svg)](https://github.com/franzos/forseti/actions/workflows/release.yml)
@@ -12,9 +12,27 @@
 
 </div>
 
-Forseti is the web frontend Ory doesn't ship: a single binary that speaks to Kratos (identity) and Hydra (OAuth2/OIDC) and gives your users real screens for every self-service flow, plus an admin surface for operators.
+Ory's engines are excellent, but headless — you get APIs, your users need pages. Forseti is the missing frontend: one binary that talks to Kratos (identity) and Hydra (OAuth2/OIDC) and gives your users real screens for every flow, plus an admin surface for operators.
 
-## Download
+<p align="center">
+  <img src="docs/assets/screenshots/dashboard.png" alt="Self-service dashboard" width="32%" />
+  <img src="docs/assets/screenshots/client-picker.png" alt="App template picker" width="32%" />
+  <img src="docs/assets/screenshots/settings.png" alt="Account settings" width="32%" />
+</p>
+
+## What you get
+
+| | |
+| --- | --- |
+| 🔐 **Every Kratos flow, server-rendered** | Login, registration, recovery, verification, and the full settings hub — profile, password, MFA/TOTP, passkeys, social logins, active sessions. |
+| 🪪 **OAuth2 / OIDC bridge** | Login, consent, and logout screens for Hydra's authorization-code flow — turn Forseti into a drop-in OIDC provider for your own apps. |
+| 🧩 **40+ app templates** | One-click, pre-filled OAuth2 client setup for popular self-hosted apps (GitLab, Nextcloud, Vaultwarden, Grafana, Immich, …) — redirect URIs and per-app OIDC quirks already filled in. [Full list →](docs/operator-guide.md#app-templates) |
+| 🛠️ **Admin console** | Manage identities, sessions, and OAuth2 clients; append-only audit log; live status dashboard; dynamic-client-registration tokens. |
+| 🏢 **Organizations** | Multi-tenant orgs with members, invites, per-org branding, and per-org OIDC claims. |
+| 🌗 **Light & dark** | A built-in theme toggle (light / dark / follow-system) across every page. |
+| 🛡️ **Production-minded** | CSRF on every form, signed cookies, rate-limited DCR, and an account-deletion webhook saga with retries. |
+
+## Quickstart
 
 Prebuilt binaries for x86_64 and aarch64 Linux (glibc) are attached to every [release](https://github.com/franzos/forseti/releases/latest):
 
@@ -39,16 +57,6 @@ podman run --rm -p 3000:3000 \
 Both need a reachable Kratos and Hydra — see the [operator guide](docs/operator-guide.md). The binary reads `./config.toml` (override with `FORSETI_CONFIG_PATH`) and serves `./static` relative to its working directory.
 
 > **Runtime note:** the binary links dynamically against `libpq` (the Postgres client). On a bare host install `libpq5` (Debian/Ubuntu) or `libpq` (most other distros); the container image already includes it. SQLite is bundled, so it needs nothing extra.
-
-## Why Forseti
-
-Ory's engines are excellent, but headless. You get APIs; your users need pages. Forseti fills that gap:
-
-- **Every Kratos flow, server-rendered** — login, registration, recovery, verification, settings (profile, password, MFA/TOTP, social logins, sessions)
-- **Hydra OAuth2 bridge** — login, consent, and logout screens for the OAuth2/OIDC authorization-code flow
-- **Admin surface** — manage identities, sessions, OAuth2 clients; append-only audit log; status dashboard
-- **Organizations** — multi-tenant orgs with members, invites, branding, and per-org OIDC claims
-- **Production-minded** — CSRF on every form, signed cookies, rate-limited DCR, account-deletion webhook saga
 
 ## Status
 
@@ -112,7 +120,7 @@ For the full OAuth2 dance — register a Hydra client, run an auth-code flow, ex
 Forseti is dual-licensed:
 
 - **AGPL-3.0** for the open-source core (everything outside `src/commercial/`)
-- **Commercial license** for paid features in `src/commercial/` (see [`MONETIZATION.md`](MONETIZATION.md) and [`LICENSE-COMMERCIAL`](LICENSE-COMMERCIAL))
+- **Commercial license** for paid features in `src/commercial/`
 
 Built on [Ory Kratos](https://www.ory.sh/kratos/) and [Ory Hydra](https://www.ory.sh/hydra/).
 

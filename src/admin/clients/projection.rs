@@ -36,6 +36,11 @@ pub(super) struct ClientRow {
     pub verified_by: String,
     /// RFC 3339 timestamp of the verification. Empty when unset.
     pub verified_at: String,
+    /// App-template logo filename (cosmetic), resolved from the stamped
+    /// `template_slug`. None → no logo tile on the row.
+    pub logo: Option<&'static str>,
+    /// Light-theme logo variant; None falls back to `logo`.
+    pub logo_dark: Option<&'static str>,
 }
 
 /// Read `metadata.forseti.client_type` off a Hydra client. Returns the raw
@@ -85,6 +90,11 @@ pub(super) fn project_row(
         // `oauth_client_metadata` for the rationale.
         None => (false, true, String::new(), String::new()),
     };
+    let (logo, logo_dark) = meta
+        .and_then(|m| m.template_slug.as_deref())
+        .and_then(crate::admin::clients::app_templates::AppTemplate::from_slug)
+        .map(|t| (t.logo, t.logo_dark))
+        .unwrap_or((None, None));
     ClientRow {
         id: c.client_id.clone().unwrap_or_default(),
         name: c.client_name.clone().unwrap_or_default(),
@@ -98,5 +108,7 @@ pub(super) fn project_row(
         verified,
         verified_by,
         verified_at,
+        logo,
+        logo_dark,
     }
 }

@@ -66,6 +66,7 @@ diesel::table! {
         audience -> Nullable<Text>,
         resource_url -> Nullable<Text>,
         org_id -> Text,
+        template_slug -> Nullable<Text>,
     }
 }
 

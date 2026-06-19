@@ -1,0 +1,14 @@
+{% macro app_logo(logo, logo_dark) %}
+  {% if let Some(src) = logo %}
+    <img src="/static/logos/{{ src }}"
+         alt=""
+         aria-hidden="true"
+         class="w-8 h-8 object-contain grayscale opacity-80 transition group-hover:grayscale-0 group-hover:opacity-100{% if logo_dark.is_some() %} dark:hidden{% endif %}">
+    {% if let Some(dsrc) = logo_dark %}
+      <img src="/static/logos/{{ dsrc }}"
+           alt=""
+           aria-hidden="true"
+           class="w-8 h-8 object-contain grayscale opacity-80 transition group-hover:grayscale-0 group-hover:opacity-100 hidden dark:block">
+    {% endif %}
+  {% endif %}
+{% endmacro %}
