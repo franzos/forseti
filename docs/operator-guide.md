@@ -298,7 +298,7 @@ The two-tier code lives at `src/admin/mod.rs::require_admin` (Tier 1) and `src/a
 | Path                                  | Purpose                                                                                         |
 |---------------------------------------|-------------------------------------------------------------------------------------------------|
 | `/admin` → `/admin/status`            | Landing redirect.                                                                               |
-| `/admin/status`                       | Kratos + Hydra health probes, courier queue (pending / failed counts), and build versions for Forseti, Kratos, and Hydra. |
+| `/admin/status`                       | Kratos + Hydra health probes, courier queue (pending / failed counts), build versions, and audit-health counters (write failures + the two audit-webhook counters described below). |
 | `/admin/clients`                      | List Hydra OAuth2 clients, filter by name.                                                      |
 | `/admin/clients/new`                  | Create a new OAuth2 client. Returns to the show page with a one-time secret + registration access token reveal. |
 | `/admin/clients/{id}`                 | View / edit a client. Rotate-secret and delete confirm pages live under here.                   |
@@ -381,12 +381,20 @@ There's no online-rotation path: Kratos's Viper-based config loader does not sup
 
 #### Audit webhook replay protection
 
-Bearer alone lets anyone who captures a single request replay it arbitrarily later — fabricating audit history. The receiver layers two cheap mitigations on top:
+Bearer alone lets anyone who captures a single request replay it arbitrarily later — fabricating audit history. The real guard is the internal listener plus the bearer; on top of that the receiver adds a freshness signal:
 
-1. **Freshness window.** The shared `audit_event.jsonnet` template emits `ctx.flow.issued_at` (RFC 3339) into the body. The receiver rejects payloads whose `issued_at` is more than 5 minutes old, or skewed more than 1 minute into the future. Payloads missing `issued_at` are accepted but logged at `debug` — older Kratos versions omit the field on some hooks and dropping them would lose legitimate events.
-2. **Per-flow dedupe.** A bounded in-memory LRU (1024 entries) keyed by `metadata.flow_id` drops same-flow replays inside the freshness window. The cache is process-local — restart loses it, which is fine because the freshness window also resets.
+**Freshness window.** The shared `audit_event.jsonnet` template emits `ctx.flow.issued_at` (RFC 3339) into the body. The receiver flags payloads whose `issued_at` is more than 1 hour old (`stale`) or skewed more than 1 minute into the future (`future`). The window covers the longest Kratos flow lifespan (settings flows default to 1h), so a stale reading means a genuinely old timestamp — replay or clock skew — not a slow user. Flagged payloads are **still recorded**, with a `metadata.freshness` marker, and counted on `/admin/status` (see below). Payloads missing `issued_at` are written unflagged — older Kratos versions omit the field on some hooks. The window is telemetry, not a hard reject: see the response-code note below for why the receiver never drops a parseable payload.
 
-**Threat model — what this catches and what it doesn't.** Stripe / GitHub webhook signing computes an HMAC over the body with a shared secret, which catches both replay and tampering. Kratos's `web_hook` action ships static headers only — it can't compute an HMAC at send time — so the freshness + dedupe approach is the realistic ceiling without a signing proxy. This stops the "captured payload replayed hours later" case but not a real-time MITM with both the bearer and a live freshness window. If your threat model includes that, terminate Kratos behind a reverse proxy that injects an HMAC header (haproxy + lua, nginx + lua, envoy + wasm) and check it in front of Forseti.
+**Responses.** The receiver returns **401** on a missing/wrong bearer and **204** on everything else — accepted, flagged, malformed body, or unknown action. The hooks are fire-and-forget on the Kratos side (`response.ignore: true`), so Kratos never reads the status; the 401/204-only scheme is defence in depth so the receiver can't break a user's self-service flow even if a future Kratos config regresses to a blocking hook. Failures surface out-of-band on `/admin/status` and in `warn!` logs.
+
+**Threat model — what this catches and what it doesn't.** Stripe / GitHub webhook signing computes an HMAC over the body with a shared secret, which catches both replay and tampering. Kratos's `web_hook` action ships static headers only — it can't compute an HMAC at send time — so the bearer + freshness flag is the realistic ceiling without a signing proxy. If your threat model includes a real-time MITM, terminate Kratos behind a reverse proxy that injects an HMAC header (haproxy + lua, nginx + lua, envoy + wasm) and check it in front of Forseti.
+
+#### Audit webhook counters on `/admin/status`
+
+Two in-process counters surface the receiver's out-of-band failure signal. Both reset on Forseti restart — they answer "did anything odd happen since the last boot?", not "what is the all-time total". Non-zero values render a hint on the status page.
+
+- **Audit webhook rejected.** A payload was dropped before any row was written — either a malformed body or an unknown `?action=`. A non-zero count almost always means a Kratos hook or config mismatch (e.g. an `action` not in the receiver's vocabulary, or a template that emits a body the receiver can't parse). Check the `kratos audit webhook` `warn!` log lines for the specifics.
+- **Audit webhook freshness anomalies.** A row was written but its `issued_at` fell outside the 1h freshness window — stamped `stale` or `future` in `metadata.freshness`. Usually a slow flow finished after the window or the Kratos / Forseti clocks have drifted. The row is still recorded; the counter is a heads-up to check for clock skew (or, rarely, replay).
 
 #### Default-org auto-join
 

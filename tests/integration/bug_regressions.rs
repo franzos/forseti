@@ -131,6 +131,105 @@ async fn kratos_webhook_profile_updated_lands_audit_row() {
 }
 
 // =========================================================================
+// Audit webhook no longer aborts self-service flows: the receiver returns
+// 401/204 only and records (rather than drops) stale payloads.
+//
+//   - A ~2h-old payload is flagged stale, written, AND answered 204.
+//   - An unknown action returns 204 (not the old 400).
+//
+// The production bug was a 400 from a *blocking* hook aborting the user's
+// settings flow; the Kratos side is now fire-and-forget, and this asserts
+// the Forseti-side defence-in-depth response scheme.
+// =========================================================================
+
+#[tokio::test]
+async fn kratos_webhook_stale_payload_flagged_and_recorded() {
+    if !portal_reachable().await {
+        eprintln!("portal not reachable; skipping");
+        return;
+    }
+    let actor_id = uuid::Uuid::new_v4().to_string();
+    let actor_email = format!("stale-{actor_id}@example.test");
+    let stale_issued_at = (chrono::Utc::now() - chrono::Duration::hours(2)).to_rfc3339();
+
+    let client = browser_client();
+    let res = client
+        .post(format!(
+            "{INTERNAL}/internal/audit/kratos?action=mfa.webauthn.added"
+        ))
+        .bearer_auth(WEBHOOK_TOKEN)
+        .json(&serde_json::json!({
+            "actor_id": actor_id,
+            "actor_email": actor_email,
+            "target_id": actor_id,
+            "issued_at": stale_issued_at,
+            "metadata": {},
+        }))
+        .send()
+        .await
+        .expect("POST internal/audit/kratos (stale)");
+    assert_eq!(
+        res.status().as_u16(),
+        204,
+        "a stale payload must still be accepted (204), not rejected; body: {}",
+        res.text().await.unwrap_or_default()
+    );
+
+    let conn = rusqlite::Connection::open(forseti_db_path()).expect("open portal db");
+    let mut metadata: Option<String> = None;
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while std::time::Instant::now() < deadline {
+        metadata = conn
+            .query_row(
+                "SELECT metadata FROM audit_events \
+                 WHERE action = 'mfa.webauthn.added' \
+                   AND actor_id = ?1 \
+                   AND actor_email = ?2 \
+                 LIMIT 1",
+                params![actor_id, actor_email],
+                |row| row.get::<_, String>(0),
+            )
+            .ok();
+        if metadata.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let metadata = metadata
+        .unwrap_or_else(|| panic!("expected a recorded audit row for stale actor={actor_id}"));
+    let parsed: Value = serde_json::from_str(&metadata).expect("audit metadata is JSON");
+    assert_eq!(
+        parsed.get("freshness").and_then(Value::as_str),
+        Some("stale"),
+        "stale row must carry metadata.freshness == \"stale\"; got {metadata}"
+    );
+}
+
+#[tokio::test]
+async fn kratos_webhook_unknown_action_returns_204_not_400() {
+    if !portal_reachable().await {
+        eprintln!("portal not reachable; skipping");
+        return;
+    }
+    let client = browser_client();
+    let res = client
+        .post(format!(
+            "{INTERNAL}/internal/audit/kratos?action=this.action.does.not.exist"
+        ))
+        .bearer_auth(WEBHOOK_TOKEN)
+        .json(&serde_json::json!({ "metadata": {} }))
+        .send()
+        .await
+        .expect("POST internal/audit/kratos (unknown action)");
+    assert_eq!(
+        res.status().as_u16(),
+        204,
+        "unknown action must return 204, never a flow-breaking 400; body: {}",
+        res.text().await.unwrap_or_default()
+    );
+}
+
+// =========================================================================
 // Bug #5 — claim-email flow lands the user on /registration with the
 // freed email prefilled (cookie + query-param).
 // =========================================================================

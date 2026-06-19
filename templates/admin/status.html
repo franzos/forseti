@@ -111,6 +111,24 @@
         </p>
       {% endif %}
     </div>
+    <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4 mt-stack-md">
+      <p class="font-label-sm text-label-sm text-on-surface-variant">Audit webhook rejected (since boot)</p>
+      <p class="font-headline-md text-headline-md text-on-surface mt-1">{{ audit_webhook_rejected }}</p>
+      {% if audit_webhook_rejected > 0 %}
+        <p class="font-body-sm text-body-sm text-on-surface-variant mt-2">
+          Malformed payloads or unknown actions — likely a Kratos hook/config mismatch. Check the <code>kratos audit webhook</code> warn logs.
+        </p>
+      {% endif %}
+    </div>
+    <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4 mt-stack-md">
+      <p class="font-label-sm text-label-sm text-on-surface-variant">Audit webhook freshness anomalies (since boot)</p>
+      <p class="font-headline-md text-headline-md text-on-surface mt-1">{{ audit_webhook_freshness_anomalies }}</p>
+      {% if audit_webhook_freshness_anomalies > 0 %}
+        <p class="font-body-sm text-body-sm text-on-surface-variant mt-2">
+          Payloads stamped stale or future-dated — usually a slow flow or clock skew. Rows are still recorded and flagged.
+        </p>
+      {% endif %}
+    </div>
   </section>
 
   <section class="mb-stack-lg">

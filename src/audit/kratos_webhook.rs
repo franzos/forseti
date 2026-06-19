@@ -19,37 +19,47 @@
 //! ## Replay protection
 //!
 //! Bearer alone lets anyone who intercepts a single request replay it
-//! arbitrarily later — fabricating audit history. The receiver adds a
-//! freshness window on top of the bearer: the jsonnet body surfaces
-//! `ctx.flow.issued_at` (RFC 3339), and the receiver rejects payloads
-//! whose `issued_at` is more than `MAX_PAYLOAD_AGE` (5 min) old, or
-//! skewed more than `MAX_PAYLOAD_SKEW` (1 min) into the future. Payloads
-//! missing `issued_at` are accepted but logged — older Kratos versions
-//! omit the field on some hooks.
+//! arbitrarily later. The receiver adds a freshness window on top: the
+//! jsonnet body surfaces `ctx.flow.issued_at` (RFC 3339), and a payload
+//! whose `issued_at` is older than `MAX_PAYLOAD_AGE` (1h) or skewed more
+//! than `MAX_PAYLOAD_SKEW` (1 min) into the future is *flagged* —
+//! recorded with a `metadata.freshness` marker and counted — not
+//! dropped. The window covers the longest Kratos flow lifespan (settings
+//! flows default to 1h), so a "stale" reading means a genuinely old
+//! `issued_at` (replay or clock skew), not a slow user. Payloads missing
+//! `issued_at` are written unflagged — older Kratos versions omit it.
 //!
-//! Duplicate rows in an append-only audit log are harmless, so the
-//! receiver doesn't dedupe: it runs on the internal listener behind the
-//! bearer, and the freshness window is the real replay guard.
+//! The window is telemetry, not the guard: the real guard remains the
+//! internal listener + bearer. Duplicate rows in an append-only log are
+//! harmless, so the receiver doesn't dedupe.
 //!
 //! Full HMAC-of-body signing is the standard webhook pattern (Stripe /
 //! GitHub), but Kratos's `web_hook` action ships static headers only —
 //! it can't compute an HMAC at send time. Closing that gap requires a
 //! reverse proxy in front of Kratos to sign, or upstream support in
-//! Kratos. The current mitigation is therefore partial: it stops the
-//! "captured payload replayed hours later" case but not a real-time
-//! MITM with both the bearer and the live freshness window.
+//! Kratos.
 //!
 //! ## Responses
 //!
-//! - `204 No Content` on accept
-//! - `401 Unauthorized` on missing / wrong token
-//! - `400 Bad Request` on malformed body, unknown action, or a
-//!   stale / future-dated payload (a freshness reject is not an auth
-//!   failure, so 401 would wrongly trigger a Kratos retry / replay)
+//! The scheme is deliberately "401 for auth, 204 for everything else":
 //!
-//! Never returns 5xx — a failing audit write logs internally; Kratos
-//! sees an accept and never blocks the user flow regardless
-//! (`can_interrupt: false` on the Kratos side).
+//! - `401 Unauthorized` on missing / wrong token
+//! - `204 No Content` on every other outcome — accepted row, flagged
+//!   (stale/future) row, malformed body, or unknown action
+//!
+//! User-flow safety comes from `response.ignore: true` on the Kratos
+//! side: hooks are fire-and-forget, so Kratos never reads our status and
+//! a slow or erroring receiver can't stall the flow. As defence in depth
+//! the receiver only ever returns 401 or 204 — it is structurally
+//! incapable of returning a flow-breaking 4xx/5xx even if a future
+//! Kratos config regresses to a blocking hook. (Earlier code returned
+//! 400 on bad payloads; a 400 from a *blocking* hook aborts the user's
+//! flow, which was the production bug. `can_interrupt: false` does *not*
+//! make a hook non-blocking.)
+//!
+//! The failure signal lives out-of-band instead: two in-process counters
+//! on `/admin/status` — rejected (malformed body / unknown action) and
+//! freshness anomalies (stale / future) — plus `warn!` logs.
 //!
 //! ## Events covered
 //!
@@ -74,9 +84,10 @@ use serde::Deserialize;
 use crate::audit::{self, action, target_kind, AuditEvent, SafeMetadata};
 use crate::state::AppState;
 
-/// Reject payloads whose `issued_at` is older than this. Mirrors the
-/// Stripe / GitHub webhook tolerance.
-const MAX_PAYLOAD_AGE: chrono::Duration = chrono::Duration::minutes(5);
+/// Flag payloads whose `issued_at` is older than this as "stale". Covers
+/// the longest Kratos flow lifespan (settings flows default to 1h), so a
+/// stale reading is a genuinely old timestamp, not a slow user.
+const MAX_PAYLOAD_AGE: chrono::Duration = chrono::Duration::hours(1);
 
 /// Tolerance for `issued_at` skew into the future — Kratos and Forseti
 /// may run on different hosts with drifting clocks.
@@ -176,11 +187,15 @@ pub async fn receive(
         return (StatusCode::UNAUTHORIZED, "bad token").into_response();
     }
 
+    // Unknown action / malformed body are a Kratos contract or config
+    // mismatch, not an auth failure. Count them and return 204 — never a
+    // flow-breaking status (see the Responses section in the module docs).
     let action_str = match action_str_opt {
         Some(s) => s,
         None => {
             tracing::warn!(action = %q.action, "kratos audit webhook: unknown action");
-            return (StatusCode::BAD_REQUEST, "unknown action").into_response();
+            audit::record_kratos_webhook_rejected();
+            return StatusCode::NO_CONTENT.into_response();
         }
     };
 
@@ -188,43 +203,49 @@ pub async fn receive(
         Ok(Json(p)) => p,
         Err(_) => {
             tracing::warn!("kratos audit webhook: malformed body");
-            return (StatusCode::BAD_REQUEST, "malformed body").into_response();
+            audit::record_kratos_webhook_rejected();
+            return StatusCode::NO_CONTENT.into_response();
         }
     };
 
-    // Freshness check. Missing `issued_at` is accepted but logged —
-    // older Kratos versions omit the field on some hooks and we don't
-    // want to drop legitimate events.
-    let now = Utc::now();
-    if let Some(issued_at) = payload.issued_at {
-        let age = now.signed_duration_since(issued_at);
-        if age > MAX_PAYLOAD_AGE {
-            tracing::warn!(
-                action = action_str,
-                age_secs = age.num_seconds(),
-                "kratos audit webhook: stale payload rejected"
-            );
-            // 400, not 401: a stale payload isn't an auth failure. Returning
-            // 401 makes Kratos treat it as a hook-endpoint auth error and
-            // retry, replaying the stale event.
-            return (StatusCode::BAD_REQUEST, "stale payload").into_response();
+    // Freshness: flag stale / future-dated payloads (telemetry) but still
+    // write the row. Missing `issued_at` writes unflagged — older Kratos
+    // versions omit the field on some hooks.
+    let freshness_flag: Option<&'static str> = match payload.issued_at {
+        Some(issued_at) => {
+            let age = Utc::now().signed_duration_since(issued_at);
+            if age > MAX_PAYLOAD_AGE {
+                tracing::warn!(
+                    action = action_str,
+                    age_secs = age.num_seconds(),
+                    "kratos audit webhook: stale payload"
+                );
+                Some("stale")
+            } else if age < -MAX_PAYLOAD_SKEW {
+                tracing::warn!(
+                    action = action_str,
+                    skew_secs = (-age).num_seconds(),
+                    "kratos audit webhook: future-dated payload"
+                );
+                Some("future")
+            } else {
+                None
+            }
         }
-        if age < -MAX_PAYLOAD_SKEW {
-            tracing::warn!(
-                action = action_str,
-                skew_secs = (-age).num_seconds(),
-                "kratos audit webhook: future-dated payload rejected"
-            );
-            return (StatusCode::BAD_REQUEST, "future-dated payload").into_response();
-        }
-    } else {
-        tracing::debug!(
-            action = action_str,
-            "kratos audit webhook: payload missing issued_at; freshness check skipped"
-        );
+        None => None,
+    };
+    if freshness_flag.is_some() {
+        audit::record_kratos_webhook_freshness_anomaly();
     }
 
-    let metadata = build_safe_metadata(payload.metadata.clone());
+    let mut meta_value = payload.metadata.clone();
+    if let (Some(flag), serde_json::Value::Object(m)) = (freshness_flag, &mut meta_value) {
+        m.insert(
+            "freshness".to_string(),
+            serde_json::Value::String(flag.to_string()),
+        );
+    }
+    let metadata = build_safe_metadata(meta_value);
     let event = build_kratos_event(action_str, &payload, metadata);
     let _ = audit::log(&state.db, event).await;
     audit::record_kratos_webhook_received();

@@ -717,6 +717,40 @@ pub fn last_kratos_webhook_epoch() -> Option<u64> {
     }
 }
 
+/// In-process count of Kratos-webhook payloads rejected for a malformed
+/// body or unknown action — a Kratos contract / config mismatch. Resets
+/// on boot; surfaced on `/admin/status`.
+static KRATOS_WEBHOOK_REJECTED: AtomicU64 = AtomicU64::new(0);
+
+/// Record a rejected Kratos webhook payload (malformed body / unknown
+/// action). Called from `src/audit/kratos_webhook.rs::receive`.
+pub fn record_kratos_webhook_rejected() {
+    KRATOS_WEBHOOK_REJECTED.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Total Kratos webhook payloads rejected in this process. See
+/// [`KRATOS_WEBHOOK_REJECTED`].
+pub fn kratos_webhook_rejected_total() -> u64 {
+    KRATOS_WEBHOOK_REJECTED.load(Ordering::Relaxed)
+}
+
+/// In-process count of Kratos-webhook rows written with a freshness flag
+/// (stale / future-dated `issued_at`). Resets on boot; surfaced on
+/// `/admin/status`.
+static KRATOS_WEBHOOK_FRESHNESS_ANOMALIES: AtomicU64 = AtomicU64::new(0);
+
+/// Record a freshness-flagged Kratos webhook row (stale / future). Called
+/// from `src/audit/kratos_webhook.rs::receive`.
+pub fn record_kratos_webhook_freshness_anomaly() {
+    KRATOS_WEBHOOK_FRESHNESS_ANOMALIES.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Total freshness-flagged Kratos webhook rows in this process. See
+/// [`KRATOS_WEBHOOK_FRESHNESS_ANOMALIES`].
+pub fn kratos_webhook_freshness_anomalies_total() -> u64 {
+    KRATOS_WEBHOOK_FRESHNESS_ANOMALIES.load(Ordering::Relaxed)
+}
+
 /// Emit the dropped row as a structured `audit_fallback`-targeted error
 /// line. Field names mirror the DB schema so a stderr scraper can
 /// reconstruct the row without a translation layer. Operators should

@@ -29,11 +29,12 @@ function(ctx) {
     if std.objectHas(ctx, 'identity') && std.objectHas(ctx.identity, 'id')
     then ctx.identity.id
     else null,
-  // Surfaced to the receiver as a freshness lower bound — see
+  // Surfaced to the receiver as a freshness signal — see
   // `src/audit/kratos_webhook.rs`. Kratos's `web_hook` action can't
-  // compute an HMAC over the body, so the receiver leans on this
-  // RFC3339 timestamp (5-min window) plus a per-`flow_id` dedupe to
-  // neutralise replay of intercepted bearer + body pairs.
+  // compute an HMAC over the body, so the receiver uses this RFC3339
+  // timestamp to flag stale/future rows (1h window, telemetry only —
+  // there is no dedupe). The real replay guard is the internal listener
+  // plus the bearer token.
   issued_at:
     if std.objectHas(ctx, 'flow') && std.objectHas(ctx.flow, 'issued_at')
     then ctx.flow.issued_at

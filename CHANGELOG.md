@@ -1,10 +1,14 @@
 # Changelog
 
-## [Unreleased]
+## [0.1.6] - 2026-06-19
 
 ### Added
 - App-template logos on the client picker and list — known apps show their logo (grayscale, colour on hover) instead of a letter tile
 - 18 more "popular app" client templates: Vaultwarden, Discourse, Apache Superset, WordPress, Penpot, NetBox, Jenkins, Rocket.Chat, Seafile, Actual Budget, Audiobookshelf, Mealie, Matomo, Rancher, OpenProject, Plane, Mattermost, and Atlassian Data Center
+- `/admin/status` counters for Kratos audit-webhook rejections and freshness anomalies
+
+### Fixed
+- Kratos audit webhook no longer aborts self-service flows on slow 2FA enrollment
 
 ## [0.1.5] - 2026-06-18
 

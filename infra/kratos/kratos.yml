@@ -130,7 +130,8 @@ selfservice:
                 url: http://host.docker.internal:8081/internal/audit/kratos?action=password.changed
                 method: POST
                 body: file:///etc/config/kratos/audit_event.jsonnet
-                can_interrupt: false
+                response:
+                  ignore: true
                 auth:
                   type: api_key
                   config:
@@ -144,7 +145,8 @@ selfservice:
                 url: http://host.docker.internal:8081/internal/audit/kratos?action=mfa.totp.enrolled
                 method: POST
                 body: file:///etc/config/kratos/audit_event.jsonnet
-                can_interrupt: false
+                response:
+                  ignore: true
                 auth:
                   type: api_key
                   config:
@@ -158,7 +160,8 @@ selfservice:
                 url: http://host.docker.internal:8081/internal/audit/kratos?action=mfa.lookup.regenerated
                 method: POST
                 body: file:///etc/config/kratos/audit_event.jsonnet
-                can_interrupt: false
+                response:
+                  ignore: true
                 auth:
                   type: api_key
                   config:
@@ -172,7 +175,8 @@ selfservice:
                 url: http://host.docker.internal:8081/internal/audit/kratos?action=mfa.webauthn.added
                 method: POST
                 body: file:///etc/config/kratos/audit_event.jsonnet
-                can_interrupt: false
+                response:
+                  ignore: true
                 auth:
                   type: api_key
                   config:
@@ -186,7 +190,8 @@ selfservice:
                 url: http://host.docker.internal:8081/internal/audit/kratos?action=profile.updated
                 method: POST
                 body: file:///etc/config/kratos/audit_event.jsonnet
-                can_interrupt: false
+                response:
+                  ignore: true
                 auth:
                   type: api_key
                   config:
@@ -205,7 +210,8 @@ selfservice:
               url: http://host.docker.internal:8081/internal/audit/kratos?action=password.recovered
               method: POST
               body: file:///etc/config/kratos/audit_event.jsonnet
-              can_interrupt: false
+              response:
+                ignore: true
               auth:
                 type: api_key
                 config:
@@ -224,7 +230,8 @@ selfservice:
               url: http://host.docker.internal:8081/internal/audit/kratos?action=verification.completed
               method: POST
               body: file:///etc/config/kratos/audit_event.jsonnet
-              can_interrupt: false
+              response:
+                ignore: true
               auth:
                 type: api_key
                 config:
@@ -255,7 +262,8 @@ selfservice:
                 url: http://host.docker.internal:8081/internal/audit/kratos?action=auth.login
                 method: POST
                 body: file:///etc/config/kratos/audit_event.jsonnet
-                can_interrupt: false
+                response:
+                  ignore: true
                 auth:
                   type: api_key
                   config:
@@ -269,7 +277,8 @@ selfservice:
                 url: http://host.docker.internal:8081/internal/audit/kratos?action=auth.login
                 method: POST
                 body: file:///etc/config/kratos/audit_event.jsonnet
-                can_interrupt: false
+                response:
+                  ignore: true
                 auth:
                   type: api_key
                   config:
@@ -305,7 +314,8 @@ selfservice:
                 url: http://host.docker.internal:8081/internal/audit/kratos?action=identity.created
                 method: POST
                 body: file:///etc/config/kratos/audit_event.jsonnet
-                can_interrupt: false
+                response:
+                  ignore: true
                 auth:
                   type: api_key
                   config:
@@ -320,7 +330,8 @@ selfservice:
                 url: http://host.docker.internal:8081/internal/audit/kratos?action=identity.created
                 method: POST
                 body: file:///etc/config/kratos/audit_event.jsonnet
-                can_interrupt: false
+                response:
+                  ignore: true
                 auth:
                   type: api_key
                   config:
@@ -335,7 +346,8 @@ selfservice:
                 url: http://host.docker.internal:8081/internal/audit/kratos?action=identity.created
                 method: POST
                 body: file:///etc/config/kratos/audit_event.jsonnet
-                can_interrupt: false
+                response:
+                  ignore: true
                 auth:
                   type: api_key
                   config:
@@ -350,7 +362,8 @@ selfservice:
                 url: http://host.docker.internal:8081/internal/audit/kratos?action=identity.created
                 method: POST
                 body: file:///etc/config/kratos/audit_event.jsonnet
-                can_interrupt: false
+                response:
+                  ignore: true
                 auth:
                   type: api_key
                   config:

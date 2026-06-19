@@ -53,6 +53,14 @@ struct StatusTemplate {
     /// stderr lines should be inspected — the row data is still
     /// recoverable from logs.
     audit_write_failures: u64,
+    /// In-process count of Kratos-webhook payloads rejected since boot
+    /// (malformed body / unknown action). >0 means a Kratos hook/config
+    /// mismatch — check the `kratos audit webhook` warn logs.
+    audit_webhook_rejected: u64,
+    /// In-process count of Kratos-webhook rows flagged stale/future since
+    /// boot. >0 usually means a slow flow or clock skew; rows are still
+    /// recorded with a `metadata.freshness` marker.
+    audit_webhook_freshness_anomalies: u64,
     /// One-word license state: "Unlicensed" / "Active" / "Grace" /
     /// "Expired". Drives the badge colour in the template.
     license_state: &'static str,
@@ -159,6 +167,9 @@ pub async fn show(State(state): State<AppState>, admin: RequireAdmin) -> Respons
     let last_kratos_webhook_pretty = last_kratos_webhook_full.as_deref().map(humanise_timestamp);
 
     let audit_write_failures = crate::audit::audit_write_failures_total();
+    let audit_webhook_rejected = crate::audit::kratos_webhook_rejected_total();
+    let audit_webhook_freshness_anomalies =
+        crate::audit::kratos_webhook_freshness_anomalies_total();
 
     let (license_state, license_detail) = match &*state.license.status() {
         crate::commercial::LicenseStatus::Unlicensed => ("Unlicensed", None),
@@ -189,6 +200,8 @@ pub async fn show(State(state): State<AppState>, admin: RequireAdmin) -> Respons
         last_kratos_webhook_pretty,
         last_kratos_webhook_full,
         audit_write_failures,
+        audit_webhook_rejected,
+        audit_webhook_freshness_anomalies,
         license_state,
         license_detail,
         issuer: disc.issuer,

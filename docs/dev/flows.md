@@ -1610,7 +1610,14 @@ override back atomically — no boot-time reset needed.
    on the webhook URL so one shared `infra/kratos/audit_event.jsonnet`
    template covers every flow. Bearer-token auth against
    `[audit].webhook_token` (mandatory — Forseti refuses to boot
-   when this is empty).
+   when this is empty). The hooks are **fire-and-forget**
+   (`response.ignore: true` on the Kratos side), so Kratos never reads
+   our status and the receiver can't break a self-service flow; as
+   defence in depth the receiver only ever returns **401** (bad/missing
+   bearer) or **204** (everything else), never a flow-breaking 4xx/5xx.
+   Stale or future-dated payloads (`issued_at` outside the 1h freshness
+   window) are flagged via `metadata.freshness` and still recorded, not
+   dropped — see the freshness counters on `/admin/status`.
 3. **Hydra consent** is emitted from `src/oauth/consent.rs` directly
    (Hydra has thin hook surface; emitting from Forseti's own handler
    gives full context without scraping).
