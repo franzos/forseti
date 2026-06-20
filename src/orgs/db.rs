@@ -486,6 +486,78 @@ pub async fn remove_member_everywhere(db: &DbPool, identity_id: &str) -> anyhow:
     Ok(affected)
 }
 
+/// An org would be left ungovernable by this identity's departure iff the
+/// identity is the *sole* owner and at least one other member remains. A solo
+/// org (only member) and a co-owned org are both fine to leave.
+pub(crate) fn blocks_self_deletion(owners: i64, members: i64) -> bool {
+    owners == 1 && members > 1
+}
+
+/// Orgs where `identity_id` is the *sole* owner AND at least one other
+/// member exists — i.e. orgs that would be left ungovernable if this
+/// identity vanished. Returns `(org_id, org_name)` pairs.
+///
+/// Used to block account self-deletion: a solo org (sole owner, no other
+/// members) is intentionally *not* returned, so deleting it proceeds.
+///
+/// Counts are computed in SQL via two grouped count queries (owners-per-org
+/// and members-per-org) — backend-agnostic across sqlite/postgres (no
+/// `FILTER`). Org names are fetched only for the surviving orgs.
+pub async fn orgs_where_sole_owner_with_other_members(
+    db: &DbPool,
+    identity_id: &str,
+) -> anyhow::Result<Vec<(String, String)>> {
+    use diesel::dsl::count_star;
+
+    let ident = identity_id.to_string();
+    db_interact!(db, |conn| {
+        let owned: Vec<String> = organization_members::table
+            .filter(organization_members::identity_id.eq(&ident))
+            .filter(organization_members::role.eq(super::Role::Owner.as_str()))
+            .limit(MAX_ROWS_PER_LIST)
+            .select(organization_members::org_id)
+            .load::<String>(conn)?;
+        if owned.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let owner_counts: Vec<(String, i64)> = organization_members::table
+            .filter(organization_members::org_id.eq_any(&owned))
+            .filter(organization_members::role.eq(super::Role::Owner.as_str()))
+            .group_by(organization_members::org_id)
+            .select((organization_members::org_id, count_star()))
+            .load::<(String, i64)>(conn)?;
+        let member_counts: Vec<(String, i64)> = organization_members::table
+            .filter(organization_members::org_id.eq_any(&owned))
+            .group_by(organization_members::org_id)
+            .select((organization_members::org_id, count_star()))
+            .load::<(String, i64)>(conn)?;
+
+        use std::collections::HashMap;
+        let owners: HashMap<String, i64> = owner_counts.into_iter().collect();
+        let members: HashMap<String, i64> = member_counts.into_iter().collect();
+
+        let blocking: Vec<String> = owned
+            .into_iter()
+            .filter(|org_id| {
+                blocks_self_deletion(
+                    owners.get(org_id).copied().unwrap_or(0),
+                    members.get(org_id).copied().unwrap_or(0),
+                )
+            })
+            .collect();
+        if blocking.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        organizations::table
+            .filter(organizations::id.eq_any(&blocking))
+            .select((organizations::id, organizations::name))
+            .load::<(String, String)>(conn)
+    })
+    .map_err(Into::into)
+}
+
 pub async fn update_role(
     db: &DbPool,
     org_id: &str,
@@ -753,6 +825,21 @@ mod tests {
     fn invite_is_expired_past() {
         let inv = invite_with_expiry("2026-01-01T00:00:00Z");
         assert!(inv.is_expired(now()));
+    }
+
+    #[test]
+    fn sole_owner_with_other_members_blocks() {
+        assert!(blocks_self_deletion(1, 2));
+    }
+
+    #[test]
+    fn solo_org_does_not_block() {
+        assert!(!blocks_self_deletion(1, 1));
+    }
+
+    #[test]
+    fn co_owned_org_does_not_block() {
+        assert!(!blocks_self_deletion(2, 3));
     }
 
     #[test]

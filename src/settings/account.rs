@@ -189,6 +189,45 @@ async fn run_delete_saga(state: &AppState, session: &ory::Session, actx: &AuditC
         "account self-delete: saga starting"
     );
 
+    // Block before anything destructive: refuse to orphan an org whose
+    // only owner is leaving while other members remain. Solo orgs (sole
+    // owner, no other members) are not returned and delete normally.
+    match crate::orgs::db::orgs_where_sole_owner_with_other_members(&state.db, &user_id).await {
+        Ok(blocking) if !blocking.is_empty() => {
+            let names = blocking
+                .iter()
+                .map(|(_, name)| name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            tracing::warn!(
+                actor = %actor_email,
+                user_id = %user_id,
+                orgs = %names,
+                "account self-delete blocked: sole owner of org(s) with other members"
+            );
+            return render_delete_failure(
+                state,
+                &format!(
+                    "You're the only owner of {names}. Transfer ownership to another \
+                     member before deleting your account."
+                ),
+            );
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                user_id = %user_id,
+                "sole-owner check failed; aborting before destructive call"
+            );
+            return render_delete_failure(
+                state,
+                "We couldn't verify your organization ownership. Nothing was changed; \
+                 please try again in a moment.",
+            );
+        }
+    }
+
     // Enumerate which apps need notification — every consent-granted
     // client with an `account_deletion_url` is a target. With SETs the
     // signing key is Forseti-owned (not per-client), so there's no
