@@ -27,6 +27,10 @@ COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY templates ./templates
 COPY migrations ./migrations
+# `include_dir!` captures static/ at compile time, so the freshly built CSS
+# must be in place before `cargo build`.
+COPY static ./static
+COPY --from=css /styles.css ./static/styles.css
 RUN cargo build --release --locked
 
 # --- Runtime image.
@@ -37,9 +41,8 @@ RUN apt-get update \
     && useradd --system --uid 10001 forseti
 WORKDIR /app
 COPY --from=build /src/target/release/forseti /usr/local/bin/forseti
-COPY --from=css /styles.css ./static/styles.css
 USER forseti
-# Forseti reads ./config.toml (override with FORSETI_CONFIG_PATH) and serves
-# ./static relative to the working directory.
+# Forseti reads ./config.toml (override with FORSETI_CONFIG_PATH); static
+# assets are compiled into the binary.
 EXPOSE 3000
 ENTRYPOINT ["forseti"]

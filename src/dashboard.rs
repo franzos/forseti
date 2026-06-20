@@ -165,7 +165,8 @@ async fn build_account_health(
     );
 
     let active_sessions = match sessions_res {
-        Ok(s) => s.len(),
+        // Kratos /sessions excludes the current session; count it.
+        Ok(s) => s.len() + 1,
         Err(e) => {
             tracing::warn!(error = ?e, "list_my_sessions failed; health.active_sessions=0");
             0

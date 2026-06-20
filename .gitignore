@@ -20,7 +20,6 @@ tests/fixtures/license/
 # Forseti scaffold
 /.bin/
 /config.toml
-/static/styles.css
 
 # Forseti-owned sqlite (default backend). Repo-local file is for `cargo run`
 # only; production sqlite installs keep the .db outside the working tree.

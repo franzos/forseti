@@ -16,7 +16,7 @@ use axum::{
     Router,
 };
 use tokio_util::sync::CancellationToken;
-use tower_http::{services::ServeDir, trace::TraceLayer};
+use tower_http::trace::TraceLayer;
 
 use crate::audit;
 use crate::commercial::{self, LicenseHandle};
@@ -29,6 +29,7 @@ use crate::orgs;
 use crate::ory::OryClients;
 use crate::profiles;
 use crate::state::AppState;
+use crate::static_assets;
 use crate::webhook;
 use crate::{admin, auth, dashboard, oauth, settings};
 
@@ -190,7 +191,7 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         public_app = public_app.merge(crate::saml::router());
     }
     let public_app = public_app
-        .nest_service("/static", ServeDir::new("./static"))
+        .merge(static_assets::router())
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             audit::middleware,

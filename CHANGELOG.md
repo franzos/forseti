@@ -1,5 +1,14 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+- Self-host the Geist / JetBrains Mono web fonts instead of loading them from Bunny Fonts — no third-party request, and preloading kills the font-swap flash on page load
+
+### Fixed
+- Static assets (provider logos, theme toggle script) 404'd in the Docker image — the runtime stage only copied `styles.css`, not the rest of `static/`
+- Dashboard "Active Sessions" tile read 0 with one session signed in — it didn't count the current session, which Kratos's `/sessions` list omits
+
 ## [0.1.6] - 2026-06-19
 
 ### Added

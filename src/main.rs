@@ -30,6 +30,7 @@ mod session_view;
 mod settings;
 mod signed_cookie;
 mod state;
+mod static_assets;
 mod theme;
 mod web;
 mod webhook;

@@ -22,11 +22,16 @@ tokio-util = { version = "0.7", default-features = false }
 # with a trimmed feature set so the combinator is a supported API.
 futures-util = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["trace", "compression-br", "fs"] }
+tower-http = { version = "0.6", features = ["trace", "compression-br"] }
 # Per-IP rate limiting on the DCR proxy. `default-features = false` then
 # `features = ["axum"]` drops the `tonic` dep we don't need.
 tower_governor = { version = "0.8", default-features = false, features = ["axum"] }
 askama = "0.16"
+# Static assets compiled into the binary so the release artifact is fully
+# self-contained — no `static/` tree to ship. `mime_guess` resolves the
+# Content-Type from the embedded path's extension.
+include_dir = "0.7"
+mime_guess = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # No `cookies` feature: every reqwest::Client in `src/` is a

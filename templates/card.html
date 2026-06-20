@@ -1,12 +1,23 @@
 <!DOCTYPE html>
-<html lang="en" class="{{ chrome.theme_pref.css_class() }}" data-theme="{{ chrome.theme_pref.as_str() }}">
+<html lang="en"
+      class="{{ chrome.theme_pref.css_class() }}"
+      data-theme="{{ chrome.theme_pref.as_str() }}">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}{{ chrome.brand.name }}{% endblock %}</title>
-    <link rel="preconnect" href="https://fonts.bunny.net" crossorigin>
-    <link rel="stylesheet"
-          href="https://fonts.bunny.net/css?family=geist:400,600,700|jetbrains-mono:400&display=swap">
+    {# Self-hosted fonts; @font-face in styles.css. Preload the latin Geist
+       faces used above the fold so first paint has them, no swap flash. #}
+    <link rel="preload"
+          href="/static/fonts/geist-latin-400-normal.woff2"
+          as="font"
+          type="font/woff2"
+          crossorigin>
+    <link rel="preload"
+          href="/static/fonts/geist-latin-700-normal.woff2"
+          as="font"
+          type="font/woff2"
+          crossorigin>
     <style>
       :root {
         --brand-name: "{{ chrome.brand.name }}";
