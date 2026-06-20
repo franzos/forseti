@@ -20,6 +20,19 @@
     </div>
   {% endif %}
 
+  {# Backstop reminder: a device factor is enrolled but no recovery codes
+     exist, so losing the device locks the account out for good. Links to the
+     2FA settings page where codes can be generated. #}
+  {% if health.two_factor_without_recovery_codes %}
+    <div class="bg-error-container border border-error rounded-xl p-4 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+      <p class="font-body-md text-body-md text-on-error-container">Two-factor is on but you have no recovery codes — generate some so you can't get locked out.</p>
+      <a href="/settings/2fa#recovery-codes"
+         class="font-label-md text-label-md text-on-error-container border border-error rounded-lg px-4 py-2 hover:bg-error hover:text-on-error transition-colors focus:outline-none focus:ring-2 focus:ring-error focus:ring-offset-2 whitespace-nowrap">
+        Generate codes
+      </a>
+    </div>
+  {% endif %}
+
   <header class="mt-2 mb-2">
     <h1 class="font-headline-lg-mobile md:font-headline-lg text-headline-lg-mobile md:text-headline-lg text-on-surface">
       Welcome back

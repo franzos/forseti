@@ -434,6 +434,135 @@ The subcommand reads the same `config.toml` as the running server, runs migratio
 - **No CSV / JSON export.** Audit and identity lists render only in the UI for now.
 - **No tamper-evidence (hash chain).** Append-only is enforced by the trigger; for stronger guarantees ship the row stream to an S3 archive with object-lock externally.
 
+## Two-factor authentication enforcement
+
+This is the section to read carefully if you run your own Kratos. 2FA enforcement lives **in your Kratos config, not in Forseti code** — and if you get it wrong, the second factor becomes a decoration that anyone with the password (or a recovery email) can walk straight past.
+
+> **Operator responsibility — read this.** Forseti does not, and cannot, enforce 2FA on its own self-service surface. Enforcement is two knobs in *your* `kratos.yml`. If those knobs are at `aal1`, there is **no 2FA enforcement at all**, and worse, the factor-removal bypass below is wide open. Forseti has no way to verify your live Kratos config — Kratos's API exposes only a version string and an opaque config hash, not the actual settings — so it can't warn you. You own this. The reference playground (`infra/kratos/kratos.yml`) ships with both knobs set correctly; if you copy from it you're fine. The one thing Forseti enforces regardless of Kratos config is its own admin surface (`/admin/*`), which does an independent AAL2 check in code.
+
+It can't read your *live* config, but it can lint the config *files* — that's what `forseti config-check` is for. Point it at your `kratos.yml` and it'll tell you whether these two knobs (and a handful of related ones) are set the way they should be. See [Config CLI](#config-cli) below; running it in CI is the cheapest insurance against shipping a misconfigured Kratos.
+
+### The two knobs
+
+Both of these must be `highest_available`. Not one. Both.
+
+```yaml
+# kratos.yml
+session:
+  whoami:
+    # Any identity with a second factor enrolled must complete AAL2 before
+    # whoami returns a session. Kratos answers 403 for an AAL1 session;
+    # Forseti maps that to a /login?aal=aal2 step-up. Users with NO second
+    # factor are unaffected — they stay at AAL1 and never see a prompt.
+    required_aal: highest_available
+
+selfservice:
+  flows:
+    settings:
+      # Changing or removing a second factor (or the password) requires AAL2.
+      # This is the critical one. See "Why both" below.
+      required_aal: highest_available
+```
+
+`highest_available` means "the highest AAL the identity *could* satisfy". A password-only user can only reach `aal1`, so they're held to `aal1` — no second factor is demanded of someone who never enrolled one. The moment a user enrols a second factor, their "highest available" becomes `aal2`, and from then on both gates demand it.
+
+### Why both — the factor-removal bypass
+
+`whoami.required_aal` alone looks like it's enough: it forces enrolled users to step up before they can see any protected page. It isn't enough.
+
+Consider `settings.required_aal: aal1` while `whoami.required_aal: highest_available`. An attacker (or a user who recovered via email) holds an **AAL1** session — password-only, or a fresh email-recovery session. They can't view the dashboard (whoami 403s them). But they *can* open the settings flow, because settings only demands `aal1`. From there they **remove the second factor**. Now their identity's "highest available" drops back to `aal1`, whoami stops 403-ing, and they're fully in — 2FA defeated without ever presenting the second factor.
+
+Email recovery is the realistic version of this attack: anyone who controls the inbox could otherwise strip 2FA. Setting `settings.required_aal: highest_available` closes it — an AAL1 session cannot touch credentials (2FA *or* password) until it steps up to AAL2 first. In normal use this adds no extra prompt, because an enrolled user is already AAL2 by the time they reach settings (they stepped up at login). It only ever blocks an un-stepped-up session.
+
+### Behavior summary
+
+| Situation | What happens |
+|-----------|--------------|
+| Login, user with **no** second factor | Password → AAL1. Stays AAL1, full access. No prompt. |
+| Login, user **with** a second factor | Password → AAL1, then any protected page bounces to `/login?aal=aal2` → complete the second factor → AAL2 → access. Once per session. |
+| OAuth login through Forseti's bridge, enrolled user | Same step-up is forced even if the relying party didn't ask for `acr_values=aal2`. The whoami 403 catches it. |
+| Managing factors at `/settings/2fa`, or changing the password | Requires AAL2. |
+| `/admin/*` | Independent AAL2 check in Forseti code — enforced regardless of Kratos config. |
+
+The step-up is a one-time event per session: the user clears it once, the session is AAL2, and they don't see it again until the session ages out.
+
+### Break-glass and recovery
+
+This is the subtle part. Get the recovery model wrong and you'll lock users out — or leave a hole.
+
+**Recovery codes are the only portable AAL2 factor.** TOTP and WebAuthn are tied to a device; lose the device and they're gone. Kratos `lookup_secret` recovery codes are not — a code satisfies AAL2 from any browser. So they're the lifeline for a lost-device user. Forseti pushes hard for them: a warning banner on `/settings/2fa` and a notice on the dashboard appear whenever a user has a device factor (TOTP/WebAuthn) but **no** recovery codes. It's a strong nudge at enrollment, not a hard per-request gate — so make sure your users act on it.
+
+**Lost device, has recovery codes.** Log in with the password (AAL1) → step up at `/login?aal=aal2` using a **recovery code** instead of the missing device → in settings, remove and re-enrol factors. Self-service, no operator involvement.
+
+**Forgot password, 2FA user.** Email recovery alone does *not* bypass 2FA — that's the whole point of `settings.required_aal: highest_available`. The recovered session is AAL1, so it can't reset the password until it steps up. The path is: email recovery → step up with the second factor *or* a recovery code → reset the password. Forseti preserves the focused password-reset page across the step-up by keeping the `?flow=` in the step-up's `return_to`, so the user lands back on the password form after clearing AAL2, not on a generic page.
+
+**Lost device, no recovery codes, forgot password.** This user is locked out of self-service — by design. They have zero factors they can present, so there is nothing to recover with; that's exactly the property 2FA is supposed to have. The escape hatch is an **admin-minted recovery link or code**: `POST /admin/recovery/link` (driven from the admin identity page, `/admin/identities/{id}`). The operator hands it over out-of-band, the user completes a recovery flow, and re-enrols. This is *why* forcing recovery codes matters — every user without them is a future support ticket that only an admin can resolve.
+
+## Config CLI
+
+Forseti's 2FA enforcement lives entirely in Kratos config, and Kratos won't tell you over the wire whether you got it right. So Forseti ships two subcommands that work on the config *files* directly — no DB, no running server, no Ory clients. They're pure file operations.
+
+Every subcommand takes `--help` (also `-h`), and `forseti --help` lists them all. Running `forseti` with no subcommand starts the HTTP server.
+
+### `config-check`
+
+Lints an existing Kratos + Hydra config against Forseti's recommendations and prints a finding per check, grouped by file:
+
+```bash
+forseti config-check                                   # uses the discovery order below
+forseti config-check --kratos /etc/kratos/kratos.yml --hydra /etc/hydra/hydra.yml
+forseti config-check --strict                          # also fail the run on WARN, not just FAIL
+```
+
+**How it finds your config.** Each file is resolved independently, highest precedence first:
+
+1. the `--kratos` / `--hydra` flag,
+2. the `FORSETI_KRATOS_CONFIG` / `FORSETI_HYDRA_CONFIG` env var,
+3. the dev default (`infra/kratos/kratos.yml` / `infra/hydra/hydra.yml`) — but **only if that file actually exists**.
+
+If none of those resolves to a file, `config-check` doesn't silently proceed — it prints a clear error naming the missing config (e.g. `No Kratos config found. Pass --kratos <path> or set $FORSETI_KRATOS_CONFIG.`) and exits non-zero. The output header shows the resolved path and where it came from, so you can always see exactly which file was linted and why:
+
+```
+== Kratos (/etc/kratos/kratos.yml — from --kratos) ==
+```
+
+Each line is `[ OK ]` / `[WARN]` / `[FAIL]` followed by the key path, the current value, the recommended value, and a one-line note on what breaks if you ignore it. SMTP/DSN credentials are redacted in the output, so it's safe to paste into a CI log. The command **exits non-zero if any check FAILs** (WARN alone doesn't fail unless you pass `--strict`), which makes it a drop-in CI gate:
+
+```yaml
+# .github/workflows/...
+- run: forseti config-check --kratos kratos.yml --hydra hydra.yml
+```
+
+The headline checks are the two 2FA knobs from the section above: `selfservice.flows.settings.required_aal` at anything other than `highest_available` is a **FAIL** (it's the factor-removal bypass), and `session.whoami.required_aal` not at `highest_available` is a **WARN**. It also covers recovery codes (`lookup_secret`), WebAuthn-as-second-factor (`passwordless: false`), self-service recovery, a non-placeholder SMTP URI, and the Kratos/Hydra secrets (presence, no obvious placeholders, and `secrets.cipher` being exactly 32 chars). On top of those specific checks it scans both files recursively and **FAILs** on any leftover `CHANGEME_*` placeholder (naming the dotted key path) — so a half-filled `config-init` output can't pass.
+
+### `config-init`
+
+Generates a recommended Kratos + Hydra config from the known-good reference, with your URLs/DSN/SMTP substituted in and fresh secrets minted from a CSPRNG. The security recommendations are baked in regardless of input — both `required_aal` knobs at `highest_available`, recovery codes on, WebAuthn as a second factor, TOTP on, recovery enabled.
+
+```bash
+forseti config-init \
+  --forseti-url https://accounts.example.com \
+  --kratos-public-url https://accounts.example.com/kratos \
+  --kratos-admin-url http://kratos:4434 \
+  --hydra-public-url https://accounts.example.com/hydra \
+  --hydra-admin-url http://hydra:4445 \
+  --kratos-db-dsn 'postgres://kratos:...@db/kratos' \
+  --hydra-db-dsn  'postgres://hydra:...@db/hydra' \
+  --smtp-uri      'smtps://user:pass@smtp.example.com:465' \
+  --kratos-out kratos.yml --hydra-out hydra.yml
+```
+
+It refuses to clobber an existing file unless you pass `--force`. Anything you don't supply via a flag is written as a loud `CHANGEME_*` placeholder, and the command prints exactly which ones are still outstanding — so a half-filled config can't masquerade as complete. `config-check` then **FAILs on any leftover `CHANGEME_*`**, anywhere in either file. The WebAuthn `rp.id` is derived from the host of `--forseti-url` (e.g. `accounts.example.com`), which is correct for a single-host deployment; narrow it to a registrable parent domain by hand if you serve several subdomains. With `--forseti-url` absent it stays `CHANGEME_RP_ID` and `config-check` FAILs on it like any other placeholder.
+
+The explanatory comments survive into the output — including the two `required_aal` comment blocks that explain *why* they're set the way they are. After writing, run the linter over what it produced to confirm the round-trip:
+
+```bash
+forseti config-init ... --kratos-out kratos.yml --hydra-out hydra.yml
+forseti config-check --kratos kratos.yml --hydra hydra.yml   # should be 0 FAIL, 0 WARN
+```
+
+A note on the generated secrets: they're embedded directly in the files and grant full session/token control, so treat the output the way you'd treat any secret material — review it, lock down the file permissions, and don't commit it.
+
 ## Kratos configuration
 
 Forseti is method-agnostic infrastructure: it renders whatever nodes Kratos serves on each self-service flow. Which methods are *available* is an operator decision made in `kratos.yml`. The reference playground config is at `infra/kratos/kratos.yml`.
@@ -1247,7 +1376,7 @@ Kratos's `serve.public.cors.allowed_origins` must include Forseti's public URL. 
 
 ### AAL2 auto-elevation after enrollment
 
-When a user enrolls a second factor (TOTP, lookup_secret, WebAuthn, passkey) inside a privileged settings flow, Kratos automatically marks the session as `aal2` going forward. The user does not have to re-authenticate to use the new factor. This is correct behavior but surprises operators verifying their setup — the second factor "just works" immediately because the enrollment ceremony itself satisfied AAL2.
+When a user enrolls a second factor (TOTP, lookup_secret, WebAuthn, passkey) inside a privileged settings flow, Kratos automatically marks the session as `aal2` going forward. The user does not have to re-authenticate to use the new factor. This is correct behavior but surprises operators verifying their setup — the second factor "just works" immediately because the enrollment ceremony itself satisfied AAL2. (Enforcement of AAL2 on *subsequent* logins is a separate concern — see [Two-factor authentication enforcement](#two-factor-authentication-enforcement).)
 
 ### Settings flow per-method return URLs
 

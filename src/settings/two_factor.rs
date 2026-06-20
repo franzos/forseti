@@ -46,6 +46,10 @@ pub(crate) struct Settings2faTemplate {
     /// True when the identity has recovery codes configured (Kratos emits a
     /// `lookup_secret_disable` node).
     pub(crate) lookup_enrolled: bool,
+    /// True when the identity has a device factor (TOTP or WebAuthn/passkey)
+    /// enrolled but no recovery codes — the lone state where losing the device
+    /// means permanent lockout. Drives the forced-codes warning banner.
+    pub(crate) needs_recovery_codes: bool,
     /// True on the single render right after regenerating lookup codes —
     /// Kratos emits a `lookup_secret_reveal` node alongside the plaintext
     /// codes. Templates use this to distinguish "show new codes" from the
@@ -105,7 +109,7 @@ fn render_2fa(
         &mut lookup_nodes,
         &["lookup_secret_confirm", "lookup_secret_regenerate"],
     );
-    promote_primary(&mut webauthn_nodes, &["webauthn_register_displayname"]);
+    promote_primary(&mut webauthn_nodes, &["webauthn_register_trigger"]);
 
     let (totp_qr, totp_secret) = totp_qr_and_secret(flow);
     let totp_enrolled = group_has_node(flow, "totp", "totp_unlink");
@@ -122,6 +126,12 @@ fn render_2fa(
     let lookup_just_regenerated =
         group_has_node(flow, "lookup_secret", "lookup_secret_reveal") && !lookup_codes.is_empty();
     let webauthn_enabled = !webauthn_nodes.is_empty();
+    // Enrolment (vs. merely-enabled) is signalled by a per-credential remove
+    // node Kratos emits for each registered authenticator.
+    let webauthn_enrolled = group_has_node(flow, "webauthn", "webauthn_remove")
+        || group_has_node(flow, "passkey", "passkey_remove");
+    // A device factor with no recovery codes is the self-lockout trap (codes are the only non-device AAL2 break-glass).
+    let needs_recovery_codes = (totp_enrolled || webauthn_enrolled) && !lookup_enrolled;
     let webauthn_scripts = collect_webauthn_scripts(flow);
 
     render(&Settings2faTemplate {
@@ -137,6 +147,7 @@ fn render_2fa(
         lookup_nodes,
         lookup_codes,
         lookup_enrolled,
+        needs_recovery_codes,
         lookup_just_regenerated,
         webauthn_nodes,
         webauthn_enabled,
@@ -163,7 +174,13 @@ fn promote_primary(nodes: &mut [InputView], primary_names: &[&str]) {
         }
     }
     if !found {
-        if let Some(first) = nodes.iter_mut().find(|n| is_button(n)) {
+        // Never let the fallback promote a destructive action (e.g. a
+        // `webauthn_remove` button Kratos emits before the add trigger).
+        let is_destructive = |n: &InputView| n.name.ends_with("_remove");
+        if let Some(first) = nodes
+            .iter_mut()
+            .find(|n| is_button(n) && !is_destructive(n))
+        {
             first.is_primary = true;
         }
     }

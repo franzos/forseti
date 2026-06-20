@@ -1,6 +1,12 @@
 # Changelog
 
-## [Unreleased]
+## [0.1.7] - 2026-06-20
+
+### Added
+- Two-factor authentication is enforced at login — once an identity has a second factor, every login (including to connected apps) requires it; driven by Kratos `required_aal: highest_available` on both the session and settings flows
+- Recovery codes as the 2FA break-glass — the 2FA page and dashboard warn when you have a second factor but no recovery codes, so losing a device can't lock you out
+- `config-check` / `config-init` operator CLI — lint a Kratos/Hydra config against the recommended (security-critical) settings, or generate a fresh pair with CSPRNG-minted secrets
+- Sole owners of an organisation with other members can no longer delete their own account — they're asked to transfer ownership first, so an org is never orphaned
 
 ### Changed
 - Self-host the Geist / JetBrains Mono web fonts instead of loading them from Bunny Fonts — no third-party request, and preloading kills the font-swap flash on page load
@@ -8,6 +14,8 @@
 ### Fixed
 - Static assets (provider logos, theme toggle script) 404'd in the Docker image — the runtime stage only copied `styles.css`, not the rest of `static/`
 - Dashboard "Active Sessions" tile read 0 with one session signed in — it didn't count the current session, which Kratos's `/sessions` list omits
+- Embedded static assets weren't refreshed when files changed — `include_dir!` contents aren't tracked by cargo, so a newly-added asset (e.g. the theme toggle script) 404'd until a clean rebuild; a build script now re-embeds on change
+- "Remove security key" buttons on the 2FA page rendered inconsistently — one filled, the rest outlined; they're now uniform
 
 ## [0.1.6] - 2026-06-19
 

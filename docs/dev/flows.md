@@ -85,7 +85,7 @@ Edge cases:
 
 The handler accepts three meaningful query params: `flow`, `return_to`, `aal`, `refresh`. The short-circuit in `login` skips the rest if the user already has a session, except in two carve-outs:
 
-1. `aal=aal2` requested but the current session is at `aal1` (step-up demanded by an OAuth client's `acr_values`). Without this carve-out the user would loop between `/oauth/login` and `/login`.
+1. `aal=aal2` requested but the current session is at `aal1` (step-up). This fires for an OAuth client's `acr_values`, **and** for the 2FA enforcement bounce — any enrolled identity whose AAL1 session is 403'd by Kratos's `session.whoami.required_aal: highest_available` gets redirected here by `RequireSession` (see [AAL enforcement model](#aal-enforcement-model) below). Without this carve-out the user would loop between the protected page (or `/oauth/login`) and `/login`.
 2. `refresh=true` (privileged-session re-auth bouncing back from `/settings/password` or similar). Without this the user would livelock at `privileged_session_max_age`.
 
 Both fall through to `browser_init_url_with` (`src/ory/kratos.rs:117`) so Kratos starts a flow that demands the appropriate credential.
@@ -114,6 +114,16 @@ Same `groups.oidc` rendering as registration. Clicking a provider button POSTs t
 
 When an OAuth client requests `acr_values=aal2` (handled in `oauth_login`, `src/oauth/login.rs:22` — out of scope for this section), or when something else demands a stronger session, the user lands on `/login?aal=aal2&return_to=...`. The handler forces Kratos to issue a fresh login flow with `aal=aal2` in the init URL (`src/ory/kratos.rs:117`). Kratos then renders TOTP / lookup_secret / webauthn nodes in `groups.other` (no dedicated group slot — they fall through `group_nodes` at `src/flow_view.rs:189`). The template's `groups.other` branch (`templates/login.html:99-117`) renders these generically.
 
+#### AAL enforcement model
+
+The reference Kratos config sets both `session.whoami.required_aal: highest_available` and `selfservice.flows.settings.required_aal: highest_available` (`infra/kratos/kratos.yml:14,125`). That makes the step-up above mandatory for any enrolled identity, not just when an OAuth client asks for it:
+
+- **whoami 403 → step-up.** With `whoami.required_aal: highest_available`, Kratos returns 403 for an AAL1 session whenever the identity has a second factor enrolled. The `RequireSession` extractor (`src/extractors.rs:31`) maps that 403 to a 303 redirect at `/login?aal=aal2&return_to=<path>`, built by `aal2_step_up_url` (`src/auth/mod.rs:33`). So a password-only login bounces to the step-up the first time it touches any protected page. A user with no second factor stays at AAL1 and is never bounced.
+- **settings demands AAL2.** With `settings.required_aal: highest_available`, an AAL1 session can't open the settings flow at all once the identity is enrolled. This is the bypass-closer: without it, an AAL1 session (password-only, or an email-recovery session) could open `/settings/2fa` and *remove* the second factor, dropping the identity's highest-available AAL back to `aal1` and defeating enforcement. With it, you must already be AAL2 to touch any credential.
+- **OAuth bridge.** A login through `/oauth/login` for an enrolled user hits the same whoami 403 path, so the step-up is forced even when the RP didn't send `acr_values=aal2`.
+
+Enforcement is entirely Kratos config — Forseti only translates the 403 into a redirect. The exception is `/admin/*`, which runs its own AAL2 check in code (`src/admin/mod.rs::require_admin`) regardless of Kratos config.
+
 ```mermaid
 sequenceDiagram
     participant U as User
@@ -135,6 +145,7 @@ sequenceDiagram
         U->>B: identifier + password, submit
         B->>K: POST /self-service/login?flow=abc
         K-->>B: 303 / (Set-Cookie: session aal1)
+        Note over B,K: enrolled user → next protected page<br/>whoami 403 → /login?aal=aal2 step-up
     else passkey
         U->>B: click "Sign in with passkey"
         B->>B: webauthn.js navigator.credentials.get()
@@ -179,6 +190,14 @@ After a correct code submission, Kratos creates a privileged session and **redir
 `render_settings` (`src/settings/mod.rs:357`) checks `is_recovery_handoff` (`src/settings/mod.rs:167`) and, when true, renders `templates/settings_password_handoff.html` instead of the usual settings layout. That template is intentionally chrome-less — no top nav, no sidebar — and shows a live countdown of Kratos's `privileged_session_max_age` (15m, `infra/kratos/kratos.yml:98`) computed via `privileged_deadline_rfc3339` (`src/settings/mod.rs:191`). The escape hatch is a single "Sign out without changing" button that POSTs to `/logout`.
 
 The handoff template strictly belongs to the recovery flow even though it lives under `templates/settings_*` — it bridges a successful `/recovery` into a forced password change, and is the only `/settings/*` view rendered without authentication chrome.
+
+##### Recovery for 2FA users — step-up before reset
+
+Email recovery alone does **not** bypass 2FA. With `selfservice.flows.settings.required_aal: highest_available` (`infra/kratos/kratos.yml:125`), the session Kratos mints after a recovery-code submission is **AAL1**, and an AAL1 session cannot touch credentials — not the password, not the second factor. So an enrolled user landing on the password-handoff page is bounced to `/login?aal=aal2` before they can submit a new password.
+
+The full path is: email recovery → AAL1 session → step up with the second factor *or* a `lookup_secret` recovery code (either satisfies AAL2) → back to the focused password page → reset. Forseti keeps the password handoff intact across the step-up by preserving the `?flow=<settings_id>` in the step-up's `return_to`, so the user returns to `settings_password_handoff.html` after clearing AAL2 rather than a generic settings or dashboard view.
+
+This is also why an email inbox is *not* enough to defeat 2FA: whoever controls the inbox gets only an AAL1 session, which can't strip the second factor (settings is AAL2-gated) and can't reset the password without first presenting a real second factor or recovery code. A user who has lost their device, has no recovery codes, and forgot their password is locked out of self-service by design — the escape hatch is an admin-minted recovery link/code (`admin_create_recovery_code`, `src/ory/kratos.rs:367`), see the operator guide's break-glass section.
 
 ```mermaid
 sequenceDiagram
@@ -840,7 +859,10 @@ Behaviour:
 4. ACR step-up: if the challenge's `oidc_context.acr_values` contains
    `aal2` and the session's AAL is below that, 302 to
    `/login?aal=aal2&return_to=...`. Kratos demands a second factor and
-   bounces the user back.
+   bounces the user back. Note this is the *explicit* step-up; under the
+   reference config (`session.whoami.required_aal: highest_available`) an
+   enrolled user is also forced to AAL2 via the whoami-403 path before this
+   handler ever accepts the login, even when the RP didn't request `aal2`.
 5. Otherwise: `hydra::accept_login_request` with `subject = identity.id`,
    `remember = true`, `amr` derived from
    `session.authentication_methods` (defaults to `["pwd"]` if missing),

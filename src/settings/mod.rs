@@ -4,10 +4,8 @@
 //!
 //! Each submodule owns one section: template + handler + section-specific
 //! render helper. The shared gate / fetch / privileged-refresh dance lives
-//! here in `fetch_settings_subpage`, and the renderer for the Profile and
-//! Password sections (which share the same shape) lives here too. The 2FA
-//! and linked-providers sections hand-roll their own templates and call
-//! `fetch_settings_subpage` directly.
+//! here in `fetch_settings_subpage`. The Profile and Password renderers live
+//! here; the other sections own their own render helpers.
 
 use axum::extract::{Query, State};
 use axum::http::HeaderMap;
@@ -342,7 +340,6 @@ pub(crate) async fn fetch_settings_subpage(
     sess: &crate::extractors::RequireSession,
 ) -> SettingsFlowOutcome {
     let cookie = cookies::cookie_header(headers);
-    let session = sess.session.clone();
 
     let return_to_full = format!(
         "{}{}",
@@ -360,7 +357,7 @@ pub(crate) async fn fetch_settings_subpage(
     };
 
     match ory::kratos::get_flow(&state.ory, FlowKind::Settings, flow_id, &cookie).await {
-        Ok(FlowFetch::Ok(flow)) => Ok((session, flow)),
+        Ok(FlowFetch::Ok(flow)) => Ok((sess.session.clone(), flow)),
         Ok(FlowFetch::Gone) => {
             let url = ory::kratos::browser_init_url(
                 FlowKind::Settings,
@@ -488,14 +485,13 @@ fn render_settings(
         }
         InlineRenderSection::Password => {
             if is_recovery_handoff(flow) {
-                // After a successful password change in the recovery
-                // hand-off, send the user to the dashboard. Kratos itself
-                // stays on the settings UI with a "Your changes have been
-                // saved!" message (no `after.password.default_browser_return_url`
-                // is set), which is right for normal settings edits but wrong
-                // for the recovery hand-off — the whole point of focused mode
-                // is to land on a working session once the new credential is
-                // in place.
+                // After a successful password change in the recovery hand-off,
+                // send the user to the dashboard. Kratos itself stays on the
+                // settings UI with a "Your changes have been saved!" message
+                // (no `after.password.default_browser_return_url` is set),
+                // which is right for normal settings edits but wrong for the
+                // recovery hand-off — the whole point of focused mode is to
+                // land on a working session once the new credential is in place.
                 if flow_state(flow) == "success" {
                     return Redirect::to("/").into_response();
                 }

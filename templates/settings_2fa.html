@@ -29,6 +29,24 @@
         </div>
       {% endif %}
 
+      {# Self-lockout warning: a device factor is enrolled but no recovery
+         codes exist, so losing the device locks the account out for good.
+         Recovery codes are the only non-device AAL2 break-glass. #}
+      {% if needs_recovery_codes %}
+        <div class="bg-error-container border border-error rounded-xl p-stack-lg flex flex-col sm:flex-row justify-between items-start sm:items-center gap-stack-md">
+          <div class="flex flex-col gap-stack-sm">
+            <p class="font-label-md text-label-md text-on-error-container">No recovery codes — you risk being locked out</p>
+            <p class="font-body-sm text-body-sm text-on-error-container">
+              Two-factor authentication is on, but you have no recovery codes. If you lose your authenticator or security key, recovery codes are the only way back into your account. Generate them now.
+            </p>
+          </div>
+          <a href="#recovery-codes"
+             class="font-label-md text-label-md text-on-error-container border border-error rounded-lg px-4 py-2 hover:bg-error hover:text-on-error transition-colors focus:outline-none focus:ring-2 focus:ring-error focus:ring-offset-2 whitespace-nowrap">
+            Generate codes
+          </a>
+        </div>
+      {% endif %}
+
       {# ----------- TOTP section ----------- #}
       <article class="bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg flex flex-col gap-stack-md">
         <header class="flex items-start justify-between gap-stack-md">
@@ -102,7 +120,8 @@
       </article>
 
       {# ----------- Lookup / recovery codes section ----------- #}
-      <article class="bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg flex flex-col gap-stack-md">
+      <article id="recovery-codes"
+               class="bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg flex flex-col gap-stack-md scroll-mt-stack-lg">
         <header class="flex items-start justify-between gap-stack-md">
           <div>
             <h2 class="font-headline-md text-headline-md text-on-surface">Recovery codes</h2>
@@ -164,7 +183,16 @@
               {% include "partials/flow_node.html" %}
             {% endfor %}
             {% for node in webauthn_nodes %}
-              {% if node.input_type == "hidden" || node.input_type == "submit" || node.input_type == "button" %}
+              {% if node.name == "webauthn_remove" %}
+                <button type="{{ node.input_type }}"
+                        name="{{ node.name }}"
+                        value="{{ node.value }}"
+                        formnovalidate
+                        {% if node.disabled %}disabled{% endif %}
+                        class="w-full flex items-center justify-center gap-stack-md bg-surface-container-lowest border border-error text-error font-label-md text-label-md py-stack-md px-stack-lg rounded-lg hover:bg-error hover:text-on-error focus:outline-none focus:ring-2 focus:ring-error focus:ring-offset-2 transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+                  {% match node.label %}{% when Some with (l) %}{{ l }}{% when None %}Remove security key{% endmatch %}
+                </button>
+              {% else if node.input_type == "hidden" || node.input_type == "submit" || node.input_type == "button" %}
                 {% include "partials/flow_node.html" %}
               {% else %}
                 <div class="flex flex-col gap-stack-sm">

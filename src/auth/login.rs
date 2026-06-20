@@ -81,13 +81,20 @@ pub(crate) async fn login(
         }
     }
 
+    // Sanitize before forwarding to Kratos — don't lean on its
+    // `allowed_return_urls` alone (matches the short-circuit branch above).
+    let safe_return = query
+        .return_to
+        .as_deref()
+        .map(|rt| safe_return_to(&state.cfg, rt));
+
     // 2. No flow yet — kick off a Kratos browser flow with the requested
     //    `aal` / `refresh` parameters preserved.
     let Some(flow_id) = query.flow.as_deref() else {
         let url = ory::kratos::browser_init_url_with(
             FlowKind::Login,
             &state.cfg.kratos.public_url,
-            query.return_to.as_deref(),
+            safe_return,
             requested_aal,
             query.refresh,
         );
@@ -105,7 +112,7 @@ pub(crate) async fn login(
             let url = ory::kratos::browser_init_url_with(
                 FlowKind::Login,
                 &state.cfg.kratos.public_url,
-                query.return_to.as_deref(),
+                safe_return,
                 requested_aal,
                 query.refresh,
             );

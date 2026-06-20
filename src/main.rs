@@ -4,6 +4,7 @@ mod audit;
 mod auth;
 mod commercial;
 mod config;
+mod config_cli;
 mod cookies;
 mod csrf;
 mod dashboard;
@@ -43,6 +44,10 @@ async fn main() -> anyhow::Result<()> {
     // framework. Anything other than a recognised subcommand falls
     // through to the HTTP server.
     match std::env::args().nth(1).as_deref() {
+        Some("--help" | "-h" | "help") => {
+            print_top_help();
+            std::process::exit(0);
+        }
         Some("audit-prune") => {
             let cfg = config::AppConfig::load()?;
             let db = db::DbPool::init(&cfg.database)?;
@@ -64,6 +69,43 @@ async fn main() -> anyhow::Result<()> {
             let code = identity::prune_unverified_cli(&cfg, &ory).await;
             std::process::exit(code);
         }
+        // Pure file operations — no DB, no Ory clients. Forseti can't read
+        // Kratos's live config via API, so these lint/generate the files.
+        Some("config-check") => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            std::process::exit(config_cli::check(&args));
+        }
+        Some("config-init") => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            std::process::exit(config_cli::init(&args));
+        }
+        // An unrecognised token that looks like a flag is almost certainly a
+        // typo or a misplaced server flag — show help rather than silently
+        // booting the server. A bare `forseti` (no args) still runs the server.
+        Some(tok) if tok.starts_with('-') => {
+            print_top_help();
+            std::process::exit(0);
+        }
         _ => app::run().await,
     }
+}
+
+fn print_top_help() {
+    println!(
+        "forseti {version} — identity + OAuth2/OIDC frontend for Ory Kratos & Hydra
+
+USAGE: forseti [SUBCOMMAND]
+
+With no subcommand, forseti runs the HTTP server.
+
+SUBCOMMANDS:
+  config-check       lint Kratos + Hydra config files against Forseti's recommendations
+  config-init        generate a recommended Kratos + Hydra config pair
+  audit-prune        delete audit_events older than [audit].retention_days
+  unverified-prune   delete Kratos identities with unverified addresses past their TTL
+  help               print this help
+
+Run `forseti <SUBCOMMAND> --help` for flags.",
+        version = web::FORSETI_VERSION,
+    );
 }

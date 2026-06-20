@@ -55,6 +55,9 @@ struct ActivityEvent {
 struct AccountHealth {
     email_verified: bool,
     two_factor_enabled: bool,
+    /// True when a device factor is enrolled but no recovery codes exist —
+    /// losing the device means permanent lockout. Drives a backstop notice.
+    two_factor_without_recovery_codes: bool,
     active_sessions: usize,
     linked_providers: usize,
 }
@@ -173,38 +176,35 @@ async fn build_account_health(
         }
     };
 
-    let (two_factor_enabled, linked_providers) = match identity_res {
-        Ok(identity) => {
-            let creds = identity.credentials.unwrap_or_default();
-            let two_factor = creds_indicate_second_factor(&creds);
-            let oidc_count = creds
-                .get("oidc")
-                .and_then(|c| c.identifiers.as_ref().map(|ids| ids.len()))
-                .unwrap_or(0);
-            (two_factor, oidc_count)
-        }
-        Err(e) => {
-            tracing::warn!(error = ?e, "admin_get_identity_full failed; health 2FA/oidc=0");
-            (false, 0)
-        }
-    };
+    let (two_factor_enabled, two_factor_without_recovery_codes, linked_providers) =
+        match identity_res {
+            Ok(identity) => {
+                let creds = identity.credentials.unwrap_or_default();
+                let two_factor = creds_indicate_second_factor(&creds);
+                let without_codes = two_factor_without_recovery_codes(&creds);
+                let oidc_count = creds
+                    .get("oidc")
+                    .and_then(|c| c.identifiers.as_ref().map(|ids| ids.len()))
+                    .unwrap_or(0);
+                (two_factor, without_codes, oidc_count)
+            }
+            Err(e) => {
+                tracing::warn!(error = ?e, "admin_get_identity_full failed; health 2FA/oidc=0");
+                (false, false, 0)
+            }
+        };
 
     AccountHealth {
         email_verified,
         two_factor_enabled,
+        two_factor_without_recovery_codes,
         active_sessions,
         linked_providers,
     }
 }
 
-/// True when the identity has enrolled a second-factor (or passkey)
-/// credential. Kratos pre-populates `credentials.webauthn.identifiers`
-/// with the user's email on every password identity so WebAuthn can be
-/// offered as a step-up method — that pre-allocation is NOT enrolment, so
-/// `identifiers.is_empty()` is the wrong test. The real signals: `totp`
-/// only appears when the user completes TOTP enrolment, `lookup_secret`
-/// only appears once backup codes are generated, and webauthn/passkey
-/// have a `config.credentials` array that's only populated post-attest.
+/// True when a second factor is enrolled. Kratos seeds `webauthn.identifiers`
+/// on every password identity (NOT enrolment), so test `config.credentials`.
 fn creds_indicate_second_factor(
     creds: &std::collections::HashMap<String, ory_client::models::IdentityCredentials>,
 ) -> bool {
@@ -222,6 +222,14 @@ fn creds_indicate_second_factor(
     })
 }
 
+/// A device second factor (TOTP/WebAuthn) with no `lookup_secret` is the
+/// self-lockout trap; `lookup_secret` present clears it, no factor clears it.
+fn two_factor_without_recovery_codes(
+    creds: &std::collections::HashMap<String, ory_client::models::IdentityCredentials>,
+) -> bool {
+    creds_indicate_second_factor(creds) && !creds.contains_key("lookup_secret")
+}
+
 #[cfg(test)]
 mod tests {
     //! Locks the helper that drives the dashboard "2FA enabled" badge.
@@ -229,7 +237,7 @@ mod tests {
     //! Kratos seeds `credentials.webauthn.identifiers` with the user's
     //! email on every password identity, and the old `identifiers.is_empty()`
     //! check flipped the badge on for users who never actually enrolled.
-    use super::creds_indicate_second_factor;
+    use super::{creds_indicate_second_factor, two_factor_without_recovery_codes};
     use ory_client::models::IdentityCredentials;
     use std::collections::HashMap;
 
@@ -299,5 +307,27 @@ mod tests {
         creds.insert("password".to_string(), empty_cred());
         creds.insert("webauthn".to_string(), webauthn_enrolled());
         assert!(creds_indicate_second_factor(&creds));
+    }
+
+    #[test]
+    fn device_factor_without_lookup_needs_recovery_codes() {
+        let mut creds = HashMap::new();
+        creds.insert("totp".to_string(), empty_cred());
+        assert!(two_factor_without_recovery_codes(&creds));
+    }
+
+    #[test]
+    fn lookup_secret_present_clears_recovery_warning() {
+        let mut creds = HashMap::new();
+        creds.insert("totp".to_string(), empty_cred());
+        creds.insert("lookup_secret".to_string(), empty_cred());
+        assert!(!two_factor_without_recovery_codes(&creds));
+    }
+
+    #[test]
+    fn no_second_factor_does_not_need_recovery_codes() {
+        let mut creds = HashMap::new();
+        creds.insert("password".to_string(), empty_cred());
+        assert!(!two_factor_without_recovery_codes(&creds));
     }
 }

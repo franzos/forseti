@@ -46,7 +46,7 @@ Run these first. If any of them fail, stop and triage before touching the browse
 - [ ] `/settings/2fa` — enroll TOTP, save secret to `/tmp/totp_secret.txt`
 - [ ] Page shows "Enabled" after submit
 - [ ] Audit row: `mfa.totp.enrolled`
-- [ ] Logout → log back in with password only → navigate to `/admin/webhooks` → bounced to `/login?flow=…` rendering the TOTP step-up form (the bounce URL itself doesn't carry `aal=aal2` — Kratos derives `requested_aal` from the flow, not the query string) → submit TOTP → land on the admin page
+- [ ] Logout → log back in with password only → navigate to any protected page (e.g. `/admin/webhooks`, or just the dashboard) → bounced to the TOTP step-up. Under the reference config (`session.whoami.required_aal: highest_available`) this now fires for an enrolled user on *any* protected page via the whoami-403 path, not just `/admin/*`. Admin pages also have their own in-code AAL2 check. → submit TOTP → land on the page
 - [ ] Default-org auto-join landed (`mail@gofranz.com` is `owner` of Default — see `/settings/organization/members`)
 
 ## 3. Authentication flows (user-facing)
@@ -65,17 +65,18 @@ Run these first. If any of them fail, stop and triage before touching the browse
 - [ ] Password login (throwaway user)
 - [ ] Wrong password → inline error, same flow
 - [ ] Already-logged-in user navigating to `/login` → short-circuits to `return_to` or `/`
-- [ ] `?aal=aal2` carve-out works when the query param IS present (no infinite loop with `/oauth/login`); note that Forseti's own AAL-required bounce (e.g. `/admin/*` on an AAL1 session) does NOT add this query param — it relies on Kratos's flow state, not the URL
+- [ ] `?aal=aal2` carve-out works when the query param IS present (no infinite loop with `/oauth/login`). Forseti's `RequireSession` extractor adds `aal=aal2` to the bounce when Kratos 403s an AAL1 session for an enrolled identity (via `aal2_step_up_url`, `src/auth/mod.rs:33`); the admin gate does likewise. Either way the carve-out must not loop.
 - [ ] `?refresh=true` carve-out works (no livelock on privileged-session re-auth)
 - [ ] Audit row: `auth.login` (lands on session-AAL settle, i.e. AAL2 completion for TOTP-enrolled users — intermediate AAL1 password submit does not emit a separate row)
 
 ### 3.3 Recovery (forgot password)
 
-- [ ] **AAL1 user only** (TOTP-enabled users have a known trap — see e2e-review skill)
-- [ ] `/recovery` → submit email → mail in Mailcrab → click link → land on `/settings/password` in focused/handoff mode
+- [ ] **AAL1 user (no second factor):** `/recovery` → submit email → mail in Mailcrab → click link → land on `/settings/password` in focused/handoff mode
 - [ ] Privileged-deadline countdown renders
 - [ ] New password sticks; redirected to `/` after success
 - [ ] Audit row: `password.recovered`
+- [ ] **2FA user (TOTP enrolled):** recovery does NOT bypass 2FA. The recovered session is AAL1; under `settings.required_aal: highest_available` it can't reset the password until it steps up. Expect: `/recovery` → AAL1 session → bounced to `/login?aal=aal2` → submit TOTP or a recovery code → land back on the focused password page (the `?flow=` is preserved across the step-up) → new password sticks
+- [ ] **Lockout-by-design:** a user with no device, no recovery codes, and a forgotten password cannot self-recover. Escape hatch is an admin-minted recovery link via `/admin/identities/{id}`
 - [ ] **Info-leak guard:** submit a non-existent email → identical response body and visible timing to a real submission; no audit row, no Mailcrab message, no `Set-Cookie` differences
 
 ### 3.4 Verification

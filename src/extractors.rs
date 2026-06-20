@@ -113,7 +113,14 @@ where
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let app_state = app_state(parts, state).await;
-        let path = parts.uri.path().to_string();
+        // Keep the query (e.g. `?flow=`) so a step-up return_to restores the exact
+        // URL — the post-recovery settings hand-off needs `?flow=` to survive.
+        let path = parts
+            .uri
+            .path_and_query()
+            .map(|pq| pq.as_str())
+            .unwrap_or_else(|| parts.uri.path())
+            .to_string();
         let session = match resolve_session_from_parts(&app_state, parts, &path).await {
             Ok(s) => *s,
             Err(SessionFailure::InsufficientAal(r)) | Err(SessionFailure::NoSession(r)) => {

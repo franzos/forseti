@@ -1,6 +1,6 @@
 [package]
 name = "forseti"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2021"
 description = "Self-service UI and Hydra login/consent bridge for Ory Kratos + Hydra"
 # Forseti is dual-licensed: everything outside `src/commercial/` is
@@ -34,6 +34,10 @@ include_dir = "0.7"
 mime_guess = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# YAML parsing for the `config-check` operator subcommand (lint Kratos/Hydra
+# config files). `serde_yaml_ng` is the maintained fork — upstream
+# `serde_yaml` is archived.
+serde_yaml_ng = "0.10"
 # No `cookies` feature: every reqwest::Client in `src/` is a
 # server-to-server caller (Hydra admin, webhook delivery) where a
 # persistent cookie jar would let upstream `Set-Cookie` responses leak

@@ -2,16 +2,16 @@ version: v1.3.0
 
 dsn: postgres://kratos:secret@postgres:5432/kratos?sslmode=disable&max_conns=20&max_idle_conns=4
 
-# Kratos's `whoami` defaults to `required_aal: highest_available`, which
-# returns 403 for an AAL1 session on any identity that has a second factor
-# enrolled. That collapses "session exists, needs step-up" into the same
-# error shape as "no session at all" — every protected route bounces to
-# /login without an aal=aal2 hint, livelocking the user. Lower it to
-# aal1 so the portal sees the real session and decides per-route which
-# AAL it actually needs (admin gate already enforces aal2 explicitly).
+# `highest_available` forces any identity with a second factor enrolled to
+# complete AAL2 before whoami returns a session — Kratos answers 403, which
+# Forseti maps to a `/login?aal=aal2` step-up. Settings ALSO requires AAL2
+# (see `selfservice.flows.settings.required_aal` below) so an AAL1 session
+# (password-only login, or an email-recovery session) can't strip a second
+# factor and defeat 2FA. Lost-device users step up with a `lookup_secret`
+# recovery code (which satisfies AAL2) to manage their factors.
 session:
   whoami:
-    required_aal: aal1
+    required_aal: highest_available
 
 serve:
   public:
@@ -114,14 +114,15 @@ selfservice:
     settings:
       ui_url: http://localhost:3000/settings
       privileged_session_max_age: 15m
-      # Read-only settings pages (profile, sessions, linked-providers,
-      # authorized-apps) shouldn't force an AAL2 step-up just to view.
-      # Destructive operations are still gated by `privileged_session_max_age`
-      # above (re-prove password within 15m), and TOTP disable has its own
-      # method-internal rule that requires submitting the current code.
-      # Without this, Kratos's default of `highest_available` blocks every
-      # /settings/* init for any identity with a second factor enrolled.
-      required_aal: aal1
+      # AAL2 required for settings changes once the identity has a second
+      # factor. Otherwise an AAL1 session (password-only login, or an email
+      # recovery session) could open the settings flow and REMOVE the second
+      # factor, defeating 2FA entirely. With enforcement on, the user is
+      # already AAL2 by the time they reach settings (they stepped up at
+      # login), so this adds no extra prompt for normal use — it only blocks
+      # an un-stepped-up session from touching credentials.
+      # `privileged_session_max_age` above still gates destructive ops.
+      required_aal: highest_available
       after:
         password:
           hooks:

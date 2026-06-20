@@ -401,6 +401,40 @@ pub async fn kratos_admin_create_identity(email: &str) -> String {
     v["id"].as_str().expect("identity id").to_string()
 }
 
+/// Create an identity *with* a password credential directly via the admin
+/// API (Kratos hashes the supplied plaintext). Unlike
+/// [`kratos_admin_create_identity`], the returned identity can password-login
+/// — used by the AAL2-enforcement test that needs a second-factor-less user
+/// to prove enforcement doesn't bounce password-only sessions. Returns the
+/// new identity ID.
+pub async fn kratos_admin_create_password_identity(email: &str, password: &str) -> String {
+    let client = browser_client();
+    let body = serde_json::json!({
+        "schema_id": "default",
+        "traits": {
+            "email": email,
+            "name": { "first": "NoMfa", "last": "User" }
+        },
+        "credentials": {
+            "password": { "config": { "password": password } }
+        },
+    });
+    let res = client
+        .post(format!("{KRATOS_ADMIN}/admin/identities"))
+        .json(&body)
+        .send()
+        .await
+        .expect("create password identity transport");
+    assert!(
+        res.status().is_success(),
+        "create password identity status {}: {}",
+        res.status(),
+        res.text().await.unwrap_or_default()
+    );
+    let v: Value = res.json().await.expect("create password identity body");
+    v["id"].as_str().expect("identity id").to_string()
+}
+
 // --- Flow helpers ----------------------------------------------------------
 
 /// Fetch a Kratos self-service flow's JSON shape. The client must carry the
@@ -708,6 +742,55 @@ pub async fn hydra_delete_client(client_id: &str) {
 /// misconfigured admin credential is a loud test failure, not a silent
 /// skip.
 pub async fn try_admin_signed_in_client() -> Option<Client> {
+    let creds = admin_test_credentials()?;
+    let client = browser_client();
+    password_login_aal1(&client, &creds.email, &creds.password).await;
+    totp_step_up(&client, &creds.totp_code()).await;
+    Some(client)
+}
+
+/// AAL1-only sibling of [`try_admin_signed_in_client`]: signs the seeded
+/// admin in with password alone and stops there. The returned client's jar
+/// carries an `ory_kratos_session` at AAL1 — exactly the "user has a second
+/// factor but only authenticated with the first" state the AAL2-enforcement
+/// tests need to provoke a step-up bounce. Env-gated identically; returns
+/// `None` when the admin fixtures aren't wired up.
+pub async fn try_admin_aal1_client() -> Option<Client> {
+    let creds = admin_test_credentials()?;
+    let client = browser_client();
+    password_login_aal1(&client, &creds.email, &creds.password).await;
+    Some(client)
+}
+
+/// Resolved admin test credentials from `FORSETI_ADMIN_TEST_*`. `None` is
+/// the legitimate "skip the admin-gated tests" signal (all vars unset, or a
+/// partial config with no usable TOTP source).
+pub struct AdminTestCredentials {
+    pub email: String,
+    pub password: String,
+    totp_secret: Option<String>,
+    totp_code: Option<String>,
+}
+
+impl AdminTestCredentials {
+    /// A fresh RFC 6238 code from the base32 secret, or the verbatim
+    /// single-shot code when only `_CODE` is configured.
+    pub fn totp_code(&self) -> String {
+        match self.totp_secret.as_deref() {
+            Some(secret_b32) => compute_totp_now(secret_b32),
+            None => self
+                .totp_code
+                .clone()
+                .expect("at least one TOTP source guaranteed by admin_test_credentials"),
+        }
+    }
+}
+
+/// Parse the `FORSETI_ADMIN_TEST_*` env vars into [`AdminTestCredentials`].
+/// Returns `None` when nothing is configured or the config is too partial to
+/// drive an AAL2 sign-in (mirrors the old guard in
+/// `try_admin_signed_in_client`).
+pub fn admin_test_credentials() -> Option<AdminTestCredentials> {
     let email = std::env::var("FORSETI_ADMIN_TEST_EMAIL")
         .ok()
         .filter(|s| !s.is_empty());
@@ -721,23 +804,26 @@ pub async fn try_admin_signed_in_client() -> Option<Client> {
         .ok()
         .filter(|s| !s.is_empty());
 
-    // All three unset → skip-the-test signal. Any partial config →
-    // hand back `None` only when no TOTP source at all is provided;
-    // beyond that, sign-in failures panic.
     match (&email, &password, &totp_secret, &totp_code) {
-        (None, None, None, None) => return None,
-        (Some(_), Some(_), Some(_), _) | (Some(_), Some(_), _, Some(_)) => { /* proceed */ }
+        (Some(_), Some(_), Some(_), _) | (Some(_), Some(_), _, Some(_)) => {}
         _ => return None,
     }
-    let email = email.expect("checked above");
-    let password = password.expect("checked above");
+    Some(AdminTestCredentials {
+        email: email.expect("checked above"),
+        password: password.expect("checked above"),
+        totp_secret,
+        totp_code,
+    })
+}
 
-    let client = browser_client();
-
-    // 1. Init an AAL1 login flow (no `aal=` param). Kratos refuses to
-    //    init an AAL2 step-up flow without a pre-existing AAL1 session
-    //    (`Ory-Error-Id: session_aal1_required`), so we must log in
-    //    AAL1 first, then re-init for the TOTP step-up.
+/// Drive a password-only (AAL1) Kratos login on `client`'s cookie jar.
+/// After this returns the jar carries `ory_kratos_session` at AAL1. Used as
+/// the first leg of every admin sign-in and by the AAL2-enforcement tests
+/// that need an under-elevated session.
+///
+/// Kratos refuses to init an AAL2 step-up flow without a pre-existing AAL1
+/// session (`Ory-Error-Id: session_aal1_required`), so AAL1 must come first.
+pub async fn password_login_aal1(client: &Client, email: &str, password: &str) {
     let res = client
         .get(format!("{KRATOS_PUBLIC}/self-service/login/browser"))
         .header("Accept", "application/json")
@@ -750,9 +836,6 @@ pub async fn try_admin_signed_in_client() -> Option<Client> {
         res.status()
     );
     let flow: Value = res.json().await.expect("init AAL1 login flow: parse json");
-
-    // 2. Submit password against the AAL1 flow. Cookie jar now carries
-    //    `ory_kratos_session` at AAL1.
     let action = flow["ui"]["action"]
         .as_str()
         .expect("AAL1 flow has ui.action")
@@ -762,8 +845,8 @@ pub async fn try_admin_signed_in_client() -> Option<Client> {
         .post(&action)
         .header("Accept", "application/json")
         .form(&[
-            ("identifier", email.as_str()),
-            ("password", password.as_str()),
+            ("identifier", email),
+            ("password", password),
             ("method", "password"),
             ("csrf_token", csrf.as_str()),
         ])
@@ -772,14 +855,19 @@ pub async fn try_admin_signed_in_client() -> Option<Client> {
         .expect("submit AAL1 password: transport");
     let status = res.status();
     let body = res.text().await.unwrap_or_default();
-    // Kratos returns 200 (when AAL2 required) or 422 with a browser
-    // redirect hint; either way the AAL1 session cookie is set.
+    // Kratos returns 200 (when AAL2 required) or 422 with a browser redirect
+    // hint; either way the AAL1 session cookie is set on the jar.
     assert!(
         status.is_success() || status == StatusCode::UNPROCESSABLE_ENTITY,
         "submit AAL1 password: status {status} body {body}"
     );
+}
 
-    // 3. Init the AAL2 step-up flow with the AAL1 cookie in the jar.
+/// Step `client`'s AAL1 session up to AAL2 by submitting `totp_code` against
+/// a fresh Kratos `aal=aal2` login flow. Precondition: the jar already
+/// carries an AAL1 `ory_kratos_session` (see [`password_login_aal1`]) and the
+/// identity has TOTP enrolled.
+pub async fn totp_step_up(client: &Client, totp_code: &str) {
     let res = client
         .get(format!(
             "{KRATOS_PUBLIC}/self-service/login/browser?aal=aal2"
@@ -790,7 +878,7 @@ pub async fn try_admin_signed_in_client() -> Option<Client> {
         .expect("init AAL2 step-up flow: transport");
     assert!(
         res.status().is_success(),
-        "init AAL2 step-up flow: status {} — check that the admin has TOTP enrolled",
+        "init AAL2 step-up flow: status {} — check that the identity has TOTP enrolled",
         res.status()
     );
     let flow: Value = res
@@ -802,17 +890,11 @@ pub async fn try_admin_signed_in_client() -> Option<Client> {
         .expect("AAL2 flow has ui.action")
         .to_string();
     let csrf = flow_csrf_token(&flow).expect("AAL2 flow has csrf_token");
-
-    // 4. Compute (or accept) the TOTP code and submit it.
-    let code = match totp_secret.as_deref() {
-        Some(secret_b32) => compute_totp_now(secret_b32),
-        None => totp_code.expect("at least one TOTP source guaranteed by guard above"),
-    };
     let res = client
         .post(&action)
         .header("Accept", "application/json")
         .form(&[
-            ("totp_code", code.as_str()),
+            ("totp_code", totp_code),
             ("method", "totp"),
             ("csrf_token", csrf.as_str()),
         ])
@@ -827,7 +909,6 @@ pub async fn try_admin_signed_in_client() -> Option<Client> {
          — TOTP rejected; secret may be wrong or clock-skewed",
         body.chars().take(400).collect::<String>()
     );
-    Some(client)
 }
 
 /// Derive the current RFC 6238 TOTP code (SHA1, 30 s period, 6 digits)

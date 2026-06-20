@@ -574,6 +574,8 @@ Forseti observes the `acr_values` request, looks at the user's current Kratos se
 
 Your app must inspect the returned id_token's `acr` claim and reject `aal1` for the sensitive operation. Do not assume `acr_values=aal2` was honored; verify.
 
+**Note on enrolled users.** When the operator enforces 2FA (the recommended config — `session.whoami.required_aal: highest_available` in Kratos), any user who has a second factor enrolled is forced through the step-up on *every* login through Forseti, even when your app didn't send `acr_values=aal2`. So for those users the returned `acr` is `aal2` regardless. You can't rely on the *absence* of a step-up to mean a user has no second factor — only that they hadn't enrolled one, or the operator hasn't enabled enforcement. Still verify the `acr` claim when you need AAL2; don't infer it from the flow's behavior.
+
 ## Enterprise SSO (SAML)
 
 If the operator has enabled Enterprise SAML SSO (a commercial feature), some users sign in through their company's corporate IdP instead of with a Forseti password. **This is transparent to your app.** You keep doing plain OIDC against Forseti — an SSO'd user arrives as an ordinary session and `id_token`, with the same claims as any other user. There's nothing SAML-specific to handle on your side.
