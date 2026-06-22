@@ -32,6 +32,35 @@ Ory's engines are excellent, but headless — you get APIs, your users need page
 | 🌗 **Light & dark** | A built-in theme toggle (light / dark / follow-system) across every page. |
 | 🛡️ **Production-minded** | CSRF on every form, signed cookies, rate-limited DCR, and an account-deletion webhook saga with retries. |
 
+## How Forseti compares
+
+Here's the thing: Forseti isn't another from-scratch identity engine. Rauthy, Kanidm, Keycloak and FreeIPA each implement their own protocol stack and their own datastore — they *are* the engine. Forseti is the part Ory never shipped: a server-rendered UI, an admin console, multi-tenant orgs, and governance, sitting in front of [Ory Kratos](https://www.ory.sh/kratos/) and [Ory Hydra](https://www.ory.sh/hydra/) — engines that are already OpenID-certified and battle-tested in production. So the comparison below is a little apples-to-oranges, and that's rather the point.
+
+Legend: **✓** built-in · **◐** partial / via add-on / consumes-not-serves · **✗** no · **†** commercial license
+
+| | **Forseti** | **Rauthy** | **Kanidm** | **Keycloak** | **FreeIPA** |
+| --- | :---: | :---: | :---: | :---: | :---: |
+| **What it is** | UI + governance layer on Ory | Standalone OIDC provider | Passkey-first IdM | Full IAM server | Linux/Unix domain IdM |
+| **Language** | Rust (Axum) | Rust | Rust | Java / Quarkus (JVM) | C + Python |
+| **OIDC / OAuth2 provider** | ✓ (Hydra) | ✓ | ✓ | ✓ | ◐ inbound only |
+| **SAML 2.0** | ✓ † | ✗ | ✗ | ✓ | ◐ via Keycloak |
+| **TOTP + passkeys/WebAuthn** | ✓ (AAL2-enforced) | ◐ passkey-first | ✓ (passkey attestation) | ✓ | ✓ (+ smartcard) |
+| **Multi-org / tenancy** | ✓ † | ✗ | ✗ | ✓ realms + orgs | ✗ |
+| **Upstream IdP brokering / social login** | ✓ (Kratos) | ✓ | ✗ by design | ✓ | ◐ device-grant |
+| **LDAP / RADIUS / Unix (POSIX) hosts** | ✗ | ◐ PAM/NSS | ✓ | ◐ federation | ✓ (core) |
+| **Admin console (web)** | ✓ | ✓ | ◐ CLI-first | ✓ | ✓ |
+| **End-user self-service UI** | ✓ (the whole point) | ✓ | ✓ | ✓ | ◐ limited |
+| **Datastore** | SQLite / Postgres¹ | Embedded (Hiqlite) / Postgres | Own embedded DB | External RDBMS | 389 DS (LDAP) |
+| **Footprint** | Binary + Ory services | Single binary (~50 MB) | Single binary | JVM, ~0.75–2 GB RAM | Heavy, Linux/RPM only |
+| **License** | AGPL-3.0 + commercial gate | Apache-2.0 | MPL-2.0 | Apache-2.0 | GPLv3 |
+| **Maturity** | Young; built on mature Ory | Pre-1.0, audited | Stable 1.x | Very mature (CNCF/Red Hat) | Very mature (Red Hat) |
+
+¹ Forseti's own data. Kratos and Hydra each bring their own Postgres, so a full deployment runs several services — more moving parts than a single-binary Rauthy or Kanidm. † Organizations and SAML SSO are commercial features; the AGPL core runs as a fully working single tenant. SCIM, SIEM streaming and bulk-admin are on the roadmap, not shipped.
+
+**Where Forseti wins.** If you've already bet on Ory — or you want a certified OAuth2/OIDC engine rather than a bespoke one — nothing else gives Kratos and Hydra real screens *and* an admin console *and* first-class multi-tenant organizations (members, invites, per-org branding, `org`/`orgs` OIDC claims). Rauthy, Kanidm and FreeIPA have no organizations model at all; only Keycloak does, and it costs you a JVM and a couple of gigs of RAM. You also get governance the others don't bundle: an append-only audit log, RFC 7591 dynamic client registration, and an account-deletion webhook saga that emits signed RISC events.
+
+**Where it doesn't.** Forseti is not a directory. If you need an LDAP server, RADIUS, POSIX accounts, SSH key distribution or Kerberos for a fleet of Linux hosts, that's Kanidm or FreeIPA territory — not this. If you want the absolute smallest footprint and a single self-contained binary with no Ory alongside, Rauthy or Kanidm will be lighter to run. And if you need the full enterprise kitchen sink — UMA, fine-grained authz, every protocol under one roof — Keycloak still does more, at the cost of operating Keycloak. Do take the table with a grain of salt: these projects move, and the facts here are current as of mid-2026.
+
 ## Quickstart
 
 Prebuilt binaries for x86_64 and aarch64 Linux (glibc) are attached to every [release](https://github.com/franzos/forseti/releases/latest):
