@@ -109,4 +109,97 @@ impl LicenseHandle {
         let status = self.status();
         license::evaluate_feature(&status, feature)
     }
+
+    /// Re-classify against `now`, swapping only on a variant change. Returns the new label on transition, else `None`.
+    pub fn reclassify(&self, now: chrono::DateTime<chrono::Utc>) -> Option<&'static str> {
+        let current = self.status();
+        let license = current.license()?;
+        let next = license::classify(license.clone(), self.grace_days, now);
+        if license::status_variant(&next) == license::status_variant(&current) {
+            return None;
+        }
+        let label = license::status_variant(&next);
+        self.swap(next);
+        Some(label)
+    }
+}
+
+use tokio_util::sync::CancellationToken;
+
+/// Hourly tick that re-runs the expiry math so a license that booted `Active` crosses into grace/expired between restarts.
+pub fn spawn_reclassify(license: LicenseHandle, shutdown: CancellationToken) {
+    use std::time::Duration;
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(60 * 60));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        ticker.tick().await; // consume the immediate first tick (boot already classified)
+        loop {
+            tokio::select! {
+                _ = shutdown.cancelled() => {
+                    tracing::info!("license reclassify task: shutdown received, exiting");
+                    break;
+                }
+                _ = ticker.tick() => {
+                    if let Some(label) = license.reclassify(chrono::Utc::now()) {
+                        tracing::warn!(status = label, "license: status transitioned on periodic re-classification");
+                    }
+                }
+            }
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commercial::license::{Feature, License, LicenseStatus};
+    use chrono::{Duration, Utc};
+
+    fn active_handle(expires_in_days: i64) -> LicenseHandle {
+        let license = License {
+            license_id: "test".into(),
+            customer: "Test Co".into(),
+            email: "t@example.com".into(),
+            issued_at: Utc::now(),
+            expires_at: Some(Utc::now() + Duration::days(expires_in_days)),
+            features: vec![Feature::Orgs],
+            max_orgs: None,
+        };
+        LicenseHandle::new(LicenseStatus::Active(license), GRACE_DAYS)
+    }
+
+    #[test]
+    fn reclassify_moves_active_into_grace_then_expired() {
+        let handle = active_handle(10);
+        assert!(matches!(
+            handle.feature(Feature::Orgs),
+            FeatureStatus::Allowed
+        ));
+
+        // 11 days on, the license is one day past expiry — inside grace.
+        let into_grace = Utc::now() + Duration::days(11);
+        assert_eq!(handle.reclassify(into_grace), Some("Grace"));
+        assert!(matches!(
+            handle.feature(Feature::Orgs),
+            FeatureStatus::GraceReadOnly
+        ));
+
+        // Well past the grace window — hard-gated.
+        let past_grace = Utc::now() + Duration::days(10 + GRACE_DAYS + 5);
+        assert_eq!(handle.reclassify(past_grace), Some("Expired"));
+        assert!(matches!(
+            handle.feature(Feature::Orgs),
+            FeatureStatus::Locked
+        ));
+    }
+
+    #[test]
+    fn reclassify_noop_while_still_active() {
+        let handle = active_handle(30);
+        assert_eq!(handle.reclassify(Utc::now() + Duration::days(1)), None);
+        assert!(matches!(
+            handle.feature(Feature::Orgs),
+            FeatureStatus::Allowed
+        ));
+    }
 }

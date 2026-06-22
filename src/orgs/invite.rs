@@ -125,7 +125,9 @@ async fn post_invite_for(
 
     let email = form.email.trim().to_lowercase();
     if email.is_empty() || lettre::Address::from_str(&email).is_err() {
-        return back_to_members(&org_id, "Enter a valid email address").into_response();
+        return back_to_members(&state.db, &org_id, "Enter a valid email address")
+            .await
+            .into_response();
     }
     let role = match form.role.as_deref() {
         Some("owner") => Role::Owner,
@@ -204,11 +206,17 @@ async fn post_invite_for(
 /// query-string error the template can render. Smaller-diff choice over
 /// wiring this through the flash mechanism — the members handler can
 /// pick the param up once it grows an error-banner branch.
-fn back_to_members(org_id: &str, msg: &str) -> Redirect {
+async fn back_to_members(db: &crate::db::DbPool, org_id: &str, msg: &str) -> Redirect {
     let base = if org_id == orgs::DEFAULT_ORG_ID {
         "/settings/organization/members".to_string()
     } else {
-        format!("/settings/organizations/{}/members", org_id)
+        let slug = orgs::org_by_id(db, org_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|o| o.slug)
+            .unwrap_or_else(|| "default".to_string());
+        format!("/settings/organizations/{}/members", slug)
     };
     if msg.is_empty() {
         Redirect::to(&base)

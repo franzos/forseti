@@ -1,5 +1,14 @@
 # Changelog
 
+## [Unreleased]
+
+### Security
+- A configured `[security].cookie_secret` shorter than 32 bytes now hard-fails boot instead of only warning — a weak HMAC key for signed cookies is always a deployment bug. The unset → ephemeral per-boot key fallback is unchanged
+
+### Fixed
+- An expired commercial license stayed fully active until the next restart — the cached status was only recomputed at boot and on activate/deactivate, so a license that booted active never crossed into its grace window or hard-gate. An hourly background task now re-evaluates the expiry against the clock
+- Invalid-email errors on org invites redirected to a broken members URL built from the org ID instead of its slug
+
 ## [0.1.7] - 2026-06-20
 
 ### Added

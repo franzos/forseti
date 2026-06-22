@@ -178,6 +178,17 @@ pub fn classify(license: License, grace_days: i64, now: DateTime<Utc>) -> Licens
     }
 }
 
+/// Stable label for a status variant, used both for logging and for
+/// cheap change-detection in the periodic re-classification task.
+pub(crate) fn status_variant(status: &LicenseStatus) -> &'static str {
+    match status {
+        LicenseStatus::Unlicensed => "Unlicensed",
+        LicenseStatus::Active(_) => "Active",
+        LicenseStatus::Grace(_) => "Grace",
+        LicenseStatus::Expired(_) => "Expired",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

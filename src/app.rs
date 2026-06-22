@@ -125,6 +125,8 @@ pub(crate) async fn run() -> anyhow::Result<()> {
     let grace_days = commercial::GRACE_DAYS;
     let initial_status = commercial::store::load(&db, grace_days).await;
     let license = LicenseHandle::new(initial_status, grace_days);
+    // Status is otherwise only recomputed at boot / activate, so a license that booted Active never crosses into grace.
+    commercial::spawn_reclassify(license.clone(), shutdown.clone());
 
     let cfg_internal_bind = cfg.internal.bind.clone();
 
@@ -296,9 +298,10 @@ fn warn_if_sqlite_in_production(db: &DbPool, self_url: &str) {
 
 /// Materialise the master cookie-signing secret. Hex string preferred
 /// (operators paste `openssl rand -hex 32`); a string that fails hex
-/// decode is treated as raw UTF-8 bytes. Missing config → 32 random
-/// bytes for this process only, with a loud warning so the operator
-/// knows cookies won't survive restart.
+/// decode is treated as raw UTF-8 bytes. A configured secret shorter
+/// than 32 key bytes hard-fails boot. Missing config → 32 random bytes
+/// for this process only, with a loud warning so the operator knows
+/// cookies won't survive restart.
 fn resolve_cookie_secret(configured: Option<&str>) -> Arc<[u8]> {
     if let Some(raw) = configured.map(str::trim).filter(|s| !s.is_empty()) {
         let key: Box<[u8]> = match hex::decode(raw) {
@@ -306,11 +309,13 @@ fn resolve_cookie_secret(configured: Option<&str>) -> Arc<[u8]> {
             Err(_) => raw.as_bytes().to_vec().into_boxed_slice(),
         };
         if key.len() < 32 {
-            tracing::warn!(
-                len = key.len(),
-                "[security].cookie_secret is shorter than 32 bytes; this is a weak HMAC key. \
-                 Use `openssl rand -hex 32` to generate a strong secret."
+            eprintln!(
+                "config error: [security].cookie_secret decodes to {} bytes; a minimum of 32 \
+                 bytes is required for a strong HMAC key. Generate one with `openssl rand -hex \
+                 32` (or via FORSETI_SECURITY__COOKIE_SECRET) and restart.",
+                key.len()
             );
+            std::process::exit(1);
         }
         return Arc::from(key);
     }
