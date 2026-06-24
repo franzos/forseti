@@ -13,6 +13,19 @@ urls:
   consent: http://localhost:3000/oauth/consent
   login:   http://localhost:3000/oauth/login
   logout:  http://localhost:3000/oauth/logout
+  # OAuth 2.0 Device Authorization Grant (RFC 8628). Nested under `device`
+  # (NOT flat `device_verification`/`post_device_done`). The device grant
+  # itself is enabled per-client by granting the
+  # `urn:ietf:params:oauth:grant-type:device_code` grant type — there is no
+  # global on/off toggle. `forseti-linux-pam` (the Linux-auth confidential
+  # client) is the only client that gets it; see `src/oauth/device.rs`.
+  #
+  #   verification → Forseti's device_verify page (Part B). The user opens
+  #     this, types the user_code, and Forseti accepts the device challenge.
+  #   success → the post-approval landing.
+  device:
+    verification: http://localhost:3000/oauth/device
+    success:      http://localhost:3000/oauth/device/done
 
 secrets:
   system:
@@ -87,3 +100,8 @@ strategies:
 # `/oauth2/token`, which is the natural revocation choke-point.
 ttl:
   access_token: 5m
+  # Device + user code lifetime for the RFC 8628 grant. The PAM poll cap
+  # (`[posix].device_poll_cap_secs`, default 90s) sits well inside this so a
+  # human has time to open the verification URL and approve. Hydra returns
+  # this as `expires_in` on the device-authz response.
+  device_user_code: 10m

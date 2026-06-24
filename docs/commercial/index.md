@@ -6,10 +6,11 @@ This page is the buyer/operator overview: what the license unlocks, how the offl
 
 ## What a license unlocks today
 
-Two features are gated behind a commercial license. Both ship and work today:
+A commercial license unlocks a small set of features. They all ship and work today:
 
 - **[Organizations](./organizations.md)** — run Forseti for more than one tenant: named orgs beyond the always-free default, per-org membership and invites, per-org branding, an org-scoped admin slice, and the OIDC `org` / `orgs` claims for org-aware authorization.
 - **[Enterprise SAML SSO](./saml.md)** — per-org SAML login (`/sso/{org-slug}`) against a customer's corporate identity provider, with just-in-time provisioning and verified-email linking. Your apps keep doing plain OIDC.
+- **Linux authentication — higher seat cap.** The Linux-authentication core (back your Linux hosts' login accounts off the identity store) is **free**; a commercial license raises how many accounts you can provision. See [Linux authentication](#linux-authentication) below for exactly where the free/paid line sits.
 
 Nothing else is gated. Other capability names you might see referenced (SCIM provisioning, SIEM streaming, bulk admin) are **planned, not shipped** — they don't work yet, so don't plan around them.
 
@@ -45,8 +46,22 @@ The boundary is deliberately simple:
 | Org-scoped admin | n/a | Owners manage their own org |
 | `org` / `orgs` OIDC claims | Default-only | Full membership |
 | SAML SSO (`/sso/{slug}`) | Unavailable | Per-org connections |
+| Linux auth core (resolver, host enrollment, SSH keys) | Full | Full |
+| Linux POSIX accounts | Up to the free seat cap | Up to the license's seat cap |
+| Org→POSIX-group mirroring | n/a (Default only) | With the Organizations feature |
 
 OSS ships exactly one real default org and every code path treats it like any other org — there's no stubbed single-tenant mode. The license simply lets you add more orgs and switch SAML on, so an unlicensed deployment is always a fully working single tenant.
+
+### Linux authentication
+
+Linux authentication is a hybrid: the capability is free, and a license raises one specific limit.
+
+- **Free / OSS.** Everything operational: the resolver that serves passwd/group/SSH-key data to your hosts, host enrollment (and secret rotation/revocation), adding SSH keys, and provisioning POSIX accounts up to the free seat cap (`free_seats`, default 25). A single-machine or small-fleet operator never needs a license to run Linux auth.
+- **Commercial — higher seat cap.** A license carrying the Linux-authentication feature raises the cap from `free_seats` to the license's seat allowance, so you can provision more accounts. This is the only thing the license changes about Linux auth.
+- **Resolution is never gated.** Whatever your license state, an already-provisioned account keeps resolving — a lapsed or missing license can stop you *adding* accounts but can never lock an existing user out of a machine. In the 30-day grace window after expiry, the cap falls back to the free tier for *new* provisioning (consistent with grace being read-only), while existing accounts keep working.
+- **Org→POSIX-group mirroring needs Organizations.** If you scope hosts to organisations, mirroring an account's org memberships into POSIX groups requires the **Organizations** feature — it's part of the multi-org capability, not Linux auth on its own. Without it you still get each account's primary group.
+
+The operator-facing how-to (enrolling hosts, provisioning accounts, the seat cap in practice) is in the [operator guide → Linux authentication](../operator-guide.md#linux-authentication).
 
 ## The licensing split
 

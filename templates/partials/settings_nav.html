@@ -1,5 +1,5 @@
 {# Settings left-nav. Caller sets `active` to one of:
-   "hub" | "profile" | "password" | "2fa" | "sessions" | "authorized-apps" | "linked-providers" | "license" | "account".
+   "hub" | "profile" | "password" | "2fa" | "sessions" | "authorized-apps" | "linked-providers" | "offline-access" | "license" | "account".
    Highlighted items use the secondary-container background; others fall
    through to the default hover state. The Account entry is for the
    danger-zone page and highlights in error tones when active. #}
@@ -22,6 +22,8 @@
        class="flex items-center gap-3 px-4 py-3 rounded-xl font-label-md text-label-md {% if active == "authorized-apps" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">Authorized apps</a>
     <a href="/settings/linked-providers"
        class="flex items-center gap-3 px-4 py-3 rounded-xl font-label-md text-label-md {% if active == "linked-providers" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">Linked providers</a>
+    <a href="/settings/offline-access"
+       class="flex items-center gap-3 px-4 py-3 rounded-xl font-label-md text-label-md {% if active == "offline-access" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">Offline access</a>
     <a href="/settings/organization"
        class="flex items-center gap-3 px-4 py-3 rounded-xl font-label-md text-label-md {% if active == "organization" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">Organization</a>
     <a href="/settings/account"

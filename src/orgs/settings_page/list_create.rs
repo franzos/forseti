@@ -223,5 +223,10 @@ pub(super) async fn named_delete(
         tracing::error!(error = ?e, "delete_org failed");
         return (StatusCode::INTERNAL_SERVER_ERROR, "delete failed").into_response();
     }
+    // Cascade: the org is gone, so drop its POSIX mirror (group + members)
+    // too. Best-effort; the org delete already succeeded.
+    if let Err(e) = crate::posix::db::delete_org_group(&state.db, &org.id).await {
+        tracing::error!(error = ?e, org_id = %org.id, "failed to delete posix org group on org delete");
+    }
     Redirect::to("/settings/organizations").into_response()
 }

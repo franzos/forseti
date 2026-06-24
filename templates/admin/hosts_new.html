@@ -1,0 +1,67 @@
+{% extends "admin/admin_shell.html" %}
+
+{% block admin_title %}Enroll host{% endblock %}
+
+{% block admin_content %}
+  <div class="max-w-2xl">
+    <h1 class="font-headline-lg text-headline-lg text-on-surface mb-stack-sm">Enroll a Linux host</h1>
+    <p class="font-body-md text-body-md text-on-surface-variant mb-stack-lg">
+      A one-shot secret is revealed once on the next page. Configure the host agent with the <code class="font-mono">host_id:secret</code> credential it shows.
+    </p>
+
+    {% if !error_message.is_empty() %}
+      <div class="bg-error-container border border-error rounded-lg p-3 mb-stack-md">
+        <p class="font-body-sm text-body-sm text-on-error-container">{{ error_message }}</p>
+      </div>
+    {% endif %}
+
+    <form method="POST"
+          action="/admin/hosts/new"
+          class="flex flex-col gap-stack-md">
+      <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+
+      <label class="flex flex-col gap-stack-xs">
+        <span class="font-label-md text-label-md text-on-surface">Hostname</span>
+        <input type="text"
+               name="hostname"
+               value="{{ hostname }}"
+               placeholder="web-01.example.com"
+               required
+               class="font-body-md text-body-md bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2">
+        <span class="font-label-sm text-label-sm text-on-surface-variant">A label for your records. Doesn't have to match the machine's actual hostname.</span>
+      </label>
+
+      <label class="flex flex-col gap-stack-xs">
+        <span class="font-label-md text-label-md text-on-surface">Allowed GID</span>
+        <input type="number"
+               name="allowed_gid"
+               min="0"
+               value="{{ allowed_gid }}"
+               placeholder="2000"
+               class="font-body-md text-body-md bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2 w-32">
+        <span class="font-label-sm text-label-sm text-on-surface-variant">Restrict this host to members of one group. Leave blank to allow any group.</span>
+      </label>
+
+      <label class="flex flex-col gap-stack-xs">
+        <span class="flex items-center gap-stack-sm">
+          <input type="checkbox"
+                 name="force_mfa"
+                 value="1"
+                 {% if force_mfa %}checked{% endif %}
+                 class="rounded border-outline-variant">
+          <span class="font-label-md text-label-md text-on-surface">Force MFA on this host</span>
+        </span>
+        <span class="font-label-sm text-label-sm text-on-surface-variant">Recorded now; enforced once interactive login (PAM) ships.</span>
+      </label>
+
+      <div class="flex items-center gap-stack-md mt-stack-sm">
+        <button type="submit"
+                class="bg-primary text-on-primary font-label-md text-label-md font-bold px-4 py-2 rounded-lg hover:opacity-90 transition-opacity">
+          Enroll host
+        </button>
+        <a href="/admin/hosts"
+           class="font-label-md text-label-md text-on-surface-variant border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">Cancel</a>
+      </div>
+    </form>
+  </div>
+{% endblock %}

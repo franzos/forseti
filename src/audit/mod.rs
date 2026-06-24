@@ -133,6 +133,30 @@ pub mod action {
     /// initiated outside the admin surface.
     pub const IDENTITY_RECLAIMED: &str = "identity.reclaimed";
     pub const ADMIN_SESSION_REVOKED: &str = "admin.session.revoked";
+    // posix host enrollment (`src/admin/hosts.rs`)
+    pub const HOST_ENROLLED: &str = "host.enrolled";
+    pub const HOST_REVOKED: &str = "host.revoked";
+    pub const HOST_SECRET_ROTATED: &str = "host.secret_rotated";
+    // posix account provisioning (`src/admin/posix.rs`)
+    pub const POSIX_ACCOUNT_PROVISIONED: &str = "posix.account.provisioned";
+    pub const POSIX_ACCOUNT_ENABLED: &str = "posix.account.enabled";
+    pub const POSIX_ACCOUNT_DISABLED: &str = "posix.account.disabled";
+    pub const POSIX_ACCOUNT_DELETED: &str = "posix.account.deleted";
+    pub const POSIX_SSH_KEY_ADDED: &str = "posix.ssh_key.added";
+    pub const POSIX_SSH_KEY_REMOVED: &str = "posix.ssh_key.removed";
+    // posix device-auth (RFC 8628; `src/posix/device.rs`). Metadata carries
+    // hostname + username + a coarse reason ONLY — never device/user codes or
+    // tokens (the SafeMetadata deny-list also blocks them).
+    pub const POSIX_DEVICE_AUTH_INITIATED: &str = "posix.device_auth.initiated";
+    pub const POSIX_DEVICE_AUTH_APPROVED: &str = "posix.device_auth.approved";
+    pub const POSIX_DEVICE_AUTH_DENIED: &str = "posix.device_auth.denied";
+    // posix offline-auth (M3a; `src/posix/offline.rs`). Metadata carries
+    // username + host + a coarse reason ONLY — never the passphrase, verifier,
+    // pepper, or verify_tag (the SafeMetadata deny-list also blocks them).
+    pub const POSIX_OFFLINE_SECRET_SET: &str = "posix.offline.secret_set";
+    pub const POSIX_OFFLINE_SECRET_CLEARED: &str = "posix.offline.secret_cleared";
+    pub const POSIX_OFFLINE_AUTH_SUCCEEDED: &str = "posix.offline.auth_succeeded";
+    pub const POSIX_OFFLINE_AUTH_FAILED: &str = "posix.offline.auth_failed";
     pub const ADMIN_WEBHOOK_REQUEUED: &str = "admin.webhook.requeued";
     pub const ADMIN_WEBHOOK_DISCARDED: &str = "admin.webhook.discarded";
     // profiles
@@ -183,6 +207,8 @@ pub mod target_kind {
     pub const SESSION: &str = "session";
     pub const WEBHOOK_OUTBOX: &str = "webhook_outbox";
     pub const DCR_IAT: &str = "dcr_iat";
+    pub const HOST: &str = "host";
+    pub const POSIX_ACCOUNT: &str = "posix_account";
     pub const LICENSE: &str = "license";
     pub const ORG: &str = "org";
     pub const SAML_CONNECTION: &str = "saml_connection";
@@ -236,6 +262,13 @@ impl SafeMetadata {
     fn into_value(self) -> serde_json::Value {
         self.0
     }
+
+    /// Read-only view of the underlying object, for assertions in tests
+    /// that need to confirm a key is present/absent.
+    #[cfg(test)]
+    pub(crate) fn as_value(&self) -> &serde_json::Value {
+        &self.0
+    }
 }
 
 /// Build a `SafeMetadata` from `"k" => expr` pairs. Values go through
@@ -274,6 +307,18 @@ fn is_sensitive_key(key: &str) -> bool {
         "signing_key",
         "secret_key",
         "credential",
+        // OAuth device-authorization grant: never log these. Specific needles,
+        // not a bare "code" — that would over-match status_code/error_code.
+        "device_code",
+        "user_code",
+        "verification_uri",
+        // Offline-auth (M3a): the bare passphrase, the server-side Argon2id
+        // verifier, the host pepper, and the host-side HMAC verify_tag must
+        // never reach metadata.
+        "passphrase",
+        "verifier",
+        "pepper",
+        "verify_tag",
     ];
     let lower = key.to_lowercase();
     NEEDLES.iter().any(|n| lower.contains(n))
@@ -1173,15 +1218,44 @@ mod sensitive_key_tests {
             "signing_key",
             "secret_key",
             "credential",
+            "device_code",
+            "user_code",
+            "verification_uri",
+            "passphrase",
+            "offline_passphrase",
+            "verifier",
+            "verifier_phc",
+            "pepper",
+            "host_pepper",
+            "verify_tag",
         ] {
             assert!(is_sensitive_key(k), "{k} should be rejected");
         }
     }
 
     #[test]
+    fn allows_offline_benign_keys() {
+        // The offline-auth audit events carry only these coarse fields.
+        for k in ["username", "host_id", "reason"] {
+            assert!(!is_sensitive_key(k), "{k} should be allowed");
+        }
+    }
+
+    #[test]
     fn allows_benign_key_substrings() {
-        // The bare "key" needle used to over-match these.
-        for k in ["api_key_id", "public_key_kid", "monkey", "keyboard_layout"] {
+        // The bare "key" needle used to over-match these. (`api_key_id` is
+        // intentionally NOT here: it contains the specific `api_key` needle, so
+        // it's redacted — harmless for an id, and safer than a carve-out.)
+        for k in ["public_key_kid", "monkey", "keyboard_layout"] {
+            assert!(!is_sensitive_key(k), "{k} should be allowed");
+        }
+    }
+
+    #[test]
+    fn device_auth_needles_are_specific() {
+        // The device-auth needles must not over-match a bare "code" — a *_code
+        // suffix on a benign field is common and must stay allowed.
+        for k in ["status_code", "country_code", "error_code"] {
             assert!(!is_sensitive_key(k), "{k} should be allowed");
         }
     }

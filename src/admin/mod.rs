@@ -38,7 +38,9 @@ pub mod audit;
 pub mod clients;
 pub mod configuration;
 pub mod dcr_tokens;
+pub mod hosts;
 pub mod identities;
+pub mod posix;
 pub mod saml;
 pub mod sessions;
 pub mod status;
@@ -119,6 +121,32 @@ pub fn router() -> Router<AppState> {
         .route(
             "/admin/dcr-tokens/{id}/revoke",
             get(dcr_tokens::revoke_confirm).post(dcr_tokens::revoke),
+        )
+        // Linux host enrollment (Forseti-tier; POSIX/NSS resolver)
+        .route("/admin/hosts", get(hosts::list))
+        .route("/admin/hosts/new", get(hosts::new).post(hosts::issue))
+        .route(
+            "/admin/hosts/{id}/revoke",
+            get(hosts::revoke_confirm).post(hosts::revoke),
+        )
+        .route(
+            "/admin/hosts/{id}/rotate",
+            get(hosts::rotate_confirm).post(hosts::rotate),
+        )
+        // POSIX accounts (Forseti-tier; license-aware seat cap)
+        .route("/admin/posix", get(posix::list))
+        .route("/admin/posix/new", get(posix::new).post(posix::provision))
+        .route("/admin/posix/{id}", get(posix::account))
+        .route("/admin/posix/{id}/keys", post(posix::add_key))
+        .route(
+            "/admin/posix/{id}/keys/{key_id}/delete",
+            post(posix::remove_key),
+        )
+        .route("/admin/posix/{id}/disable", post(posix::disable))
+        .route("/admin/posix/{id}/enable", post(posix::enable))
+        .route(
+            "/admin/posix/{id}/delete",
+            get(posix::delete_confirm).post(posix::delete),
         )
 }
 
@@ -346,6 +374,8 @@ pub(crate) enum AdminSection {
     Configuration,
     Clients,
     DcrTokens,
+    Hosts,
+    Posix,
     Identities,
     Sessions,
     Audit,
@@ -361,6 +391,8 @@ impl AdminSection {
             AdminSection::Configuration => "configuration",
             AdminSection::Clients => "clients",
             AdminSection::DcrTokens => "dcr-tokens",
+            AdminSection::Hosts => "hosts",
+            AdminSection::Posix => "posix",
             AdminSection::Identities => "identities",
             AdminSection::Sessions => "sessions",
             AdminSection::Audit => "audit",

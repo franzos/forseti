@@ -178,7 +178,88 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    posix_accounts (identity_id) {
+        identity_id -> Text,
+        username -> Text,
+        uid -> Integer,
+        gid -> Integer,
+        gecos -> Text,
+        shell -> Text,
+        home_dir -> Text,
+        enabled -> Integer,
+        created_at -> Text,
+        updated_at -> Text,
+    }
+}
+
+diesel::table! {
+    posix_groups (gid) {
+        gid -> Integer,
+        name -> Text,
+        org_id -> Nullable<Text>,
+        kind -> Text,
+        created_at -> Text,
+    }
+}
+
+diesel::table! {
+    posix_group_members (gid, identity_id) {
+        gid -> Integer,
+        identity_id -> Text,
+        added_at -> Text,
+    }
+}
+
+diesel::table! {
+    host_enrollments (id) {
+        id -> Text,
+        hostname -> Text,
+        secret_hash -> Text,
+        allowed_gid -> Nullable<Integer>,
+        force_mfa -> Integer,
+        created_by -> Nullable<Text>,
+        created_at -> Text,
+        last_seen_at -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
+    device_sessions (device_code) {
+        device_code -> Text,
+        user_code -> Text,
+        host_id -> Text,
+        requested_username -> Text,
+        status -> Text,
+        identity_id -> Nullable<Text>,
+        created_at -> Text,
+        expires_at -> Text,
+    }
+}
+
+diesel::table! {
+    ssh_authorized_keys (id) {
+        id -> Text,
+        identity_id -> Text,
+        public_key -> Text,
+        comment -> Text,
+        created_at -> Text,
+        expires_at -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
+    offline_secrets (identity_id) {
+        identity_id -> Text,
+        verifier -> Text,
+        algo_version -> Integer,
+        created_at -> Text,
+        updated_at -> Text,
+    }
+}
+
 diesel::joinable!(organization_members -> organizations (org_id));
 diesel::joinable!(saml_connections -> organizations (org_id));
 diesel::allow_tables_to_appear_in_same_query!(organizations, organization_members);
 diesel::allow_tables_to_appear_in_same_query!(organizations, saml_connections);
+diesel::allow_tables_to_appear_in_same_query!(posix_group_members, posix_accounts);

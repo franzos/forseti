@@ -131,6 +131,16 @@ pub(crate) async fn oauth_consent(
         }
     };
 
+    // Linux-PAM device-auth NEVER auto-skips consent (R1). The host+account
+    // binding renders on the verification screen AND consent must show — a
+    // stray `skip_consent` toggle (or a remembered Hydra grant) on the PAM
+    // client must not bypass it. This guard sits ABOVE the skip tree; the
+    // subject-mismatch check below still applies because we fall through to
+    // the normal render path (which validates the session before showing the
+    // Allow button on POST).
+    let is_pam_client =
+        !client_id_lookup.is_empty() && client_id_lookup == state.cfg.posix.pam_client_id;
+
     // Auto-grant path: Hydra already remembers the user's consent, or the
     // client is flagged trusted. Either way, no UI; fold the id_token claims
     // and redirect straight to the relying party.
@@ -145,7 +155,7 @@ pub(crate) async fn oauth_consent(
     //
     // Unverified clients never auto-grant (M1): we always want the user
     // to see the caution banner.
-    if verified && (hydra_skip || client_skip_consent) {
+    if !is_pam_client && verified && (hydra_skip || client_skip_consent) {
         // Subject comparison is independent of AAL — InsufficientAal means
         // a session exists, we just couldn't read it here. Treating that
         // as "no subject" keeps the mismatch check conservative (rejects

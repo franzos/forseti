@@ -1,0 +1,14 @@
+# Thin: proto + client (which is proto + libc). No heavy deps — this binary runs
+# under sshd's AuthorizedKeysCommand on every login.
+[package]
+name = "forseti-ssh-authorizedkeys"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "forseti_ssh_authorizedkeys"
+path = "src/main.rs"
+
+[dependencies]
+forseti-unix-proto = { path = "../proto" }
+forseti-unix-client = { path = "../client" }

@@ -54,6 +54,9 @@ mod logout;
 #[path = "integration/oauth.rs"]
 mod oauth;
 
+#[path = "integration/posix.rs"]
+mod posix;
+
 #[path = "integration/recovery.rs"]
 mod recovery;
 

@@ -82,6 +82,13 @@ pub(crate) async fn delete_identity_audited(
         ),
     }
 
+    // Cascade: purge POSIX rows. An orphaned posix_account would keep a
+    // usable login (uid/ssh keys) for a deleted identity — log loudly but
+    // never abort; the identity is gone in Kratos regardless.
+    if let Err(e) = crate::posix::db::delete_account_rows(&state.db, target_identity_id).await {
+        tracing::error!(error = ?e, identity_id = %target_identity_id, "failed to purge posix rows on identity delete");
+    }
+
     let mut event = AuditEvent::new(reason.action())
         .target(target_kind::IDENTITY, target_identity_id.to_string())
         .critical()

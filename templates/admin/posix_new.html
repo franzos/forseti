@@ -1,0 +1,64 @@
+{% extends "admin/admin_shell.html" %}
+
+{% block admin_title %}Provision POSIX account{% endblock %}
+
+{% block admin_content %}
+  <div class="max-w-2xl">
+    <h1 class="font-headline-lg text-headline-lg text-on-surface mb-stack-sm">Provision a POSIX account</h1>
+    <p class="font-body-md text-body-md text-on-surface-variant mb-stack-lg">
+      Materialise a Kratos identity into a Linux account. A uid/gid is allocated automatically and a primary group created. Paste the identity's UUID (copy it from the <a href="/admin/identities" class="text-primary hover:underline">Identities</a> page).
+    </p>
+
+    {% if !error_message.is_empty() %}
+      <div class="bg-error-container border border-error rounded-lg p-3 mb-stack-md">
+        <p class="font-body-sm text-body-sm text-on-error-container">{{ error_message }}</p>
+      </div>
+    {% endif %}
+
+    <form method="POST"
+          action="/admin/posix/new"
+          class="flex flex-col gap-stack-md">
+      <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+
+      <label class="flex flex-col gap-stack-xs">
+        <span class="font-label-md text-label-md text-on-surface">Kratos identity ID</span>
+        <input type="text"
+               name="identity_id"
+               value="{{ identity_id }}"
+               placeholder="00000000-0000-0000-0000-000000000000"
+               required
+               class="font-mono text-body-sm bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2">
+        <span class="font-label-sm text-label-sm text-on-surface-variant">The identity must already exist in Kratos.</span>
+      </label>
+
+      <label class="flex flex-col gap-stack-xs">
+        <span class="font-label-md text-label-md text-on-surface">Username</span>
+        <input type="text"
+               name="username"
+               value="{{ username }}"
+               placeholder="alice"
+               required
+               class="font-body-md text-body-md bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2 w-64">
+        <span class="font-label-sm text-label-sm text-on-surface-variant">1–32 chars, lowercase, starting with a letter or underscore. This becomes the POSIX login name.</span>
+      </label>
+
+      <label class="flex flex-col gap-stack-xs">
+        <span class="font-label-md text-label-md text-on-surface">Login shell</span>
+        <input type="text"
+               name="shell"
+               value="{{ shell }}"
+               class="font-body-md text-body-md bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2 w-64">
+        <span class="font-label-sm text-label-sm text-on-surface-variant">Defaults to the configured shell. Home dir is derived from the home prefix + username.</span>
+      </label>
+
+      <div class="flex items-center gap-stack-md mt-stack-sm">
+        <button type="submit"
+                class="bg-primary text-on-primary font-label-md text-label-md font-bold px-4 py-2 rounded-lg hover:opacity-90 transition-opacity">
+          Provision account
+        </button>
+        <a href="/admin/posix"
+           class="font-label-md text-label-md text-on-surface-variant border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">Cancel</a>
+      </div>
+    </form>
+  </div>
+{% endblock %}

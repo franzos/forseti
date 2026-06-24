@@ -1966,6 +1966,388 @@ Downstream apps that want to pin a specific org on a re-authentication include `
 
 When the user is a member of the named org, Forseti writes the active-org cookie before accepting the login challenge. When they're not a member, the param is silently ignored (per spec — no error UX).
 
+## POSIX resolver API (Linux integration)
+
+The `/posix/v1/*` resolver serves passwd/group/authorized_keys data to
+enrolled Linux hosts (NSS + sshd `AuthorizedKeysCommand`). It lives on the
+**internal listener** (`[internal].bind`, default `127.0.0.1`) alongside the
+Kratos audit webhook — never the public listener. No CSRF, no session
+cookies; hosts authenticate with HTTP Basic.
+
+```mermaid
+sequenceDiagram
+    participant Host as Enrolled host (NSS/sshd)
+    participant Internal as Forseti internal :8081
+    participant DB as posix::db (sqlite/pg)
+
+    Host->>Internal: GET /posix/v1/passwd/name/{name}<br/>Authorization: Basic host_id:secret
+    Internal->>Internal: RequirePosixHost: host_by_id + constant-time<br/>SHA-256 hash compare → 401 on mismatch
+    Internal->>DB: account_by_username (enabled only)
+    alt host.allowed_gid = Some(gid)
+        Internal->>DB: group_by_gid(gid) — re-assert kind='org'
+        Internal->>DB: is_member(gid, identity_id)
+    end
+    DB-->>Internal: row(s)
+    Internal-->>Host: 200 JSON / 404 / text-plain keys
+```
+
+Auth (`src/posix/host_auth.rs`, B1): `Authorization: Basic base64(host_id:secret)`.
+The secret is compared against the stored SHA-256 hex hash
+(`host_enrollments.secret_hash`) in constant time. Unknown host and bad
+secret return the same 401 (no enumeration oracle). `last_seen_at` is touched
+best-effort, throttled to once per 60s.
+
+Routes (`src/posix/resolver.rs`):
+
+```
+GET /posix/v1/passwd                 all enabled accounts (scoped) / []
+GET /posix/v1/passwd/name/{name}     one account by username
+GET /posix/v1/passwd/uid/{uid}       one account by uid
+GET /posix/v1/group                  the org group (scoped) / []
+GET /posix/v1/group/name/{name}      one group by name
+GET /posix/v1/group/gid/{gid}        one group by gid
+GET /posix/v1/authorized_keys/{name} text/plain, one key per line
+```
+
+Access-control policy hinges on the host's `allowed_gid`:
+
+- **Unscoped (`allowed_gid = NULL`)** — single lookups resolve any
+  enabled account / any group. **Enumeration returns empty** (`passwd` → `[]`,
+  `group` → `[]`) so a single host can't slurp the whole directory.
+- **Scoped (`allowed_gid = Some(gid)`)** — every request re-asserts that
+  `gid` is a `kind = 'org'` group (defense in depth; the stored value is
+  never trusted on its own). If it's missing or not an org group, the host
+  is treated as misconfigured (`tracing::warn!` + empty/404 for everything).
+  Otherwise results are restricted to enabled members of `gid`: `passwd`
+  lists those members, single passwd lookups 404 unless the account is an
+  enabled member, `group`/`group/*` only ever return the one allowed org
+  group, and `authorized_keys` serves keys only for in-scope members.
+
+`authorized_keys` resolves name → enabled account → `authorized_keys_for`,
+**drops any key whose `expires_at` is non-null and `<= now`** (serve-time
+expiry), and returns `text/plain` with one key per line. An empty body + 200
+is the "no keys" answer sshd expects; passwd/group misses return 404 (the
+daemon maps that to NSS `NOTFOUND`).
+
+Rate limit: a single coarse per-IP bucket (`SmartIpKeyExtractor`, 600/min)
+via `rate_limit::apply`, with a tiny empty-429 error handler. Coarse because
+hosts behind one NAT share the bucket — a host-keyed extractor is future
+hardening (`rate_limit.rs` has no host-id extractor).
+
+## POSIX device-auth login (RFC 8628)
+
+Interactive login (`ssh` with a password, a TTY/console login, `sudo`
+re-auth) for a Forseti-backed account runs over the OAuth 2.0 Device
+Authorization Grant. The host's PAM module starts a device flow for a *named*
+account, a human approves it in the browser, and Forseti **binds** the
+approving identity to that named account before ever telling the host
+`approved`. This is the security heart of the feature: the resolver only
+hands out the *shape* of an account; this path decides whether a login
+actually happens.
+
+Two surfaces are involved. The daemon-facing `/posix/v1/device/*` endpoints
+live on the **internal listener** alongside the resolver (gated by
+`RequirePosixHost` Basic auth, no session/CSRF). The browser-facing
+verification screen lives on the **public listener** as `/oauth/device`.
+
+```mermaid
+sequenceDiagram
+    participant PAM as pam_forseti.so (host)
+    participant Daemon as forseti-unixd (host)
+    participant Internal as Forseti internal :8081
+    participant Hydra
+    participant Browser as Human's browser
+    participant Public as Forseti public
+
+    PAM->>Daemon: AuthInitiate{username} (local socket)
+    Daemon->>Internal: POST /posix/v1/device/init {username}<br/>Basic host_id:secret
+    Internal->>Internal: account enabled + visible-on-host?<br/>(deny/unknown both → 404)
+    Internal->>Hydra: device_authorization (forseti-linux-pam, openid)
+    Hydra-->>Internal: device_code, user_code, verification_uri, interval, expires_in
+    Internal->>Internal: persist device_sessions row (unique codes)
+    Internal-->>Daemon: user_code + verification_uri<br/>(verification_uri_complete suppressed if force_mfa)
+    Daemon-->>PAM: show "go to <uri>, enter <user_code>"
+
+    Browser->>Public: GET /oauth/device?user_code=…&device_challenge=…
+    Public->>Public: look up session by user_code → show<br/>"did YOU start login as <user> on <host>?"
+    Browser->>Public: POST /oauth/device (confirm + _csrf)
+    Public->>Hydra: accept_user_code_request → login + consent leg (Kratos)
+    Hydra-->>Browser: redirect through consent
+
+    loop poll (interval, capped by device_poll_cap_secs)
+        Daemon->>Internal: POST /posix/v1/device/poll {device_code}<br/>Basic host_id:secret
+        Internal->>Hydra: poll_device_token
+        alt token issued
+            Hydra-->>Internal: id_token + access_token
+            Internal->>Internal: verify id_token (iss/aud/azp/exp/iat)
+            Internal->>Internal: THE BINDING (evaluate_binding) — LIVE
+            Internal-->>Daemon: approved / denied{reason}
+        else still pending / slow_down
+            Hydra-->>Internal: pending
+            Internal-->>Daemon: pending{interval}
+        end
+    end
+    Daemon-->>PAM: approved → PAM_SUCCESS / denied → fail
+```
+
+### Daemon-facing endpoints
+
+Router at `src/posix/device.rs:115` (`/posix/v1/device/init`, `/posix/v1/device/poll`),
+both gated by `RequirePosixHost` and mounted on the internal listener.
+`device/init` carries its own per-IP rate bucket (60/min); the real backoff
+is Forseti owning the `interval` it returns.
+
+- **`device_init`** (`src/posix/device.rs:133`) — resolves the named account,
+  requires it `enabled` AND visible on the host (`scope::account_visible_on_host`);
+  a denied or unknown account collapses to the same `404` so the host can't
+  probe which. Drives Hydra's device-authorization endpoint as the confidential
+  `forseti-linux-pam` client, persists a `device_sessions` row keyed by the
+  unique `device_code`/`user_code`, and returns the codes. For `force_mfa`
+  hosts it **omits `verification_uri_complete`** (`device.rs:219`) so the human
+  must type the code — defeating one-click `verification_uri_complete`
+  phishing.
+- **`device_poll`** (`src/posix/device.rs:240`) — loads the session (must
+  belong to *this* host, else `404`), returns a settled state without
+  re-polling Hydra for already-terminal sessions (single-use), expires past
+  `expires_at`, otherwise polls Hydra's token endpoint. On a `slow_down`
+  Forseti hands the daemon a longer `interval` so it owns the backoff. On a
+  token it runs the binding.
+- **`handle_token`** (`src/posix/device.rs:328`) — validates the id_token
+  (`hydra::verify_id_token`, issuer from `[posix].hydra_issuer` ?? `[hydra].public_url`,
+  audience pinned to `pam_client_id`, `iat` within `id_token_iat_window_secs`),
+  resolves the approver's account by the token `sub`, runs the pure
+  `evaluate_binding`, then **atomically** approves (the `WHERE status='pending'`
+  guard means a replay after approval never re-approves).
+
+If `[posix].pam_client_secret` is unset/empty, both `device_init`
+(`device.rs:166`) and `device_poll` (`device.rs:278`) hard-fail with `500` and
+**make no Hydra call** — `require_client_secret` (`device.rs:92`) treats a
+blank secret as a misconfiguration rather than sending Hydra a blank
+`client_secret_basic` password.
+
+### THE BINDING (`evaluate_binding`, `src/posix/device.rs:495`)
+
+A pure, unit-tested function — no DB, no network. The DB/scope/token I/O is
+done in `handle_token`; this is just the rule. The init-time checks are
+necessary but never sufficient, so the binding is re-run **live** at the poll
+that observes the token (host scope and account state can change between init
+and approval). Every clause is required, in order:
+
+1. **Named-target match** — `account.username == requested_username`. The
+   approver must *be* the account the host named. (The approver is resolved
+   from the token `sub`; if a different identity approved, this fails.)
+2. **Account enabled** — `account.enabled`.
+3. **Live host scope** — `account_visible_on_host` re-checked at poll time, not
+   trusted from init.
+4. **`force_mfa` only** — `acr == "aal2"`, `amr` contains a pinned second
+   factor from the `SECOND_FACTOR_AMR` allowlist (`totp`, `webauthn`,
+   `lookup_secret`, `webauthn_v2`, `totp_v2` — `pwd` is deliberately absent),
+   and `auth_time` is within `mfa_auth_time_window_secs` (default 300s) of now.
+   A stale or missing `auth_time` denies.
+
+Any failure returns a coarse, non-sensitive `reason` tag (`binding`,
+`mfa_required`, `token_invalid`, `no_account`) — never a code or token — and
+the session is denied. Codes and tokens are never logged.
+
+### Browser verification leg
+
+`src/oauth/device_verify.rs`. Hydra redirects the human to `/oauth/device`
+(`verification_uri`) with `?device_challenge=…&user_code=…`.
+
+- **`device_verify`** GET (`device_verify.rs:66`) — correlates by `user_code`
+  against Forseti's *own* `device_sessions` row (the device-authz request
+  carries no Hydra context, and there's no get-device-request admin API). It
+  renders `templates/oauth/device_verify.html` with the primary, unmissable
+  question: "did **you** start this login as `<username>` on `<hostname>`?" —
+  host-bound consent is the RFC 8628 §5.4 phishing mitigation. A `user_code`
+  with no backing session shows a plain code-entry form (can't bind what we
+  can't find).
+- **`device_verify_submit`** POST (`device_verify.rs:98`) — CSRF-checked,
+  re-loads by `user_code` (a tampered POST can't accept a code with no backing
+  session), then calls Hydra's `accept_user_code_request`, which drives the
+  login + consent leg. Consent **never auto-skips** for the PAM client (guard
+  in `consent.rs`) so the binding panel is always shown.
+
+### Hydra confidential-client bridge
+
+`src/oauth/device.rs` owns the `forseti-linux-pam` confidential client model
+(device-code grant, `openid` scope, `client_secret_basic`, `skip_consent =
+false`). `ensure_pam_client` (`device.rs:61`) is create-if-absent and
+idempotent — it **never overwrites** an existing client — and is driven only
+by the `forseti posix-init-client` CLI verb (`src/main.rs:97`), which reveals a
+freshly-minted secret exactly once.
+
+### Host-side PAM module
+
+`forseti-unix/pam/src/core.rs` + `forseti-unix/pam/src/lib.rs:88`. The `auth`
+phase (`sm_authenticate`) fast-fails to `PAM_IGNORE` when there's no usable
+TTY (never starts a device flow for a non-interactive caller), then runs
+`run_device_auth` over the conversation function and the local daemon socket —
+showing the code and polling for approval with a cancel point, bounded well
+under sshd's `LoginGraceTime`. The separate `account` phase
+(`acct_mgmt`) queries the daemon's `AccountAllowed`; on a daemon outage it
+**fails closed for NSS-only users** (`PAM_AUTHINFO_UNAVAIL`) but lets
+shadow-backed local accounts through `pam_unix` (`decide_account_unreachable`,
+`has_local_shadow_entry` in `core.rs:78`) so an outage can't lock out local
+admins. See `infra/guix/README-linux-auth.md` for the PAM control-map.
+
+### Audit
+
+`POSIX_DEVICE_AUTH_INITIATED` at init, `POSIX_DEVICE_AUTH_APPROVED` on a bound
+approval, `POSIX_DEVICE_AUTH_DENIED` (severity WARNING, with the coarse
+`reason`) on every denial. Metadata carries `host_id` + `username` only —
+never codes or tokens.
+
+## POSIX offline auth (passphrase, server-unreachable)
+
+When an enrolled host's daemon is **up but cannot reach Forseti** (laptop on a
+plane, datacenter partition, Forseti maintenance), the device-auth flow above
+can't run — there's nobody to drive the Hydra device grant. Offline auth lets
+the host authenticate a user at the terminal against a **dedicated offline
+passphrase** the user set earlier while online, verified locally by the daemon.
+It is a deliberately weaker, opt-in fallback: online device-auth is always
+preferred and always wins.
+
+The honest trade-off is stated up front: the host stores its HMAC pepper in a
+`0600` file, so a stolen host disk **or** a stolen server DB permits an offline
+brute-force *bounded by the Argon2id work factor × passphrase entropy* — hence
+the ≥8-char floor. M3b (TPM sealing) will move the pepper into a TPM so the
+verifier is uncheckable off the host; that's the planned hardening. The
+host-side lockout below defends **live terminal guessing only**, not disk theft.
+
+### Non-goals (read these first)
+
+- **Daemon-down is NOT offline-eligible.** Offline auth triggers only on
+  *server-unreachable* with the **daemon still up** (`InitOutcome::Unavailable`,
+  `forseti-unix/daemon/src/server.rs:197`). The PAM daemon-unreachable case
+  (`None`) is untouched — it stays M4 fail-closed for NSS-only users.
+- **`force_mfa` hosts refuse offline entirely.** The `offline_verifiers`
+  endpoint returns an **empty set** for a `force_mfa` host, so it provisions
+  zero offline credentials and always requires the network — closing the
+  AAL2-downgrade where going offline would skip the second factor.
+- **Server-reached-denied never falls back.** The daemon distinguishes
+  `Unavailable` (transport) from `Denied`/`Unknown` (a real server answer); only
+  `Unavailable` offers offline. A reached-but-denied login stays denied.
+
+```mermaid
+sequenceDiagram
+    participant User as User's browser
+    participant Public as Forseti public
+    participant Internal as Forseti internal :8081
+    participant Poller as forseti-unixd poller (host)
+    participant Keystore as 0600 keystore (host)
+    participant PAM as pam_forseti.so (host)
+    participant Daemon as forseti-unixd (host)
+
+    Note over User,Public: While online
+    User->>Public: POST /settings/offline-access {passphrase}
+    Public->>Public: mint_verifier → Argon2id PHC (≥8 chars)
+    Public->>Internal: store offline_secrets row (verifier only)
+
+    Note over Poller,Keystore: Periodically (offline_poll_secs)
+    Poller->>Internal: GET /posix/v1/offline_verifiers<br/>Basic host_id:secret
+    Internal->>Internal: enabled + scoped + NON-force_mfa users<br/>(force_mfa host → empty set)
+    Internal-->>Poller: {username, verifier, ttl_secs, algo_version}[]
+    Poller->>Keystore: wholesale-replace: re-pepper HMAC(pepper, Argon2id_raw)<br/>stamp ttl_expires_at; drop absent users
+
+    Note over PAM,Daemon: Later, server unreachable
+    PAM->>Daemon: AuthInitiate{username} (local socket)
+    Daemon->>Internal: device/init → transport error
+    Daemon->>Daemon: InitOutcome::Unavailable + usable cred?
+    Daemon-->>PAM: OfflineAvailable
+    PAM->>PAM: prompt "Offline passphrase:" (ECHO_OFF)
+    PAM->>Daemon: OfflineAuthStep{username, secret}
+    Daemon->>Daemon: evaluate_offline_gate (TTL / max-life / rollback / lockout / algo)
+    Daemon->>Daemon: verify_offline = ct_eq(verify_tag, HMAC(pepper, Argon2id(secret)))
+    Daemon-->>PAM: OfflineSuccess / OfflineDenied{reason}
+    PAM-->>PAM: account phase answered from M1 cache last-known state
+    Daemon->>Daemon: enqueue audit event (flushed on reconnect)
+```
+
+### Setting the passphrase (server, online)
+
+`/settings/offline-access` (`src/settings/offline_access.rs`) — a Forseti-owned
+POST surface modeled on `settings_profile_extended_save`, **not** a Kratos flow.
+`RequireSession` + `Csrf` + `verify_csrf_or_forbid`; GET renders, POST sets
+(`settings_offline_access_save:84`), POST clears
+(`settings_offline_access_clear:147`). The passphrase is never echoed, never put
+in a redirect, never logged, never written to audit metadata — only the
+Argon2id verifier is stored. The page 404s when `[posix].offline_auth_enabled`
+is off. `mint_verifier` (`src/posix/offline.rs:44`) rejects anything under
+`OFFLINE_MIN_LEN` (8) and produces `$argon2id$v=19$m=65536,t=3,p=1$<salt>$<hash>`
+with a fresh random salt per call.
+
+### Provisioning (host pull, wholesale-replace)
+
+`GET /posix/v1/offline_verifiers` (`src/posix/resolver.rs:321`, `RequirePosixHost`)
+returns the *complete current* set of `{username, verifier, ttl_secs,
+algo_version}` for the users enabled and scoped on this host. `force_mfa` (or
+`offline_auth_enabled = false`) short-circuits to an empty list before any DB
+work (`resolver.rs:322`). Unlike `passwd_all`, an **unscoped** host does get the
+offline set — it can already resolve and authenticate those users online.
+
+The host poller (`forseti-unix/daemon/src/provision.rs`) runs on a
+`offline_poll_secs` tokio interval: it pulls the set and **wholesale-replaces**
+its keystore (`Keystore::replace_all`, `forseti-unix/daemon/src/offline.rs:412`)
+— inserting/refreshing present users, deleting absent ones. Withdrawal
+(disable, de-scope, `force_mfa`-flip, passphrase-clear) is therefore just
+absence from the next pull; no tombstones. Each cred is re-peppered with a
+host-local HMAC key generated once and kept in the same `forseti-unixd`-owned
+`0600` keystore (`get_or_create_pepper:311`) — the bare server verifier is never
+stored; only `verify_tag = HMAC(pepper, Argon2id_raw(verifier))`. The poller
+also drains the local audit queue to `POST /posix/v1/offline_audit`
+(`resolver.rs:405`).
+
+### Offline login (host, server-unreachable)
+
+`auth_begin` (`forseti-unix/daemon/src/server.rs:189`): on
+`InitOutcome::Unavailable`, if a usable non-expired cred exists it returns
+`OfflineAvailable`; otherwise it stays `PAM_AUTHINFO_UNAVAIL`. `Unknown`/`Denied`
+(a real server answer) never offer offline.
+
+`pam_forseti.so` (`forseti-unix/pam/src/core.rs:236`, `run_offline_auth`): after
+`run_device_auth` returns `PAM_AUTHINFO_UNAVAIL` *and* the daemon signalled
+`OfflineAvailable`, it prompts `PAM_PROMPT_ECHO_OFF` "Offline passphrase:" and
+sends `OfflineAuthStep{username, secret}`. The daemon
+(`offline_auth_step:148`) runs the pure precondition gate
+`evaluate_offline_gate` (`offline.rs:108` — refuse reasons `Expired`,
+`ClockRollback`, `LockedOut`, `MaxLifetime`, `UnknownAlgo`), then the
+KDF+HMAC `verify_offline` (`offline.rs:229`) constant-time-compared against the
+stored tag. Wrong passphrase → `OfflineDenied{reason: "bad_passphrase"}` →
+"Incorrect offline passphrase", incrementing a per-user lockout with exponential
+backoff (`bump_lockout:543`, hard cap `offline_lockout_max`). A success resets
+the lockout. The separate `account` phase is answered from the **M1 cache's**
+last-known passwd entry (`account_allowed:295`): a user present in the cache was
+last-seen enabled+visible, so the account phase clears offline; absent → Unknown
+(fail-safe).
+
+### Revocation & expiry
+
+Three independent bounds, all stated honestly:
+
+- **TTL** — each provisioned cred carries `ttl_expires_at = synced_at +
+  offline_ttl_hours` (default 24). The gate refuses an expired cred. On a
+  fully-partitioned host the worst-case disable-to-revocation latency is ≈
+  `offline_ttl_hours`.
+- **Max lifetime** — the host also refuses any cred older than
+  `offline_max_lifetime_secs` (default 168h) from the **last successful online
+  auth** (stamped on a genuine online login, `server.rs:257`), so TTL refreshes
+  can't extend a stale cred indefinitely.
+- **Server purge** — deleting an identity purges its `offline_secrets` row via
+  the reconcile sweep (`src/posix/mod.rs`); clearing the passphrase in the
+  dashboard withdraws it on the next poll.
+
+A wallclock rollback (`now < synced_at`) is refused (`ClockRollback`); TTL also
+bounds a forward jump.
+
+### Audit
+
+`posix.offline.secret_set` / `secret_cleared` at the dashboard
+(`offline_access.rs`); `posix.offline.auth_succeeded` / `auth_failed` ingested
+from the host's queued events via `/posix/v1/offline_audit` and written with
+only `host_id` + `username` + a coarse `reason`. The `SafeMetadata` deny-list
+blocks `passphrase`, `verifier`, `pepper`, and `verify_tag` regardless.
+
 ## Unverified-account reaper
 
 `forseti unverified-prune` (`src/identity/mod.rs::prune_unverified_cli`) walks Kratos's identity list and deletes anyone with at least one unverified verifiable address AND `created_at < now - identity.unverified_ttl_days` (default 7).

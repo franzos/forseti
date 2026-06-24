@@ -249,3 +249,34 @@ support_email = "support@example.com"
 # client_secret_verifier = "change-me"          # Jackson's CLIENT_SECRET_VERIFIER
 # identity_schema_id = "default"                # Kratos schema for JIT identities
 # sp_entity_id = "https://saml.boxyhq.com"      # SP entity id you give the customer's IdP; must match Jackson's samlAudience
+
+# POSIX account materialisation — Forseti backing a Linux host's auth.
+# Enables Linux auth (uid/gid allocation, home/shell shape) for free up
+# to `free_seats` accounts; a commercial license raises that cap.
+# Defaults below match the code-side defaults.
+[posix]
+uid_base = 1000000          # first uid handed out; allocated monotonically
+gid_base = 2000000          # first gid; disjoint from uid space so they never collide
+default_shell = "/bin/sh"   # per-OS: /run/current-system/profile/bin/bash on Guix System, /bin/bash on Debian
+home_prefix = "/home"       # home dir is {home_prefix}/{username} unless overridden per account
+free_seats = 25             # free-tier seat cap when no commercial max_seats applies
+
+# Linux PAM device-auth (RFC 8628). The confidential OAuth client Forseti
+# drives the device grant as; create it with `forseti posix-init-client`.
+pam_client_id = "forseti-linux-pam"
+# pam_client_secret = "..."   # client_secret_basic secret; omit to let posix-init-client mint one (revealed once)
+device_poll_cap_secs = 90        # wall-clock cap on a device-auth poll loop; keep < sshd LoginGraceTime (120s)
+id_token_iat_window_secs = 120   # reject device id_tokens whose iat is older than this (replay guard)
+mfa_auth_time_window_secs = 300  # force_mfa hosts: AAL2 session older than this won't unlock (R11 fresh-MFA)
+# hydra_issuer = "http://localhost:4444"  # expected `iss` on the device id_token; defaults to [hydra].public_url.
+                                          # Override when Hydra's urls.self.issuer differs (e.g. host.containers.internal).
+
+# Offline auth (M3a). A dedicated ≥8-char passphrase (NOT the Forseti password)
+# lets an enrolled host authenticate when it can run its daemon but can't reach
+# Forseti. Honest reduced guarantee: the host pepper is a 0600 file, so a stolen
+# host disk permits an offline brute-force bounded by the Argon2id work factor ×
+# passphrase entropy. force_mfa hosts are provisioned zero offline verifiers.
+offline_auth_enabled = true       # master switch for offline auth
+offline_ttl_hours = 24            # TTL on each provisioned verifier; bounds the offline window since last poll
+offline_max_lifetime_hours = 168  # hard cap (from last successful online auth) regardless of TTL refreshes
+offline_min_len = 8               # passphrase length floor (never below the hard wall of 8)

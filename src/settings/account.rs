@@ -300,6 +300,11 @@ async fn run_delete_saga(state: &AppState, session: &ory::Session, actx: &AuditC
                     "self-delete: org_members cleanup failed",
                 ),
             }
+            // Cascade: purge POSIX rows. An orphan would leave a usable
+            // login for a deleted identity. Best-effort; never abort.
+            if let Err(e) = crate::posix::db::delete_account_rows(&state.db, &user_id).await {
+                tracing::error!(error = ?e, identity_id = %user_id, "failed to purge posix rows on identity delete");
+            }
             if let Err(e) = webhook::confirm_event(&state.db, event_id).await {
                 tracing::error!(error = %e, event_id = %event_id, "outbox confirm failed; rows stay PENDING and will be reconciled at startup");
             }

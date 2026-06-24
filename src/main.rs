@@ -22,6 +22,7 @@ mod oauth_client_metadata;
 mod orgs;
 mod ory;
 mod page_chrome;
+mod posix;
 mod profiles;
 mod rate_limit;
 mod render;
@@ -63,11 +64,69 @@ async fn main() -> anyhow::Result<()> {
         }
         Some("unverified-prune") => {
             let cfg = config::AppConfig::load()?;
-            // No DB-touching here; reads + deletes go through Kratos's
-            // admin API. We still build OryClients from config.
+            // Reads + deletes go through Kratos's admin API, but each
+            // delete cascades to the local POSIX tables, so we need the pool.
             let ory = ory::OryClients::from_config(&cfg);
-            let code = identity::prune_unverified_cli(&cfg, &ory).await;
+            let db = db::DbPool::init(&cfg.database)?;
+            db.ping().await?;
+            if !cfg.database.skip_migrations {
+                db.run_migrations().await?;
+            }
+            let code = identity::prune_unverified_cli(&cfg, &db, &ory).await;
             std::process::exit(code);
+        }
+        Some("posix-reconcile") => {
+            let cfg = config::AppConfig::load()?;
+            let db = db::DbPool::init(&cfg.database)?;
+            db.ping().await?;
+            if !cfg.database.skip_migrations {
+                db.run_migrations().await?;
+            }
+            let ory = ory::OryClients::from_config(&cfg);
+            match posix::reconcile_orphans(&db, &ory).await {
+                Ok(n) => {
+                    println!("posix-reconcile: removed {n} orphaned posix account(s)");
+                    std::process::exit(0);
+                }
+                Err(e) => {
+                    eprintln!("posix-reconcile: {e:?}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Some("posix-init-client") => {
+            let cfg = config::AppConfig::load()?;
+            let ory = ory::OryClients::from_config(&cfg);
+            match oauth::device::ensure_pam_client(&ory, &cfg.posix).await {
+                Ok(oauth::device::EnsureOutcome::AlreadyExists) => {
+                    println!(
+                        "posix-init-client: client '{}' already exists — left untouched",
+                        cfg.posix.pam_client_id
+                    );
+                    std::process::exit(0);
+                }
+                Ok(oauth::device::EnsureOutcome::Created { secret }) => {
+                    println!(
+                        "posix-init-client: created confidential client '{}'",
+                        cfg.posix.pam_client_id
+                    );
+                    if secret.is_empty() {
+                        println!(
+                            "  using the operator-supplied [posix].pam_client_secret from config"
+                        );
+                    } else {
+                        // One-shot reveal — Hydra won't show the plaintext
+                        // again. Operator must store it in [posix].pam_client_secret.
+                        println!("  client_secret (shown ONCE — store it in [posix].pam_client_secret):");
+                        println!("    {secret}");
+                    }
+                    std::process::exit(0);
+                }
+                Err(e) => {
+                    eprintln!("posix-init-client: {e:?}");
+                    std::process::exit(1);
+                }
+            }
         }
         // Pure file operations — no DB, no Ory clients. Forseti can't read
         // Kratos's live config via API, so these lint/generate the files.
@@ -103,6 +162,8 @@ SUBCOMMANDS:
   config-init        generate a recommended Kratos + Hydra config pair
   audit-prune        delete audit_events older than [audit].retention_days
   unverified-prune   delete Kratos identities with unverified addresses past their TTL
+  posix-reconcile    purge POSIX rows whose Kratos identity no longer exists
+  posix-init-client  create the forseti-linux-pam confidential OAuth client (device grant)
   help               print this help
 
 Run `forseti <SUBCOMMAND> --help` for flags.",

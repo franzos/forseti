@@ -1,0 +1,12 @@
+# Thin-deps invariant: this crate is linked into the NSS `.so` that libc dlopens
+# into every process (incl. setuid sshd/sudo); deps stay proto + libc only.
+[package]
+name = "forseti-unix-client"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+forseti-unix-proto = { path = "../proto" }
+# Already in the tree via proto; only used for the generic codec bounds (no new weight).
+serde = "1"
+libc = "0.2"

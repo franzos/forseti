@@ -1,0 +1,119 @@
+{% extends "admin/admin_shell.html" %}
+
+{% block admin_title %}{{ account.username }}{% endblock %}
+
+{% block admin_content %}
+  <div class="max-w-3xl">
+    <div class="flex items-center justify-between mt-2 mb-stack-lg">
+      <div>
+        <h1 class="font-headline-lg text-headline-lg text-on-surface">{{ account.username }}</h1>
+        <p class="font-body-sm text-body-sm text-on-surface-variant mt-1 font-mono" title="{{ account.identity_id }}">{{ account.identity_id }}</p>
+        {% if !email.is_empty() %}
+          <p class="font-body-sm text-body-sm text-on-surface-variant">{{ email }}</p>
+        {% endif %}
+      </div>
+      <div class="flex items-center gap-stack-sm">
+        {% if account.enabled %}
+          <form method="POST" action="/admin/posix/{{ account.identity_id }}/disable">
+            <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+            <button type="submit"
+                    class="font-label-sm text-label-sm text-on-surface-variant border border-outline-variant rounded-lg px-3 py-2 hover:bg-surface-container-high transition-colors">Disable</button>
+          </form>
+        {% else %}
+          <form method="POST" action="/admin/posix/{{ account.identity_id }}/enable">
+            <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+            <button type="submit"
+                    class="font-label-sm text-label-sm text-on-secondary-container bg-secondary-container rounded-lg px-3 py-2 hover:opacity-90 transition-opacity">Enable</button>
+          </form>
+        {% endif %}
+        <a href="/admin/posix/{{ account.identity_id }}/delete"
+           class="font-label-sm text-label-sm text-error border border-error rounded-lg px-3 py-2 hover:bg-error-container hover:text-on-error-container transition-colors">Delete</a>
+      </div>
+    </div>
+
+    <div class="grid grid-cols-2 sm:grid-cols-4 gap-stack-md mb-stack-lg">
+      <div>
+        <p class="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">UID</p>
+        <p class="font-body-md text-body-md text-on-surface font-mono">{{ account.uid }}</p>
+      </div>
+      <div>
+        <p class="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">GID</p>
+        <p class="font-body-md text-body-md text-on-surface font-mono">{{ account.gid }}</p>
+      </div>
+      <div>
+        <p class="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Status</p>
+        <p class="font-body-md text-body-md text-on-surface">{% if account.enabled %}enabled{% else %}disabled{% endif %}</p>
+      </div>
+      <div>
+        <p class="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Created</p>
+        <p class="font-body-md text-body-md text-on-surface" title="{{ account.created_at }}">{{ account.created_at_pretty }}</p>
+      </div>
+    </div>
+
+    <h2 class="font-headline-md text-headline-md text-on-surface mb-stack-sm">SSH keys</h2>
+
+    {% if !error_message.is_empty() %}
+      <div class="bg-error-container border border-error rounded-lg p-3 mb-stack-md">
+        <p class="font-body-sm text-body-sm text-on-error-container">{{ error_message }}</p>
+      </div>
+    {% endif %}
+
+    <div class="bg-surface-container-lowest border border-outline-variant rounded-xl overflow-x-auto mb-stack-md">
+      <table class="w-full text-left">
+        <tbody>
+          {% if keys.is_empty() %}
+            <tr>
+              <td class="px-4 py-6 text-center font-body-md text-body-md text-on-surface-variant">No SSH keys yet.</td>
+            </tr>
+          {% else %}
+            {% for k in keys %}
+              <tr class="border-t border-outline-variant first:border-t-0">
+                <td class="px-4 py-3">
+                  <p class="font-mono text-body-sm text-on-surface break-all">{{ k.public_key }}</p>
+                  <p class="font-body-sm text-body-sm text-on-surface-variant">
+                    {% if !k.comment.is_empty() %}{{ k.comment }} &middot; {% endif %}added {{ k.created_at_pretty }}
+                  </p>
+                </td>
+                <td class="px-4 py-3 text-right whitespace-nowrap">
+                  <form method="POST" action="/admin/posix/{{ account.identity_id }}/keys/{{ k.id }}/delete">
+                    <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+                    <button type="submit"
+                            class="font-label-sm text-label-sm text-error border border-error rounded-lg px-3 py-1 hover:bg-error-container hover:text-on-error-container transition-colors">Remove</button>
+                  </form>
+                </td>
+              </tr>
+            {% endfor %}
+          {% endif %}
+        </tbody>
+      </table>
+    </div>
+
+    <form method="POST"
+          action="/admin/posix/{{ account.identity_id }}/keys"
+          class="flex flex-col gap-stack-md max-w-2xl">
+      <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+      <label class="flex flex-col gap-stack-xs">
+        <span class="font-label-md text-label-md text-on-surface">Public key</span>
+        <textarea name="public_key"
+                  rows="3"
+                  required
+                  placeholder="ssh-ed25519 AAAA... user@host"
+                  class="font-mono text-body-sm bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2"></textarea>
+      </label>
+      <label class="flex flex-col gap-stack-xs">
+        <span class="font-label-md text-label-md text-on-surface">Comment (optional)</span>
+        <input type="text"
+               name="comment"
+               class="font-body-md text-body-md bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2 w-64">
+      </label>
+      <div>
+        <button type="submit"
+                class="bg-primary text-on-primary font-label-md text-label-md font-bold px-4 py-2 rounded-lg hover:opacity-90 transition-opacity">Add key</button>
+      </div>
+    </form>
+
+    <div class="mt-stack-lg">
+      <a href="/admin/posix" class="font-label-md text-label-md text-primary hover:underline">&larr; All POSIX accounts</a>
+    </div>
+  </div>
+{% endblock %}

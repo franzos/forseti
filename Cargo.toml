@@ -73,6 +73,10 @@ subtle = "2"
 sha2 = "0.11"
 hex = "0.4"
 base64 = "0.22"
+# Argon2id (RFC 9106) verifier for the offline-auth passphrase. Server stores
+# only the PHC string (salt + params embedded), never a pepper — the Linux host
+# applies its own HMAC pepper. `std` pulls in `password_hash` + `OsRng`.
+argon2 = { version = "0.5", features = ["std"] }
 # Account-deletion webhooks ship as RFC 8417 Security Event Tokens —
 # compact JWS bodies signed with the Forseti-owned Ed25519 key
 # (`[webhook] signing_key_path` in config). EdDSA per RFC 8037; chosen

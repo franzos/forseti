@@ -113,6 +113,13 @@ pub struct AppConfig {
     /// app_referrer signed-cookie codec mixes with per-cookie salts.
     #[serde(default)]
     pub security: SecurityConfig,
+    /// POSIX account materialisation (Linux auth). uid/gid allocation
+    /// bases, default login shell, home-dir prefix, and the free-tier
+    /// seat cap. Defaults work out of the box; a commercial license
+    /// raises the seat cap.
+    #[serde(default)]
+    #[allow(dead_code)] // read by the posix provisioning handler (later task)
+    pub posix: PosixConfig,
 }
 
 /// Operator-supplied secrets. `cookie_secret` seeds the HMAC keys
@@ -134,6 +141,87 @@ pub struct SecurityConfig {
 pub struct ProxyConfig {
     #[serde(default)]
     pub trust_forwarded_for: bool,
+}
+
+/// POSIX account materialisation knobs. Drives uid/gid allocation and
+/// the default shell/home shape when Forseti backs a Linux host's auth.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct PosixConfig {
+    /// First uid handed out; accounts allocate monotonically from here.
+    pub uid_base: u32,
+    /// First gid handed out for auto-created primary/org groups.
+    pub gid_base: u32,
+    pub default_shell: String,
+    /// Home dir is `{home_prefix}/{username}` unless overridden per account.
+    pub home_prefix: String,
+    /// Free-tier seat cap when no commercial `max_seats` applies.
+    pub free_seats: u32,
+    /// Confidential OAuth client id Forseti drives the RFC 8628 device grant
+    /// as for Linux PAM auth. Created (if absent) by `posix-init-client`.
+    pub pam_client_id: String,
+    /// Client secret for `pam_client_id` when using `client_secret_basic`
+    /// auth. `None` = let `posix-init-client` mint one (revealed once). Once
+    /// `private_key_jwt` lands this becomes a fallback knob.
+    pub pam_client_secret: Option<String>,
+    /// Hard wall-clock cap (seconds) on a single device-auth poll loop. Kept
+    /// strictly below sshd's `LoginGraceTime` (default 120s) so an abandoned
+    /// flow can't pin the login. The PAM module honours this; Forseti returns
+    /// it so the daemon can bound its own polling.
+    pub device_poll_cap_secs: u64,
+    /// `iat` freshness window (seconds) for the device id_token. Rejects a
+    /// token whose `iat` is older than this — a tight replay guard layered on
+    /// top of `exp`.
+    pub id_token_iat_window_secs: u64,
+    /// `auth_time` freshness window (seconds) for `force_mfa` hosts (R11). An
+    /// AAL2 session older than this won't unlock a force_mfa host — an
+    /// hours-old MFA shouldn't grant root.
+    pub mfa_auth_time_window_secs: u64,
+    /// Expected `iss` on the device id_token. Hydra advertises whatever its
+    /// own `urls.self.issuer` is set to, which can differ from
+    /// `[hydra].public_url` (e.g. the playground's `host.containers.internal`
+    /// vs `localhost`). `None` falls back to `[hydra].public_url` at the
+    /// binding call site (R10's issuer-host subtlety).
+    #[serde(default)]
+    pub hydra_issuer: Option<String>,
+    /// Master switch for offline auth (M3a). When off, no offline verifiers are
+    /// provisioned to hosts and the settings page hides the offline-passphrase
+    /// surface.
+    pub offline_auth_enabled: bool,
+    /// TTL (hours) stamped on each provisioned offline verifier. A host refuses
+    /// a credential older than this since its last successful poll — bounds the
+    /// offline window on a partitioned host.
+    pub offline_ttl_hours: u64,
+    /// Hard cap (hours) on how long a host may keep using an offline credential
+    /// measured from the last successful *online* auth, regardless of TTL
+    /// refreshes. Defense against a long-de-scoped-but-never-online host.
+    pub offline_max_lifetime_hours: u64,
+    /// Hard floor on the offline passphrase length, enforced server-side. Kept
+    /// configurable but never below the [`posix::offline::OFFLINE_MIN_LEN`]
+    /// hard wall (8).
+    pub offline_min_len: usize,
+}
+
+impl Default for PosixConfig {
+    fn default() -> Self {
+        Self {
+            uid_base: 1_000_000,
+            gid_base: 2_000_000, // disjoint from uid space so uids/gids never numerically collide
+            default_shell: "/bin/sh".to_string(), // Guix has no /bin/bash
+            home_prefix: "/home".to_string(),
+            free_seats: 25,
+            pam_client_id: "forseti-linux-pam".to_string(),
+            pam_client_secret: None,
+            device_poll_cap_secs: 90,
+            id_token_iat_window_secs: 120,
+            mfa_auth_time_window_secs: 300,
+            hydra_issuer: None,
+            offline_auth_enabled: true,
+            offline_ttl_hours: 24,
+            offline_max_lifetime_hours: 168,
+            offline_min_len: 8,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1062,6 +1150,23 @@ mod tests {
             url: "http://forseti.example.com".into(),
         };
         assert!(!c.is_https());
+    }
+
+    // --- PosixConfig -------------------------------------------------------
+
+    #[test]
+    fn posix_config_defaults() {
+        let p = PosixConfig::default();
+        assert_eq!(p.uid_base, 1_000_000);
+        assert_eq!(p.gid_base, 2_000_000);
+        assert_eq!(p.default_shell, "/bin/sh");
+        assert_eq!(p.home_prefix, "/home");
+        assert_eq!(p.free_seats, 25);
+        assert_eq!(p.pam_client_id, "forseti-linux-pam");
+        assert!(p.pam_client_secret.is_none());
+        assert_eq!(p.device_poll_cap_secs, 90);
+        assert_eq!(p.id_token_iat_window_secs, 120);
+        assert_eq!(p.mfa_auth_time_window_secs, 300);
     }
 
     // --- clamp_rate_limits -------------------------------------------------

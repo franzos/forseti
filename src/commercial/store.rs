@@ -42,6 +42,7 @@ struct UpsertRow {
     expires_at: Option<String>,
     features: String,
     max_orgs: Option<i32>,
+    max_seats: Option<i32>,
     activated_at: String,
     verified_at: String,
 }
@@ -113,6 +114,11 @@ pub async fn save(db: &DbPool, blob: &str, license: &License) -> anyhow::Result<
         .map(i32::try_from)
         .transpose()
         .map_err(|_| anyhow::anyhow!("license max_orgs exceeds i32::MAX"))?;
+    let max_seats = license
+        .max_seats
+        .map(i32::try_from)
+        .transpose()
+        .map_err(|_| anyhow::anyhow!("license max_seats exceeds i32::MAX"))?;
     let row = UpsertRow {
         id: SINGLETON_ID.into(),
         blob: blob.trim().to_string(),
@@ -130,6 +136,7 @@ pub async fn save(db: &DbPool, blob: &str, license: &License) -> anyhow::Result<
                 .collect::<Vec<_>>(),
         )?,
         max_orgs,
+        max_seats,
         activated_at: Utc::now().to_rfc3339(),
         verified_at: Utc::now().to_rfc3339(),
     };

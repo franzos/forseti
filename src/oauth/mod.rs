@@ -12,6 +12,8 @@ use crate::rate_limit;
 use crate::state::AppState;
 
 pub(crate) mod consent;
+pub(crate) mod device;
+pub(crate) mod device_verify;
 pub(crate) mod login;
 pub(crate) mod logout;
 pub(crate) mod register;
@@ -49,6 +51,14 @@ pub(crate) fn router(oauth_cfg: &OAuthConfig, proxy_cfg: &ProxyConfig) -> Router
             "/oauth/logout",
             get(logout::oauth_logout).post(logout::oauth_logout_submit),
         )
+        // RFC 8628 device-verification screen (Hydra's `verification_uri`).
+        // Browser-facing forms → inside the CSRF layer (mounted via the
+        // `csrf_routes` bundle in `app::run`).
+        .route(
+            "/oauth/device",
+            get(device_verify::device_verify).post(device_verify::device_verify_submit),
+        )
+        .route("/oauth/device/done", get(device_verify::device_done))
         // Forseti-fronted RFC 7591 DCR endpoint. Mounted at the canonical
         // `/oauth2/register` path so the URL Hydra advertises in its
         // discovery document is the one MCP clients actually call.

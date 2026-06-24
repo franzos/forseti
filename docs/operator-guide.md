@@ -141,7 +141,9 @@ FORSETI_DATABASE__URL="postgres://forseti:secret@localhost:5450/forseti" cargo r
 
 | Key    | Type   | Default            | Description                                                                                                                          |
 |--------|--------|--------------------|--------------------------------------------------------------------------------------------------------------------------------------|
-| `bind` | string | `"127.0.0.1:8081"` | Bind address for the internal listener (today: the audit webhook receiver). Never expose this on a public interface — see [Internal listener](#internal-listener). |
+| `bind` | string | `"127.0.0.1:8081"` | Bind address for the internal listener (the audit webhook receiver and the POSIX resolver). Never expose this on a public interface — see [Internal listener](#internal-listener). |
+
+The `[posix]` table (uid/gid bases, default shell, home prefix, free-tier seat cap) is documented in [Linux authentication → `[posix]`](#posix).
 
 ### `[smtp]`
 
@@ -316,6 +318,8 @@ The two-tier code lives at `src/admin/mod.rs::require_admin` (Tier 1) and `src/a
 | `/admin/license`                      | View current license status (Unlicensed / Active / Grace / Expired), tier, expiry. Activate or deactivate from here. |
 | `/admin/license/activate`             | POST — verify a pasted signed license blob against the baked-in Ed25519 pubkey and persist.    |
 | `/admin/license/deactivate`           | POST — drop the current license row. Premium features fall back to the upsell page.             |
+| `/admin/hosts`                        | Enrolled Linux hosts. Enroll a new host (one-time `host_id:secret` reveal), rotate its secret, or revoke it. See [Linux authentication](#linux-authentication). |
+| `/admin/posix`                        | POSIX accounts. Provision a Kratos identity into a Linux account, manage its SSH keys, enable/disable/delete. Shows the current seat count against the cap. |
 
 ### App templates
 
@@ -357,13 +361,15 @@ Three sources feed the table:
 
 #### Internal listener
 
-Machine-to-machine endpoints (today: the audit webhook receiver) live on a **separate HTTP listener** from the user-facing Forseti. The split is the trust boundary — the internal listener should never be reachable from the public internet, while the public listener is built for it.
+Machine-to-machine endpoints live on a **separate HTTP listener** from the user-facing Forseti: today the audit webhook receiver (`POST /internal/audit/kratos`) and the POSIX resolver API (`GET /posix/v1/*`, consumed by enrolled Linux hosts' NSS/sshd). The split is the trust boundary — the internal listener should never be reachable from the public internet, while the public listener is built for it.
 
 | Knob              | Default              | What to set in production                                                                                                                |
 |-------------------|----------------------|------------------------------------------------------------------------------------------------------------------------------------------|
 | `[internal].bind` | `127.0.0.1:8081`     | Loopback when Forseti and Kratos share a host. Bind to a specific private interface (e.g. `10.0.0.5:8081`) — or `0.0.0.0:8081` inside a container where the trust boundary is the docker / pod network — so Kratos in a separate container can reach it. **Never expose this on a public interface.** |
 
-The internal listener does not mount `/readyz` or `/healthz`; those stay on the public listener so load balancers and orchestrators don't have to know about a second port. CSRF middleware is also not applied to the internal listener — these endpoints take JSON over `POST`, not cookie-bearing browser forms.
+The internal listener does not mount `/readyz` or `/healthz`; those stay on the public listener so load balancers and orchestrators don't have to know about a second port. CSRF middleware is also not applied to the internal listener — these endpoints take JSON over `POST` (audit webhook) or authenticated `GET` (POSIX resolver), not cookie-bearing browser forms.
+
+**Remote hosts and rebinding.** With the default loopback bind, only processes on the Forseti host can reach the resolver. Linux hosts elsewhere need the listener rebound to a private interface (`10.0.0.5:8081`) behind a firewall that admits only those hosts. Note the audit webhook and the resolver **share this listener** — rebinding to `0.0.0.0:8081` exposes *both*. The resolver authenticates each host with HTTP Basic (`host_id:secret`, SHA-256-hashed, constant-time compared), so its own auth holds, but the audit webhook's bearer token (`[audit].webhook_token`) and a network ACL in front of the listener both matter once it leaves loopback.
 
 #### Audit webhook bearer
 
@@ -433,6 +439,201 @@ The subcommand reads the same `config.toml` as the running server, runs migratio
 - **Tier-1 allowlist is global.** A single `[admin].allowed_emails` controls operator access for the whole deployment; there's no per-realm partition. For per-customer scoping, use Tier 2 (org-scoped admin) instead — see [Admin access model](#admin-access-model).
 - **No CSV / JSON export.** Audit and identity lists render only in the UI for now.
 - **No tamper-evidence (hash chain).** Append-only is enforced by the trigger; for stronger guarantees ship the row stream to an S3 archive with object-lock externally.
+
+## Linux authentication
+
+Forseti can back the login accounts on your Linux hosts. Instead of maintaining `/etc/passwd`, `/etc/group`, and per-user `~/.ssh/authorized_keys` by hand on every box, you provision a Kratos identity into a POSIX account once, and enrolled hosts resolve that account — uid/gid, login shell, home dir, and SSH keys — over a small HTTP API. The identity store stays the source of truth; a host is just a consumer.
+
+This is the server side. The NSS/PAM client and the sshd / Guix wiring that actually plug a host into the resolver ship as the **`forseti-unix`** host client (under `forseti-unix/`, packaged for Guix in `infra/guix/`) — see [Connecting a host](#connecting-a-host) below.
+
+### Trust model
+
+The resolver lives on the **internal listener** (`[internal].bind`, default `127.0.0.1:8081`), the same loopback-by-default port as the audit webhook — see [Internal listener](#internal-listener) for the binding rules and the firewall warning. The short version: with the default bind only processes on the Forseti host reach it; remote hosts need the listener rebound to a private interface behind a firewall that admits only those hosts, and rebinding exposes the audit webhook on the same port.
+
+Each request authenticates with the enrolled host's `host_id:secret` over HTTP Basic (the secret is stored SHA-256-hashed and compared in constant time). That credential is the only thing standing between a caller and your directory once the listener leaves loopback, so treat the network ACL in front of it as load-bearing, not optional. The resolver flow and route table are in [`docs/dev/flows.md` → POSIX resolver API](./dev/flows.md#posix-resolver-api-linux-integration).
+
+### `[posix]`
+
+Account-materialisation knobs plus the interactive PAM device-auth settings. The defaults work out of the box; for the resolver you'll typically only touch `default_shell` (it's OS-specific) and `free_seats`. The device-auth keys (everything below `free_seats`) only matter once you [enable PAM login](#enabling-pam-login-device-auth).
+
+| Key                         | Type            | Default              | Description                                                                                                          |
+|-----------------------------|-----------------|----------------------|--------------------------------------------------------------------------------------------------------------------|
+| `uid_base`                  | u32             | `1000000`            | First uid handed out. Accounts allocate monotonically upward from here.                                             |
+| `gid_base`                  | u32             | `2000000`            | First gid handed out for auto-created primary and org groups. Deliberately disjoint from the uid space so uids and gids never numerically collide. |
+| `default_shell`             | string          | `"/bin/sh"`          | Login shell written onto a new account unless overridden per account. OS-specific — `/bin/bash` on Debian, `/run/current-system/profile/bin/bash` on Guix System. `/bin/sh` is the safe default because Guix has no `/bin/bash`. |
+| `home_prefix`               | string          | `"/home"`            | Home dir is `{home_prefix}/{username}` unless overridden per account.                                               |
+| `free_seats`                | u32             | `25`                 | Free-tier seat cap — how many *enabled* accounts you can provision without a commercial license. See [Seat cap](#seat-cap). |
+| `pam_client_id`             | string          | `"forseti-linux-pam"` | The confidential OAuth client id Forseti drives the device grant as for PAM login. Created (if absent) by `forseti posix-init-client`. |
+| `pam_client_secret`         | string          | *(unset)*            | `client_secret_basic` secret for `pam_client_id`. Leave unset to let `posix-init-client` mint one (revealed once). **Device-auth hard-fails while this is unset/empty** — see [Enabling PAM login](#enabling-pam-login-device-auth). |
+| `device_poll_cap_secs`      | u64             | `90`                 | Hard wall-clock cap (seconds) on a single device-auth poll loop. Keep it strictly **below sshd's `LoginGraceTime`** (default 120s) so an abandoned login can't pin the session. Forseti returns it so the daemon can bound its own polling. |
+| `id_token_iat_window_secs`  | u64             | `120`                | `iat` freshness window (seconds) for the device id_token — rejects a token whose `iat` is older than this. A tight replay guard layered on top of `exp`. |
+| `mfa_auth_time_window_secs` | u64             | `300`                | `auth_time` freshness window (seconds) for `force_mfa` hosts. An AAL2 session older than this won't unlock such a host — an hours-old MFA shouldn't grant a login. |
+| `hydra_issuer`              | string          | *(unset)*            | Expected `iss` on the device id_token. Unset falls back to `[hydra].public_url`. Override when Hydra's own `urls.self.issuer` differs from that URL — see the [gotcha](#enabling-pam-login-device-auth) below. |
+
+```toml
+[posix]
+uid_base = 1000000
+gid_base = 2000000
+default_shell = "/bin/sh"
+home_prefix = "/home"
+free_seats = 25
+
+# Device-auth (PAM login) — only needed once you enable interactive login.
+pam_client_id = "forseti-linux-pam"
+# pam_client_secret = "..."          # mint via posix-init-client
+device_poll_cap_secs = 90
+id_token_iat_window_secs = 120
+mfa_auth_time_window_secs = 300
+# hydra_issuer = "http://localhost:4444"
+```
+
+The picked uid/gid bases sit well above the system range so Forseti-managed accounts never clash with packages that create their own service users.
+
+### Enrolling a host
+
+A host has to identify itself to the resolver before it can resolve anything.
+
+1. Go to **Admin → Hosts** (`/admin/hosts`), then **New** (`/admin/hosts/new`).
+2. Name the host and submit. Forseti mints a `host_id` and a secret and shows the combined `host_id:secret` **once**. Copy it now — it's not stored in retrievable form and you can't see it again.
+3. Put that credential into the host client's config — the `host-id` / `host-secret` fields of the `forseti-unix-configuration` (see [Connecting a host](#connecting-a-host)). For a manual check, it's the HTTP Basic username:password the resolver expects.
+
+**Rotating** a host's secret: **Admin → Hosts → the host → Rotate** (`/admin/hosts/{id}/rotate`). This mints a fresh secret, reveals it once, and invalidates the old one immediately — so the host is locked out until you update its config. Rotate on a schedule, or right away if a host's credential might have leaked.
+
+**Revoking** a host: **Admin → Hosts → the host → Revoke** (`/admin/hosts/{id}/revoke`). The host can no longer resolve anything. Use this when you're decommissioning a box.
+
+**`force_mfa` is enforced on the PAM device-auth login path.** The enroll form captures a `force_mfa` flag against the host, and it's a real control on the [interactive PAM login](#enabling-pam-login-device-auth) — it does *not* gate the NSS resolver (resolving an already-provisioned account is never MFA-gated). For a `force_mfa` host, Forseti only tells the host `approved` when the approving session is a fresh AAL2 login: the id_token's `acr` must be `aal2`, its `amr` must carry a real second factor (TOTP, WebAuthn, or a recovery code — a password alone never counts), and its `auth_time` must fall within `mfa_auth_time_window_secs` (default 300s) so an hours-old MFA can't unlock a login. Forseti also suppresses the one-click `verification_uri_complete` link for these hosts, so the human has to type the user code by hand.
+
+### Provisioning an account
+
+Enrolling a host gives it the *right* to resolve; provisioning is what creates something to resolve.
+
+1. Go to **Admin → POSIX accounts** (`/admin/posix`), then **New** (`/admin/posix/new`).
+2. Supply the Kratos **identity id** and a **username**. uid, gid, login shell, and home dir default from `[posix]` (uid/gid auto-allocated, shell/home derived) — override them on the form if a particular account needs something specific.
+3. Submit. Forseti creates the POSIX account plus its primary group.
+
+On the account page (`/admin/posix/{id}`):
+
+- **Add SSH keys** — paste a public key (`/admin/posix/{id}/keys`). The resolver serves these to sshd's `AuthorizedKeysCommand`. Remove a key from the same page (`/admin/posix/{id}/keys/{key_id}/delete`).
+- **Disable / enable** — toggle the account (`/admin/posix/{id}/disable`, `/admin/posix/{id}/enable`). A disabled account stops resolving (no login, no keys) but its row, uid/gid, and keys are retained, so enabling it again restores the same identifiers. **Disabling frees a seat** — a disabled account doesn't count against the cap.
+- **Delete** (`/admin/posix/{id}/delete`) — remove the account and its POSIX rows outright. Deleting the underlying Kratos identity also purges its POSIX rows at every delete path (admin delete, self-service account deletion, the unverified-prune reaper), and an hourly reconcile sweep catches identities deleted out-of-band via the Kratos admin API — so an orphaned POSIX account can't keep a deleted identity's login alive.
+
+### Seat cap
+
+Provisioning a *new* enabled account consumes a seat. The cap depends on your license state:
+
+- **No license (OSS):** up to `[posix].free_seats` enabled accounts (default 25).
+- **Commercial license with Linux authentication:** the license's `max_seats` raises the cap. Provisioning beyond it is blocked with a clear message naming the current count and cap.
+- **Grace window:** a license that's expired but still in its 30-day grace period falls back to the **free** cap for new provisioning — provisioning a new account is a write, and grace is read-only for writes. Existing accounts keep working.
+- **Resolution is never gated.** A host can always resolve an already-provisioned account, regardless of license state. A lapsed or missing license can stop you *adding* accounts; it can never lock an existing user out of a machine they already log in to.
+
+Disabling an account frees its seat (see above); deleting one frees it too. The list page (`/admin/posix`) shows the current `enabled / cap` count so you can see how much headroom you have.
+
+If your hosts are scoped to organisations (a host with an `allowed_gid` set to an `org`-kind group resolves only that org's members), Forseti mirrors each provisioned identity's org memberships into POSIX `org`-kind groups — but **only when the commercial Organizations feature is licensed**. Without the Orgs license you still get the per-account primary group; you just don't get the org→group mirroring. The mirror happens at provision time.
+
+### Enabling PAM login (device-auth)
+
+The resolver hands a host the *shape* of an account (uid/gid, shell, home, keys). Interactive password/console login — `ssh` with a password, a TTY login, `sudo` re-auth — is a separate path built on the OAuth 2.0 Device Authorization Grant (RFC 8628). The host's PAM module starts a device flow for the named account, the human approves it in their browser, and Forseti binds the approving identity to the named account before the host is told the login is `approved`. The full mechanism is in [`docs/dev/flows.md` → POSIX device-auth login](./dev/flows.md#posix-device-auth-login-rfc-8628).
+
+This path needs one extra thing the resolver doesn't: a confidential OAuth client Forseti authenticates as when it drives the device grant through Hydra.
+
+1. **Mint the client.** Run
+
+   ```sh
+   forseti posix-init-client
+   ```
+
+   This creates the `forseti-linux-pam` confidential client in Hydra (if it doesn't already exist — it never overwrites one you've tuned) and prints the freshly-minted `client_secret` **once**. Hydra won't show it again.
+2. **Store the secret.** Put that value into `[posix].pam_client_secret`. (If you'd rather supply your own secret, set it in config first and `posix-init-client` will use it instead of minting — it won't echo a secret you already hold.)
+
+**Device-auth hard-fails while `pam_client_secret` is unset or empty.** A request to the device-auth endpoints in that state logs an error, returns `500`, and makes **no** call to Hydra — an empty secret would send `client_secret_basic` with a blank password, which Hydra rejects with a confusing `502`, so Forseti refuses up front. Set the secret before pointing any host's PAM stack at Forseti.
+
+#### `hydra_issuer` gotcha
+
+The device id_token's issuer (`iss`) must match what Forseti expects, or validation fails with `InvalidIssuer` and every login is denied. By default Forseti expects `[hydra].public_url`. But Hydra advertises whatever its own `urls.self.issuer` is set to, which is not always the same string — the playground, for instance, issues tokens with `host.containers.internal:4444` while `public_url` is `localhost:4444`. When the two differ, set `[posix].hydra_issuer` to Hydra's actual issuer.
+
+### Connecting a host
+
+The host-side piece — the NSS module, the daemon, the sshd `AuthorizedKeysCommand` hook, **and the `pam_forseti.so` PAM module that drives device-auth login** — ships as the **`forseti-unix` client workspace** (under `forseti-unix/`), packaged for GNU Guix. On a Guix System you wire it in with one service plus the system-wide name-service-switch; everything else (the daemon account, the runtime directories, the `pam_mkhomedir` session entry, the nscd module load) is handled by the service.
+
+The package and service split across two places:
+
+- The **`forseti-unix`** package (`forseti-unixd`, `libnss_forseti.so.2`, `forseti_ssh_authorizedkeys`) lives in the **panther** channel as `forseti-unix` in `(px packages authentication)`. It carries the generated ~190-crate set so it builds offline; the earlier in-repo stub couldn't and has been removed.
+- `infra/guix/forseti-unix-service.scm` — `forseti-unix-service-type` (defaults to panther's package), plus the ready-made `%forseti-name-service-switch` and `%forseti-nscd-caches` values you drop into your `operating-system`.
+
+Minimal `operating-system` wiring:
+
+```scheme
+(use-modules (forseti-unix)          ; the package
+             (forseti-unix-service)) ; the service + nss/nscd helpers
+
+(operating-system
+  ;; …
+  ;; Chain `forseti' after `files' for passwd/group. REQUIRED — without this
+  ;; nscd loading the module does nothing; nsswitch must list it.
+  (name-service-switch %forseti-name-service-switch)
+  (services
+   (cons*
+    (service forseti-unix-service-type
+             (forseti-unix-configuration
+              (server-url "https://id.example.com")
+              (host-id "host-abc")          ; from `/admin/hosts` enrollment
+              (host-secret "REDACTED")))    ; the one-time secret reveal
+    (service openssh-service-type
+             (openssh-configuration
+              ;; HARD PRECONDITION: pam_mkhomedir only runs under PAM. Without
+              ;; `use-pam? #t' an SSH login never creates a home directory.
+              (use-pam? #t)
+              (authorized-keys-command
+               (file-append forseti-unix "/bin/forseti_ssh_authorizedkeys"))
+              (authorized-keys-command-user "forseti")))
+    ;; Lower nscd's passwd/group positive TTL so it doesn't shadow the daemon's
+    ;; own cache TTL with a long stale window.
+    (modify-services %base-services
+      (nscd-service-type config =>
+        (nscd-configuration (inherit config) (caches %forseti-nscd-caches))))
+    ;; … the rest of %base-services / %desktop-services
+    )))
+```
+
+The credential from step 3 above (`host_id` + `host_secret`, the one-time reveal at `/admin/hosts`) goes into the `forseti-unix-configuration`. The service renders `/etc/forseti/unixd.toml` from those fields (tightened to `0600`, owner `forseti`), runs `forseti-unixd` as the unprivileged `forseti` user, and adds the NSS module to nscd. See the header comment block in `infra/guix/forseti-unix-service.scm` for the full mechanism notes.
+
+**End-to-end (`getent` / `id` / key-based `ssh` landing in a `pam_mkhomedir` home) is the deferred Layer-5 test** — it needs a full `guix system vm` and a live enrolled host, so it isn't part of CI. The VM smoke procedure is in `infra/guix/README-linux-auth.md`.
+
+**A `forseti-unixd` outage denies Forseti users but never your local ones.** The service installs `pam_forseti.so` as the *sole arbiter* of the account stack for Forseti (NSS-only) accounts with an explicit control map. When the daemon is unreachable, a Forseti user's `account` check returns `PAM_AUTHINFO_UNAVAIL`, which the control map maps to `die` — they **cannot log in** (fail-closed). A genuine local, shadow-backed account (root and friends) is classified by a `/etc/shadow` lookup and returns `PAM_IGNORE`, so it falls through to `pam_unix` and **logs in normally** (fail-open). So an outage fails closed for Forseti users and fail-open for local ones — you don't get locked out of your own boxes, but a directory outage does stop directory-backed logins. The exact PAM control-map detail is in [`infra/guix/README-linux-auth.md`](../infra/guix/README-linux-auth.md).
+
+### Offline authentication
+
+The [device-auth login](#enabling-pam-login-device-auth) above needs the network — it drives a browser device grant against Forseti. **Offline authentication** is an opt-in fallback for the case where a host's daemon is *up but cannot reach Forseti* (a laptop on a plane, a datacenter partition, Forseti maintenance): the host authenticates the user at the terminal against a **dedicated offline passphrase** they set earlier while online. Online device-auth is always preferred and always wins; offline is only offered when the server is genuinely unreachable.
+
+This is **not** the same as the daemon being down. A `forseti-unixd` outage stays fail-closed (above) — offline auth needs the daemon running to verify the passphrase. It only kicks in on *server-unreachable, daemon-up*.
+
+**How a user enables it.** While online, the user sets a passphrase at `/settings/offline-access` in their dashboard. It must be **at least 8 characters** and is **separate from their Forseti account password** — it's a dedicated offline credential, never the primary one. Forseti stores only an Argon2id verifier (m=64 MiB, t=3, p=1); enrolled hosts pull it on an interval and re-pepper it locally. Clearing the passphrase there withdraws it from every host on their next sync.
+
+**`force_mfa` hosts refuse offline auth.** A host enrolled with `force_mfa` is provisioned **zero** offline verifiers — it always requires the network to log a user in. This is deliberate: it closes the AAL2-downgrade where a user could skip their second factor simply by going offline. If you depend on MFA at a host, leave `force_mfa` on and accept that a partition means no terminal login there.
+
+**Reduced guarantee — state it plainly.** Offline auth is a weaker control than online device-auth, by construction. The host keeps its HMAC pepper in a `0600` file, so a **stolen host disk** *or* a **stolen server DB** permits an offline brute-force of the passphrase — bounded only by the Argon2id work factor times the passphrase's entropy. That's the whole reason for the 8-character floor. The per-user host lockout (`offline_lockout_max`) defends **live terminal guessing only**, not someone who walks off with the disk. TPM sealing (M3b) — which makes the verifier uncheckable off the host and is the planned hardening — is **not** in this release. Until then, treat a host that holds offline verifiers as carrying brute-forceable secrets at rest, and keep offline passphrases strong.
+
+**Revocation latency.** Each provisioned verifier carries a TTL (`offline_ttl_hours`, default 24). A disabled, de-scoped, deleted, or passphrase-cleared user drops off the host's next pull — but on a *fully partitioned* host that pull may not happen, so the worst-case window between disabling an account and its offline credential becoming unusable is **≈ `offline_ttl_hours`**. A second hard cap (`offline_max_lifetime_secs`, default 168h, measured from the last successful *online* login) bounds it regardless of TTL refreshes. Offline-auth attempts are queued on the host and flushed into the server audit log on reconnect — so the events aren't lost, just delayed until the partition heals.
+
+The full mechanism (the server-unreachable trigger, the gate, the host keystore, the explicit non-goals) is in [`docs/dev/flows.md` → POSIX offline auth](./dev/flows.md#posix-offline-auth-passphrase-server-unreachable).
+
+**Server config** — `[posix]`:
+
+| Key                          | Type | Default | Description                                                                                                      |
+|------------------------------|------|---------|----------------------------------------------------------------------------------------------------------------|
+| `offline_auth_enabled`       | bool | `true`  | Master switch. When off, no verifiers are provisioned and `/settings/offline-access` 404s.                       |
+| `offline_ttl_hours`          | u64  | `24`    | TTL stamped on each provisioned verifier. Bounds the offline window since the host's last poll — and the worst-case disable-to-revocation latency on a partitioned host. |
+| `offline_max_lifetime_hours` | u64  | `168`   | Hard cap (from the last successful *online* auth) on how long a host may keep using an offline credential, regardless of TTL refreshes. |
+| `offline_min_len`            | usize| `8`     | Passphrase length floor, enforced server-side. Never honoured below the hard wall of 8.                          |
+
+**Host config** — the `forseti-unix` client's flat TOML (rendered by the Guix service into `/etc/forseti/unixd.toml`):
+
+| Key                        | Type   | Default                          | Description                                                                                      |
+|----------------------------|--------|----------------------------------|--------------------------------------------------------------------------------------------------|
+| `credentials_db`           | string | `/var/lib/forseti/credentials.db`| Path to the `forseti-unixd`-owned `0600` offline keystore (re-peppered verifiers, lockout, audit queue, host pepper). |
+| `offline_lockout_max`      | u32    | `5`                              | Consecutive offline failures before a per-user lockout (live-guessing defence only).             |
+| `offline_poll_secs`        | u64    | `300`                            | How often the daemon pulls the current verifier set and flushes queued audit events.             |
+| `offline_max_lifetime_secs`| u64    | `604800`                         | Host-side hard ceiling (from the last successful online auth) on an offline credential's age. Mirror of the server's `offline_max_lifetime_hours`. |
 
 ## Two-factor authentication enforcement
 

@@ -148,6 +148,10 @@ Every org **write** path funnels through one helper, `gate_orgs_feature_or_upsel
 
 The license blob carries an optional `max_orgs` (`src/commercial/license.rs:83`): `None` = unlimited, `Some(n)` = hard cap. Enforced by `org_cap_allows(cap, current)` (`src/commercial/license.rs:67-69`) against a live `count_orgs()`. With no license the effective cap is `Some(0)` (`list_create.rs:62`), so the create path is closed and only the seeded Default org survives.
 
+### POSIX org-group mirroring
+
+When a Kratos identity is provisioned into a POSIX account (`/admin/posix/new`) **and** `Feature::Orgs` is `Allowed`/`GraceReadOnly`, provisioning mirrors the identity's org memberships into `org`-kind `posix_groups` rows — one group per org (keyed by `org_id`, named after the slug), shared by all its members, with the identity added to each (`posix::db::sync_org_groups`, called from `src/admin/posix.rs`). The sync is idempotent and concurrency-safe (find-or-create on a UniqueViolation re-read) and best-effort (a failure logs but never fails the provision). Unlicensed, provisioning yields only the account's `user`-kind primary group.
+
 ## Related
 
 - [Organizations (operator/buyer guide)](../commercial/organizations.md) — the customer-facing description of this feature.

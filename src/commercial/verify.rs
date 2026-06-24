@@ -48,7 +48,6 @@ struct Claims {
     features: Vec<String>,
     #[serde(default)]
     max_orgs: Option<u32>,
-    #[allow(dead_code)] // wire-format claim; seat caps are not enforced at runtime
     #[serde(default)]
     max_seats: Option<u32>,
     #[allow(dead_code)] // free-text issuer note; deserialized but unused at runtime
@@ -177,6 +176,7 @@ fn into_license(claims: Claims) -> Result<License, VerifyError> {
         expires_at,
         features,
         max_orgs: claims.max_orgs,
+        max_seats: claims.max_seats,
     })
 }
 

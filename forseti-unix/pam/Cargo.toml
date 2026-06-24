@@ -1,0 +1,18 @@
+# Thin-deps invariant: this cdylib is dlopened by PAM into sshd/login (root,
+# pre-auth). It must link ONLY: libc, forseti-unix-proto and forseti-unix-client.
+# NO pam/pam-sys/pamsm (bindgen), NO tokio/reqwest/jwt. The PAM FFI is vendored
+# by hand (kanidm-style) under src/pam/. serde_json arrives transitively via
+# proto's codec (pure Rust) — acceptable, matching the NSS module.
+[package]
+name = "pam_forseti"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "pam_forseti"
+crate-type = ["cdylib"]
+
+[dependencies]
+libc = "0.2"
+forseti-unix-proto = { path = "../proto" }
+forseti-unix-client = { path = "../client" }

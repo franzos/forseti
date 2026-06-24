@@ -23,6 +23,8 @@ pub enum Feature {
     SiemStreaming,
     /// Bulk admin ops (mass suspend, force-MFA, etc.).
     BulkAdmin,
+    /// Linux/Unix authentication (POSIX resolver + SSH keys).
+    LinuxAuth,
 }
 
 impl Feature {
@@ -33,6 +35,7 @@ impl Feature {
             Feature::Scim => "scim",
             Feature::SiemStreaming => "siem_streaming",
             Feature::BulkAdmin => "bulk_admin",
+            Feature::LinuxAuth => "linux_auth",
         }
     }
 
@@ -46,6 +49,7 @@ impl Feature {
             "scim" => Some(Feature::Scim),
             "siem_streaming" => Some(Feature::SiemStreaming),
             "bulk_admin" => Some(Feature::BulkAdmin),
+            "linux_auth" => Some(Feature::LinuxAuth),
             _ => None,
         }
     }
@@ -58,6 +62,7 @@ impl Feature {
             Feature::Scim => "SCIM provisioning",
             Feature::SiemStreaming => "SIEM streaming",
             Feature::BulkAdmin => "Bulk admin operations",
+            Feature::LinuxAuth => "Linux authentication",
         }
     }
 }
@@ -65,6 +70,11 @@ impl Feature {
 /// True when `current` is strictly below `cap`. `None` (unlimited) is
 /// always under.
 pub fn org_cap_allows(cap: Option<u32>, current: u32) -> bool {
+    cap.is_none_or(|c| current < c)
+}
+
+/// True when `current` is strictly below `cap`. `None` (unlimited) is always under.
+pub fn seat_cap_allows(cap: Option<u32>, current: u32) -> bool {
     cap.is_none_or(|c| current < c)
 }
 
@@ -81,6 +91,8 @@ pub struct License {
     pub features: Vec<Feature>,
     /// `None` = unlimited.
     pub max_orgs: Option<u32>,
+    /// `None` = unlimited.
+    pub max_seats: Option<u32>,
 }
 
 impl License {
@@ -202,7 +214,21 @@ mod tests {
             expires_at: expires,
             features,
             max_orgs: None,
+            max_seats: None,
         }
+    }
+
+    #[test]
+    fn linux_auth_wire_name_roundtrips() {
+        assert_eq!(Feature::LinuxAuth.wire_name(), "linux_auth");
+        assert_eq!(Feature::from_wire("linux_auth"), Some(Feature::LinuxAuth));
+    }
+
+    #[test]
+    fn seat_cap_allows_under_and_blocks_at_limit() {
+        assert!(seat_cap_allows(Some(10), 9));
+        assert!(!seat_cap_allows(Some(10), 10));
+        assert!(seat_cap_allows(None, 9_999));
     }
 
     #[test]

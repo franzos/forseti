@@ -279,6 +279,14 @@ pub(super) async fn members_remove(
     if let Err(e) = orgs::remove_member(&state.db, org_id, &target_identity).await {
         tracing::error!(error = ?e, "remove_member failed");
     } else {
+        // Cascade: drop the ex-member from the org's POSIX mirror so an
+        // org-scoped host stops resolving them. Best-effort; never abort.
+        if let Err(e) =
+            crate::posix::db::remove_identity_from_org_group(&state.db, org_id, &target_identity)
+                .await
+        {
+            tracing::error!(error = ?e, org_id = %org_id, identity_id = %target_identity, "failed to revoke posix org-group membership on org member removal");
+        }
         let _ = audit::log(
             &state.db,
             AuditEvent::new(action::ORG_MEMBER_REMOVED)

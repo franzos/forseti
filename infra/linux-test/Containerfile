@@ -1,0 +1,88 @@
+# Real-Linux NSS/PAM/sshd test image for the forseti-unix client.
+#
+# Stage 1 builds the client workspace against Debian's glibc (the honest
+# foreign-distro / M4 path — distinct from the Guix-System wiring, which is a
+# separate marionette test). Stage 2 is a slim Debian with sshd + PAM + nscd,
+# the three client artifacts installed, and NSS/PAM/sshd wired up.
+#
+# Build context = repo ROOT (so `forseti-unix/` is reachable):
+#   podman build -f infra/linux-test/Containerfile -t forseti-linux-test .
+
+# ---- Stage 1: build the client (Debian glibc) -------------------------------
+FROM docker.io/library/rust:bookworm AS build
+WORKDIR /src
+# Only the client workspace is needed; it's a self-contained cargo workspace.
+COPY forseti-unix/ ./forseti-unix/
+WORKDIR /src/forseti-unix
+RUN cargo build --release \
+ && ls -l target/release/forseti-unixd \
+            target/release/forseti_ssh_authorizedkeys \
+            target/release/libnss_forseti.so
+
+# ---- Stage 2: runtime (Debian + sshd + PAM + nscd) --------------------------
+FROM docker.io/library/debian:bookworm-slim AS runtime
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      openssh-server \
+      openssh-client \
+      libpam-modules \
+      libpam-modules-bin \
+      nscd \
+      ca-certificates \
+      iproute2 \
+ && rm -rf /var/lib/apt/lists/*
+
+# Unprivileged service account the daemon, AuthorizedKeysCommand, and
+# nss-resolved homedirs run as. No login shell, no home of its own needed.
+RUN groupadd --system forseti \
+ && useradd --system --gid forseti --no-create-home \
+      --home-dir /nonexistent --shell /usr/sbin/nologin forseti
+
+# --- client artifacts ---
+# The NSS module must land where glibc/nscd dlopen it, under its versioned
+# soname. AuthorizedKeysCommand + its parent dirs must be root-owned and not
+# group/world-writable (sshd refuses otherwise) — /usr/local/bin satisfies that.
+COPY --from=build /src/forseti-unix/target/release/libnss_forseti.so \
+                  /usr/lib/x86_64-linux-gnu/libnss_forseti.so.2
+COPY --from=build /src/forseti-unix/target/release/forseti-unixd \
+                  /usr/local/bin/forseti-unixd
+COPY --from=build /src/forseti-unix/target/release/forseti_ssh_authorizedkeys \
+                  /usr/local/bin/forseti_ssh_authorizedkeys
+RUN chmod 0755 /usr/local/bin/forseti-unixd \
+               /usr/local/bin/forseti_ssh_authorizedkeys \
+               /usr/lib/x86_64-linux-gnu/libnss_forseti.so.2
+
+# --- nsswitch: chain glibc `files` then the forseti module ---
+RUN sed -i 's/^passwd:.*/passwd:         files forseti/' /etc/nsswitch.conf \
+ && sed -i 's/^group:.*/group:          files forseti/'  /etc/nsswitch.conf
+
+# --- sshd: key login via AuthorizedKeysCommand, PAM session for mkhomedir ---
+RUN mkdir -p /run/sshd \
+ && { \
+      echo 'UsePAM yes'; \
+      echo 'PasswordAuthentication no'; \
+      echo 'PubkeyAuthentication yes'; \
+      echo 'AuthorizedKeysCommand /usr/local/bin/forseti_ssh_authorizedkeys %u'; \
+      echo 'AuthorizedKeysCommandUser forseti'; \
+      echo 'UseDNS no'; \
+      echo 'LogLevel VERBOSE'; \
+    } >> /etc/ssh/sshd_config
+
+# PAM wiring for NSS-only (no /etc/passwd) Forseti accounts:
+#  - The account stack's common-account runs pam_unix, which returns
+#    user_unknown for a user that lives only in the forseti NSS module and
+#    then trips pam_deny -> "Access denied by PAM account configuration".
+#    Permit the account phase for NSS-resolved (uid >= 1000) users up front;
+#    pubkey-only auth (AuthorizedKeysCommand) is the real gate. A dedicated
+#    forseti PAM account module is future work (M2).
+#  - pam_mkhomedir (session) creates $HOME on first key-based login.
+RUN sed -i '/pam_systemd\.so/d' /etc/pam.d/sshd \
+ && sed -i '/^@include common-account/i account sufficient pam_succeed_if.so uid >= 1000 quiet' /etc/pam.d/sshd \
+ && echo 'session optional pam_mkhomedir.so skel=/etc/skel umask=0077' >> /etc/pam.d/sshd
+
+COPY infra/linux-test/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod 0755 /usr/local/bin/entrypoint.sh
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

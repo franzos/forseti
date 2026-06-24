@@ -17,7 +17,8 @@ endif
 
 .PHONY: css css-watch dev build check clean run test-integration \
 	stack-up stack-up-saml stack-wait stack-down stack-reset stack-logs seed-admin \
-	e2e e2e-expired e2e-licensed e2e-trace license-fixtures
+	e2e e2e-expired e2e-licensed e2e-trace license-fixtures \
+	test-linux-host linux-test-seed linux-test-unseed linux-test-build
 
 # Compose engine. Defaults to podman-compose for local GUIX dev; CI overrides
 # with `COMPOSE="docker compose"`.
@@ -237,3 +238,60 @@ e2e-trace: ## Open the Playwright trace viewer for the most recent run
 		-w /work \
 		$(PLAYWRIGHT_IMAGE) \
 		bash -c "npx playwright show-report --host 0.0.0.0"
+
+# ---------------------------------------------------------------------------
+# Real-Linux NSS/PAM/sshd harness (forseti-unix client)
+#
+# A Debian container with the forseti-unix client installed talks to the
+# host's Forseti internal resolver and asserts the whole NSS/PAM/ssh chain
+# works (+ fail-open when the daemon is down). This is the foreign-distro /
+# M4 path; Guix-System wiring is a separate marionette test (future).
+#
+# PREREQ (same convention as `make e2e`): the playground + Forseti must
+# ALREADY be running on the host, with the internal resolver bound to
+# 0.0.0.0:8081 (config.toml `[internal] bind`). Bring them up with:
+#   podman-compose -f infra/docker-compose.yml up -d
+#   guix shell -m manifest.scm -- cargo run        # serves :3000 + :8081
+#
+# `make` isn't on PATH outside a guix shell here, so invoke as:
+#   guix shell make -- make test-linux-host
+# ---------------------------------------------------------------------------
+LINUX_TEST_IMAGE   ?= forseti-linux-test
+LINUX_TEST_CONT    ?= forseti-linux-test-run
+LINUX_TEST_ENV     := infra/linux-test/.seed.env
+# host-gateway lets the container reach the host's 0.0.0.0:8081 resolver.
+LINUX_TEST_SERVER  ?= http://host.containers.internal:8081
+
+linux-test-build: ## Build the Debian NSS/PAM/sshd test image (context = repo root)
+	podman build -f infra/linux-test/Containerfile -t $(LINUX_TEST_IMAGE) .
+
+linux-test-seed: ## Seed host enrollment + posix account + ssh key into forseti.db
+	bash infra/linux-test/seed.sh $(FORSETI_DB)
+
+linux-test-unseed: ## Remove the seeded rows + ephemeral keys
+	bash infra/linux-test/unseed.sh $(FORSETI_DB)
+
+test-linux-host: ## Build + run the containerized NSS/PAM/ssh harness against the running host Forseti
+	$(call FORSETI_HEALTH_CHECK)
+	@echo "==> seeding forseti.db"
+	@bash infra/linux-test/seed.sh $(FORSETI_DB)
+	@echo "==> building $(LINUX_TEST_IMAGE)"
+	@podman build -f infra/linux-test/Containerfile -t $(LINUX_TEST_IMAGE) .
+	@echo "==> running harness container"
+	@set -a; . $(LINUX_TEST_ENV); set +a; \
+	rc=0; \
+	podman run --rm --name $(LINUX_TEST_CONT) \
+		--add-host=host.containers.internal:host-gateway \
+		-v "$$PRIVKEY_PATH:/test/id_key:ro" \
+		-e SERVER_URL="$(LINUX_TEST_SERVER)" \
+		-e HOST_ID="$$HOST_ID" \
+		-e HOST_SECRET="$$HOST_SECRET" \
+		-e TEST_USER="$$TEST_USER" \
+		-e TEST_UID="$$TEST_UID" \
+		-e TEST_GID="$$TEST_GID" \
+		-e TEST_HOME="$$TEST_HOME" \
+		-e TEST_SHELL="$$TEST_SHELL" \
+		$(LINUX_TEST_IMAGE) || rc=$$?; \
+	echo "==> harness exited rc=$$rc; unseeding"; \
+	bash infra/linux-test/unseed.sh $(FORSETI_DB); \
+	exit $$rc

@@ -128,6 +128,12 @@ pub(crate) async fn run() -> anyhow::Result<()> {
     // Status is otherwise only recomputed at boot / activate, so a license that booted Active never crosses into grace.
     commercial::spawn_reclassify(license.clone(), shutdown.clone());
 
+    // Hourly POSIX reconcile: purge posix rows for identities deleted
+    // out-of-band via the Kratos admin API (the per-delete-site cascade
+    // can't see those). Defense-in-depth; conservative — never purges on
+    // a Kratos lookup error.
+    crate::posix::spawn_reconcile(db.clone(), ory.clone(), shutdown.clone());
+
     let cfg_internal_bind = cfg.internal.bind.clone();
 
     let state = AppState {
@@ -208,6 +214,7 @@ pub(crate) async fn run() -> anyhow::Result<()> {
     // future internal endpoints land here too.
     let internal_app = Router::new()
         .merge(audit::kratos_webhook::router())
+        .merge(crate::posix::router())
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             audit::middleware,

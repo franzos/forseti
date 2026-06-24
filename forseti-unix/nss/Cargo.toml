@@ -1,0 +1,19 @@
+# Thin-deps invariant: this cdylib is dlopened by libc into EVERY process that
+# does a name lookup, incl. setuid sshd/sudo. It must link ONLY: libnss, libc,
+# forseti-unix-proto and forseti-unix-client (the blocking client — timeouts +
+# MSG_NOSIGNAL + fail-open None). NO tokio/reqwest/rusqlite/tracing. serde_json
+# arrives transitively via proto's codec (pure Rust) — that's acceptable.
+[package]
+name = "libnss_forseti"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "nss_forseti"
+crate-type = ["cdylib"]
+
+[dependencies]
+libnss = "0.9"
+libc = "0.2"
+forseti-unix-proto = { path = "../proto" }
+forseti-unix-client = { path = "../client" }

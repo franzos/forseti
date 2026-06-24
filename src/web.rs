@@ -144,8 +144,8 @@ mod tests {
     use crate::config::{
         AdminConfig, AppConfig, AuditConfig, BrandConfig, ClaimEmailConfig, DatabaseConfig,
         FlashConfig, HandoffConfig, HydraConfig, IdentityConfig, InternalConfig, KratosConfig,
-        LicenseConfig, OAuthConfig, OrgsConfig, ProfilesConfig, ProxyConfig, SecurityConfig,
-        SelfConfig, SmtpConfig, WebhookConfig,
+        LicenseConfig, OAuthConfig, OrgsConfig, PosixConfig, ProfilesConfig, ProxyConfig,
+        SecurityConfig, SelfConfig, SmtpConfig, WebhookConfig,
     };
 
     fn cfg_with_self_url(url: &str) -> AppConfig {
@@ -183,6 +183,7 @@ mod tests {
             saml: None,
             proxy: ProxyConfig::default(),
             security: SecurityConfig::default(),
+            posix: PosixConfig::default(),
         }
     }
 

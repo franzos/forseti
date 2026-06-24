@@ -28,6 +28,10 @@ use sha2::{Digest, Sha256};
 // the subsequent same-port request goes to a different host and the cookie
 // is dropped, sending the portal into an infinite re-init loop.
 pub const PORTAL: &str = "http://localhost:3000";
+// Internal listener (M2M: audit webhook + posix resolver). Matches
+// `[internal].bind` in config.ci.toml (default 0.0.0.0:8081); reached over
+// loopback from the test host.
+pub const INTERNAL: &str = "http://127.0.0.1:8081";
 pub const KRATOS_PUBLIC: &str = "http://localhost:4433";
 pub const KRATOS_ADMIN: &str = "http://localhost:4434";
 // Must match Hydra's `issuer` (host.containers.internal, see infra/hydra/hydra.yml):
@@ -965,6 +969,348 @@ pub fn forseti_db_path() -> PathBuf {
 fn forseti_db_conn() -> rusqlite::Connection {
     let p = forseti_db_path();
     rusqlite::Connection::open(&p).unwrap_or_else(|e| panic!("open portal db at {p:?}: {e}"))
+}
+
+/// Seed a POSIX account + one SSH key for `identity_id` directly via the
+/// portal DB. Mirrors what the resolver/provisioning path would write, so
+/// the identity-delete cascade has something to purge. `uid`/`gid` must be
+/// unique across the suite — callers derive them from a timestamp.
+pub fn seed_posix_account(identity_id: &str, username: &str, uid: i64, gid: i64) {
+    let now = chrono::Utc::now().to_rfc3339();
+    let conn = forseti_db_conn();
+    conn.execute(
+        "INSERT INTO posix_accounts (\
+            identity_id, username, uid, gid, gecos, shell, home_dir, enabled, created_at, updated_at\
+         ) VALUES (?1, ?2, ?3, ?4, '', '/bin/bash', ?5, 1, ?6, ?6)",
+        params![
+            identity_id,
+            username,
+            uid,
+            gid,
+            format!("/home/{username}"),
+            now
+        ],
+    )
+    .unwrap_or_else(|e| panic!("seed posix_accounts: {e}"));
+    conn.execute(
+        "INSERT INTO posix_groups (gid, name, org_id, kind, created_at) \
+         VALUES (?1, ?2, NULL, 'user', ?3)",
+        params![gid, username, now],
+    )
+    .unwrap_or_else(|e| panic!("seed posix_groups: {e}"));
+    conn.execute(
+        "INSERT INTO posix_group_members (gid, identity_id, added_at) VALUES (?1, ?2, ?3)",
+        params![gid, identity_id, now],
+    )
+    .unwrap_or_else(|e| panic!("seed posix_group_members: {e}"));
+    conn.execute(
+        "INSERT INTO ssh_authorized_keys (id, identity_id, public_key, comment, created_at, expires_at) \
+         VALUES (?1, ?2, 'ssh-ed25519 AAAATEST test@fixture', '', ?3, NULL)",
+        params![uuid::Uuid::new_v4().to_string(), identity_id, now],
+    )
+    .unwrap_or_else(|e| panic!("seed ssh_authorized_keys: {e}"));
+}
+
+/// Seed a `host_enrollments` row for the resolver tests. `secret` is hashed
+/// the same way the server compares it (SHA-256 hex). `allowed_gid = NULL`
+/// (unscoped host). Returns nothing — the caller already knows `id`/`secret`.
+pub fn seed_host_enrollment(id: &str, hostname: &str, secret: &str, allowed_gid: Option<i64>) {
+    let mut h = Sha256::new();
+    h.update(secret.as_bytes());
+    let secret_hash = hex::encode(h.finalize());
+    let now = chrono::Utc::now().to_rfc3339();
+    let conn = forseti_db_conn();
+    conn.execute(
+        "INSERT INTO host_enrollments (\
+            id, hostname, secret_hash, allowed_gid, force_mfa, created_by, created_at, last_seen_at\
+         ) VALUES (?1, ?2, ?3, ?4, 0, 'test-fixture', ?5, NULL)",
+        params![id, hostname, secret_hash, allowed_gid, now],
+    )
+    .unwrap_or_else(|e| panic!("seed host_enrollments: {e}"));
+}
+
+/// Delete a `host_enrollments` row (test cleanup).
+pub fn delete_host_enrollment(id: &str) {
+    let conn = forseti_db_conn();
+    conn.execute("DELETE FROM host_enrollments WHERE id = ?1", params![id])
+        .unwrap_or_else(|e| panic!("delete host_enrollments: {e}"));
+}
+
+/// Seed an org-kind `posix_groups` row (the scoped-host roster). `org_id`
+/// is nullable so a dummy NULL keeps the fixture self-contained.
+pub fn seed_org_group(gid: i64, name: &str) {
+    let now = chrono::Utc::now().to_rfc3339();
+    let conn = forseti_db_conn();
+    conn.execute(
+        "INSERT INTO posix_groups (gid, name, org_id, kind, created_at) \
+         VALUES (?1, ?2, NULL, 'org', ?3)",
+        params![gid, name, now],
+    )
+    .unwrap_or_else(|e| panic!("seed org posix_groups: {e}"));
+}
+
+/// Seed an `org`-kind `posix_groups` row with a real `org_id` (the
+/// scoped-host roster as `sync_org_groups` writes it). Distinct from
+/// [`seed_org_group`], which NULLs `org_id`; the org-removal cleanup helpers
+/// key off `org_id`, so they need a non-NULL value to find the group.
+pub fn seed_org_group_with_org_id(gid: i64, name: &str, org_id: &str) {
+    let now = chrono::Utc::now().to_rfc3339();
+    let conn = forseti_db_conn();
+    conn.execute(
+        "INSERT INTO posix_groups (gid, name, org_id, kind, created_at) \
+         VALUES (?1, ?2, ?3, 'org', ?4)",
+        params![gid, name, org_id, now],
+    )
+    .unwrap_or_else(|e| panic!("seed org posix_groups (org_id): {e}"));
+}
+
+/// Add a `posix_group_members` row tying `identity_id` to `gid`.
+pub fn add_posix_group_member(gid: i64, identity_id: &str) {
+    let now = chrono::Utc::now().to_rfc3339();
+    let conn = forseti_db_conn();
+    conn.execute(
+        "INSERT INTO posix_group_members (gid, identity_id, added_at) VALUES (?1, ?2, ?3)",
+        params![gid, identity_id, now],
+    )
+    .unwrap_or_else(|e| panic!("add posix_group_member: {e}"));
+}
+
+/// Delete the `posix_group_members` row tying `identity_id` to `gid` — the
+/// net effect of `posix::db::remove_identity_from_org_group`.
+pub fn delete_org_group_member(gid: i64, identity_id: &str) {
+    let conn = forseti_db_conn();
+    conn.execute(
+        "DELETE FROM posix_group_members WHERE gid = ?1 AND identity_id = ?2",
+        params![gid, identity_id],
+    )
+    .unwrap_or_else(|e| panic!("delete org posix_group_member: {e}"));
+}
+
+/// Delete a `posix_groups` row by gid (test cleanup).
+pub fn delete_posix_group(gid: i64) {
+    let conn = forseti_db_conn();
+    conn.execute("DELETE FROM posix_groups WHERE gid = ?1", params![gid])
+        .unwrap_or_else(|e| panic!("delete posix_groups: {e}"));
+}
+
+/// Delete all `posix_group_members` rows for a gid (test cleanup).
+pub fn delete_posix_group_members(gid: i64) {
+    let conn = forseti_db_conn();
+    conn.execute(
+        "DELETE FROM posix_group_members WHERE gid = ?1",
+        params![gid],
+    )
+    .unwrap_or_else(|e| panic!("delete posix_group_members: {e}"));
+}
+
+/// Count the POSIX rows tied to `identity_id` across all four tables
+/// (accounts + the user-kind primary group + memberships + ssh keys). Used
+/// to assert the delete cascade purged everything. `gid` is the account's
+/// primary gid — passed explicitly because posix_groups is keyed by gid and
+/// the account row (the only identity_id link) is gone after a cascade delete.
+pub fn count_posix_rows(identity_id: &str, gid: i64) -> i64 {
+    let conn = forseti_db_conn();
+    let accounts: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM posix_accounts WHERE identity_id = ?1",
+            params![identity_id],
+            |r| r.get(0),
+        )
+        .unwrap_or_else(|e| panic!("count posix_accounts: {e}"));
+    let groups: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM posix_groups WHERE gid = ?1 AND kind = 'user'",
+            params![gid],
+            |r| r.get(0),
+        )
+        .unwrap_or_else(|e| panic!("count posix_groups: {e}"));
+    let members: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM posix_group_members WHERE identity_id = ?1",
+            params![identity_id],
+            |r| r.get(0),
+        )
+        .unwrap_or_else(|e| panic!("count posix_group_members: {e}"));
+    let keys: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM ssh_authorized_keys WHERE identity_id = ?1",
+            params![identity_id],
+            |r| r.get(0),
+        )
+        .unwrap_or_else(|e| panic!("count ssh_authorized_keys: {e}"));
+    accounts + groups + members + keys
+}
+
+/// Total enabled `posix_accounts` rows. Mirrors `posix::db::count_accounts`
+/// (enabled-only — a disabled account frees its seat) so the seat-cap test
+/// can fill the free tier directly via the DB.
+pub fn count_enabled_posix_accounts() -> i64 {
+    let conn = forseti_db_conn();
+    conn.query_row(
+        "SELECT COUNT(*) FROM posix_accounts WHERE enabled = 1",
+        [],
+        |r| r.get(0),
+    )
+    .unwrap_or_else(|e| panic!("count enabled posix_accounts: {e}"))
+}
+
+/// Seed a `host_enrollments` row with `force_mfa = 1`. Mirrors
+/// [`seed_host_enrollment`] but flips the MFA flag so the device-auth
+/// `force_mfa` binding path can be exercised.
+pub fn seed_host_enrollment_mfa(id: &str, hostname: &str, secret: &str, allowed_gid: Option<i64>) {
+    let mut h = Sha256::new();
+    h.update(secret.as_bytes());
+    let secret_hash = hex::encode(h.finalize());
+    let now = chrono::Utc::now().to_rfc3339();
+    let conn = forseti_db_conn();
+    conn.execute(
+        "INSERT INTO host_enrollments (\
+            id, hostname, secret_hash, allowed_gid, force_mfa, created_by, created_at, last_seen_at\
+         ) VALUES (?1, ?2, ?3, ?4, 1, 'test-fixture', ?5, NULL)",
+        params![id, hostname, secret_hash, allowed_gid, now],
+    )
+    .unwrap_or_else(|e| panic!("seed host_enrollments (mfa): {e}"));
+}
+
+/// Read a `device_sessions.status` by `user_code`. `None` when no such row
+/// (e.g. pruned on expiry). Used to assert the atomic single-use transitions.
+pub fn device_session_status_by_user_code(user_code: &str) -> Option<String> {
+    let conn = forseti_db_conn();
+    conn.query_row(
+        "SELECT status FROM device_sessions WHERE user_code = ?1",
+        params![user_code],
+        |r| r.get::<_, String>(0),
+    )
+    .ok()
+}
+
+/// Read a `device_sessions.device_code` (the PK) by `user_code`. The init
+/// response never carries the device_code (it's the Hydra bearer secret); a
+/// test driving the daemon's poll leg pulls it from the DB.
+pub fn device_code_for_user_code(user_code: &str) -> Option<String> {
+    let conn = forseti_db_conn();
+    conn.query_row(
+        "SELECT device_code FROM device_sessions WHERE user_code = ?1",
+        params![user_code],
+        |r| r.get::<_, String>(0),
+    )
+    .ok()
+}
+
+/// Flip `posix_accounts.enabled` for an identity (test fixture for the
+/// disabled-account negative path).
+pub fn set_posix_account_enabled(identity_id: &str, enabled: bool) {
+    let conn = forseti_db_conn();
+    conn.execute(
+        "UPDATE posix_accounts SET enabled = ?1 WHERE identity_id = ?2",
+        params![i32::from(enabled), identity_id],
+    )
+    .unwrap_or_else(|e| panic!("set posix_accounts.enabled: {e}"));
+}
+
+/// Seed an `offline_secrets` row for an identity (M3a offline-auth). The
+/// `verifier` is opaque to these tests — they only assert presence/absence in
+/// the projection, never re-verify it.
+pub fn seed_offline_secret(identity_id: &str, verifier: &str) {
+    let now = chrono::Utc::now().to_rfc3339();
+    let conn = forseti_db_conn();
+    conn.execute(
+        "INSERT OR REPLACE INTO offline_secrets \
+            (identity_id, verifier, algo_version, created_at, updated_at) \
+         VALUES (?1, ?2, 1, ?3, ?3)",
+        params![identity_id, verifier, now],
+    )
+    .unwrap_or_else(|e| panic!("seed offline_secrets: {e}"));
+}
+
+/// Delete an `offline_secrets` row (test cleanup).
+pub fn delete_offline_secret(identity_id: &str) {
+    let conn = forseti_db_conn();
+    conn.execute(
+        "DELETE FROM offline_secrets WHERE identity_id = ?1",
+        params![identity_id],
+    )
+    .unwrap_or_else(|e| panic!("delete offline_secrets: {e}"));
+}
+
+/// Count `audit_events` rows matching `action` whose metadata mentions `host_id`.
+/// Used by the offline-audit ingest test to assert a batch landed as rows.
+pub fn count_audit_events_for_host(action: &str, host_id: &str) -> i64 {
+    let conn = forseti_db_conn();
+    conn.query_row(
+        "SELECT COUNT(*) FROM audit_events WHERE action = ?1 AND metadata LIKE ?2",
+        params![action, format!("%{host_id}%")],
+        |r| r.get(0),
+    )
+    .unwrap_or_else(|e| panic!("count audit_events: {e}"))
+}
+
+/// Delete every `device_sessions` row for a host (test cleanup).
+pub fn delete_device_sessions_for_host(host_id: &str) {
+    let conn = forseti_db_conn();
+    conn.execute(
+        "DELETE FROM device_sessions WHERE host_id = ?1",
+        params![host_id],
+    )
+    .unwrap_or_else(|e| panic!("delete device_sessions: {e}"));
+}
+
+/// Insert a bare `posix_accounts` row (no group / membership / key) for
+/// `identity_id`. Used by the seat-cap test to consume seats cheaply
+/// without registering a Kratos identity per seat. `uid`/`gid` must be
+/// unique across the suite.
+pub fn seed_bare_posix_account(identity_id: &str, username: &str, uid: i64, gid: i64) {
+    let now = chrono::Utc::now().to_rfc3339();
+    let conn = forseti_db_conn();
+    conn.execute(
+        "INSERT INTO posix_accounts (\
+            identity_id, username, uid, gid, gecos, shell, home_dir, enabled, created_at, updated_at\
+         ) VALUES (?1, ?2, ?3, ?4, '', '/bin/sh', ?5, 1, ?6, ?6)",
+        params![identity_id, username, uid, gid, format!("/home/{username}"), now],
+    )
+    .unwrap_or_else(|e| panic!("seed bare posix_accounts: {e}"));
+}
+
+/// Delete every POSIX row tied to `identity_id` plus its primary group
+/// (test cleanup for the seat-cap fixtures).
+pub fn delete_posix_account(identity_id: &str) {
+    let conn = forseti_db_conn();
+    conn.execute(
+        "DELETE FROM posix_groups WHERE gid IN \
+         (SELECT gid FROM posix_accounts WHERE identity_id = ?1) AND kind = 'user'",
+        params![identity_id],
+    )
+    .unwrap_or_else(|e| panic!("delete posix_groups for account: {e}"));
+    conn.execute(
+        "DELETE FROM ssh_authorized_keys WHERE identity_id = ?1",
+        params![identity_id],
+    )
+    .unwrap_or_else(|e| panic!("delete ssh_authorized_keys for account: {e}"));
+    conn.execute(
+        "DELETE FROM posix_group_members WHERE identity_id = ?1",
+        params![identity_id],
+    )
+    .unwrap_or_else(|e| panic!("delete posix_group_members for account: {e}"));
+    conn.execute(
+        "DELETE FROM posix_accounts WHERE identity_id = ?1",
+        params![identity_id],
+    )
+    .unwrap_or_else(|e| panic!("delete posix_accounts: {e}"));
+}
+
+/// Count the `org`-kind `posix_group_members` rows for `identity_id` (joined
+/// to `posix_groups.kind = 'org'`). Powers the Orgs-gate assertion: zero org
+/// memberships when Orgs is unlicensed, ≥1 once licensed.
+pub fn count_org_group_memberships(identity_id: &str) -> i64 {
+    let conn = forseti_db_conn();
+    conn.query_row(
+        "SELECT COUNT(*) FROM posix_group_members m \
+         JOIN posix_groups g ON g.gid = m.gid \
+         WHERE m.identity_id = ?1 AND g.kind = 'org'",
+        params![identity_id],
+        |r| r.get(0),
+    )
+    .unwrap_or_else(|e| panic!("count org group memberships: {e}"))
 }
 
 /// Mint a fresh DCR Initial Access Token directly via the portal DB,

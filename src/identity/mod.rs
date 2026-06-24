@@ -10,15 +10,16 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use ory_client::apis::identity_api;
 
 use crate::config::AppConfig;
+use crate::db::DbPool;
 use crate::ory::OryClients;
 
 /// Entry point for the `unverified-prune` subcommand. Mirrors `audit-prune`:
 /// reads `[identity].unverified_ttl_days`, deletes Kratos identities that
 /// have at least one unverified address AND were created more than N days
 /// ago. Returns the process exit code (0 on success, 1 on failure).
-pub async fn prune_unverified_cli(cfg: &AppConfig, ory: &OryClients) -> i32 {
+pub async fn prune_unverified_cli(cfg: &AppConfig, db: &DbPool, ory: &OryClients) -> i32 {
     let ttl_days = cfg.identity.unverified_ttl_days;
-    match prune_unverified(ory, ttl_days).await {
+    match prune_unverified(db, ory, ttl_days).await {
         Ok((deleted, scanned)) => {
             println!(
                 "unverified-prune: scanned {scanned} identities, deleted {deleted} older than {ttl_days} days with at least one unverified address"
@@ -41,7 +42,11 @@ pub async fn prune_unverified_cli(cfg: &AppConfig, ory: &OryClients) -> i32 {
 /// same rows. We log a `warn!` if a full page came back (caller should
 /// re-run the prune after deletes to drain the rest) and document the
 /// limitation in `docs/operator-guide.md`.
-pub async fn prune_unverified(ory: &OryClients, ttl_days: i64) -> anyhow::Result<(u64, u64)> {
+pub async fn prune_unverified(
+    db: &DbPool,
+    ory: &OryClients,
+    ttl_days: i64,
+) -> anyhow::Result<(u64, u64)> {
     let cutoff = Utc::now() - ChronoDuration::days(ttl_days.max(0));
     let mut deleted: u64 = 0;
     let mut scanned: u64 = 0;
@@ -70,6 +75,12 @@ pub async fn prune_unverified(ory: &OryClients, ttl_days: i64) -> anyhow::Result
             if let Err(e) = identity_api::delete_identity(&ory.kratos_admin, &ident.id).await {
                 tracing::warn!(error = ?e, id = %ident.id, "unverified-prune: delete failed");
                 continue;
+            }
+            // Cascade: purge POSIX rows. Best-effort; an orphan is a
+            // security issue (usable login for a deleted identity) but
+            // must not stop the prune.
+            if let Err(e) = crate::posix::db::delete_account_rows(db, &ident.id).await {
+                tracing::error!(error = ?e, identity_id = %ident.id, "failed to purge posix rows on identity delete");
             }
             deleted += 1;
         }

@@ -164,6 +164,7 @@ mod tests {
             expires_at: Some(Utc::now() + Duration::days(expires_in_days)),
             features: vec![Feature::Orgs],
             max_orgs: None,
+            max_seats: None,
         };
         LicenseHandle::new(LicenseStatus::Active(license), GRACE_DAYS)
     }

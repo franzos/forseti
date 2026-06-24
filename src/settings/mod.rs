@@ -30,6 +30,7 @@ use crate::{render_error_boundary, FlowQuery};
 pub(crate) mod account;
 pub(crate) mod authorized_apps;
 pub(crate) mod linked_providers;
+pub(crate) mod offline_access;
 pub(crate) mod password;
 pub(crate) mod profile;
 pub(crate) mod sessions;
@@ -68,6 +69,15 @@ pub(crate) fn router() -> Router<AppState> {
         .route(
             "/settings/authorized-apps/{client_id}/revoke",
             post(authorized_apps::settings_authorized_apps_revoke),
+        )
+        .route(
+            "/settings/offline-access",
+            get(offline_access::settings_offline_access)
+                .post(offline_access::settings_offline_access_save),
+        )
+        .route(
+            "/settings/offline-access/clear",
+            post(offline_access::settings_offline_access_clear),
         )
         .route("/settings/account", get(account::settings_account))
         .route(

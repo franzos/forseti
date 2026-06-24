@@ -475,6 +475,11 @@ pub async fn remove_member(db: &DbPool, org_id: &str, identity_id: &str) -> anyh
 /// deleted identities don't leave dangling rows that show up on the
 /// members page (and trip up the last-owner guard with phantom owners).
 /// Returns the number of rows removed.
+//
+// POSIX org-group cleanup: both callers (admin `delete_identity_audited`,
+// self-delete in `settings/account`) also call `posix::db::delete_account_rows`,
+// which purges ALL of the identity's `posix_group_members` — so the org-group
+// mirror is already covered; no extra posix cleanup needed here.
 pub async fn remove_member_everywhere(db: &DbPool, identity_id: &str) -> anyhow::Result<usize> {
     let ident = identity_id.to_string();
     let affected = db_interact!(db, |conn| {
