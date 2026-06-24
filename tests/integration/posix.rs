@@ -1077,7 +1077,10 @@ async fn offline_verifiers_includes_only_eligible() {
     seed_posix_account(&member_id, &member_name, 90_000 + seed, 90_000 + seed);
     seed_org_group(org_gid, &format!("offlgrp{seed}"));
     add_posix_group_member(org_gid, &member_id);
-    seed_offline_secret(&member_id, "$argon2id$v=19$m=65536,t=3,p=1$c2FsdHNhbHQ$aGFzaGhhc2g");
+    seed_offline_secret(
+        &member_id,
+        "$argon2id$v=19$m=65536,t=3,p=1$c2FsdHNhbHQ$aGFzaGhhc2g",
+    );
 
     // nosecret: enabled + scoped but NO offline secret → excluded.
     let nosecret = register_test_user("offl-nosecret").await;
@@ -1092,7 +1095,10 @@ async fn offline_verifiers_includes_only_eligible() {
     let disabled_name = format!("offldisabled{seed}");
     seed_posix_account(&disabled_id, &disabled_name, 92_000 + seed, 92_000 + seed);
     add_posix_group_member(org_gid, &disabled_id);
-    seed_offline_secret(&disabled_id, "$argon2id$v=19$m=65536,t=3,p=1$c2FsdHNhbHQ$aGFzaGhhc2g");
+    seed_offline_secret(
+        &disabled_id,
+        "$argon2id$v=19$m=65536,t=3,p=1$c2FsdHNhbHQ$aGFzaGhhc2g",
+    );
     set_posix_account_enabled(&disabled_id, false);
 
     // descoped: enabled + has-secret but NOT a member of ORG_GID → excluded.
@@ -1100,7 +1106,10 @@ async fn offline_verifiers_includes_only_eligible() {
     let descoped_id = descoped.identity_id.clone();
     let descoped_name = format!("offldescoped{seed}");
     seed_posix_account(&descoped_id, &descoped_name, 93_000 + seed, 93_000 + seed);
-    seed_offline_secret(&descoped_id, "$argon2id$v=19$m=65536,t=3,p=1$c2FsdHNhbHQ$aGFzaGhhc2g");
+    seed_offline_secret(
+        &descoped_id,
+        "$argon2id$v=19$m=65536,t=3,p=1$c2FsdHNhbHQ$aGFzaGhhc2g",
+    );
 
     let host_id = format!("offl-host-{seed}");
     let secret = "s3cret-offl";
@@ -1113,7 +1122,11 @@ async fn offline_verifiers_includes_only_eligible() {
         .send()
         .await
         .expect("GET offline_verifiers");
-    assert_eq!(res.status(), StatusCode::OK, "offline_verifiers should be 200");
+    assert_eq!(
+        res.status(),
+        StatusCode::OK,
+        "offline_verifiers should be 200"
+    );
     let body: Value = res.json().await.expect("offline_verifiers json");
     let names = offline_verifier_usernames(&body);
 
@@ -1142,7 +1155,9 @@ async fn offline_verifiers_includes_only_eligible() {
         .find(|e| e["username"] == Value::from(member_name.clone()))
         .expect("member row present");
     assert!(
-        member_row["verifier"].as_str().is_some_and(|v| v.starts_with("$argon2id$")),
+        member_row["verifier"]
+            .as_str()
+            .is_some_and(|v| v.starts_with("$argon2id$")),
         "verifier must be the Argon2id PHC string"
     );
     assert_eq!(member_row["ttl_secs"], Value::from(24 * 3600));
@@ -1174,7 +1189,10 @@ async fn offline_verifiers_force_mfa_host_is_empty() {
     let user_id = user.identity_id.clone();
     let username = format!("offlmfa{seed}");
     seed_posix_account(&user_id, &username, 94_000 + seed, 94_000 + seed);
-    seed_offline_secret(&user_id, "$argon2id$v=19$m=65536,t=3,p=1$c2FsdHNhbHQ$aGFzaGhhc2g");
+    seed_offline_secret(
+        &user_id,
+        "$argon2id$v=19$m=65536,t=3,p=1$c2FsdHNhbHQ$aGFzaGhhc2g",
+    );
 
     // Unscoped force_mfa host: the user would qualify on a normal host.
     let host_id = format!("offl-mfa-host-{seed}");

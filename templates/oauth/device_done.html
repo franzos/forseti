@@ -1,11 +1,20 @@
 {% extends "card.html" %}
 
 {% block title %}
-  {% if error %}Login not approved{% else %}Login approved{% endif %} &middot; {{ chrome.brand.name }}
+  {% if error %}
+    Login not approved
+  {% else %}
+    Login approved
+  {% endif %}
+  &middot; {{ chrome.brand.name }}
 {% endblock %}
 
 {% block card_title %}
-  {% if error %}We couldn't approve that login{% else %}Approved{% endif %}
+  {% if error %}
+    We couldn't approve that login
+  {% else %}
+    Approved
+  {% endif %}
 {% endblock %}
 
 {% block card_body %}
@@ -18,8 +27,6 @@
     <p class="font-body-md text-body-md text-on-surface">
       You can return to your terminal — the login will continue there.
     </p>
-    <p class="font-body-sm text-body-sm text-on-surface-variant mt-stack-xs">
-      It's safe to close this page.
-    </p>
+    <p class="font-body-sm text-body-sm text-on-surface-variant mt-stack-xs">It's safe to close this page.</p>
   {% endif %}
 {% endblock %}

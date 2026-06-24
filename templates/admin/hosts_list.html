@@ -52,11 +52,13 @@
         {% else %}
           {% for r in rows %}
             <tr class="border-t border-outline-variant">
-              <td class="px-4 py-3 font-body-md text-body-md text-on-surface" title="{{ r.id }}">{{ r.hostname }}</td>
+              <td class="px-4 py-3 font-body-md text-body-md text-on-surface"
+                  title="{{ r.id }}">{{ r.hostname }}</td>
               <td class="px-4 py-3 font-body-sm text-body-sm text-on-surface-variant font-mono">{{ r.allowed_gid }}</td>
               <td class="px-4 py-3 font-body-sm text-body-sm">
                 {% if r.force_mfa %}
-                  <span class="font-label-sm text-label-sm bg-tertiary-container text-on-tertiary-container px-2 py-0.5 rounded-full font-semibold" title="Recorded but not yet enforced; enforcement lands with interactive login (PAM).">MFA (pending)</span>
+                  <span class="font-label-sm text-label-sm bg-tertiary-container text-on-tertiary-container px-2 py-0.5 rounded-full font-semibold"
+                        title="Recorded but not yet enforced; enforcement lands with interactive login (PAM).">MFA (pending)</span>
                 {% else %}
                   <span class="text-on-surface-variant">—</span>
                 {% endif %}

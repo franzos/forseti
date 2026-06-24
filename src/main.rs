@@ -117,7 +117,9 @@ async fn main() -> anyhow::Result<()> {
                     } else {
                         // One-shot reveal — Hydra won't show the plaintext
                         // again. Operator must store it in [posix].pam_client_secret.
-                        println!("  client_secret (shown ONCE — store it in [posix].pam_client_secret):");
+                        println!(
+                            "  client_secret (shown ONCE — store it in [posix].pam_client_secret):"
+                        );
                         println!("    {secret}");
                     }
                     std::process::exit(0);

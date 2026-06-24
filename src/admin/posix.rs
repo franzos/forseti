@@ -22,9 +22,9 @@ use crate::audit::{self, action, target_kind, AuditCtx, AuditEvent};
 use crate::audit_metadata;
 use crate::commercial::license::{seat_cap_allows, Feature};
 use crate::commercial::FeatureStatus;
-use crate::orgs;
 use crate::extractors::{Csrf, RequireAdmin};
 use crate::format::humanise_timestamp;
+use crate::orgs;
 use crate::ory;
 use crate::page_chrome::PageChrome;
 use crate::posix::allocate::is_valid_username;
@@ -315,7 +315,8 @@ pub async fn provision(
             .collect();
         org_group_count = orgs.len();
         if let Err(e) =
-            posix_db::sync_org_groups(&state.db, state.cfg.posix.gid_base, &identity_id, &orgs).await
+            posix_db::sync_org_groups(&state.db, state.cfg.posix.gid_base, &identity_id, &orgs)
+                .await
         {
             // Best-effort: the account is already provisioned, so a group-sync
             // failure must not fail the provision.
@@ -487,14 +488,8 @@ pub async fn add_key(
         }
         Err(e) => {
             tracing::error!(error = ?e, id, "admin: insert ssh key failed");
-            return render_account(
-                &state,
-                &ctx,
-                &csrf,
-                &id,
-                format!("Could not add key: {e}"),
-            )
-            .await;
+            return render_account(&state, &ctx, &csrf, &id, format!("Could not add key: {e}"))
+                .await;
         }
     }
 
@@ -539,7 +534,11 @@ pub async fn remove_key(
         }
         Err(e) => {
             tracing::error!(error = ?e, id, key_id, "admin: delete ssh key failed");
-            render_admin_error(&state, "Remove key failed", &format!("Could not remove key: {e}"))
+            render_admin_error(
+                &state,
+                "Remove key failed",
+                &format!("Could not remove key: {e}"),
+            )
         }
     }
 }
@@ -607,11 +606,7 @@ async fn set_enabled(
     }
 }
 
-pub async fn delete_confirm(
-    Path(id): Path<String>,
-    admin: RequireAdmin,
-    csrf: Csrf,
-) -> Response {
+pub async fn delete_confirm(Path(id): Path<String>, admin: RequireAdmin, csrf: Csrf) -> Response {
     let ctx = admin.ctx;
     let chrome = ctx.chrome(&csrf);
     render(&ConfirmTemplate {
@@ -658,7 +653,11 @@ pub async fn delete(
         }
         Err(e) => {
             tracing::error!(error = ?e, id, "admin: delete posix account failed");
-            render_admin_error(&state, "Delete failed", &format!("Could not delete account: {e}"))
+            render_admin_error(
+                &state,
+                "Delete failed",
+                &format!("Could not delete account: {e}"),
+            )
         }
     }
 }
@@ -685,9 +684,7 @@ mod tests {
         assert!(looks_like_ssh_key("ssh-ed25519 AAAA... user@host"));
         assert!(looks_like_ssh_key("ssh-rsa AAAA..."));
         assert!(looks_like_ssh_key("ecdsa-sha2-nistp256 AAAA..."));
-        assert!(looks_like_ssh_key(
-            "sk-ssh-ed25519@openssh.com AAAA..."
-        ));
+        assert!(looks_like_ssh_key("sk-ssh-ed25519@openssh.com AAAA..."));
         assert!(!looks_like_ssh_key("-----BEGIN OPENSSH PRIVATE KEY-----"));
         assert!(!looks_like_ssh_key("not a key"));
         assert!(!looks_like_ssh_key(""));

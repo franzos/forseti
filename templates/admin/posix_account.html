@@ -7,7 +7,8 @@
     <div class="flex items-center justify-between mt-2 mb-stack-lg">
       <div>
         <h1 class="font-headline-lg text-headline-lg text-on-surface">{{ account.username }}</h1>
-        <p class="font-body-sm text-body-sm text-on-surface-variant mt-1 font-mono" title="{{ account.identity_id }}">{{ account.identity_id }}</p>
+        <p class="font-body-sm text-body-sm text-on-surface-variant mt-1 font-mono"
+           title="{{ account.identity_id }}">{{ account.identity_id }}</p>
         {% if !email.is_empty() %}
           <p class="font-body-sm text-body-sm text-on-surface-variant">{{ email }}</p>
         {% endif %}
@@ -42,11 +43,18 @@
       </div>
       <div>
         <p class="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Status</p>
-        <p class="font-body-md text-body-md text-on-surface">{% if account.enabled %}enabled{% else %}disabled{% endif %}</p>
+        <p class="font-body-md text-body-md text-on-surface">
+          {% if account.enabled %}
+            enabled
+          {% else %}
+            disabled
+          {% endif %}
+        </p>
       </div>
       <div>
         <p class="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Created</p>
-        <p class="font-body-md text-body-md text-on-surface" title="{{ account.created_at }}">{{ account.created_at_pretty }}</p>
+        <p class="font-body-md text-body-md text-on-surface"
+           title="{{ account.created_at }}">{{ account.created_at_pretty }}</p>
       </div>
     </div>
 
@@ -71,11 +79,13 @@
                 <td class="px-4 py-3">
                   <p class="font-mono text-body-sm text-on-surface break-all">{{ k.public_key }}</p>
                   <p class="font-body-sm text-body-sm text-on-surface-variant">
-                    {% if !k.comment.is_empty() %}{{ k.comment }} &middot; {% endif %}added {{ k.created_at_pretty }}
+                    {% if !k.comment.is_empty() %}{{ k.comment }} &middot; {% endif %}
+                    added {{ k.created_at_pretty }}
                   </p>
                 </td>
                 <td class="px-4 py-3 text-right whitespace-nowrap">
-                  <form method="POST" action="/admin/posix/{{ account.identity_id }}/keys/{{ k.id }}/delete">
+                  <form method="POST"
+                        action="/admin/posix/{{ account.identity_id }}/keys/{{ k.id }}/delete">
                     <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
                     <button type="submit"
                             class="font-label-sm text-label-sm text-error border border-error rounded-lg px-3 py-1 hover:bg-error-container hover:text-on-error-container transition-colors">Remove</button>
@@ -113,7 +123,8 @@
     </form>
 
     <div class="mt-stack-lg">
-      <a href="/admin/posix" class="font-label-md text-label-md text-primary hover:underline">&larr; All POSIX accounts</a>
+      <a href="/admin/posix"
+         class="font-label-md text-label-md text-primary hover:underline">&larr; All POSIX accounts</a>
     </div>
   </div>
 {% endblock %}

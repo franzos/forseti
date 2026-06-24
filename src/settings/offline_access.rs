@@ -96,7 +96,11 @@ pub(crate) async fn settings_offline_access_save(
     }
 
     let secure = state.cfg.self_.is_https();
-    let min_len = state.cfg.posix.offline_min_len.max(offline::OFFLINE_MIN_LEN);
+    let min_len = state
+        .cfg
+        .posix
+        .offline_min_len
+        .max(offline::OFFLINE_MIN_LEN);
 
     let msg = match offline::mint_verifier(&form.passphrase) {
         Ok(verifier) => {

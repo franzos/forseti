@@ -241,10 +241,7 @@ pub async fn issue(
     )
     .await;
 
-    let reveal = SecretReveal::HostSecret {
-        host_id,
-        secret,
-    };
+    let reveal = SecretReveal::HostSecret { host_id, secret };
     reveal_and_redirect(&state, reveal).await
 }
 
@@ -282,13 +279,21 @@ pub async fn revoke(
         Ok(h) => h,
         Err(e) => {
             tracing::error!(error = ?e, "admin: host lookup before revoke failed");
-            return render_admin_error(&state, "Revoke failed", &format!("Could not revoke host: {e}"));
+            return render_admin_error(
+                &state,
+                "Revoke failed",
+                &format!("Could not revoke host: {e}"),
+            );
         }
     };
 
     if let Err(e) = posix_db::delete_host(&state.db, &id).await {
         tracing::error!(error = ?e, "admin: host delete failed");
-        return render_admin_error(&state, "Revoke failed", &format!("Could not revoke host: {e}"));
+        return render_admin_error(
+            &state,
+            "Revoke failed",
+            &format!("Could not revoke host: {e}"),
+        );
     }
 
     if let Some(h) = host {
@@ -341,7 +346,11 @@ pub async fn rotate(
         Ok(None) => return render_admin_error(&state, "Rotate failed", "No such host."),
         Err(e) => {
             tracing::error!(error = ?e, "admin: host lookup before rotate failed");
-            return render_admin_error(&state, "Rotate failed", &format!("Could not rotate secret: {e}"));
+            return render_admin_error(
+                &state,
+                "Rotate failed",
+                &format!("Could not rotate secret: {e}"),
+            );
         }
     };
 
@@ -352,7 +361,11 @@ pub async fn rotate(
         Ok(_) => {}
         Err(e) => {
             tracing::error!(error = ?e, "admin: host secret rotate failed");
-            return render_admin_error(&state, "Rotate failed", &format!("Could not rotate secret: {e}"));
+            return render_admin_error(
+                &state,
+                "Rotate failed",
+                &format!("Could not rotate secret: {e}"),
+            );
         }
     }
 
@@ -391,7 +404,10 @@ async fn reveal_and_redirect(state: &AppState, reveal: SecretReveal) -> Response
                 );
             }
         };
-    let url = format!("/admin/hosts?reveal={}", ory_client::apis::urlencode(&token));
+    let url = format!(
+        "/admin/hosts?reveal={}",
+        ory_client::apis::urlencode(&token)
+    );
     Redirect::to(&url).into_response()
 }
 
@@ -422,8 +438,14 @@ mod tests {
     fn host_audit_metadata_builds_and_omits_secret() {
         let md = host_audit_metadata("web-01.example.com", Some(2000));
         let obj = md.as_value().as_object().expect("metadata is an object");
-        assert_eq!(obj.get("hostname").and_then(|v| v.as_str()), Some("web-01.example.com"));
-        assert_eq!(obj.get("allowed_gid").and_then(|v| v.as_str()), Some("2000"));
+        assert_eq!(
+            obj.get("hostname").and_then(|v| v.as_str()),
+            Some("web-01.example.com")
+        );
+        assert_eq!(
+            obj.get("allowed_gid").and_then(|v| v.as_str()),
+            Some("2000")
+        );
         assert!(!obj.contains_key("secret"));
         assert!(!obj.contains_key("secret_hash"));
         let json = md.as_value().to_string();

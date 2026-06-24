@@ -55,11 +55,15 @@ pub async fn reconcile_orphans(db: &DbPool, ory: &Arc<OryClients>) -> anyhow::Re
     // Sweep the union of identities holding posix accounts AND offline
     // secrets: an identity can carry an offline verifier without a posix
     // account, and its row must be purged once the Kratos identity is gone.
-    let mut id_set: std::collections::HashSet<String> =
-        db::all_account_identity_ids(db).await?.into_iter().collect();
+    let mut id_set: std::collections::HashSet<String> = db::all_account_identity_ids(db)
+        .await?
+        .into_iter()
+        .collect();
     match db::all_offline_secret_identity_ids(db).await {
         Ok(offline_ids) => id_set.extend(offline_ids),
-        Err(e) => tracing::warn!(error = %e, "posix reconcile: offline-secret id scan failed; continuing with account ids"),
+        Err(e) => {
+            tracing::warn!(error = %e, "posix reconcile: offline-secret id scan failed; continuing with account ids")
+        }
     }
     let ids: Vec<String> = id_set.into_iter().collect();
     if ids.is_empty() {

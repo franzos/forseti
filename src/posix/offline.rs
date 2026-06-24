@@ -106,7 +106,10 @@ mod tests {
     fn two_mints_differ_random_salt() {
         let a = mint_verifier("samepassphrase").unwrap();
         let b = mint_verifier("samepassphrase").unwrap();
-        assert_ne!(a, b, "random per-call salt must make the PHC strings differ");
+        assert_ne!(
+            a, b,
+            "random per-call salt must make the PHC strings differ"
+        );
         // Both still verify the same passphrase.
         assert!(verify("samepassphrase", &a));
         assert!(verify("samepassphrase", &b));

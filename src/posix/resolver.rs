@@ -118,8 +118,12 @@ async fn resolve_scope(
 }
 
 async fn passwd_all(State(state): State<AppState>, host: RequirePosixHost) -> Response {
-    let scope = match resolve_scope(&state, &host, Json(Vec::<PasswdEntry>::new()).into_response())
-        .await
+    let scope = match resolve_scope(
+        &state,
+        &host,
+        Json(Vec::<PasswdEntry>::new()).into_response(),
+    )
+    .await
     {
         Ok(s) => s,
         Err(r) => return r,
@@ -179,8 +183,12 @@ async fn serve_account_scoped(
 }
 
 async fn group_all(State(state): State<AppState>, host: RequirePosixHost) -> Response {
-    let scope = match resolve_scope(&state, &host, Json(Vec::<GroupEntry>::new()).into_response())
-        .await
+    let scope = match resolve_scope(
+        &state,
+        &host,
+        Json(Vec::<GroupEntry>::new()).into_response(),
+    )
+    .await
     {
         Ok(s) => s,
         Err(r) => return r,

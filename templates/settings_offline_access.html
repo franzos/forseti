@@ -42,12 +42,17 @@
           </p>
         {% endif %}
 
-        <form method="POST" action="/settings/offline-access" class="flex flex-col gap-stack-md">
+        <form method="POST"
+              action="/settings/offline-access"
+              class="flex flex-col gap-stack-md">
           <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
           <div class="flex flex-col gap-stack-sm">
-            <label for="passphrase"
-                   class="font-label-md text-label-md text-on-surface">
-              {% if has_secret %}New offline passphrase{% else %}Offline passphrase{% endif %}
+            <label for="passphrase" class="font-label-md text-label-md text-on-surface">
+              {% if has_secret %}
+                New offline passphrase
+              {% else %}
+                Offline passphrase
+              {% endif %}
             </label>
             <input type="password"
                    id="passphrase"
@@ -63,7 +68,11 @@
           <div>
             <button type="submit"
                     class="inline-flex items-center justify-center gap-2 bg-primary text-on-primary hover:bg-primary/90 px-5 py-3 rounded-xl font-label-lg text-label-lg font-semibold">
-              {% if has_secret %}Change passphrase{% else %}Set passphrase{% endif %}
+              {% if has_secret %}
+                Change passphrase
+              {% else %}
+                Set passphrase
+              {% endif %}
             </button>
           </div>
         </form>
@@ -76,7 +85,9 @@
             Delete your offline passphrase. Enrolled hosts drop it on their next sync, and
             you'll no longer be able to log in to them while they're offline.
           </p>
-          <form method="POST" action="/settings/offline-access/clear" class="mt-stack-md">
+          <form method="POST"
+                action="/settings/offline-access/clear"
+                class="mt-stack-md">
             <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
             <button type="submit"
                     class="inline-flex items-center justify-center gap-2 bg-error text-on-error hover:bg-error/90 px-5 py-3 rounded-xl font-label-lg text-label-lg font-semibold">
