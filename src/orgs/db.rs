@@ -396,17 +396,21 @@ pub async fn auto_join_default_txn(
     let email = email.to_string();
     let admin_cfg = admin_cfg.clone();
     let now = Utc::now().to_rfc3339();
-    db_interact!(db, |conn| {
-        conn.transaction::<_, diesel::result::Error, _>(|c| {
-            // Member count re-read inside the txn is the race guard.
-            // SERIALIZABLE isn't needed: sqlite serialises writers via the WAL
-            // write lock, postgres READ COMMITTED is fine since we only insert.
-            // The loser sees the winner's row (count > 0 → member) or hits the
-            // unique constraint (already a member, idempotent).
+
+    // Member count re-read inside the txn is the race guard: the loser sees the
+    // winner's row (count > 0 → member) or hits the unique constraint (already a
+    // member, idempotent). The txn reads then writes, so on sqlite it must start
+    // with BEGIN IMMEDIATE: a deferred BEGIN begins as a reader and the
+    // read->write upgrade returns SQLITE_BUSY *immediately* when another writer
+    // holds the lock (busy_timeout doesn't cover promotion deadlocks), which
+    // silently dropped fresh users' auto-join. IMMEDIATE grabs the write lock up
+    // front so busy_timeout waits. Postgres (MVCC) is unaffected.
+    macro_rules! join_default {
+        ($c:expr) => {{
             let count: i64 = organization_members::table
                 .filter(organization_members::org_id.eq(super::DEFAULT_ORG_ID))
                 .count()
-                .get_result(c)?;
+                .get_result($c)?;
             let role = super::pick_default_role(&admin_cfg, &email, count == 0);
             diesel::insert_into(organization_members::table)
                 .values(NewMember {
@@ -416,10 +420,35 @@ pub async fn auto_join_default_txn(
                     added_at: now.clone(),
                     added_by: None,
                 })
-                .execute(c)?;
+                .execute($c)?;
             Ok(())
-        })
-    })?;
+        }};
+    }
+
+    match db {
+        DbPool::Sqlite(pool) => {
+            let conn = pool
+                .get()
+                .await
+                .map_err(|e| anyhow::anyhow!("sqlite pool: {e}"))?;
+            conn.interact(move |c: &mut diesel::sqlite::SqliteConnection| {
+                c.immediate_transaction::<_, diesel::result::Error, _>(|c| join_default!(c))
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("sqlite interact: {e}"))??;
+        }
+        DbPool::Postgres(pool) => {
+            let conn = pool
+                .get()
+                .await
+                .map_err(|e| anyhow::anyhow!("postgres pool: {e}"))?;
+            conn.interact(move |c: &mut diesel::pg::PgConnection| {
+                c.transaction::<_, diesel::result::Error, _>(|c| join_default!(c))
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("postgres interact: {e}"))??;
+        }
+    }
     Ok(())
 }
 
