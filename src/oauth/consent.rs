@@ -28,6 +28,12 @@ struct ConsentScopeView {
     required: bool,
 }
 
+/// One remembered account offered in the consent-screen chooser.
+struct ConsentAccountView {
+    id: String,
+    label: String,
+}
+
 #[derive(Template)]
 #[template(path = "consent.html")]
 struct ConsentTemplate {
@@ -44,6 +50,9 @@ struct ConsentTemplate {
     /// row exists (legacy clients default to verified). Drives the consent
     /// badge: verified shows a checkmark, unverified a caution banner.
     verified: bool,
+    /// Other accounts remembered on this device (current subject excluded);
+    /// each offers a one-click switch via the OAuth restart.
+    known_accounts: Vec<ConsentAccountView>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -206,6 +215,21 @@ pub(crate) async fn oauth_consent(
         }
     };
 
+    let known_ids = crate::accounts::cookie::read_known_account_ids(
+        &headers,
+        &state.cookie_secret,
+        state.cfg.accounts.known_accounts_cookie_ttl_seconds,
+    );
+    let known_accounts: Vec<ConsentAccountView> = crate::accounts::resolve(&state, &known_ids)
+        .await
+        .into_iter()
+        .filter(|a| a.id != subject)
+        .map(|a| ConsentAccountView {
+            id: a.id,
+            label: if a.email.is_empty() { a.display_name.clone() } else { a.email.clone() },
+        })
+        .collect();
+
     render(&ConsentTemplate {
         chrome: PageChrome::from_parts(&state, subject_email.clone(), csrf.0),
         consent_intro: state.cfg.brand.consent_intro.clone(),
@@ -214,6 +238,7 @@ pub(crate) async fn oauth_consent(
         challenge,
         scopes,
         verified,
+        known_accounts,
     })
 }
 
