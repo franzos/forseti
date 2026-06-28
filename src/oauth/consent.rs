@@ -381,11 +381,7 @@ async fn switch_account(
     let request_url = req.request_url.clone().unwrap_or_default();
 
     let cookie = crate::cookies::cookie_header(headers);
-    if !cookie.is_empty() {
-        if let Ok(Some(url)) = ory::kratos::fetch_logout_url(&state.ory, &cookie).await {
-            let _ = ory::kratos::hit_logout_url(&state.ory, &url, Some(&cookie)).await;
-        }
-    }
+    ory::kratos::tear_down_session(&state.ory, &cookie).await;
 
     let actor_email = lookup_identity_email(state, &subject).await;
     let mut ev = AuditEvent::new(action::OAUTH_ACCOUNT_SWITCH).with_ctx(actx);

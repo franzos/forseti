@@ -654,6 +654,18 @@ pub async fn version(clients: &OryClients) -> Result<String> {
     Ok(v.version)
 }
 
+/// Best-effort Kratos session teardown: fetch the logout URL for the cookie's
+/// session and hit it server-side. No-op when the cookie is empty. Callers that
+/// need a guarantee the session is gone must re-check `whoami` afterwards.
+pub async fn tear_down_session(clients: &OryClients, cookie: &str) {
+    if cookie.is_empty() {
+        return;
+    }
+    if let Ok(Some(url)) = fetch_logout_url(clients, cookie).await {
+        let _ = hit_logout_url(clients, &url, Some(cookie)).await;
+    }
+}
+
 /// Fire the single-use `logout_url` server-side to destroy the session without following the post-logout
 /// redirect (for callers routing the browser elsewhere). Transport errors bubble; non-2xx are fire-and-forget.
 pub async fn hit_logout_url(clients: &OryClients, url: &str, cookie: Option<&str>) -> Result<()> {
