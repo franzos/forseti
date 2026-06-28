@@ -2231,3 +2231,13 @@ pub async fn portal_reachable() -> bool {
         .map(|r| r.status().is_success())
         .unwrap_or(false)
 }
+
+/// Pull the `value` of a hidden `_csrf` input from an HTML form body.
+pub fn extract_csrf_form_token(html: &str) -> Option<String> {
+    let idx = html.find("name=\"_csrf\"")?;
+    let rest = &html[idx..];
+    let val_idx = rest.find("value=\"")?;
+    let after = &rest[val_idx + "value=\"".len()..];
+    let end = after.find('"')?;
+    Some(after[..end].to_string())
+}

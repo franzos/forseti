@@ -33,6 +33,9 @@ mod common;
 #[path = "integration/aal2_enforcement.rs"]
 mod aal2_enforcement;
 
+#[path = "integration/accounts.rs"]
+mod accounts;
+
 #[path = "integration/account_delete.rs"]
 mod account_delete;
 
