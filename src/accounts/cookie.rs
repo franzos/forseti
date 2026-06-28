@@ -21,7 +21,6 @@ fn codec<'a>(ttl_secs: u64, secure: bool) -> SignedCookie<'a> {
     }
 }
 
-/// Move `id` to the front (most-recently-used), dedup, and truncate to `cap`.
 pub(crate) fn add_mru(ids: Vec<String>, id: &str, cap: usize) -> Vec<String> {
     let mut out = Vec::with_capacity(ids.len() + 1);
     out.push(id.to_string());
@@ -34,7 +33,6 @@ pub(crate) fn add_mru(ids: Vec<String>, id: &str, cap: usize) -> Vec<String> {
     out
 }
 
-/// Drop `id` from the list, preserving order.
 pub(crate) fn remove(ids: Vec<String>, id: &str) -> Vec<String> {
     ids.into_iter().filter(|x| x != id).collect()
 }

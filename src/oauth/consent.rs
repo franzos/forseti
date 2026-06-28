@@ -259,10 +259,7 @@ pub(crate) struct ConsentSwitchForm {
     identity_id: String,
 }
 
-/// Switch to a remembered account from the consent screen: restart the SAME
-/// OAuth flow (so the downstream app still completes) with a forced
-/// `prompt=login` and the target as `login_hint`, after tearing down the
-/// current session.
+/// Restart the same OAuth flow with prompt=login so the downstream app still completes after a session switch.
 pub(crate) async fn consent_switch(
     State(state): State<AppState>,
     headers: HeaderMap,

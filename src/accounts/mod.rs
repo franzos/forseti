@@ -1,6 +1,4 @@
-//! Device-local "remembered accounts" chooser (Tier 1): a signed cookie of
-//! identity UUIDs, with labels resolved server-side. One live session at a
-//! time; switching is logout + fresh login.
+//! Device-local remembered-accounts chooser: signed cookie of identity UUIDs, labels resolved server-side.
 
 use crate::ory;
 use crate::state::AppState;
@@ -10,7 +8,6 @@ pub(crate) mod handlers;
 
 pub(crate) use handlers::router;
 
-/// Display view for one remembered account on the chooser surfaces.
 #[derive(Debug, Clone)]
 pub(crate) struct AccountView {
     pub id: String,
@@ -18,8 +15,7 @@ pub(crate) struct AccountView {
     pub display_name: String,
 }
 
-/// Build a view from a Kratos identity. `name` may be a string or
-/// `{first, last}`; display falls back to the email, then the id.
+/// Build a display view from a Kratos identity; falls back email then id.
 pub(crate) fn account_view_from_identity(id: &str, identity: &ory::Identity) -> AccountView {
     let traits = identity.traits.as_ref();
     let email = traits
@@ -44,9 +40,7 @@ pub(crate) fn account_view_from_identity(id: &str, identity: &ory::Identity) -> 
     AccountView { id: id.to_string(), email, display_name }
 }
 
-/// Resolve a list of identity ids to display views via the Kratos admin API.
-/// Ids whose lookup fails (e.g. deleted identity) are dropped, so the list
-/// self-heals.
+/// Resolve identity ids to display views; failed lookups are silently dropped so the list self-heals.
 pub(crate) async fn resolve(state: &AppState, ids: &[String]) -> Vec<AccountView> {
     let mut views = Vec::with_capacity(ids.len());
     for id in ids {

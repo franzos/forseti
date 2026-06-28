@@ -1,6 +1,4 @@
-//! `POST /accounts/switch` — tear down the current Kratos session, verify it
-//! is gone, clear the active-org pin, audit, and redirect to a fresh login
-//! prefilled for the target identity.
+//! Account switch and forget handlers.
 
 use axum::extract::State;
 use axum::http::HeaderMap;
@@ -27,9 +25,7 @@ pub(crate) struct SwitchForm {
     return_to: Option<String>,
 }
 
-/// `POST /accounts/switch` — log the current session out server-side, confirm
-/// it is gone, clear the active-org pin, audit the switch, and redirect to
-/// `/login` with a `login_hint` seeded from `target_id`.
+/// Tear down the current session, confirm it is gone, and redirect to a fresh login.
 pub(crate) async fn switch(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -76,17 +72,17 @@ pub(crate) async fn switch(
     let mut resp = build_login_redirect(&state, &form.target_id, form.return_to.as_deref());
     append_set_cookie(&mut resp, Some(clear_org));
 
-    let ev = AuditEvent::new(action::ACCOUNT_SWITCHED)
-        .actor_user(&actor_id, "")
+    let mut ev = AuditEvent::new(action::ACCOUNT_SWITCHED)
         .target(target_kind::IDENTITY, &form.target_id)
         .with_ctx(&actx);
+    if !actor_id.is_empty() {
+        ev = ev.actor_user(&actor_id, "");
+    }
     let _ = audit::log(&state.db, ev).await;
 
     resp
 }
 
-/// Build a `/login` redirect with optional `return_to` (validated) and
-/// `login_hint` (the target identity id, URL-encoded).
 fn build_login_redirect(state: &AppState, target_id: &str, return_to: Option<&str>) -> Response {
     let mut qs = String::new();
 
@@ -117,8 +113,7 @@ pub(crate) struct ForgetForm {
     return_to: Option<String>,
 }
 
-/// Remove one remembered account (or all, when `identity_id == "*"`) from this
-/// device's chooser list.
+/// Remove one or all remembered accounts from the device chooser cookie.
 pub(crate) async fn forget(
     State(state): State<AppState>,
     headers: HeaderMap,
