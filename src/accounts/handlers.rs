@@ -19,8 +19,7 @@ use crate::web::append_set_cookie;
 #[derive(Debug, Deserialize)]
 pub(crate) struct SwitchForm {
     /// Kratos identity UUID to prefill on the login page after teardown.
-    #[serde(default)]
-    target_id: String,
+    identity_id: String,
     #[serde(default)]
     return_to: Option<String>,
 }
@@ -69,11 +68,11 @@ pub(crate) async fn switch(
     // Session is confirmed gone; clear the active-org pin on the success path only.
     let clear_org = orgs::cookie::clear_active_org_cookie(secure);
 
-    let mut resp = build_login_redirect(&state, &form.target_id, form.return_to.as_deref());
+    let mut resp = build_login_redirect(&state, &form.identity_id, form.return_to.as_deref());
     append_set_cookie(&mut resp, Some(clear_org));
 
     let mut ev = AuditEvent::new(action::ACCOUNT_SWITCHED)
-        .target(target_kind::IDENTITY, &form.target_id)
+        .target(target_kind::IDENTITY, &form.identity_id)
         .with_ctx(&actx);
     if !actor_id.is_empty() {
         ev = ev.actor_user(&actor_id, "");
@@ -83,7 +82,7 @@ pub(crate) async fn switch(
     resp
 }
 
-fn build_login_redirect(state: &AppState, target_id: &str, return_to: Option<&str>) -> Response {
+fn build_login_redirect(state: &AppState, identity_id: &str, return_to: Option<&str>) -> Response {
     let mut qs = String::new();
 
     let rt = return_to
@@ -94,14 +93,14 @@ fn build_login_redirect(state: &AppState, target_id: &str, return_to: Option<&st
         qs.push_str(&ory_client::apis::urlencode(rt));
     }
 
-    if !target_id.is_empty() {
+    if !identity_id.is_empty() {
         if qs.is_empty() {
             qs.push('?');
         } else {
             qs.push('&');
         }
         qs.push_str("login_hint=");
-        qs.push_str(&ory_client::apis::urlencode(target_id));
+        qs.push_str(&ory_client::apis::urlencode(identity_id));
     }
 
     Redirect::to(&format!("/login{qs}")).into_response()
