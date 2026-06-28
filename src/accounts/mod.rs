@@ -6,6 +6,9 @@ use crate::ory;
 use crate::state::AppState;
 
 pub(crate) mod cookie;
+pub(crate) mod handlers;
+
+pub(crate) use handlers::router;
 
 /// Display view for one remembered account on the chooser surfaces.
 #[derive(Debug, Clone)]

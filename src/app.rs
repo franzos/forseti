@@ -27,7 +27,7 @@ use crate::profiles;
 use crate::state::AppState;
 use crate::static_assets;
 use crate::webhook;
-use crate::{admin, auth, dashboard, oauth, settings};
+use crate::{accounts, admin, auth, dashboard, oauth, settings};
 
 pub(crate) async fn healthz() -> &'static str {
     "ok"
@@ -134,6 +134,7 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         ))
         .merge(profiles::router())
         .merge(oauth::router(&state.cfg.oauth, &state.cfg.proxy))
+        .merge(accounts::router())
         .merge(handoff::router(&state.cfg.proxy, &state.cfg.handoff))
         .merge(admin::router())
         .route_layer(axum::middleware::from_fn_with_state(

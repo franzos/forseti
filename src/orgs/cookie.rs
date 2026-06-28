@@ -29,6 +29,11 @@ pub fn read_active_org_cookie(headers: &HeaderMap, secret: &[u8], ttl_secs: u64)
     String::from_utf8(payload).ok()
 }
 
+/// `Set-Cookie` line that clears the active-org pin.
+pub fn clear_active_org_cookie(secure: bool) -> String {
+    codec(0, secure).clear_header()
+}
+
 /// Build a `Set-Cookie` header value pinning `org_id` as the active org.
 pub fn set_active_org_cookie(secret: &[u8], ttl_secs: u64, org_id: &str, secure: bool) -> String {
     let c = codec(ttl_secs, secure);
