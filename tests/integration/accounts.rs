@@ -137,7 +137,7 @@ async fn accounts_switch_tears_down_and_redirects() {
     // At least one Set-Cookie should clear forseti_active_org.
     let clears_active_org = res.headers().get_all(reqwest::header::SET_COOKIE).iter().any(|v| {
         v.to_str()
-            .map(|s| s.contains("forseti_active_org") && (s.contains("Max-Age=0") || s.contains("expires")))
+            .map(|s| s.contains("forseti_active_org") && (s.contains("Max-Age=0") || s.to_ascii_lowercase().contains("expires")))
             .unwrap_or(false)
     });
     assert!(
