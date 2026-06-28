@@ -111,6 +111,38 @@ fn build_login_redirect(state: &AppState, target_id: &str, return_to: Option<&st
     Redirect::to(&format!("/login{qs}")).into_response()
 }
 
+#[derive(Debug, Deserialize)]
+pub(crate) struct ForgetForm {
+    identity_id: String,
+    return_to: Option<String>,
+}
+
+/// Remove one remembered account (or all, when `identity_id == "*"`) from this
+/// device's chooser list.
+pub(crate) async fn forget(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    CsrfForm(form): CsrfForm<ForgetForm>,
+) -> Response {
+    let secure = state.cfg.self_.is_https();
+    let ttl = state.cfg.accounts.known_accounts_cookie_ttl_seconds;
+    let dest = crate::safe_return_to(&state.cfg, form.return_to.as_deref().unwrap_or("/")).to_string();
+
+    let set_cookie = if form.identity_id == "*" {
+        crate::accounts::cookie::clear_known_accounts_cookie(secure)
+    } else {
+        let ids = crate::accounts::cookie::read_known_account_ids(&headers, &state.cookie_secret, ttl);
+        let next = crate::accounts::cookie::remove(ids, &form.identity_id);
+        crate::accounts::cookie::set_known_accounts_cookie(&state.cookie_secret, ttl, &next, secure)
+    };
+
+    let mut resp = Redirect::to(&dest).into_response();
+    crate::web::append_set_cookie(&mut resp, Some(set_cookie));
+    resp
+}
+
 pub(crate) fn router() -> Router<AppState> {
-    Router::new().route("/accounts/switch", post(switch))
+    Router::new()
+        .route("/accounts/switch", post(switch))
+        .route("/accounts/forget", post(forget))
 }
