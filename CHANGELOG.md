@@ -6,6 +6,7 @@
 - POSIX provisioning: searchable identity picker, accept a UUID or an email
 - Edit an enrolled host after enrollment
 - Scope a host to any of several org groups, not just one
+- "Use a different account" on the OAuth consent screen, to re-authenticate as someone else
 
 ### Changed
 - Grouped the admin and settings navigation into labelled sections

@@ -103,6 +103,7 @@ pub mod action {
     pub const OAUTH_CONSENT_GRANTED: &str = "oauth.consent.granted";
     pub const OAUTH_CONSENT_DENIED: &str = "oauth.consent.denied";
     pub const OAUTH_CONSENT_REVOKED: &str = "oauth.consent.revoked";
+    pub const OAUTH_ACCOUNT_SWITCH: &str = "oauth.account.switch";
     /// Verification-state lookup against `oauth_client_metadata` failed
     /// (DB blip). The consent flow fails closed and shows the caution
     /// banner — this event gives operators a signal so they notice when

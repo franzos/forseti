@@ -233,6 +233,10 @@ pub(crate) async fn oauth_consent_submit(
     actx: AuditCtx,
     CsrfForm(form): CsrfForm<OAuthConsentForm>,
 ) -> Response {
+    if form.decision == "switch_account" {
+        return switch_account(&state, &headers, &actx, &form.consent_challenge).await;
+    }
+
     let remember = form.remember.as_deref() == Some("true");
 
     if form.decision == "deny" {
@@ -352,6 +356,53 @@ pub(crate) async fn oauth_consent_submit(
     redirect
 }
 
+/// Tear down the Kratos session and restart the OAuth flow with
+/// `prompt=login` so the user lands on `/login` to authenticate as someone
+/// else. Teardown is best-effort; the user may already be signed out.
+async fn switch_account(
+    state: &AppState,
+    headers: &axum::http::HeaderMap,
+    actx: &AuditCtx,
+    challenge: &str,
+) -> Response {
+    let req = match ory::hydra::get_consent_request(&state.ory, challenge).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!(error = ?e, "hydra get_consent_request failed during account switch");
+            return Redirect::to("/error").into_response();
+        }
+    };
+    let subject = req.subject.clone().unwrap_or_default();
+    let client_id = req
+        .client
+        .as_ref()
+        .and_then(|c| c.client_id.clone())
+        .unwrap_or_default();
+    let request_url = req.request_url.clone().unwrap_or_default();
+
+    let cookie = crate::cookies::cookie_header(headers);
+    if !cookie.is_empty() {
+        if let Ok(Some(url)) = ory::kratos::fetch_logout_url(&state.ory, &cookie).await {
+            let _ = ory::kratos::hit_logout_url(&state.ory, &url, Some(&cookie)).await;
+        }
+    }
+
+    let actor_email = lookup_identity_email(state, &subject).await;
+    let mut ev = AuditEvent::new(action::OAUTH_ACCOUNT_SWITCH).with_ctx(actx);
+    if !subject.is_empty() {
+        ev = ev.actor_user(&subject, &actor_email);
+    }
+    if !client_id.is_empty() {
+        ev = ev.target(target_kind::OAUTH_CLIENT, client_id);
+    }
+    let _ = audit::log(&state.db, ev).await;
+
+    match with_prompt_login(&request_url) {
+        Some(target) => Redirect::to(&target).into_response(),
+        None => Redirect::to("/login").into_response(),
+    }
+}
+
 /// Pick a single resource-URL to stamp on
 /// `oauth_client_metadata.resource_url`. RFC 8707 clients send
 /// `?resource=<url>` on the auth URL (Hydra's `request_url`); others use
@@ -379,6 +430,26 @@ fn extract_resource_url(request_url: &str, requested_audience: &[String]) -> Opt
         .map(|s| s.trim())
         .find(|s| !s.is_empty())
         .map(str::to_string)
+}
+
+/// Rebuild the original `/oauth2/auth` request URL with `prompt=login` so the
+/// restarted flow forces a fresh authentication. Any existing `prompt` value is
+/// dropped. `None` when `request_url` is empty or unparseable.
+fn with_prompt_login(request_url: &str) -> Option<String> {
+    if request_url.is_empty() {
+        return None;
+    }
+    let mut url = url::Url::parse(request_url).ok()?;
+    let preserved: Vec<(String, String)> = url
+        .query_pairs()
+        .filter(|(k, _)| k != "prompt")
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+    url.query_pairs_mut()
+        .clear()
+        .extend_pairs(preserved)
+        .append_pair("prompt", "login");
+    Some(url.into())
 }
 
 /// Best-effort identity email for the audit row. Empty `subject` or a
@@ -662,7 +733,42 @@ fn build_id_token_claims(
 
 #[cfg(test)]
 mod tests {
-    use super::extract_resource_url;
+    use super::{extract_resource_url, with_prompt_login};
+
+    fn prompt_values(url: &str) -> Vec<String> {
+        url::Url::parse(url)
+            .unwrap()
+            .query_pairs()
+            .filter(|(k, _)| k == "prompt")
+            .map(|(_, v)| v.into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn with_prompt_login_appends_when_absent() {
+        let out =
+            with_prompt_login("https://hydra.example.com/oauth2/auth?client_id=x&scope=openid")
+                .expect("should produce a url");
+        assert_eq!(prompt_values(&out), vec!["login".to_string()]);
+    }
+
+    #[test]
+    fn with_prompt_login_replaces_existing_prompt() {
+        let out =
+            with_prompt_login("https://hydra.example.com/oauth2/auth?prompt=none&client_id=x")
+                .expect("should produce a url");
+        assert_eq!(prompt_values(&out), vec!["login".to_string()]);
+    }
+
+    #[test]
+    fn with_prompt_login_empty_returns_none() {
+        assert_eq!(with_prompt_login(""), None);
+    }
+
+    #[test]
+    fn with_prompt_login_unparseable_returns_none() {
+        assert_eq!(with_prompt_login("not a url"), None);
+    }
 
     #[test]
     fn extract_resource_url_picks_rfc8707_resource_param() {
