@@ -28,9 +28,6 @@ pub(crate) struct ErrorQuery {
     id: Option<String>,
 }
 
-/// `/error?id=<error_id>` — Kratos's `flows.error.ui_url` lands here whenever
-/// a self-service flow terminates with an error that has no flow context
-/// (e.g. a stale link that's already been consumed).
 pub(crate) async fn error_page(
     State(state): State<AppState>,
     Query(query): Query<ErrorQuery>,
@@ -74,9 +71,8 @@ pub(crate) async fn error_page(
     })
 }
 
-/// Pull `(title, message, reason)` out of Kratos's self-service error envelope.
-/// Kratos wraps the actual error under `error.{id,message,reason,...}`; older
-/// versions use the top-level fields directly. Handle both.
+/// Older Kratos versions put the error at the top level, newer ones wrap it
+/// under `error.{id,message,reason,...}`. Handle both.
 fn extract_error_strings(body: &serde_json::Value) -> (String, String, String) {
     let inner = body.get("error").unwrap_or(body);
     let title = inner

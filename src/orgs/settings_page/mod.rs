@@ -1,17 +1,11 @@
-//! `/settings/organization*` — OSS Default + commercial-tier org pages.
+//! `/settings/organization*`: OSS Default + commercial-tier org pages.
 //!
 //! Two route shapes coexist:
-//!
-//! 1. `/settings/organization/*` — singular, Default-org-only. Lives in
-//!    OSS as the rebadged admin-management page that used to require
-//!    editing `config.toml`. No license gate.
-//! 2. `/settings/organizations/{slug}/*` — plural, multi-org. Commercial
-//!    only. Each handler checks `feature(Orgs)` before rendering.
-//!
-//! Sub-pages: overview (rename), branding (logo + support email), members
-//! (list + role + remove), pending-invites, create-new-org form.
+//! 1. `/settings/organization/*`: singular, Default-org-only, no license gate.
+//! 2. `/settings/organizations/{slug}/*`: plural, multi-org, gated on
+//!    `feature(Orgs)`.
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -28,14 +22,12 @@ mod list_create;
 mod members;
 mod overview;
 mod switch;
+mod teams;
 
 pub(crate) fn router() -> Router<AppState> {
     Router::new()
-        // OSS Default-org pages (singular, no slug) and the multi-org
-        // (commercial, `{slug}`) twins target the same handlers — an absent
-        // `{slug}` segment extracts as `None`, selecting the Default org.
-        // Everything past resolution is shared, including the data-driven
-        // license gate.
+        // Singular (Default) and plural (`{slug}`) routes share handlers: an
+        // absent `{slug}` extracts as `None`, selecting the Default org.
         .route("/settings/organization", get(overview).post(overview_save))
         .route("/settings/organization/info", get(overview_info))
         .route(
@@ -44,12 +36,41 @@ pub(crate) fn router() -> Router<AppState> {
         )
         .route("/settings/organization/members", get(members))
         .route(
+            "/settings/organization/members/visibility",
+            post(members_visibility),
+        )
+        .route(
             "/settings/organization/members/{identity_id}/role",
             post(members_role),
         )
         .route(
+            "/settings/organization/members/{identity_id}/hidden",
+            post(members_hidden),
+        )
+        .route(
             "/settings/organization/members/{identity_id}/remove",
             post(members_remove),
+        )
+        // Teams (commercial everywhere) — Default-org singular routes.
+        .route(
+            "/settings/organization/teams",
+            get(teams).post(teams_create),
+        )
+        .route(
+            "/settings/organization/teams/{team_id}/rename",
+            post(teams_rename),
+        )
+        .route(
+            "/settings/organization/teams/{team_id}/delete",
+            post(teams_delete),
+        )
+        .route(
+            "/settings/organization/teams/{team_id}/members",
+            post(teams_member_add),
+        )
+        .route(
+            "/settings/organization/teams/{team_id}/members/{identity_id}/remove",
+            post(teams_member_remove),
         )
         // Multi-org (commercial)
         .route("/settings/organizations", get(list_create::orgs_list))
@@ -68,12 +89,41 @@ pub(crate) fn router() -> Router<AppState> {
         )
         .route("/settings/organizations/{slug}/members", get(members))
         .route(
+            "/settings/organizations/{slug}/members/visibility",
+            post(members_visibility),
+        )
+        .route(
             "/settings/organizations/{slug}/members/{identity_id}/role",
             post(members_role),
         )
         .route(
+            "/settings/organizations/{slug}/members/{identity_id}/hidden",
+            post(members_hidden),
+        )
+        .route(
             "/settings/organizations/{slug}/members/{identity_id}/remove",
             post(members_remove),
+        )
+        // Teams (commercial) — multi-org plural twins.
+        .route(
+            "/settings/organizations/{slug}/teams",
+            get(teams).post(teams_create),
+        )
+        .route(
+            "/settings/organizations/{slug}/teams/{team_id}/rename",
+            post(teams_rename),
+        )
+        .route(
+            "/settings/organizations/{slug}/teams/{team_id}/delete",
+            post(teams_delete),
+        )
+        .route(
+            "/settings/organizations/{slug}/teams/{team_id}/members",
+            post(teams_member_add),
+        )
+        .route(
+            "/settings/organizations/{slug}/teams/{team_id}/members/{identity_id}/remove",
+            post(teams_member_remove),
         )
         .route(
             "/settings/organizations/{slug}/delete",
@@ -83,12 +133,10 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/orgs/switch", post(switch::switch_active_org))
 }
 
-// --- handlers: one fn per page, shared by the singular Default-org route
-// (`slug` absent → `None`) and the plural multi-org route (`{slug}` → `Some`).
+// --- handlers: one fn per page, shared by the singular and plural routes ---
 
-/// Pull the optional `slug` segment out of a path that may or may not carry
-/// it. The singular `/settings/organization*` routes have no `{slug}`, so the
-/// extractor yields `None` (the Default org); the plural routes carry it.
+/// Extract the optional `slug` segment. Singular routes have no `{slug}` and
+/// yield `None` (the Default org); plural routes carry it.
 fn slug_of(path: Option<Path<String>>) -> Option<String> {
     path.map(|Path(s)| s)
 }
@@ -179,9 +227,31 @@ async fn members_remove(
     members::members_remove(state, params.into_target(), headers, sess, csrf, actx, form).await
 }
 
-/// Path params for the member role/remove routes. `slug` is absent on the
-/// singular Default-org route and present on the plural multi-org route;
-/// `serde` fills it from whichever segments the matched route exposes.
+async fn members_visibility(
+    state: State<AppState>,
+    slug: Option<Path<String>>,
+    headers: HeaderMap,
+    sess: RequireSession,
+    csrf: Csrf,
+    actx: AuditCtx,
+    form: Form<members::VisibilityForm>,
+) -> Response {
+    members::members_visibility(state, slug_of(slug), headers, sess, csrf, actx, form).await
+}
+
+async fn members_hidden(
+    state: State<AppState>,
+    Path(params): Path<MemberPath>,
+    headers: HeaderMap,
+    sess: RequireSession,
+    actx: AuditCtx,
+    form: Form<members::HiddenForm>,
+) -> Response {
+    members::members_hidden(state, params.into_target(), headers, sess, actx, form).await
+}
+
+/// Path params for the member role/remove routes. `slug` is `None` on the
+/// singular route, `Some` on the plural one.
 #[derive(serde::Deserialize)]
 struct MemberPath {
     #[serde(default)]
@@ -193,6 +263,123 @@ impl MemberPath {
     fn into_target(self) -> members::MemberTarget {
         members::MemberTarget {
             slug: self.slug,
+            identity_id: self.identity_id,
+        }
+    }
+}
+
+// --- teams wrappers ------------------------------------------------------
+
+/// Optional `?team=<id>` selection driving the membership-manager panel.
+#[derive(serde::Deserialize)]
+struct TeamSelect {
+    #[serde(default)]
+    team: Option<String>,
+}
+
+async fn teams(
+    state: State<AppState>,
+    slug: Option<Path<String>>,
+    Query(sel): Query<TeamSelect>,
+    headers: HeaderMap,
+    sess: RequireSession,
+    csrf: Csrf,
+) -> Response {
+    teams::teams(state, slug_of(slug), sel.team, headers, sess, csrf).await
+}
+
+async fn teams_create(
+    state: State<AppState>,
+    slug: Option<Path<String>>,
+    headers: HeaderMap,
+    sess: RequireSession,
+    csrf: Csrf,
+    actx: AuditCtx,
+    form: Form<teams::CreateForm>,
+) -> Response {
+    teams::teams_create(state, slug_of(slug), headers, sess, csrf, actx, form).await
+}
+
+async fn teams_rename(
+    state: State<AppState>,
+    Path(params): Path<TeamPath>,
+    headers: HeaderMap,
+    sess: RequireSession,
+    csrf: Csrf,
+    actx: AuditCtx,
+    form: Form<teams::RenameForm>,
+) -> Response {
+    teams::teams_rename(state, params.into_target(), headers, sess, csrf, actx, form).await
+}
+
+async fn teams_delete(
+    state: State<AppState>,
+    Path(params): Path<TeamPath>,
+    headers: HeaderMap,
+    sess: RequireSession,
+    csrf: Csrf,
+    actx: AuditCtx,
+    form: Form<crate::csrf::CsrfForm>,
+) -> Response {
+    teams::teams_delete(state, params.into_target(), headers, sess, csrf, actx, form).await
+}
+
+async fn teams_member_add(
+    state: State<AppState>,
+    Path(params): Path<TeamPath>,
+    headers: HeaderMap,
+    sess: RequireSession,
+    csrf: Csrf,
+    actx: AuditCtx,
+    form: Form<teams::MemberAddForm>,
+) -> Response {
+    teams::teams_member_add(state, params.into_target(), headers, sess, csrf, actx, form).await
+}
+
+async fn teams_member_remove(
+    state: State<AppState>,
+    Path(params): Path<TeamMemberPath>,
+    headers: HeaderMap,
+    sess: RequireSession,
+    csrf: Csrf,
+    actx: AuditCtx,
+    form: Form<crate::csrf::CsrfForm>,
+) -> Response {
+    teams::teams_member_remove(state, params.into_target(), headers, sess, csrf, actx, form).await
+}
+
+/// Path params for team rename/delete/member-add routes. `slug` absent on the
+/// singular Default-org route, present on the plural multi-org route.
+#[derive(serde::Deserialize)]
+struct TeamPath {
+    #[serde(default)]
+    slug: Option<String>,
+    team_id: String,
+}
+
+impl TeamPath {
+    fn into_target(self) -> teams::TeamTarget {
+        teams::TeamTarget {
+            slug: self.slug,
+            team_id: self.team_id,
+        }
+    }
+}
+
+/// Path params for the team member-remove route.
+#[derive(serde::Deserialize)]
+struct TeamMemberPath {
+    #[serde(default)]
+    slug: Option<String>,
+    team_id: String,
+    identity_id: String,
+}
+
+impl TeamMemberPath {
+    fn into_target(self) -> teams::TeamMemberTarget {
+        teams::TeamMemberTarget {
+            slug: self.slug,
+            team_id: self.team_id,
             identity_id: self.identity_id,
         }
     }
@@ -214,12 +401,9 @@ pub(super) fn settings_ctx(sess: &RequireSession, csrf: &Csrf) -> SettingsCtx {
     }
 }
 
-/// Resolved org for a settings sub-page, plus the path prefix its
-/// redirects/links hang off. `slug` is `None` on the OSS Default route
-/// (`/settings/organization`) and `Some(_)` on the multi-org route
-/// (`/settings/organizations/{slug}`); the only behavioural fork between
-/// the two is org resolution and the redirect prefix — license gating
-/// stays data-driven off `org.id != DEFAULT_ORG_ID` in the worker helpers.
+/// Resolved org for a settings sub-page plus the redirect/link prefix. The
+/// only fork between singular and plural routes is org resolution and the
+/// prefix; license gating stays data-driven off `org.id != DEFAULT_ORG_ID`.
 pub(crate) struct OrgTarget {
     pub(crate) org: Org,
     /// `/settings/organization` or `/settings/organizations/{slug}`.
@@ -264,14 +448,9 @@ pub(super) async fn require_org_owner(
     Ok(())
 }
 
-/// Owner-check + license-gate for non-Default org write paths.
-///
-/// Default org stays OSS — no license check. Any named org (id !=
-/// `DEFAULT_ORG_ID`) requires `Feature::Orgs` to be `Allowed`. Locked
-/// licenses render the upsell page rather than a hard 403 so the user
-/// understands what's blocking them.
-///
-/// Caller passes `email` for the upsell page's "signed in as" line.
+/// Owner-check + license-gate for non-Default org write paths. Default org is
+/// OSS; named orgs require `Feature::Orgs`. Locked licenses render the upsell
+/// page rather than a hard 403. `email` feeds the upsell "signed in as" line.
 pub(super) async fn require_org_owner_with_license(
     state: &AppState,
     csrf_token: &str,

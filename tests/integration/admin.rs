@@ -501,6 +501,183 @@ async fn admin_happy_status_view() {
     );
 }
 
+/// Admin session browser: list renders, and revoking a target session via
+/// the confirm + POST cycle actually kills it in Kratos. Guards
+/// `admin_list_all_sessions` / `admin_get_session` (scope check) /
+/// `admin_revoke_session`.
+#[tokio::test]
+async fn admin_sessions_list_and_revoke_kills_target() {
+    if !portal_reachable().await {
+        eprintln!("portal not reachable; skipping");
+        return;
+    }
+    let Some(client) = admin_client_or_skip().await else {
+        return;
+    };
+
+    // A victim user with one live session.
+    let victim = register_test_user("admin-sess-victim").await;
+    let session_id = {
+        let ids = kratos_identity_session_ids(&victim.identity_id).await;
+        ids.into_iter()
+            .next()
+            .expect("victim should have an active session")
+    };
+
+    // List renders (drives admin_list_all_sessions with expand).
+    let res = client
+        .get(format!("{PORTAL}/admin/sessions"))
+        .send()
+        .await
+        .expect("GET /admin/sessions");
+    assert_eq!(res.status().as_u16(), 200, "sessions list status");
+
+    // Confirm page → POST revoke (drives admin_get_session scope check then
+    // admin_revoke_session).
+    let res = client
+        .get(format!("{PORTAL}/admin/sessions/{session_id}/revoke"))
+        .send()
+        .await
+        .expect("GET admin session revoke-confirm");
+    assert_eq!(res.status().as_u16(), 200, "revoke-confirm status");
+    let body = res.text().await.unwrap_or_default();
+    let csrf = extract_form_csrf(&body).expect("csrf in revoke-confirm form");
+    let res = client
+        .post(format!("{PORTAL}/admin/sessions/{session_id}/revoke"))
+        .form(&[("_csrf", csrf.as_str()), ("confirm", "yes")])
+        .send()
+        .await
+        .expect("POST admin session revoke");
+    assert!(
+        res.status().is_success() || res.status().is_redirection(),
+        "admin revoke status {}",
+        res.status()
+    );
+
+    assert!(
+        !whoami_is_active(&victim.client).await,
+        "admin revoke must invalidate the victim's session"
+    );
+
+    victim.cleanup().await;
+}
+
+/// The admin configuration page must surface Hydra's signing keys AND Kratos's
+/// identity schemas — exercising `signing_keys` + `list_identity_schemas` in
+/// one render. A failure on either upstream renders an "Unavailable" notice,
+/// which we assert against.
+#[tokio::test]
+async fn admin_configuration_lists_schemas_and_signing_keys() {
+    if !portal_reachable().await {
+        eprintln!("portal not reachable; skipping");
+        return;
+    }
+    let Some(client) = admin_client_or_skip().await else {
+        return;
+    };
+    let res = client
+        .get(format!("{PORTAL}/admin/configuration"))
+        .send()
+        .await
+        .expect("GET /admin/configuration");
+    assert_eq!(res.status().as_u16(), 200);
+    let body = res.text().await.unwrap_or_default();
+
+    // Kratos identity schemas: the playground registers the `default` schema.
+    assert!(
+        body.contains("Kratos identity schemas"),
+        "config page should render the schemas section"
+    );
+    assert!(
+        !body.contains("Unavailable — couldn't fetch identity schemas from Kratos.")
+            && !body.contains("No identity schemas registered."),
+        "list_identity_schemas should have returned at least one schema"
+    );
+    assert!(
+        body.contains("default"),
+        "the playground's `default` identity schema should be listed"
+    );
+
+    // Hydra signing keys.
+    assert!(
+        body.contains("Signing keys (JWKS)"),
+        "config page should render the signing-keys section"
+    );
+    assert!(
+        !body.contains("Unavailable — couldn't fetch Hydra's public keys.")
+            && !body.contains("Hydra advertised no signing keys."),
+        "signing_keys should have returned at least one key"
+    );
+}
+
+/// Editing a client through `/admin/clients/{id}` must round-trip to Hydra via
+/// `update_client` (full PUT) and persist. Guards the update path the
+/// create/delete smoke doesn't touch.
+#[tokio::test]
+async fn admin_client_update_persists_name_change() {
+    if !portal_reachable().await {
+        eprintln!("portal not reachable; skipping");
+        return;
+    }
+    let Some(client) = admin_client_or_skip().await else {
+        return;
+    };
+
+    // Seed a client straight via Hydra so the test owns its lifecycle.
+    let (client_id, _secret, redirect_uri) = hydra_create_test_client(&["openid", "email"]).await;
+
+    // Fetch the edit form for a CSRF token bound to this admin jar.
+    let res = client
+        .get(format!("{PORTAL}/admin/clients/{client_id}"))
+        .send()
+        .await
+        .expect("GET /admin/clients/{id}");
+    assert_eq!(res.status().as_u16(), 200, "client show/edit status");
+    let body = res.text().await.unwrap_or_default();
+    let csrf = extract_form_csrf(&body).expect("csrf in client edit form");
+
+    let new_name = "integration-renamed-client";
+    let res = client
+        .post(format!("{PORTAL}/admin/clients/{client_id}"))
+        .form(&[
+            ("_csrf", csrf.as_str()),
+            ("name", new_name),
+            ("grant_types", "authorization_code"),
+            ("grant_types", "refresh_token"),
+            ("response_types", "code"),
+            ("scope", "openid email"),
+            ("redirect_uris", redirect_uri.as_str()),
+            ("post_logout_redirect_uris", ""),
+            ("token_endpoint_auth_method", "client_secret_post"),
+            ("account_deletion_url", ""),
+        ])
+        .send()
+        .await
+        .expect("POST /admin/clients/{id} update");
+    assert!(
+        res.status().is_success() || res.status().is_redirection(),
+        "update status {}",
+        res.status()
+    );
+
+    // Hydra should reflect the new name.
+    let probe = browser_client();
+    let hydra = probe
+        .get(format!("{HYDRA_ADMIN}/admin/clients/{client_id}"))
+        .send()
+        .await
+        .expect("hydra get client after update");
+    assert_eq!(hydra.status().as_u16(), 200);
+    let v: serde_json::Value = hydra.json().await.expect("client json");
+    assert_eq!(
+        v["client_name"].as_str(),
+        Some(new_name),
+        "update_client should have persisted the new name to Hydra"
+    );
+
+    hydra_delete_client(&client_id).await;
+}
+
 /// Extract the value of the `_csrf` hidden input from a rendered HTML form.
 /// Used by the admin happy-path tests to pull the portal-issued CSRF token
 /// out of the response body so the follow-up POST passes the double-submit

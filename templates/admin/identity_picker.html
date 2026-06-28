@@ -1,0 +1,94 @@
+{% extends "admin/admin_shell.html" %}
+
+{% block admin_title %}Select user{% endblock %}
+
+{% block admin_content %}
+  <header class="mt-2 mb-stack-lg">
+    <h1 class="font-headline-lg-mobile md:font-headline-lg text-headline-lg-mobile md:text-headline-lg text-on-surface">
+      Select user
+    </h1>
+    <p class="font-body-md text-body-md text-on-surface-variant mt-1">Pick an identity to continue.</p>
+  </header>
+
+  {% if invalid_return %}
+    <div class="bg-error-container text-on-error-container border border-outline-variant rounded-xl px-4 py-3 font-body-md text-body-md">
+      Invalid return target.
+    </div>
+  {% else %}
+    <form method="GET"
+          action="/admin/identity-picker"
+          class="mb-stack-md flex items-center gap-stack-sm">
+      <input type="hidden" name="return_to" value="{{ return_to }}">
+      {% if !org_slug.is_empty() %}
+        <input type="hidden" name="org" value="{{ org_slug }}">
+      {% endif %}
+      <input type="text"
+             name="q"
+             value="{{ filter_q }}"
+             placeholder="Search by ID or email"
+             class="font-body-md text-body-md bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2 flex-1">
+      <button type="submit"
+              class="font-label-md text-label-md text-primary border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">
+        Search
+      </button>
+    </form>
+
+    <div class="bg-surface-container-lowest border border-outline-variant rounded-xl overflow-x-auto">
+      <table class="w-full text-left">
+        <thead class="bg-surface-container-low">
+          <tr>
+            <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Email</th>
+            <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">State</th>
+            <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Created</th>
+            <th class="px-4 py-3"></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% if rows.is_empty() %}
+            <tr>
+              <td colspan="4"
+                  class="px-4 py-6 text-center font-body-md text-body-md text-on-surface-variant">
+                No identities found.
+              </td>
+            </tr>
+          {% else %}
+            {% for r in rows %}
+              <tr class="border-t border-outline-variant hover:bg-surface-container-low">
+                <td class="px-4 py-3 font-body-md text-body-md text-on-surface"
+                    title="{{ r.id }}">{{ r.email }}</td>
+                <td class="px-4 py-3">
+                  {% if r.state == "active" %}
+                    <span class="inline-block px-2.5 py-0.5 rounded-full bg-success-container text-on-success-container font-label-sm text-label-sm font-semibold">{{ r.state }}</span>
+                  {% else %}
+                    <span class="inline-block px-2.5 py-0.5 rounded-full bg-error-container text-on-error-container font-label-sm text-label-sm font-semibold">{{ r.state }}</span>
+                  {% endif %}
+                </td>
+                <td class="px-4 py-3 font-body-sm text-body-sm text-on-surface-variant"
+                    title="{{ r.created_at }}">{{ r.created_at_pretty }}</td>
+                <td class="px-4 py-3 text-right">
+                  <a href="{{ r.select_url }}"
+                     class="font-label-md text-label-md text-primary border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">Select</a>
+                </td>
+              </tr>
+            {% endfor %}
+          {% endif %}
+        </tbody>
+      </table>
+    </div>
+
+    {% if !prev_url.is_empty() || !next_page_url.is_empty() %}
+      <div class="mt-stack-md flex justify-between items-center">
+        {% if !prev_url.is_empty() %}
+          <a href="{{ prev_url }}"
+             class="font-label-md text-label-md text-on-surface-variant border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">&larr; Back to start</a>
+        {% else %}
+          <span></span>
+        {% endif %}
+        {% if !next_page_url.is_empty() %}
+          <a href="{{ next_page_url }}"
+             class="font-label-md text-label-md text-primary border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">Next page &rarr;</a>
+        {% endif %}
+      </div>
+    {% endif %}
+  {% endif %}
+{% endblock %}

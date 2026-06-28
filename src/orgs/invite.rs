@@ -1,13 +1,8 @@
 //! Org invite mint + accept + email re-claim flows.
 //!
-//! Invite tokens are stored in `organization_invites` (URL handle in
-//! `token`, payload in the row). Mirrors the `SecretReveal` shape: the
-//! URL carries only the opaque token, the row carries the bound
-//! `{ org_id, email, role, expires_at }` so a leaked URL can't be replayed
-//! after the row expires + gets pruned.
-//!
-//! Default TTL: 7 days. Operator can dial up by overriding the constant
-//! below in a follow-up (deferred — no operator has asked yet).
+//! The URL carries only the opaque `token`; the row carries the bound
+//! `{ org_id, email, role, expires_at }`, so a leaked URL can't be replayed
+//! after the row expires and gets pruned.
 
 use askama::Template;
 use axum::extract::{Path, Query, State};
@@ -36,9 +31,6 @@ pub(crate) fn router() -> Router<AppState> {
             get(invite_accept_get).post(invite_accept_post),
         )
         .route("/invite/finalize", get(invite_finalize_get))
-        // Member invites are owner-only and POST-only from the members
-        // page; the handler verifies the owner role + CSRF before
-        // minting the token + sending mail.
         .route(
             "/settings/organization/members/invite",
             post(post_invite_default),
@@ -172,9 +164,7 @@ async fn post_invite_for(
         state.cfg.self_.url.trim_end_matches('/'),
         token
     );
-    // Best-effort lookup of org name for the mail body and slug for the
-    // redirect. Falls back to the id/"default" if the row is unreachable
-    // — the invite token is still valid either way.
+    // Best-effort org-name/slug lookup; the invite token is valid regardless.
     let org = orgs::org_by_id(&state.db, &org_id).await.ok().flatten();
     let org_name = org
         .as_ref()
@@ -202,10 +192,8 @@ async fn post_invite_for(
     Redirect::to(&target).into_response()
 }
 
-/// Bounce back to the org's members page, surfacing `msg` as a
-/// query-string error the template can render. Smaller-diff choice over
-/// wiring this through the flash mechanism — the members handler can
-/// pick the param up once it grows an error-banner branch.
+/// Bounce back to the org's members page, surfacing `msg` as an `?error=`
+/// query param the template can render.
 async fn back_to_members(db: &crate::db::DbPool, org_id: &str, msg: &str) -> Redirect {
     let base = if org_id == orgs::DEFAULT_ORG_ID {
         "/settings/organization/members".to_string()
@@ -244,31 +232,19 @@ struct InviteAcceptTemplate {
     /// session state.
     cta_label: String,
     cta_url: String,
-    /// When `true` the page renders a POST form (CSRF-protected) that
-    /// performs the membership write. When `false` the page renders an
-    /// `<a>` CTA (e.g. for the "sign out and sign back in as ..." or
-    /// "register first" branches). Keeps a single template handling
-    /// every accept landing.
+    /// `true` renders the CSRF-protected POST form; `false` renders an `<a>`
+    /// CTA (sign-out or register-first branches).
     can_accept_now: bool,
-    /// Carried into the POST form so the handler can re-fetch the invite
-    /// row. Empty when `can_accept_now == false`.
+    /// Carried into the POST form. Empty when `can_accept_now == false`.
     token: String,
 }
 
-/// `GET /invite/accept?token=...`
+/// `GET /invite/accept?token=...`: idempotent confirmation page only; the
+/// membership write is gated behind the POST handler so it's CSRF-protected.
 ///
-/// Always idempotent — only ever renders a confirmation page. The
-/// actual membership write is gated behind the POST handler below so
-/// the destructive side-effect is CSRF-protected and tied to an
-/// explicit user click.
-///
-/// Three branches drive the rendered page:
-/// 1. Anonymous → CTA points to Kratos registration with a `return_to`
-///    of `/invite/finalize?token=...`.
-/// 2. Signed in + verified email matches the invite → render a CSRF-
-///    protected POST form that performs the accept.
-/// 3. Signed in but the invite is for a different email → CTA points
-///    to logout, so the user can re-sign-in as the invited email.
+/// 1. Anonymous → CTA to Kratos registration, `return_to=/invite/finalize`.
+/// 2. Signed in + verified email matches → CSRF-protected POST form.
+/// 3. Signed in as a different email → CTA to logout + re-sign-in.
 async fn invite_accept_get(
     State(state): State<AppState>,
     Query(q): Query<InviteAcceptQuery>,
@@ -327,8 +303,7 @@ async fn invite_accept_get(
 
     let session_email = crate::flow_view::session_email(&session);
     if session_email.to_lowercase() == invite.email.to_lowercase() {
-        // Reject unverified identities (spec mitigation #3): force
-        // verification before joining any org.
+        // Force email verification before joining any org (spec mitigation #3).
         let verified = session
             .identity
             .as_ref()
@@ -347,9 +322,6 @@ async fn invite_accept_get(
             )
             .into_response();
         }
-        // Render the CSRF-protected POST form. The button itself is the
-        // single explicit confirmation step that triggers the
-        // membership write.
         return render(&InviteAcceptTemplate {
             chrome: PageChrome::from_parts(&state, session_email, csrf_token.clone()),
             org_name,
@@ -362,8 +334,7 @@ async fn invite_accept_get(
         });
     }
 
-    // Different account is currently signed in. Surface a CTA that signs
-    // them out before re-routing through accept.
+    // A different account is signed in: CTA signs out then re-routes to accept.
     render(&InviteAcceptTemplate {
         chrome: PageChrome::from_parts(&state, session_email, csrf_token),
         org_name,
@@ -472,15 +443,9 @@ struct InviteFinalizeQuery {
     token: Option<String>,
 }
 
-/// `/invite/finalize?token=...` — landing after Kratos registration
-/// completes via `return_to`.
-///
-/// This handler no longer writes any state; it just bounces back to
-/// the GET confirmation page (`/invite/accept?token=...`) which the
-/// user has to explicitly confirm by clicking the POST form button.
-/// Keeping the write off the GET surface satisfies the
-/// "GET-must-not-have-side-effects" rule the rest of Forseti
-/// follows.
+/// `/invite/finalize?token=...`: landing after Kratos registration. Writes
+/// no state; bounces back to the GET confirmation page so the side-effecting
+/// accept stays behind an explicit POST.
 async fn invite_finalize_get(
     State(_state): State<AppState>,
     Query(q): Query<InviteFinalizeQuery>,
@@ -589,10 +554,9 @@ fn render_invalid_invite(state: &AppState, csrf_token: &str, message: &str) -> R
     })
 }
 
-/// Send the invite mail directly over SMTP via `lettre`. Kratos's admin
-/// API doesn't expose a one-off `POST /admin/courier/messages` endpoint
-/// in v26+ (returns 405), so Forseti-originated mail rides its own
-/// transport configured under `[smtp]`.
+/// Send the invite mail over SMTP via `lettre`. Kratos's admin API has no
+/// one-off courier endpoint in v26+ (405), so Forseti mail uses its own
+/// `[smtp]` transport.
 pub async fn send_invite_email(
     recipient: &str,
     accept_url: &str,
@@ -612,9 +576,8 @@ pub async fn send_invite_email(
     crate::mailer::send_text(&cfg.smtp, &cfg.self_, recipient, &subject, &body).await
 }
 
-/// Pure helper that materialises the invite email's `(subject, body)`. Split
-/// out from [`send_invite_email`] so unit tests can lock the exact strings
-/// without standing up an SMTP transport.
+/// Pure `(subject, body)` builder, split from [`send_invite_email`] so tests
+/// can lock the strings without an SMTP transport.
 pub(crate) fn build_invite_email(
     brand_name: &str,
     org_name: &str,
@@ -632,9 +595,7 @@ pub(crate) fn build_invite_email(
 
 #[cfg(test)]
 mod invite_email_tests {
-    //! Locks the invite email's subject + body shape. Regression for the
-    //! bug where the inviter, org name, brand, and role weren't all making
-    //! it into the rendered email.
+    //! Locks the invite email's subject + body shape (inviter, org, brand, role).
     use super::build_invite_email;
 
     #[test]

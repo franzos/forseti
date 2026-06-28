@@ -1,14 +1,7 @@
-//! Thin app-typed wrappers around `ory_client`.
-//!
-//! Forseti speaks to Kratos via its public API on behalf of the browser
-//! (forwarding the user's `Cookie` header) and to Hydra via its admin API
-//! (server-only). The wrappers here exist so handlers don't have to drag the
-//! full `ory_client::apis::*` paths and error types around.
-//!
-//! Hydra admin responses are typed (the `ory_client` deserialization bug
-//! described below only affects Kratos's `ui.nodes`, which Hydra never emits),
-//! so the Hydra wrappers return SDK models directly. Kratos flow fetches go
-//! through [`FlowFetch`] / raw JSON.
+//! Thin app-typed wrappers around `ory_client`, so handlers don't drag the full `ory_client::apis::*` paths around.
+//! Forseti talks to Kratos via its public API (forwarding the user's `Cookie`) and Hydra via its admin API.
+//! Hydra wrappers return SDK models directly; Kratos flow fetches go through [`FlowFetch`] / raw JSON because the
+//! SDK's `ui.nodes` deserializer is broken (see below).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -32,12 +25,7 @@ pub mod discovery;
 pub mod hydra;
 pub mod kratos;
 
-/// Shared HTTP/SDK clients pinned at startup.
-///
-/// Held behind an `Arc` in `AppState` so every `State<AppState>` extraction
-/// clones cheaply — the four `Configuration` structs each carry a
-/// `reqwest::Client` handle. `Arc`'s own `Deref` keeps field access
-/// (`state.ory.kratos_public`) working.
+/// Shared HTTP/SDK clients pinned at startup, held behind `Arc` so `State<AppState>` clones cheaply.
 pub struct OryClients {
     /// Browser-facing Kratos public API (used with forwarded cookies).
     pub kratos_public: ory_client::apis::configuration::Configuration,
@@ -51,15 +39,8 @@ pub struct OryClients {
 
 impl OryClients {
     pub fn from_config(cfg: &AppConfig) -> Arc<OryClients> {
-        // One shared HTTP client across all four SDK configurations: one
-        // connection pool, one set of timeouts. Without a timeout a wedged
-        // Kratos can hang every request Forseti serves (every page
-        // calls `whoami`).
-        //
-        // `ory_client` 1.22 pulls reqwest 0.12, the rest of the codebase
-        // is on 0.13 — see Cargo.toml. We use the renamed `ory_reqwest`
-        // 0.12 dep here so the `Client` type matches the SDK's
-        // `Configuration.client` field.
+        // One shared HTTP client (one pool, one timeout) across all four configs; without a timeout a wedged Kratos hangs every page (each calls `whoami`).
+        // `ory_reqwest` is the renamed reqwest 0.12 the SDK pins, distinct from the codebase's 0.13, so the `Client` type matches `Configuration.client`.
         let http = ory_reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(3))
             .timeout(Duration::from_secs(10))
@@ -103,52 +84,29 @@ impl FlowKind {
     }
 }
 
-/// Why a privileged-session error was raised on a settings flow.
-///
-/// Parsed at the [`FlowFetch`] boundary from Kratos's `error.id` so
-/// handlers can pattern-match without poking at raw JSON. Both reasons
-/// resolve to a `/login` redirect; the parameters differ:
-///   * [`PrivilegedReason::Aal2Required`] → `/login?aal=aal2&return_to=...`
-///   * [`PrivilegedReason::SessionRefresh`] → `/login?refresh=true&return_to=...`
+/// Why a privileged-session error was raised on a settings flow, parsed from Kratos's `error.id`.
+/// Both resolve to a `/login` redirect with different params (`aal=aal2` vs `refresh=true`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrivilegedReason {
-    /// `session_refresh_required` — session older than
-    /// `privileged_session_max_age`. Refresh re-proves "still you".
+    /// `session_refresh_required`: session older than `privileged_session_max_age`.
     SessionRefresh,
-    /// `session_aal2_required` — settings group needs AAL2 and the
-    /// session is AAL1. Step up via the second factor.
+    /// `session_aal2_required`: settings group needs AAL2 but the session is AAL1.
     Aal2Required,
 }
 
-/// Outcome of fetching a self-service flow from Kratos.
-///
-/// Kratos returns 404/410 when a flow is missing or expired; rather than make
-/// every handler match on `ory_client`'s untagged error enums, surface those
-/// states as plain variants the handler can `match` on.
-///
-/// `PrivilegedRequired` is the settings-flow-specific 403 signal that the
-/// user's session is too old to mutate credentials — handlers redirect to
-/// `/login?refresh=true&return_to=...` so Kratos can re-auth and return.
-///
-/// We hand back the raw JSON rather than the typed `LoginFlow` / `RegistrationFlow` /
-/// etc. because the SDK's `UiNodeAttributes` tagged-enum deserializer is broken
-/// for the real Kratos wire shape (see `get_flow` for details). Handlers do
-/// their own light projection into view-models, which is cheap and lets us
-/// decouple from the SDK's shape drift entirely.
+/// Outcome of fetching a Kratos self-service flow, surfacing 404/410 (missing/expired) and the settings-flow
+/// 403 as plain variants. Hands back raw JSON, not the typed `LoginFlow`/etc, because the SDK's
+/// `UiNodeAttributes` deserializer is broken for the real Kratos wire shape (see `get_flow`).
 #[derive(Debug)]
 pub enum FlowFetch {
     Ok(Box<serde_json::Value>),
-    /// The flow ID is unknown or expired — the handler should restart the flow.
+    /// The flow ID is unknown or expired; restart the flow.
     Gone,
-    /// 403 with `session_refresh_required` or `session_aal2_required` on a
-    /// settings flow. The variant carries which one so handlers can pick
-    /// the right `/login` redirect without re-parsing JSON.
+    /// Settings-flow 403; the variant says whether to redirect with `refresh=true` or `aal=aal2`.
     PrivilegedRequired(PrivilegedReason),
 }
 
-/// Shared low-level GET against an `/health/*` endpoint. 2xx → Ok, anything
-/// else → Err with the status and (truncated) body. Used by both Kratos and
-/// Hydra health probes — the endpoints are identical in shape.
+/// Shared low-level GET against a `/health/*` endpoint: 2xx is Ok, else Err with status + truncated body.
 pub(crate) async fn probe_health(
     cfg: &ory_client::apis::configuration::Configuration,
     path: &str,

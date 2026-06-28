@@ -1,5 +1,5 @@
-//! `POST /logout` — verifies Forseti CSRF, fetches a Kratos logout URL, and
-//! redirects the browser there so Kratos clears the session cookie.
+//! `POST /logout`: Forseti CSRF check, then redirect to a fresh Kratos
+//! logout URL so Kratos clears the session cookie.
 
 use axum::extract::State;
 use axum::http::HeaderMap;
@@ -21,11 +21,8 @@ pub(crate) struct LogoutForm {
     csrf: Option<String>,
 }
 
-/// `POST /logout` — POST-only on purpose: link prefetchers, scanners, and
-/// pasted URLs must not be able to nuke a session. We verify Forseti's
-/// own double-submit CSRF token, then fetch a fresh `logout_url` from Kratos
-/// and redirect the browser to it (Kratos clears the session cookie and
-/// 303s to `/login`).
+/// POST-only on purpose: link prefetchers, scanners, and pasted URLs must not
+/// be able to nuke a session.
 pub(crate) async fn logout(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -38,11 +35,8 @@ pub(crate) async fn logout(
     }
 
     let cookie = cookies::cookie_header(&headers);
-    // Identify the actor before we hand off to Kratos — the session
-    // cookie will be invalidated on the redirect, so this is the last
-    // window to record who logged out. InsufficientAal sessions still
-    // produce empty actor fields (the session JSON isn't surfaced on
-    // that path), but the logout proceeds either way.
+    // Capture the actor before the redirect invalidates the session cookie:
+    // this is the last window to record who logged out.
     let actor = session.identity_id().map(|id| {
         (
             id.to_string(),
@@ -73,9 +67,8 @@ pub(crate) async fn logout(
         ),
         Err(e) => {
             tracing::error!(error = ?e, "logout: failed to fetch Kratos logout URL");
-            // Silently redirecting to /login would land back on the dashboard:
-            // the session cookie is still valid, so the user would think they
-            // had logged out when they hadn't.
+            // Redirecting to /login on failure would look like a successful
+            // logout while the session cookie is still valid.
             render_error_boundary(
                 &state,
                 "Logout unavailable",

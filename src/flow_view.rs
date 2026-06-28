@@ -1,10 +1,6 @@
-//! Flow view-models.
-//!
-//! We pre-shape Kratos's raw flow JSON into structs the template can iterate
-//! without doing complicated dispatch on `ory_client`'s untagged enum types
-//! (which currently can't be deserialized at all — see ory.rs). The grouping
-//! logic — which Kratos calls "node.group" — drives the visual layout: OIDC
-//! stack, code shortcut, profile/password form, OR-divider, etc.
+//! Flow view-models: pre-shape Kratos's raw flow JSON into template-iterable structs, sidestepping
+//! `ory_client`'s untagged enums (which can't deserialize, see ory.rs). Grouping by Kratos `node.group`
+//! drives the visual layout (OIDC stack, code shortcut, profile/password form, OR-divider).
 
 use crate::ory::{self, FlowKind};
 
@@ -19,10 +15,10 @@ pub(crate) struct InputView {
     pub(crate) label: Option<String>,
     pub(crate) autocomplete: Option<String>,
     /// HTML5 `pattern` regex for client-side validation (Kratos sets this on
-    /// short numeric inputs like recovery / verification codes — `[0-9]+`).
+    /// short numeric inputs like recovery / verification codes, `[0-9]+`).
     pub(crate) pattern: Option<String>,
     /// `inputmode` hint (e.g. `numeric`) so mobile keyboards pop the right
-    /// keypad. Not on Kratos's node directly — we infer it from `pattern`.
+    /// keypad. Not on Kratos's node directly; inferred from `pattern`.
     pub(crate) inputmode: Option<&'static str>,
     pub(crate) required: bool,
     pub(crate) disabled: bool,
@@ -31,7 +27,7 @@ pub(crate) struct InputView {
     /// meaningful for `input_type == "submit"`.
     pub(crate) is_primary: bool,
     /// JS to run on click. Kratos populates this on WebAuthn / passkey trigger
-    /// buttons — either as the legacy `onclick` attribute (literal JS to eval)
+    /// buttons, either as the legacy `onclick` attribute (literal JS to eval)
     /// or the newer `onclickTrigger` enum which we map to
     /// `window.<name>(event)`. The partial renders it verbatim on buttons.
     pub(crate) onclick: Option<String>,
@@ -44,7 +40,7 @@ pub(crate) struct MessageView {
     pub(crate) text: String,
     /// `"error"`, `"success"`, or `"info"`.
     pub(crate) severity: &'static str,
-    /// Kratos message ID — stable identifier templates can branch on (e.g.
+    /// Kratos message ID; a stable identifier templates can branch on (e.g.
     /// 4000007 = "account exists already", which lets the registration page
     /// surface a `/claim-email` CTA without sniffing the localised text).
     pub(crate) id: u64,
@@ -60,7 +56,7 @@ pub(crate) struct ScriptView {
     pub(crate) integrity: Option<String>,
     pub(crate) referrerpolicy: Option<String>,
     pub(crate) crossorigin: Option<String>,
-    /// HTML element id (e.g. `webauthn_script`) — useful for the helper's
+    /// HTML element id (e.g. `webauthn_script`), useful for the helper's
     /// own internal lookups.
     pub(crate) id: Option<String>,
     pub(crate) nonce: Option<String>,
@@ -80,7 +76,7 @@ pub(crate) struct GroupedNodes {
     pub(crate) other: Vec<InputView>,
 }
 
-/// True when the `default` group has any non-hidden input — i.e. the form has
+/// True when the `default` group has any non-hidden input, i.e. the form has
 /// its own visible fields rather than only carrying CSRF/method hidden inputs.
 pub fn has_visible_default_inputs(groups: &GroupedNodes) -> bool {
     groups.default.iter().any(|n| n.input_type != "hidden")
@@ -142,18 +138,8 @@ pub(crate) fn node_to_input(node: &serde_json::Value) -> Option<InputView> {
         .map(str::to_string);
     let label = attr_label.or_else(|| meta_label.clone());
 
-    // Kratos populates `onclick` (legacy literal JS) or `onclickTrigger`
-    // (an enum naming a function on `window` registered by Kratos's served
-    // webauthn.js). Prefer the trigger form because it avoids eval-shaped
-    // strings and is what Ory recommends going forward.
-    //
-    // The trigger functions are designed to be called with no arguments —
-    // they auto-discover options by querying a named DOM element (typically
-    // `*[name="webauthn_register_trigger"]`) and `JSON.parse` its value
-    // attribute. Passing anything truthy as the first arg (e.g. `event`)
-    // makes them skip the DOM lookup and treat that arg as the options
-    // object, which crashes at `opt.publicKey.user.id` because an Event has
-    // no `publicKey`. So: just call the function bare.
+    // Prefer `onclickTrigger` (function on `window` from Kratos's webauthn.js) over the legacy literal `onclick`.
+    // Trigger functions must be called bare: a truthy first arg (e.g. `event`) is treated as the options object and crashes at `opt.publicKey.user.id`.
     let onclick_trigger = attrs.get("onclickTrigger").and_then(|t| t.as_str());
     let onclick_literal = attrs.get("onclick").and_then(|o| o.as_str());
     let onclick = onclick_trigger
@@ -343,7 +329,7 @@ pub(crate) fn totp_qr_and_secret(flow: &serde_json::Value) -> (Option<String>, O
 }
 
 /// Extract freshly-generated lookup-secret codes from the flow's text nodes.
-/// Kratos returns them once — in `attributes.text.context.secrets[]` of a
+/// Kratos returns them once, in `attributes.text.context.secrets[]` of a
 /// `node.type=="text"` whose `attributes.id == "lookup_secret_codes"`. After
 /// the user confirms display, subsequent flow renders don't include them, so
 /// this is genuinely the only time the UI ever sees the plaintext codes.
@@ -512,7 +498,7 @@ pub(crate) fn session_email(session: &ory::Session) -> String {
 }
 
 /// Pull the (identity_id, email) pair out of a session. Both default to
-/// empty strings when missing — matches the open-coded `.unwrap_or_default()`
+/// empty strings when missing; matches the open-coded `.unwrap_or_default()`
 /// pattern callers use across extractors, the admin gate, and consent.
 pub(crate) fn session_principal(session: &ory::Session) -> (String, String) {
     let identity_id = session
@@ -525,7 +511,7 @@ pub(crate) fn session_principal(session: &ory::Session) -> (String, String) {
 }
 
 /// True when the session's identity has at least one verifiable address
-/// that's still pending verification — drives the dashboard verify banner.
+/// that's still pending verification; drives the dashboard verify banner.
 pub(crate) fn session_needs_verification(session: &ory::Session) -> bool {
     session
         .identity

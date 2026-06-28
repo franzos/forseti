@@ -13,7 +13,7 @@
       </p>
     </div>
     <a href="/admin/hosts/new"
-       class="bg-primary text-on-primary font-label-md text-label-md font-bold px-4 py-2 rounded-lg hover:opacity-90 transition-opacity">Enroll host</a>
+       class="bg-primary text-on-primary font-label-md text-label-md font-bold px-4 py-2 rounded-lg hover:opacity-90 transition-opacity whitespace-nowrap">Enroll host</a>
   </div>
 
   {% match revealed_credential %}
@@ -34,7 +34,7 @@
       <thead class="bg-surface-container-low">
         <tr>
           <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Hostname</th>
-          <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Allowed GID</th>
+          <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Teams</th>
           <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Force MFA</th>
           <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Enrolled</th>
           <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Last seen</th>
@@ -54,7 +54,7 @@
             <tr class="border-t border-outline-variant">
               <td class="px-4 py-3 font-body-md text-body-md text-on-surface"
                   title="{{ r.id }}">{{ r.hostname }}</td>
-              <td class="px-4 py-3 font-body-sm text-body-sm text-on-surface-variant font-mono">{{ r.allowed_gid }}</td>
+              <td class="px-4 py-3 font-body-sm text-body-sm text-on-surface-variant">{{ r.teams }}</td>
               <td class="px-4 py-3 font-body-sm text-body-sm">
                 {% if r.force_mfa %}
                   <span class="font-label-sm text-label-sm bg-tertiary-container text-on-tertiary-container px-2 py-0.5 rounded-full font-semibold"
@@ -67,8 +67,10 @@
                   title="{{ r.created_at }}">{{ r.created_at_pretty }}</td>
               <td class="px-4 py-3 font-body-sm text-body-sm text-on-surface-variant">{{ r.last_seen_pretty }}</td>
               <td class="px-4 py-3 text-right whitespace-nowrap">
+                <a href="/admin/hosts/{{ r.id }}/edit"
+                   class="font-label-sm text-label-sm text-on-surface-variant border border-outline-variant rounded-lg px-3 py-1 hover:bg-surface-container-high transition-colors">Edit</a>
                 <a href="/admin/hosts/{{ r.id }}/rotate"
-                   class="font-label-sm text-label-sm text-on-surface-variant border border-outline-variant rounded-lg px-3 py-1 hover:bg-surface-container-high transition-colors">Rotate</a>
+                   class="font-label-sm text-label-sm text-on-surface-variant border border-outline-variant rounded-lg px-3 py-1 hover:bg-surface-container-high transition-colors ml-2">Rotate</a>
                 <a href="/admin/hosts/{{ r.id }}/revoke"
                    class="font-label-sm text-label-sm text-error border border-error rounded-lg px-3 py-1 hover:bg-error-container hover:text-on-error-container transition-colors ml-2">Revoke</a>
               </td>

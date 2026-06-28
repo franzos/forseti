@@ -2,15 +2,14 @@
 //!
 //! Hydra redirects the human here (`verification_uri`) with
 //! `?device_challenge=…&user_code=…`. Correlation is by `user_code` against
-//! Forseti's OWN `device_sessions` row (NOT Hydra context — the device-authz
-//! request carries no context and there's no get-device-request admin API).
-//! The PRIMARY, unmissable element is "did YOU start this login as
-//! `<username>` on `<hostname>`?" — informed, host-bound consent is the
-//! RFC 8628 §5.4 phishing mitigation.
+//! Forseti's own `device_sessions` row, not Hydra context: the device-authz
+//! request carries none and there's no get-device-request admin API. The
+//! host-bound "did YOU start this login as `<username>` on `<hostname>`?"
+//! prompt is the RFC 8628 §5.4 phishing mitigation.
 //!
-//! On confirm we POST to Hydra's `accept_user_code_request`, which drives the
-//! login + consent leg (consent never auto-skips for the PAM client — see the
-//! guard in `consent.rs`).
+//! On confirm we POST `accept_user_code_request`, which drives the login +
+//! consent leg (consent never auto-skips for the PAM client; see
+//! `consent.rs`).
 
 use askama::Template;
 use axum::extract::{Query, State};
@@ -27,8 +26,8 @@ use crate::state::AppState;
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct DeviceVerifyQuery {
-    /// Hydra's device challenge — needed to accept the user code. Absent when
-    /// the user navigated to `/oauth/device` directly (bare code-entry form).
+    /// Absent when the user navigated to `/oauth/device` directly (bare
+    /// code-entry form).
     #[serde(default)]
     device_challenge: Option<String>,
     #[serde(default)]
@@ -41,10 +40,9 @@ struct DeviceVerifyTemplate {
     chrome: PageChrome,
     device_challenge: String,
     user_code: String,
-    /// The named target + host, looked up from the device session. `None`
-    /// when no session matches the `user_code` (bare form / unknown code) —
-    /// the template then shows a plain code-entry prompt without the
-    /// host-bound consent panel (we can't bind what we can't find).
+    /// Target + host from the device session. `None` when no session matches
+    /// the `user_code`; the template then shows a plain code-entry prompt
+    /// without the host-bound consent panel.
     target: Option<VerifyTarget>,
 }
 
@@ -61,8 +59,8 @@ struct DeviceDoneTemplate {
     error: bool,
 }
 
-/// `GET /oauth/device` — render the verification screen. Looks up the session
-/// by `user_code` to show the host + target account.
+/// `GET /oauth/device` — render the verification screen, showing the host +
+/// target account looked up by `user_code`.
 pub(crate) async fn device_verify(
     State(state): State<AppState>,
     Query(query): Query<DeviceVerifyQuery>,
@@ -104,8 +102,8 @@ pub(crate) async fn device_verify_submit(
         return resp;
     }
 
-    // Re-load by user_code so a tampered POST can't accept a code that has no
-    // backing session. A missing session → expired/error page.
+    // Re-load by user_code so a tampered POST can't accept a code with no
+    // backing session.
     if load_target(&state, &form.user_code).await.is_none() {
         return render(&DeviceDoneTemplate {
             chrome: anon_chrome(&state),
@@ -159,8 +157,8 @@ async fn load_target(state: &AppState, user_code: &str) -> Option<VerifyTarget> 
             return None;
         }
     };
-    // Resolve the hostname for display; fall back to the id if the host row is
-    // gone (revoked between init and approval).
+    // Fall back to the id if the host row is gone (revoked between init and
+    // approval).
     let hostname = match db::host_by_id(&state.db, &session.host_id).await {
         Ok(Some(h)) => h.hostname,
         _ => session.host_id.clone(),
@@ -172,8 +170,8 @@ async fn load_target(state: &AppState, user_code: &str) -> Option<VerifyTarget> 
     })
 }
 
-/// Anonymous chrome for the POST error path (no `Chrome` extractor available
-/// there since we consumed the request body).
+/// Anonymous chrome for the POST error path (the `Chrome` extractor isn't
+/// available once the request body is consumed).
 fn anon_chrome(state: &AppState) -> PageChrome {
     PageChrome::from_parts(state, String::new(), String::new())
 }

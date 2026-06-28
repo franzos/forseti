@@ -24,9 +24,8 @@ pub(crate) struct SettingsLinkedProvidersTemplate {
     pub(crate) form_action: String,
     pub(crate) form_method: String,
     pub(crate) flow_messages: Vec<MessageView>,
-    /// CSRF / method hiddens forwarded from the flow's `default` group.
     pub(crate) hidden_defaults: Vec<InputView>,
-    /// OIDC-group nodes — one submit button per provider (link / unlink).
+    /// OIDC-group nodes: one submit button per provider (link / unlink).
     pub(crate) oidc_nodes: Vec<InputView>,
     pub(crate) referrer_banner: Option<crate::handoff::ReferrerBannerView>,
 }
@@ -63,8 +62,7 @@ fn render_linked_providers(
     let (form_action, form_method) = form_target(flow);
     let hidden_defaults = collect_default_hidden(flow);
     let mut oidc_nodes = collect_input_nodes(flow, "oidc");
-    // Every provider button should look the same — render them as secondary
-    // (outline) buttons rather than promoting one to primary.
+    // Render every provider button as secondary; none is promoted to primary.
     for n in oidc_nodes.iter_mut() {
         n.is_primary = false;
     }

@@ -1,13 +1,9 @@
-//! Signed `app_referrer` cookie for RP-initiated account management.
+//! Signed `app_referrer` cookie for RP-initiated account management. Set by
+//! `/handoff` when an external OAuth client deep-links a user into a settings
+//! surface; drives the "Continuing from <App>" banner.
 //!
-//! Set by the `/handoff` entry endpoint when an external OAuth client
-//! deep-links a user into a Forseti settings surface. Drives the
-//! "Continuing from <App>" banner rendered above the navigation.
-//!
-//! Backed by [`crate::signed_cookie`]; the salt is distinct from
-//! flash / active_org so the three cookie types never share signing
-//! material. The payload is JSON-serialised before the codec runs its
-//! hex-encode + HMAC envelope.
+//! Backed by [`crate::signed_cookie`] with a salt distinct from
+//! flash / active_org so the cookie types never share signing material.
 
 use axum::http::HeaderMap;
 use serde::{Deserialize, Serialize};
@@ -17,10 +13,8 @@ use crate::signed_cookie::{unix_seconds_now, SignedCookie};
 const APP_REFERRER_COOKIE: &str = "forseti_app_referrer";
 const APP_REFERRER_SALT: &[u8] = b"forseti::app_referrer::v1";
 
-/// Decoded payload of the `forseti_app_referrer` cookie. Fields are what
-/// the banner needs to render plus the URI the "Return to <App>" button
-/// targets. `logo_uri` is optional because Hydra clients aren't required
-/// to set one.
+/// Decoded `forseti_app_referrer` payload: banner fields plus the "Return to
+/// <App>" target URI. `logo_uri` is optional (clients needn't set one).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReferrerPayload {
     pub client_id: String,

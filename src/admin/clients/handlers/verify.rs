@@ -17,12 +17,9 @@ use crate::state::AppState;
 
 use crate::admin::clients::scope::RequireClientInScope;
 
-/// `POST /admin/clients/{id}/verify` — admin vouches for the client.
-/// Writes the Forseti-side `oauth_client_metadata` row (lazy-creating
-/// for legacy clients), emits an INFO-severity audit row, and flashes
-/// "Client verified" on the show page. CSRF-protected via the standard
-/// double-submit token. No interstitial — verification is a non-destructive
-/// upgrade.
+/// `POST /admin/clients/{id}/verify` — admin vouches for the client. Writes
+/// the `oauth_client_metadata` row (lazy-creating for legacy clients). No
+/// interstitial: verification is a non-destructive upgrade.
 pub async fn verify(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -46,9 +43,8 @@ pub async fn verify(
     .await
 }
 
-/// `GET /admin/clients/{id}/unverify` — interstitial confirm page for the
-/// destructive side. Mirrors `delete_confirm` / `rotate_confirm`: same
-/// shared `ConfirmTemplate`, danger style, double-submit CSRF token.
+/// `GET /admin/clients/{id}/unverify` — interstitial confirm for the
+/// destructive side. Mirrors `delete_confirm` / `rotate_confirm`.
 pub async fn unverify_confirm(client_in_scope: RequireClientInScope, csrf: Csrf) -> Response {
     let RequireClientInScope { id, ctx, .. } = client_in_scope;
     let chrome = ctx.chrome(&csrf);

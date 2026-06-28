@@ -1,9 +1,9 @@
-//! `/admin/dcr-tokens/*` — Initial Access Tokens (IATs) for Forseti's
+//! `/admin/dcr-tokens/*`: Initial Access Tokens (IATs) for Forseti's
 //! Dynamic Client Registration proxy.
 //!
 //! Operators issue, list, and revoke tokens here. Issued tokens are
 //! revealed exactly once via the same `SecretReveal` flash mechanism
-//! used by client-secret rotation — the raw token is never persisted,
+//! used by client-secret rotation; the raw token is never persisted,
 //! only `sha256(token)`.
 //!
 //! Validation of inbound tokens (at `POST /oauth2/register`) lives in
@@ -11,14 +11,13 @@
 //!
 //! ## Scope
 //!
-//! This surface is **Forseti-tier only** — it does NOT honour the
+//! This surface is **Forseti-tier only**; it does NOT honour the
 //! `?org=<slug>` org-scoping convention used by the rest of `/admin/*`.
 //! The underlying `dcr_initial_access_tokens` table has no `org_id`
-//! column (see `migrations/sqlite/20260517000000_initial_schema`),
-//! so an IAT can mint a client into any org based on the
-//! `org` query param passed at `/oauth2/register` time. Restricting
-//! issuance per-org would require an `org_id` column + scope-aware
-//! validation in the DCR endpoint; intentionally deferred.
+//! column, so an IAT can mint a client into any org based on the `org`
+//! query param passed at `/oauth2/register` time. Per-org issuance would
+//! need an `org_id` column plus scope-aware validation in the DCR
+//! endpoint; intentionally deferred.
 //!
 //! Practical consequence: only admins whose email appears on
 //! `admin.allowed_emails` can reach `/admin/dcr-tokens/*`. Org owners
@@ -48,8 +47,6 @@ use crate::render::render;
 use crate::schema::dcr_initial_access_tokens as iat;
 use crate::state::AppState;
 
-// --- View models -----------------------------------------------------------
-
 /// One row on the IAT list page. Status is derived in the projection
 /// (revoked > expired > exhausted > active) so the template doesn't
 /// have to re-implement the ordering.
@@ -62,17 +59,13 @@ struct IatRow {
     expires_at_pretty: String,
     uses_remaining: String,
     note: String,
-    /// One of "active", "revoked", "expired", "exhausted". Drives the
-    /// badge colour + the visibility of the revoke button.
+    /// One of "active", "revoked", "expired", "exhausted".
     status: &'static str,
 }
 
-/// Canonical row for `dcr_initial_access_tokens`. Defined here because this
-/// `pub mod` is reachable from `oauth::register::iat` (which the admin can't
-/// reach the other way — its `iat` submodule is private), so the proxy
-/// re-uses this exact struct as its `IatRow`. One `Selectable` derive ties
-/// both readers to the schema: a column rename/removal breaks both at
-/// compile time. The admin list ignores the two daily-counter columns.
+/// Canonical row for `dcr_initial_access_tokens`, reused by the DCR proxy
+/// (`oauth::register::iat`). One `Selectable` derive ties both readers to the
+/// schema so a column rename/removal breaks both at compile time.
 #[allow(dead_code)] // some columns are only field-accessed by the proxy
 #[derive(Queryable, Selectable, Debug, Clone)]
 #[diesel(table_name = iat)]
@@ -128,16 +121,13 @@ fn project_row(s: StoredIat) -> IatRow {
     }
 }
 
-// --- Templates -------------------------------------------------------------
-
 #[derive(askama::Template)]
 #[template(path = "admin/dcr_tokens_list.html")]
 struct DcrTokensListTemplate {
     chrome: PageChrome,
     admin_active: AdminSection,
     rows: Vec<IatRow>,
-    /// One-shot reveal of a freshly issued token. Read out of the
-    /// `SecretReveal` flash store; `None` on plain refresh.
+    /// One-shot reveal of a freshly issued token; `None` on plain refresh.
     revealed_token: Option<String>,
 }
 
@@ -154,8 +144,6 @@ struct DcrTokenNewTemplate {
     ttl_hours: String,
     max_uses: String,
 }
-
-// --- Handlers --------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
 pub struct ListQuery {
@@ -343,8 +331,8 @@ pub async fn issue(
     )
     .await;
 
-    // Reuse the existing `SecretReveal` channel — same single-use,
-    // server-side store, redirect carries only an opaque token in the URL.
+    // SecretReveal channel: single-use server-side store, the redirect carries
+    // only an opaque token in the URL.
     let reveal = SecretReveal::DcrInitialAccessToken { token: raw_token };
     let reveal_token =
         match flash::store_secret_reveal(&state.db, state.cfg.flash.reveal_ttl_seconds, reveal)
@@ -438,14 +426,10 @@ pub async fn revoke(
     }
 }
 
-/// 32 random bytes from `OsRng`, base64url-encoded with no padding.
-/// Roughly 256 bits of entropy — comfortably beyond what a "bearer
-/// token used once at the moment of client registration" needs.
+/// 32 random bytes (~256 bits), base64url-encoded with no padding.
 fn generate_token() -> String {
-    // `rand::rng()` is ThreadRng, which is seeded from the OS RNG and
-    // reseeds periodically — fine for token generation. We don't need
-    // `OsRng` directly here; the rest of the codebase uses the same
-    // ThreadRng for client secrets and CSRF tokens.
+    // ThreadRng is OS-seeded and reseeds periodically; same generator the rest
+    // of the codebase uses for client secrets and CSRF tokens.
     let mut bytes = [0u8; 32];
     rand::rng().fill(&mut bytes[..]);
     URL_SAFE_NO_PAD.encode(bytes)

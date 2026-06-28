@@ -1,8 +1,8 @@
-//! `/admin/posix/*` — provision a Kratos identity into a POSIX account,
+//! `/admin/posix/*`: provision a Kratos identity into a POSIX account,
 //! manage its SSH keys, and enable / disable / delete it.
 //!
 //! This is the **only** place the license-aware seat cap is enforced.
-//! Resolution of existing accounts (the NSS resolver) is never gated — a
+//! Resolution of existing accounts (the NSS resolver) is never gated, so a
 //! lapsed license must not lock people out of their own machines. New
 //! provisioning is the gated write: see [`seat_available`].
 //!
@@ -24,7 +24,6 @@ use crate::commercial::license::{seat_cap_allows, Feature};
 use crate::commercial::FeatureStatus;
 use crate::extractors::{Csrf, RequireAdmin};
 use crate::format::humanise_timestamp;
-use crate::orgs;
 use crate::ory;
 use crate::page_chrome::PageChrome;
 use crate::posix::allocate::is_valid_username;
@@ -32,12 +31,8 @@ use crate::posix::db as posix_db;
 use crate::render::render;
 use crate::state::AppState;
 
-// --- seat cap --------------------------------------------------------------
-
 /// The licensed `max_seats` raise applies only on a fully-Allowed license.
-/// GraceReadOnly is read-only for hard POSTs (license.rs), and provisioning a
-/// new account IS a hard POST, so grace falls back to the free cap. Resolution
-/// of existing accounts is never gated (that lives in the resolver).
+/// Provisioning is a hard POST, so GraceReadOnly falls back to the free cap.
 fn seat_available(
     linux_auth: FeatureStatus,
     max_seats: Option<u32>,
@@ -51,16 +46,14 @@ fn seat_available(
     seat_cap_allows(Some(cap), current)
 }
 
-/// The effective seat cap a deployment is operating under right now. Mirrors
-/// [`seat_available`]'s arithmetic so the list page can show `N / cap`.
+/// The effective seat cap in force now. Mirrors [`seat_available`]'s
+/// arithmetic so the list page can show `N / cap`.
 fn effective_cap(linux_auth: &FeatureStatus, max_seats: Option<u32>, free_seats: u32) -> u32 {
     match linux_auth {
         FeatureStatus::Allowed => max_seats.unwrap_or(free_seats),
         FeatureStatus::GraceReadOnly | FeatureStatus::Locked => free_seats,
     }
 }
-
-// --- view models -----------------------------------------------------------
 
 struct AccountRow {
     identity_id: String,
@@ -91,7 +84,15 @@ struct KeyRow {
     created_at_pretty: String,
 }
 
-// --- templates -------------------------------------------------------------
+struct TeamRow {
+    name: String,
+    org_id: String,
+}
+
+struct HostRow {
+    hostname: String,
+    org_id: String,
+}
 
 #[derive(askama::Template)]
 #[template(path = "admin/posix_list.html")]
@@ -111,7 +112,11 @@ struct PosixNewTemplate {
     chrome: PageChrome,
     admin_active: AdminSection,
     error_message: String,
+    /// Authoritative identity UUID (hidden field); empty => step 1 (chooser).
     identity_id: String,
+    /// Read-only display of the chosen identity's email.
+    identity_email: String,
+    /// Prefilled, editable username (suggested from the email on step 2).
     username: String,
     shell: String,
 }
@@ -124,10 +129,10 @@ struct PosixAccountTemplate {
     account: AccountRow,
     email: String,
     keys: Vec<KeyRow>,
+    teams: Vec<TeamRow>,
+    hosts: Vec<HostRow>,
     error_message: String,
 }
-
-// --- handlers --------------------------------------------------------------
 
 pub async fn list(State(state): State<AppState>, admin: RequireAdmin, csrf: Csrf) -> Response {
     let ctx = admin.ctx;
@@ -160,17 +165,71 @@ pub async fn list(State(state): State<AppState>, admin: RequireAdmin, csrf: Csrf
     })
 }
 
-pub async fn new(State(state): State<AppState>, admin: RequireAdmin, csrf: Csrf) -> Response {
+#[derive(Debug, Deserialize)]
+pub struct NewQuery {
+    #[serde(default)]
+    identity_id: Option<String>,
+}
+
+pub async fn new(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<NewQuery>,
+    admin: RequireAdmin,
+    csrf: Csrf,
+) -> Response {
     let ctx = admin.ctx;
+    let raw = q.identity_id.as_deref().unwrap_or("").trim().to_string();
+
+    let (identity_id, identity_email, username) = if raw.is_empty() {
+        (String::new(), String::new(), String::new())
+    } else {
+        match ory::kratos::admin_get_identity_optional(&state.ory, &raw).await {
+            Ok(Some(id)) => {
+                let email = id
+                    .traits
+                    .as_ref()
+                    .and_then(|t| t.get("email"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let suggested = suggest_username(&email);
+                (raw, email, suggested)
+            }
+            _ => (String::new(), String::new(), String::new()),
+        }
+    };
+
     let chrome = ctx.chrome(&csrf);
     render(&PosixNewTemplate {
         chrome,
         admin_active: AdminSection::Posix,
         error_message: String::new(),
-        identity_id: String::new(),
-        username: String::new(),
+        identity_id,
+        identity_email,
+        username,
         shell: state.cfg.posix.default_shell.clone(),
     })
+}
+
+/// Derive a POSIX-safe username suggestion from an email local-part:
+/// lowercase, keep [a-z0-9_-], drop leading digits/hyphens. Empty when
+/// nothing usable remains (caller treats "" as "no suggestion").
+fn suggest_username(email: &str) -> String {
+    let local = email.split('@').next().unwrap_or("");
+    let mut s: String = local
+        .to_lowercase()
+        .chars()
+        .filter(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '_' || *c == '-')
+        .take(32)
+        .collect();
+    while s
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_digit() || c == '-')
+    {
+        s.remove(0);
+    }
+    s
 }
 
 #[derive(Debug, Deserialize)]
@@ -198,7 +257,7 @@ pub async fn provision(
         return resp;
     }
 
-    let identity_id = form.identity_id.trim().to_string();
+    let submitted = form.identity_id.trim().to_string();
     let username = form.username.trim().to_string();
     let shell = {
         let s = form.shell.trim();
@@ -215,14 +274,15 @@ pub async fn provision(
             chrome,
             admin_active: AdminSection::Posix,
             error_message,
-            identity_id: identity_id.clone(),
+            identity_id: submitted.clone(),
+            identity_email: String::new(),
             username: username.clone(),
             shell: shell.clone(),
         })
     };
 
-    if identity_id.is_empty() {
-        return rerender("Identity ID is required.".to_string());
+    if submitted.is_empty() {
+        return rerender("Select a user first.".to_string());
     }
     if !is_valid_username(&username) {
         return rerender(
@@ -232,18 +292,32 @@ pub async fn provision(
         );
     }
 
-    // The target Kratos identity must exist — provisioning a posix account
-    // for a phantom id would create an orphan the reconcile sweep deletes.
-    match ory::kratos::admin_get_identity_optional(&state.ory, &identity_id).await {
-        Ok(Some(_)) => {}
-        Ok(None) => return rerender(format!("No Kratos identity with ID '{identity_id}'.")),
-        Err(e) => {
-            tracing::error!(error = ?e, identity_id, "admin: identity lookup before provision failed");
-            return rerender(
-                "Couldn't verify that identity against Kratos. Please try again.".to_string(),
-            );
+    // Resolve the submitted value to a canonical UUID; the target must exist,
+    // else we'd create an orphan the reconcile sweep deletes.
+    let identity_id = if crate::format::looks_like_uuid(&submitted) {
+        match ory::kratos::admin_get_identity_optional(&state.ory, &submitted).await {
+            Ok(Some(_)) => submitted.clone(),
+            Ok(None) => return rerender(format!("No Kratos identity with ID '{submitted}'.")),
+            Err(e) => {
+                tracing::error!(error = ?e, identity = %submitted, "admin: identity lookup before provision failed");
+                return rerender(
+                    "Couldn't verify that identity against Kratos. Please try again.".to_string(),
+                );
+            }
         }
-    }
+    } else {
+        match ory::kratos::admin_find_identity_by_email(&state.ory, &submitted.to_lowercase()).await
+        {
+            Ok(Some((id, _verified))) => id.id,
+            Ok(None) => return rerender(format!("No identity found for '{submitted}'.")),
+            Err(e) => {
+                tracing::error!(error = ?e, "admin: email resolve before provision failed");
+                return rerender(
+                    "Couldn't look up that email against Kratos. Please try again.".to_string(),
+                );
+            }
+        }
+    };
 
     let current = match posix_db::count_accounts(&state.db).await {
         Ok(n) => n,
@@ -277,52 +351,12 @@ pub async fn provision(
     {
         Ok(a) => a,
         Err(e) => {
-            // `provision_account` bails on a username / identity / group-name
-            // collision — those are user errors, not 500s.
+            // A collision (username / identity / group-name) is a user error,
+            // not a 500.
             tracing::info!(error = %e, identity_id, username, "admin: provision_account rejected");
             return rerender(format!("Could not provision account: {e}"));
         }
     };
-
-    // Org→posix-group sync is a commercial feature: mirror the identity's org
-    // memberships into `org`-kind groups ONLY when Orgs is licensed (Allowed or
-    // grace). Free tier gets just the user-kind primary group from above.
-    let mut org_group_count = 0usize;
-    if matches!(
-        state.license.feature(Feature::Orgs),
-        FeatureStatus::Allowed | FeatureStatus::GraceReadOnly
-    ) {
-        let memberships = orgs::db::list_memberships(&state.db, &identity_id)
-            .await
-            .unwrap_or_default();
-        let orgs: Vec<(String, String)> = memberships
-            .into_iter()
-            .map(|m| {
-                // Slugs are `[a-z0-9-]`; a leading digit or empty slug isn't a
-                // valid POSIX group name, so fall back to a stable `org-<id>`.
-                let safe = m
-                    .slug
-                    .as_bytes()
-                    .first()
-                    .is_some_and(|b| b.is_ascii_lowercase() || *b == b'_');
-                let name = if safe {
-                    m.slug
-                } else {
-                    format!("org-{}", m.org_id)
-                };
-                (m.org_id, name)
-            })
-            .collect();
-        org_group_count = orgs.len();
-        if let Err(e) =
-            posix_db::sync_org_groups(&state.db, state.cfg.posix.gid_base, &identity_id, &orgs)
-                .await
-        {
-            // Best-effort: the account is already provisioned, so a group-sync
-            // failure must not fail the provision.
-            tracing::error!(error = ?e, identity_id, "admin: org→posix-group sync failed");
-        }
-    }
 
     let _ = audit::log(
         &state.db,
@@ -333,7 +367,6 @@ pub async fn provision(
             .metadata(audit_metadata!(
                 "username" => account.username.clone(),
                 "uid" => account.uid.to_string(),
-                "org_groups" => org_group_count.to_string(),
             )),
     )
     .await;
@@ -354,8 +387,8 @@ pub async fn account(
     render_account(&state, &admin.ctx, &csrf, &id, String::new()).await
 }
 
-/// Shared render for the account detail page — reused by `account` and by
-/// the add-key handler's error path so a bad key re-renders the page inline.
+/// Shared render for the account detail page, reused by the add-key error
+/// path so a bad key re-renders the page inline.
 async fn render_account(
     state: &AppState,
     ctx: &crate::admin::AdminCtx,
@@ -409,6 +442,34 @@ async fn render_account(
         }
     };
 
+    let teams = match crate::orgs::teams::teams_for_identity_any_org(&state.db, id).await {
+        Ok(rows) => rows
+            .into_iter()
+            .map(|t| TeamRow {
+                name: t.name,
+                org_id: t.org_id,
+            })
+            .collect(),
+        Err(e) => {
+            tracing::error!(error = ?e, id, "admin: list identity teams failed");
+            Vec::new()
+        }
+    };
+
+    let hosts = match posix_db::hosts_reachable_by(&state.db, id).await {
+        Ok(rows) => rows
+            .into_iter()
+            .map(|h| HostRow {
+                hostname: h.hostname,
+                org_id: h.org_id,
+            })
+            .collect(),
+        Err(e) => {
+            tracing::error!(error = ?e, id, "admin: list reachable hosts failed");
+            Vec::new()
+        }
+    };
+
     let chrome = ctx.chrome(csrf);
     render(&PosixAccountTemplate {
         chrome,
@@ -416,6 +477,8 @@ async fn render_account(
         account: project_row(account),
         email,
         keys,
+        teams,
+        hosts,
         error_message,
     })
 }
@@ -430,9 +493,8 @@ pub struct AddKeyForm {
     comment: String,
 }
 
-/// Accepted OpenSSL/OpenSSH public-key prefixes. A pasted key must start
-/// with one of these — a cheap shape check so an obvious paste error (a
-/// private key, a URL, a blob of base64) doesn't land in authorized_keys.
+/// Accepted OpenSSH public-key prefixes. A cheap shape check so an obvious
+/// paste error (private key, URL, base64 blob) doesn't land in authorized_keys.
 fn looks_like_ssh_key(s: &str) -> bool {
     const PREFIXES: &[&str] = &[
         "ssh-ed25519",
@@ -668,14 +730,14 @@ mod tests {
     use crate::commercial::FeatureStatus::*;
     #[test]
     fn cap_consults_license_for_the_raise() {
-        // Unlicensed/Locked: free_seats applies regardless of any max_seats.
+        // Unlicensed/Locked: free_seats applies regardless of max_seats.
         assert!(!seat_available(Locked, Some(100), 3, 3));
         assert!(seat_available(Locked, Some(100), 3, 2));
         // Allowed: max_seats overrides free_seats.
         assert!(seat_available(Allowed, Some(100), 3, 50));
-        assert!(seat_available(Allowed, None, 3, 2)); // licensed, no max_seats → still free cap
+        assert!(seat_available(Allowed, None, 3, 2)); // no max_seats: still free cap
         assert!(!seat_available(Allowed, None, 3, 3));
-        // GraceReadOnly: new provisioning is a hard POST → must NOT raise; free cap holds.
+        // GraceReadOnly: provisioning is a hard POST, so the free cap holds.
         assert!(!seat_available(GraceReadOnly, Some(100), 3, 3));
     }
 
@@ -688,5 +750,12 @@ mod tests {
         assert!(!looks_like_ssh_key("-----BEGIN OPENSSH PRIVATE KEY-----"));
         assert!(!looks_like_ssh_key("not a key"));
         assert!(!looks_like_ssh_key(""));
+    }
+
+    #[test]
+    fn username_suggestion_from_email() {
+        assert_eq!(suggest_username("Alice.B@x.com"), "aliceb");
+        assert_eq!(suggest_username("1bob@x"), "bob");
+        assert_eq!(suggest_username("@x"), "");
     }
 }

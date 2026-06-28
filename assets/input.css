@@ -8,6 +8,14 @@
 
 @import "tailwindcss";
 
+@layer base {
+  button:not(:disabled),
+  [role="button"],
+  summary {
+    cursor: pointer;
+  }
+}
+
 /* Tailwind v4 auto-detects sources from the working directory, but we
  * pin the template glob explicitly so the CLI scans the right tree
  * regardless of where it's invoked from. */

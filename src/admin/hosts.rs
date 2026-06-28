@@ -1,18 +1,15 @@
-//! `/admin/hosts/*` — enrollment of Linux hosts that consume Forseti's
+//! `/admin/hosts/*`: enrollment of Linux hosts that consume Forseti's
 //! POSIX/NSS resolver.
 //!
 //! Operators enroll a host (minting a one-shot secret), revoke it, and
 //! rotate its secret here. The raw secret is revealed exactly once via the
-//! same `SecretReveal` flash mechanism the DCR-token surface uses — only
+//! same `SecretReveal` flash the DCR-token surface uses; only
 //! `sha256(secret)` is persisted (see [`crate::oauth::register::hash_token`]).
 //!
 //! ## Scope
 //!
-//! This surface is **Forseti-tier only** — an operator concern, not an
-//! org-owner one. It uses [`RequireAdmin`] (session + AAL2 +
-//! `[admin].allowed_emails`) and does NOT honour the `?org=<slug>`
-//! org-scoping convention used by the rest of `/admin/*`. Org owners who
-//! land here via `?org=<slug>` get a 403 from `require_admin`.
+//! **Forseti-tier only** ([`RequireAdmin`]: session + AAL2 +
+//! `[admin].allowed_emails`); does NOT honour the `?org=<slug>` convention.
 
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
@@ -35,23 +32,37 @@ use crate::posix::db as posix_db;
 use crate::render::render;
 use crate::state::AppState;
 
-// --- View models -----------------------------------------------------------
-
 struct HostRow {
     id: String,
     hostname: String,
-    allowed_gid: String,
+    teams: String,
     force_mfa: bool,
     created_at: String,
     created_at_pretty: String,
     last_seen_pretty: String,
 }
 
-fn project_row(r: posix_db::HostListRow) -> HostRow {
-    let allowed_gid = match r.allowed_gid {
-        Some(g) => g.to_string(),
-        None => "any".to_string(),
-    };
+/// A selectable org team rendered as a checkbox in the enroll/edit forms.
+struct TeamChoice {
+    id: String,
+    name: String,
+    checked: bool,
+}
+
+/// An org option in the enroll form's org `<select>`.
+struct OrgChoice {
+    id: String,
+    name: String,
+    selected: bool,
+}
+
+/// One org's teams, grouped under the org name in the enroll form.
+struct OrgTeamGroup {
+    org_name: String,
+    teams: Vec<TeamChoice>,
+}
+
+fn project_row(r: posix_db::HostListRow, teams: String) -> HostRow {
     let last_seen_pretty = match r.last_seen_at.as_deref().filter(|s| !s.is_empty()) {
         Some(ts) => humanise_timestamp(ts),
         None => "never".to_string(),
@@ -59,7 +70,7 @@ fn project_row(r: posix_db::HostListRow) -> HostRow {
     HostRow {
         id: r.id,
         hostname: r.hostname,
-        allowed_gid,
+        teams,
         force_mfa: r.force_mfa != 0,
         created_at_pretty: humanise_timestamp(&r.created_at),
         created_at: r.created_at,
@@ -67,16 +78,13 @@ fn project_row(r: posix_db::HostListRow) -> HostRow {
     }
 }
 
-// --- Templates -------------------------------------------------------------
-
 #[derive(askama::Template)]
 #[template(path = "admin/hosts_list.html")]
 struct HostsListTemplate {
     chrome: PageChrome,
     admin_active: AdminSection,
     rows: Vec<HostRow>,
-    /// One-shot reveal of a freshly minted `host_id:secret`. Read out of
-    /// the `SecretReveal` flash store; `None` on plain refresh.
+    /// One-shot reveal of a freshly minted `host_id:secret`; `None` otherwise.
     revealed_credential: Option<String>,
 }
 
@@ -87,11 +95,26 @@ struct HostNewTemplate {
     admin_active: AdminSection,
     error_message: String,
     hostname: String,
-    allowed_gid: String,
+    orgs: Vec<OrgChoice>,
+    team_groups: Vec<OrgTeamGroup>,
+    /// True when at least one org has a team; gates the "no teams yet" hint.
+    any_teams: bool,
     force_mfa: bool,
 }
 
-// --- Handlers --------------------------------------------------------------
+#[derive(askama::Template)]
+#[template(path = "admin/hosts_edit.html")]
+struct HostEditTemplate {
+    chrome: PageChrome,
+    admin_active: AdminSection,
+    error_message: String,
+    id: String,
+    hostname: String,
+    /// Read-only: a host's org is fixed at enrollment, never editable here.
+    org_name: String,
+    teams: Vec<TeamChoice>,
+    force_mfa: bool,
+}
 
 #[derive(Debug, Deserialize)]
 pub struct ListQuery {
@@ -107,8 +130,8 @@ pub async fn list(
 ) -> Response {
     let ctx = admin.ctx;
 
-    let rows = match posix_db::list_hosts(&state.db).await {
-        Ok(rows) => rows.into_iter().map(project_row).collect(),
+    let host_rows = match posix_db::list_hosts(&state.db).await {
+        Ok(rows) => rows,
         Err(e) => {
             tracing::error!(error = ?e, "admin: list hosts failed");
             return render_admin_error(
@@ -118,6 +141,49 @@ pub async fn list(
             );
         }
     };
+
+    // team-id -> name map across every org, built once to avoid an N+1.
+    let team_names: std::collections::HashMap<String, String> =
+        match load_orgs_and_teams(&state).await {
+            Ok((_, by_org)) => by_org
+                .into_values()
+                .flatten()
+                .map(|t| (t.id, t.name))
+                .collect(),
+            Err(e) => {
+                tracing::error!(error = ?e, "admin: list teams failed");
+                return render_admin_error(
+                    &state,
+                    "Hosts unavailable",
+                    "We couldn't resolve host scopes. Please try again in a moment.",
+                );
+            }
+        };
+
+    let mut rows = Vec::with_capacity(host_rows.len());
+    for r in host_rows {
+        let team_ids = match posix_db::host_allowed_team_ids(&state.db, &r.id).await {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::error!(error = ?e, "admin: host allowed teams failed");
+                return render_admin_error(
+                    &state,
+                    "Hosts unavailable",
+                    "We couldn't resolve host scopes. Please try again in a moment.",
+                );
+            }
+        };
+        let teams = if team_ids.is_empty() {
+            "whole org".to_string()
+        } else {
+            team_ids
+                .iter()
+                .map(|t| team_names.get(t).cloned().unwrap_or_else(|| t.clone()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        rows.push(project_row(r, teams));
+    }
 
     let revealed_credential = match query.reveal.as_deref().filter(|s| !s.is_empty()) {
         Some(token) => {
@@ -142,15 +208,34 @@ pub async fn list(
     })
 }
 
-pub async fn new(admin: RequireAdmin, csrf: Csrf) -> Response {
+pub async fn new(State(state): State<AppState>, admin: RequireAdmin, csrf: Csrf) -> Response {
     let ctx = admin.ctx;
+    let (orgs, teams_by_org) = match load_orgs_and_teams(&state).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(error = ?e, "admin: load orgs/teams (new host) failed");
+            return render_admin_error(
+                &state,
+                "Enroll unavailable",
+                "We couldn't load organizations. Please try again in a moment.",
+            );
+        }
+    };
+    let selected_org = orgs
+        .first()
+        .map(|o| o.id.clone())
+        .unwrap_or_else(|| crate::orgs::DEFAULT_ORG_ID.to_string());
+    let groups = team_groups(&orgs, &teams_by_org, &[]);
+    let any_teams = groups.iter().any(|g| !g.teams.is_empty());
     let chrome = ctx.chrome(&csrf);
     render(&HostNewTemplate {
         chrome,
         admin_active: AdminSection::Hosts,
         error_message: String::new(),
         hostname: String::new(),
-        allowed_gid: String::new(),
+        orgs: org_choices(&orgs, &selected_org),
+        team_groups: groups,
+        any_teams,
         force_mfa: false,
     })
 }
@@ -161,9 +246,13 @@ pub struct IssueForm {
     csrf: Option<String>,
     #[serde(default)]
     hostname: String,
-    /// Blank → no gid restriction. Otherwise parsed as i32 (non-negative).
+    /// The org this host belongs to. Immutable after enrollment.
     #[serde(default)]
-    allowed_gid: String,
+    org_id: String,
+    /// Repeated `team_ids=` checkbox values (`axum_extra::Form` collects them
+    /// into a Vec). Empty → whole-org host (allows any org member).
+    #[serde(default)]
+    team_ids: Vec<String>,
     #[serde(default)]
     force_mfa: Option<String>,
 }
@@ -181,36 +270,54 @@ pub async fn issue(
         return resp;
     }
 
-    // TODO: enforcement lands with the resolver/PAM MFA task (M2); captured only for now.
     let force_mfa = form.force_mfa.is_some();
-    let rerender = |error_message: String| -> Response {
+    let (orgs, teams_by_org) = match load_orgs_and_teams(&state).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(error = ?e, "admin: load orgs/teams (issue) failed");
+            return render_admin_error(
+                &state,
+                "Enroll failed",
+                "We couldn't load organizations. Please try again in a moment.",
+            );
+        }
+    };
+    let rerender = |error_message: String, team_ids: &[String]| -> Response {
+        let groups = team_groups(&orgs, &teams_by_org, team_ids);
+        let any_teams = groups.iter().any(|g| !g.teams.is_empty());
         let chrome = ctx.chrome(&csrf);
         render(&HostNewTemplate {
             chrome,
             admin_active: AdminSection::Hosts,
             error_message,
             hostname: form.hostname.clone(),
-            allowed_gid: form.allowed_gid.clone(),
+            orgs: org_choices(&orgs, &form.org_id),
+            team_groups: groups,
+            any_teams,
             force_mfa,
         })
     };
 
     let hostname = form.hostname.trim().to_string();
     if hostname.is_empty() {
-        return rerender("Hostname is required.".to_string());
+        return rerender("Hostname is required.".to_string(), &form.team_ids);
     }
-    let allowed_gid: Option<i32> = match form.allowed_gid.trim() {
-        "" => None,
-        s => match s.parse::<i32>() {
-            Ok(n) if n >= 0 => Some(n),
-            _ => {
-                return rerender(
-                    "Allowed GID must be a non-negative integer, or blank for any group."
-                        .to_string(),
-                )
-            }
-        },
-    };
+    if !orgs.iter().any(|o| o.id == form.org_id) {
+        return rerender(
+            "Pick an organization for this host.".to_string(),
+            &form.team_ids,
+        );
+    }
+    let valid: std::collections::HashSet<&str> = teams_by_org
+        .get(&form.org_id)
+        .map(|ts| ts.iter().map(|t| t.id.as_str()).collect())
+        .unwrap_or_default();
+    if let Some(bad) = form.team_ids.iter().find(|t| !valid.contains(t.as_str())) {
+        return rerender(
+            format!("Unknown team {bad}. Pick teams from the chosen organization."),
+            &form.team_ids,
+        );
+    }
 
     let secret = generate_token();
     let secret_hash = hash_token(&secret);
@@ -221,14 +328,27 @@ pub async fn issue(
         &host_id,
         &hostname,
         &secret_hash,
-        allowed_gid,
+        &form.org_id,
         force_mfa,
         Some(&ctx.email),
     )
     .await
     {
         tracing::error!(error = ?e, "admin: host enroll insert failed");
-        return rerender(format!("Failed to enroll host: {e}"));
+        return rerender(format!("Failed to enroll host: {e}"), &form.team_ids);
+    }
+    for team_id in &form.team_ids {
+        if let Err(e) =
+            posix_db::find_or_create_team_gid(&state.db, team_id, state.cfg.posix.group_gid_base)
+                .await
+        {
+            tracing::error!(error = ?e, "admin: team gid allocation (issue) failed");
+            return rerender(format!("Failed to scope host: {e}"), &form.team_ids);
+        }
+    }
+    if let Err(e) = posix_db::set_host_allowed_team_ids(&state.db, &host_id, &form.team_ids).await {
+        tracing::error!(error = ?e, "admin: host allowed teams write failed");
+        return rerender(format!("Failed to scope host: {e}"), &form.team_ids);
     }
 
     let _ = audit::log(
@@ -237,12 +357,188 @@ pub async fn issue(
             .actor_admin(&ctx.identity_id, &ctx.email)
             .target(target_kind::HOST, host_id.clone())
             .with_ctx(&actx)
-            .metadata(host_audit_metadata(&hostname, allowed_gid)),
+            .metadata(host_audit_metadata(&hostname, &form.team_ids)),
     )
     .await;
 
     let reveal = SecretReveal::HostSecret { host_id, secret };
     reveal_and_redirect(&state, reveal).await
+}
+
+pub async fn edit(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    admin: RequireAdmin,
+    csrf: Csrf,
+) -> Response {
+    let ctx = admin.ctx;
+    let host = match posix_db::host_by_id(&state.db, &id).await {
+        Ok(Some(h)) => h,
+        Ok(None) => return render_admin_error(&state, "Edit failed", "No such host."),
+        Err(e) => {
+            tracing::error!(error = ?e, "admin: host lookup before edit failed");
+            return render_admin_error(&state, "Edit failed", &format!("Could not load host: {e}"));
+        }
+    };
+    let current = match posix_db::host_allowed_team_ids(&state.db, &id).await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::error!(error = ?e, "admin: host allowed teams (edit) failed");
+            return render_admin_error(&state, "Edit failed", &format!("Could not load host: {e}"));
+        }
+    };
+    let host_org = match posix_db::host_org_id(&state.db, &id).await {
+        Ok(Some(o)) => o,
+        Ok(None) => return render_admin_error(&state, "Edit failed", "No such host."),
+        Err(e) => {
+            tracing::error!(error = ?e, "admin: host org lookup (edit) failed");
+            return render_admin_error(&state, "Edit failed", &format!("Could not load host: {e}"));
+        }
+    };
+    let org_name = match org_display_name(&state, &host_org).await {
+        Ok(n) => n,
+        Err(e) => {
+            tracing::error!(error = ?e, "admin: org lookup (edit) failed");
+            return render_admin_error(&state, "Edit failed", &format!("Could not load host: {e}"));
+        }
+    };
+    let org_teams = match crate::orgs::teams::list_teams(&state.db, &host_org).await {
+        Ok(ts) => ts,
+        Err(e) => {
+            tracing::error!(error = ?e, "admin: list teams (edit) failed");
+            return render_admin_error(&state, "Edit failed", &format!("Could not load host: {e}"));
+        }
+    };
+    let chrome = ctx.chrome(&csrf);
+    render(&HostEditTemplate {
+        chrome,
+        admin_active: AdminSection::Hosts,
+        error_message: String::new(),
+        id: host.id,
+        hostname: host.hostname,
+        org_name,
+        teams: team_choices(&org_teams, &current),
+        force_mfa: host.force_mfa != 0,
+    })
+}
+
+#[derive(Debug, Deserialize)]
+pub struct EditForm {
+    #[serde(rename = "_csrf")]
+    csrf: Option<String>,
+    #[serde(default)]
+    hostname: String,
+    #[serde(default)]
+    team_ids: Vec<String>,
+    #[serde(default)]
+    force_mfa: Option<String>,
+}
+
+pub async fn update(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    actx: AuditCtx,
+    admin: RequireAdmin,
+    csrf: Csrf,
+    Form(form): Form<EditForm>,
+) -> Response {
+    let ctx = admin.ctx;
+    if let Some(resp) = crate::extractors::verify_csrf_or_forbid(&headers, form.csrf.as_deref()) {
+        return resp;
+    }
+
+    let force_mfa = form.force_mfa.is_some();
+    // Validate teams against the stored host org, never what the form claims.
+    let host_org = match posix_db::host_org_id(&state.db, &id).await {
+        Ok(Some(o)) => o,
+        Ok(None) => return render_admin_error(&state, "Save failed", "No such host."),
+        Err(e) => {
+            tracing::error!(error = ?e, "admin: host org lookup (update) failed");
+            return render_admin_error(
+                &state,
+                "Save failed",
+                "We couldn't load the host. Please try again in a moment.",
+            );
+        }
+    };
+    let org_name = match org_display_name(&state, &host_org).await {
+        Ok(n) => n,
+        Err(e) => {
+            tracing::error!(error = ?e, "admin: org lookup (update) failed");
+            return render_admin_error(
+                &state,
+                "Save failed",
+                "We couldn't load the host. Please try again in a moment.",
+            );
+        }
+    };
+    let org_teams = match crate::orgs::teams::list_teams(&state.db, &host_org).await {
+        Ok(ts) => ts,
+        Err(e) => {
+            tracing::error!(error = ?e, "admin: list teams (update) failed");
+            return render_admin_error(
+                &state,
+                "Save failed",
+                "We couldn't load org teams. Please try again in a moment.",
+            );
+        }
+    };
+    let rerender = |error_message: String, team_ids: &[String]| -> Response {
+        let chrome = ctx.chrome(&csrf);
+        render(&HostEditTemplate {
+            chrome,
+            admin_active: AdminSection::Hosts,
+            error_message,
+            id: id.clone(),
+            hostname: form.hostname.clone(),
+            org_name: org_name.clone(),
+            teams: team_choices(&org_teams, team_ids),
+            force_mfa,
+        })
+    };
+
+    let hostname = form.hostname.trim().to_string();
+    if hostname.is_empty() {
+        return rerender("Hostname is required.".to_string(), &form.team_ids);
+    }
+    let valid: std::collections::HashSet<&str> = org_teams.iter().map(|t| t.id.as_str()).collect();
+    if let Some(bad) = form.team_ids.iter().find(|t| !valid.contains(t.as_str())) {
+        return rerender(
+            format!("Unknown team {bad}. Pick from the host's org teams."),
+            &form.team_ids,
+        );
+    }
+
+    if let Err(e) = posix_db::update_host(&state.db, &id, &hostname, force_mfa).await {
+        tracing::error!(error = ?e, "admin: host update failed");
+        return rerender(format!("Failed to update host: {e}"), &form.team_ids);
+    }
+    for team_id in &form.team_ids {
+        if let Err(e) =
+            posix_db::find_or_create_team_gid(&state.db, team_id, state.cfg.posix.group_gid_base)
+                .await
+        {
+            tracing::error!(error = ?e, "admin: team gid allocation (update) failed");
+            return rerender(format!("Failed to scope host: {e}"), &form.team_ids);
+        }
+    }
+    if let Err(e) = posix_db::set_host_allowed_team_ids(&state.db, &id, &form.team_ids).await {
+        tracing::error!(error = ?e, "admin: host allowed teams update failed");
+        return rerender(format!("Failed to scope host: {e}"), &form.team_ids);
+    }
+
+    let _ = audit::log(
+        &state.db,
+        AuditEvent::new(action::HOST_UPDATED)
+            .actor_admin(&ctx.identity_id, &ctx.email)
+            .target(target_kind::HOST, id)
+            .with_ctx(&actx)
+            .metadata(host_audit_metadata(&hostname, &form.team_ids)),
+    )
+    .await;
+
+    Redirect::to("/admin/hosts").into_response()
 }
 
 pub async fn revoke_confirm(Path(id): Path<String>, admin: RequireAdmin, csrf: Csrf) -> Response {
@@ -286,6 +582,9 @@ pub async fn revoke(
             );
         }
     };
+    let team_ids = posix_db::host_allowed_team_ids(&state.db, &id)
+        .await
+        .unwrap_or_default();
 
     if let Err(e) = posix_db::delete_host(&state.db, &id).await {
         tracing::error!(error = ?e, "admin: host delete failed");
@@ -303,7 +602,7 @@ pub async fn revoke(
                 .actor_admin(&ctx.identity_id, &ctx.email)
                 .target(target_kind::HOST, id)
                 .with_ctx(&actx)
-                .metadata(host_audit_metadata(&h.hostname, h.allowed_gid))
+                .metadata(host_audit_metadata(&h.hostname, &team_ids))
                 .critical(),
         )
         .await;
@@ -369,13 +668,16 @@ pub async fn rotate(
         }
     }
 
+    let team_ids = posix_db::host_allowed_team_ids(&state.db, &id)
+        .await
+        .unwrap_or_default();
     let _ = audit::log(
         &state.db,
         AuditEvent::new(action::HOST_SECRET_ROTATED)
             .actor_admin(&ctx.identity_id, &ctx.email)
             .target(target_kind::HOST, id.clone())
             .with_ctx(&actx)
-            .metadata(host_audit_metadata(&host.hostname, host.allowed_gid)),
+            .metadata(host_audit_metadata(&host.hostname, &team_ids)),
     )
     .await;
 
@@ -411,19 +713,87 @@ async fn reveal_and_redirect(state: &AppState, reveal: SecretReveal) -> Response
     Redirect::to(&url).into_response()
 }
 
-/// Audit metadata for host events. **Only** carries `hostname` + `allowed_gid`
-/// — never the secret or its hash. `SafeMetadata` deny-lists credential keys
-/// and panics in debug, so keeping secrets out is enforced both ways.
-fn host_audit_metadata(hostname: &str, allowed_gid: Option<i32>) -> SafeMetadata {
+/// Load every org plus its teams, keyed by org id.
+async fn load_orgs_and_teams(
+    state: &AppState,
+) -> anyhow::Result<(
+    Vec<crate::orgs::db::Org>,
+    std::collections::HashMap<String, Vec<crate::orgs::teams::Team>>,
+)> {
+    let orgs = crate::orgs::db::list_orgs(&state.db).await?;
+    let mut by_org = std::collections::HashMap::with_capacity(orgs.len());
+    for o in &orgs {
+        let teams = crate::orgs::teams::list_teams(&state.db, &o.id).await?;
+        by_org.insert(o.id.clone(), teams);
+    }
+    Ok((orgs, by_org))
+}
+
+/// Resolve an org's display name, falling back to its id if the row is gone.
+async fn org_display_name(state: &AppState, org_id: &str) -> anyhow::Result<String> {
+    Ok(crate::orgs::db::org_by_id(&state.db, org_id)
+        .await?
+        .map(|o| o.name)
+        .unwrap_or_else(|| org_id.to_string()))
+}
+
+/// Project orgs into `<select>` options, marking `selected`.
+fn org_choices(orgs: &[crate::orgs::db::Org], selected: &str) -> Vec<OrgChoice> {
+    orgs.iter()
+        .map(|o| OrgChoice {
+            id: o.id.clone(),
+            name: o.name.clone(),
+            selected: o.id == selected,
+        })
+        .collect()
+}
+
+/// Group each org's teams into checkbox choices, marking `selected_teams`.
+fn team_groups(
+    orgs: &[crate::orgs::db::Org],
+    teams_by_org: &std::collections::HashMap<String, Vec<crate::orgs::teams::Team>>,
+    selected_teams: &[String],
+) -> Vec<OrgTeamGroup> {
+    orgs.iter()
+        .map(|o| OrgTeamGroup {
+            org_name: o.name.clone(),
+            teams: teams_by_org
+                .get(&o.id)
+                .map(|ts| team_choices(ts, selected_teams))
+                .unwrap_or_default(),
+        })
+        .collect()
+}
+
+/// Project org teams into checkbox choices, marking `selected`.
+fn team_choices(org_teams: &[crate::orgs::teams::Team], selected: &[String]) -> Vec<TeamChoice> {
+    org_teams
+        .iter()
+        .map(|t| TeamChoice {
+            id: t.id.clone(),
+            name: t.name.clone(),
+            checked: selected.contains(&t.id),
+        })
+        .collect()
+}
+
+/// Audit metadata for host events. Carries only `hostname` + the scoped team
+/// set, never the secret or its hash (also enforced by `SafeMetadata`).
+fn host_audit_metadata(hostname: &str, team_ids: &[String]) -> SafeMetadata {
+    let teams_str = if team_ids.is_empty() {
+        "whole-org".to_string()
+    } else {
+        team_ids.join(",")
+    };
     audit_metadata!(
         "hostname" => hostname.to_string(),
-        "allowed_gid" => allowed_gid.map(|g| g.to_string()).unwrap_or_else(|| "any".to_string()),
+        "team_count" => team_ids.len().to_string(),
+        "allowed_teams" => teams_str,
     )
 }
 
-/// 32 random bytes from ThreadRng (OS-seeded), base64url-encoded, no padding.
-/// Mirrors `dcr_tokens::generate_token` — ~256 bits, same generator the rest
-/// of the codebase uses for client secrets and CSRF tokens.
+/// 32 random bytes (~256 bits), base64url-encoded; mirrors
+/// `dcr_tokens::generate_token`.
 fn generate_token() -> String {
     let mut bytes = [0u8; 32];
     rand::rng().fill(&mut bytes[..]);
@@ -436,16 +806,20 @@ mod tests {
 
     #[test]
     fn host_audit_metadata_builds_and_omits_secret() {
-        let md = host_audit_metadata("web-01.example.com", Some(2000));
+        let md = host_audit_metadata(
+            "web-01.example.com",
+            &["team-a".to_string(), "team-b".to_string()],
+        );
         let obj = md.as_value().as_object().expect("metadata is an object");
         assert_eq!(
             obj.get("hostname").and_then(|v| v.as_str()),
             Some("web-01.example.com")
         );
         assert_eq!(
-            obj.get("allowed_gid").and_then(|v| v.as_str()),
-            Some("2000")
+            obj.get("allowed_teams").and_then(|v| v.as_str()),
+            Some("team-a,team-b")
         );
+        assert_eq!(obj.get("team_count").and_then(|v| v.as_str()), Some("2"));
         assert!(!obj.contains_key("secret"));
         assert!(!obj.contains_key("secret_hash"));
         let json = md.as_value().to_string();
@@ -453,10 +827,14 @@ mod tests {
     }
 
     #[test]
-    fn host_audit_metadata_handles_any_gid() {
-        let md = host_audit_metadata("db-01", None);
+    fn host_audit_metadata_handles_unscoped() {
+        let md = host_audit_metadata("db-01", &[]);
         let obj = md.as_value().as_object().expect("metadata is an object");
-        assert_eq!(obj.get("allowed_gid").and_then(|v| v.as_str()), Some("any"));
+        assert_eq!(
+            obj.get("allowed_teams").and_then(|v| v.as_str()),
+            Some("whole-org")
+        );
+        assert_eq!(obj.get("team_count").and_then(|v| v.as_str()), Some("0"));
         assert!(!obj.contains_key("secret"));
     }
 }

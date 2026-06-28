@@ -27,14 +27,12 @@ use super::{build_nav, require_org_owner, settings_ctx};
 struct OrgsListTemplate {
     chrome: PageChrome,
     memberships: Vec<Membership>,
-    /// True when the operator's license covers the Orgs feature and
-    /// they're under the quota — drives whether the "Create" form is
-    /// shown or hidden behind an upsell card.
+    /// License covers Orgs and under quota: shows the "Create" form vs an
+    /// upsell card.
     can_create: bool,
     /// Pretty label for the upsell card (e.g. "Pro" or "Light").
     required_tier_label: String,
-    /// True when at least one license is active (drives "Upgrade" vs
-    /// "Get a license" CTA copy).
+    /// A license is active (drives "Upgrade" vs "Get a license" CTA copy).
     has_license: bool,
     purchase_url: String,
     nav: orgs::nav::OrgNav,
@@ -51,9 +49,7 @@ pub(super) async fn orgs_list(
         .await
         .unwrap_or_default();
 
-    // License gate: can_create iff feature(Orgs) is Allowed AND we're
-    // under max_orgs. We render the upsell card inline instead of a
-    // hard 403 so the list page is always reachable.
+    // Upsell card rendered inline (not a 403) so the list page stays reachable.
     let feat = state.license.feature(Feature::Orgs);
     let max_orgs = state
         .license
@@ -161,10 +157,8 @@ pub(super) async fn orgs_create(
     {
         tracing::warn!(error = ?e, "add_member owner failed");
     } else {
-        // Owner self-add on org creation. Membership mutations elsewhere
-        // (role change, removal) are already audited at the handler
-        // layer; this closes the gap on the create path so every
-        // membership row written has a corresponding audit trail.
+        // Audit the owner self-add so the create path matches the other
+        // membership mutations' audit trail.
         let _ = audit::log(
             &state.db,
             AuditEvent::new(action::ORG_MEMBER_ADDED)
@@ -203,10 +197,8 @@ pub(super) async fn named_delete(
     if let Err(r) = require_org_owner(&state, &identity_id, &org.id).await {
         return r;
     }
-    // Precondition: refuse delete while any oauth_client_metadata row
-    // references this org. The Hydra-side client object itself is
-    // owner-of-record for the oauth2 client; deleting the org without
-    // moving its clients somewhere would orphan the rows.
+    // Refuse delete while any oauth_client_metadata row references this org;
+    // deleting it without migrating the clients would orphan the rows.
     let pending = crate::oauth_client_metadata::count_for_org(&state.db, &org.id)
         .await
         .unwrap_or(0);
@@ -219,14 +211,21 @@ pub(super) async fn named_delete(
         )
             .into_response();
     }
+    if crate::posix::db::count_hosts_in_org(&state.db, &org.id)
+        .await
+        .unwrap_or(0)
+        > 0
+    {
+        // Hosts are operator-tier; an owner can't destroy them by deleting the org.
+        return (
+            StatusCode::CONFLICT,
+            "revoke this org's hosts before deleting it",
+        )
+            .into_response();
+    }
     if let Err(e) = orgs::delete_org(&state.db, &org.id).await {
         tracing::error!(error = ?e, "delete_org failed");
         return (StatusCode::INTERNAL_SERVER_ERROR, "delete failed").into_response();
-    }
-    // Cascade: the org is gone, so drop its POSIX mirror (group + members)
-    // too. Best-effort; the org delete already succeeded.
-    if let Err(e) = crate::posix::db::delete_org_group(&state.db, &org.id).await {
-        tracing::error!(error = ?e, org_id = %org.id, "failed to delete posix org group on org delete");
     }
     Redirect::to("/settings/organizations").into_response()
 }

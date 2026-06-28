@@ -1,6 +1,6 @@
-//! `/oauth/consent` — Hydra's consent challenge handler (GET renders the
-//! consent screen or auto-grants; POST processes the user's allow/deny
-//! decision and folds identity traits into the id_token claims).
+//! `/oauth/consent` — Hydra's consent challenge handler (GET renders or
+//! auto-grants; POST processes the allow/deny decision and folds identity
+//! traits into the id_token claims).
 
 use askama::Template;
 use axum::extract::{Query, State};
@@ -22,9 +22,9 @@ use crate::state::AppState;
 struct ConsentScopeView {
     name: String,
     description: String,
-    /// `true` when un-checking the scope would break the protocol — currently
-    /// only `openid`. The template disables the checkbox and emits a hidden
-    /// duplicate so the value is still POSTed.
+    /// `true` when un-checking would break the protocol (only `openid`); the
+    /// template disables the checkbox and emits a hidden duplicate so it's
+    /// still POSTed.
     required: bool,
 }
 
@@ -34,21 +34,15 @@ struct ConsentTemplate {
     chrome: PageChrome,
     consent_intro: String,
     client_name: String,
-    /// Subject email shown in the "Signed in as ..." line above the
-    /// scopes. Distinct from the chrome's `user_email` because consent
-    /// runs out-of-band from the Kratos session cookie — we look up the
-    /// subject directly via the admin API.
+    /// Subject email for the "Signed in as ..." line. Distinct from the
+    /// chrome's `user_email`: consent runs out-of-band from the Kratos session
+    /// cookie, so we look up the subject directly via the admin API.
     subject_email: String,
     challenge: String,
     scopes: Vec<ConsentScopeView>,
-    /// True when an admin has explicitly verified the client (or the
-    /// client predates the `oauth_client_metadata` table and so defaults
-    /// to verified — see the missing-row fallback below). Drives the
-    /// consent-screen badge: verified clients get a subtle "Reviewed by
-    /// your administrator" checkmark; unverified clients get a
-    /// prominent caution banner. Replaces the previous `dcr_registered`
-    /// flag — verification is now a first-class state, not implied by
-    /// DCR provenance.
+    /// True when an admin verified the client, or no `oauth_client_metadata`
+    /// row exists (legacy clients default to verified). Drives the consent
+    /// badge: verified shows a checkmark, unverified a caution banner.
     verified: bool,
 }
 
@@ -88,19 +82,11 @@ pub(crate) async fn oauth_consent(
         .unwrap_or(false);
     let hydra_skip = req.skip.unwrap_or(false);
 
-    // Verification lookup must happen *before* the auto-grant decision
-    // (M1). The trust-boundary rule is "an unverified client must show
-    // the caution banner on every consent" — neither Hydra-side `skip`
-    // (remembered consent grant) nor client-side `skip_consent` (admin-
-    // flagged trusted) gets to bypass that, otherwise an admin who
-    // flipped `skip_consent: true` on a self-registered client would
-    // also implicitly verify it. Verification lives in the Forseti-owned
-    // `oauth_client_metadata` table — see `src/oauth_client_metadata.rs`
-    // for why the trust-boundary state can't live on the Hydra client.
-    // Default for a missing row is "verified": clients without a Forseti
-    // row predate this table or came in via the admin UI, both of which
-    // are implicitly trusted. Self-registered DCR clients always have a
-    // row inserted with `verification = "unverified"` by the proxy.
+    // Verification lookup must run before the auto-grant decision: an
+    // unverified client shows the caution banner on every consent, so neither
+    // Hydra `skip` nor client-side `skip_consent` may bypass it. Missing row
+    // defaults to verified (legacy / admin-created); DCR clients always carry
+    // an "unverified" row.
     let client_id_lookup = req
         .client
         .as_ref()
@@ -131,35 +117,20 @@ pub(crate) async fn oauth_consent(
         }
     };
 
-    // Linux-PAM device-auth NEVER auto-skips consent (R1). The host+account
-    // binding renders on the verification screen AND consent must show — a
-    // stray `skip_consent` toggle (or a remembered Hydra grant) on the PAM
-    // client must not bypass it. This guard sits ABOVE the skip tree; the
-    // subject-mismatch check below still applies because we fall through to
-    // the normal render path (which validates the session before showing the
-    // Allow button on POST).
+    // Linux-PAM device-auth never auto-skips consent: the host+account
+    // binding must be shown, so a stray `skip_consent` or remembered grant
+    // must not bypass it. Guard sits above the skip tree.
     let is_pam_client =
         !client_id_lookup.is_empty() && client_id_lookup == state.cfg.posix.pam_client_id;
 
-    // Auto-grant path: Hydra already remembers the user's consent, or the
-    // client is flagged trusted. Either way, no UI; fold the id_token claims
-    // and redirect straight to the relying party.
-    //
-    // Before auto-granting, verify the active Kratos session matches the
-    // subject Hydra claims this consent belongs to. Without this check a
-    // crafted consent link tied to one identity could be auto-granted while
-    // a different identity is signed in — the consent screen would never
-    // appear, leaving the requesting client with tokens issued for the
-    // wrong user. Mismatch → reject with `access_denied` rather than
-    // silently granting.
-    //
-    // Unverified clients never auto-grant (M1): we always want the user
-    // to see the caution banner.
+    // Auto-grant path (remembered consent or trusted client). Verify the
+    // active Kratos session matches Hydra's claimed subject first: a crafted
+    // consent link tied to one identity could otherwise auto-grant tokens
+    // while a different identity is signed in. Mismatch rejects with
+    // `access_denied`. Unverified clients never auto-grant.
     if !is_pam_client && verified && (hydra_skip || client_skip_consent) {
-        // Subject comparison is independent of AAL — InsufficientAal means
-        // a session exists, we just couldn't read it here. Treating that
-        // as "no subject" keeps the mismatch check conservative (rejects
-        // rather than silently grants), which is the safer default.
+        // InsufficientAal means a session exists we couldn't read here;
+        // treating it as "no subject" keeps the mismatch check conservative.
         let session_subject = session.identity_id().unwrap_or_default();
         if session_subject != subject || subject.is_empty() {
             tracing::warn!(
@@ -214,21 +185,16 @@ pub(crate) async fn oauth_consent(
                 .cloned()
                 .or_else(|| super::default_scope_description(s).map(str::to_string))
                 .unwrap_or_else(|| s.clone()),
-            // `openid` is mandatory for OIDC flows — Hydra rejects the
-            // consent acceptance if it's missing from `grant_scope`. We
-            // disable the checkbox (visually) and emit a hidden duplicate
-            // (in the template) so even if the user un-checks it the value
-            // still makes it into the POST body. Other scopes are
-            // user-controlled.
+            // `openid` is mandatory: Hydra rejects the accept if it's missing
+            // from `grant_scope`, so the template disables the checkbox and
+            // emits a hidden duplicate to keep it in the POST.
             required: s == "openid",
         })
         .collect();
 
-    // Best-effort subject email lookup for the "Signed in as ..." line.
-    // Done via the admin API since /oauth/consent reaches us out-of-band
-    // (Hydra sets its own cookie, but the Kratos session cookie isn't
-    // guaranteed to be in scope here — and we already trust `subject`
-    // from Hydra).
+    // Subject email for the "Signed in as ..." line. Via the admin API
+    // because the Kratos session cookie isn't guaranteed in scope here, and
+    // we already trust `subject` from Hydra.
     let subject_email = match ory::kratos::admin_get_identity(&state.ory, &subject).await {
         Ok(id) => id
             .traits
@@ -257,9 +223,7 @@ pub(crate) struct OAuthConsentForm {
     csrf: Option<String>,
     consent_challenge: String,
     decision: String,
-    /// `Vec<String>` because the same field name is repeated once per
-    /// granted scope. Axum's form extractor handles this when the field is
-    /// declared as a `Vec`.
+    /// `Vec` because the field repeats once per granted scope.
     #[serde(default, rename = "grant_scope")]
     grant_scope: Vec<String>,
     remember: Option<String>,
@@ -278,9 +242,8 @@ pub(crate) async fn oauth_consent_submit(
     let remember = form.remember.as_deref() == Some("true");
 
     if form.decision == "deny" {
-        // Best-effort lookup of subject + client for the audit row;
-        // failure here doesn't block the reject (Hydra will still get
-        // told the user said no).
+        // Best-effort subject + client for the audit row; a failure here
+        // doesn't block the reject.
         let (subject, client_id) =
             match ory::hydra::get_consent_request(&state.ory, &form.consent_challenge).await {
                 Ok(r) => (
@@ -337,13 +300,10 @@ pub(crate) async fn oauth_consent_submit(
         .requested_access_token_audience
         .clone()
         .unwrap_or_default();
-    // Snapshot the bits we need for the lazy `resource_url` provenance
-    // capture below. `request_url` carries the original `/oauth2/auth`
-    // URL Hydra received — RFC 8707 clients like Claude send
-    // `?resource=<url>` there. `requested_audience` is Hydra's parsed
-    // audience list, which we fall back to for clients that used
-    // Hydra's non-standard `audience=` param at the auth endpoint
-    // instead of `resource=`.
+    // Snapshot for the lazy `resource_url` capture below. `request_url` is
+    // the original `/oauth2/auth` URL where RFC 8707 clients send
+    // `?resource=<url>`; `requested_audience` is the fallback for clients
+    // that used Hydra's non-standard `audience=` param instead.
     let request_url = req.request_url.clone().unwrap_or_default();
     let captured_audience = requested_audience.clone();
     let grant_scope_for_audit = form.grant_scope.clone();
@@ -377,14 +337,9 @@ pub(crate) async fn oauth_consent_submit(
     }
     let _ = audit::log(&state.db, ev).await;
 
-    // Lazy provenance capture (capture point 2): record the resource
-    // URL the client is actually being granted access to, if we can
-    // figure one out and the row doesn't already carry one. First
-    // observed value wins — see
-    // `oauth_client_metadata::upsert_resource_url_if_missing` for the
-    // race semantics. Fires for every client (DCR + admin-created)
-    // because even for operator-created clients the captured URL is
-    // useful provenance for "what got used on the wire".
+    // Lazy provenance: record the resource URL being granted, if any, when
+    // the row doesn't already carry one. First-writer-wins (see
+    // `upsert_resource_url_if_missing`). Fires for every client.
     if !client_id.is_empty() {
         if let Some(url) = extract_resource_url(request_url.as_str(), captured_audience.as_slice())
         {
@@ -403,23 +358,14 @@ pub(crate) async fn oauth_consent_submit(
     redirect
 }
 
-/// Pick a single resource-URL string to stamp on
-/// `oauth_client_metadata.resource_url`. RFC 8707 clients (Claude and
-/// friends) send `?resource=<url>` on the original auth URL, which Hydra
-/// exposes verbatim via `request_url`. Older / non-RFC-8707 clients use
-/// Hydra's non-standard `audience=` query param, which Hydra parses into
-/// `requested_access_token_audience` — we fall back to the first entry
-/// of that list.
-///
-/// Returns `None` when neither source yields a non-empty string. We
-/// don't try to normalise or validate the URL here — provenance is
-/// "what we observed", not "what we'd accept as a valid resource
-/// identifier".
+/// Pick a single resource-URL to stamp on
+/// `oauth_client_metadata.resource_url`. RFC 8707 clients send
+/// `?resource=<url>` on the auth URL (Hydra's `request_url`); others use
+/// Hydra's non-standard `audience=`, which falls back to the first
+/// `requested_access_token_audience` entry. `None` when neither yields a
+/// value. Not normalised or validated: this is "what we observed".
 fn extract_resource_url(request_url: &str, requested_audience: &[String]) -> Option<String> {
-    // (a) Parse the original auth URL and look for `?resource=<url>`.
-    // If the caller sent multiple `resource=` values (RFC 8707 §2 allows
-    // multiple), take the first — first-writer-wins applies at the row
-    // level anyway. URL parsing handles percent-decoding on the way out.
+    // RFC 8707 §2 allows multiple `resource=` values; take the first.
     if !request_url.is_empty() {
         if let Ok(url) = url::Url::parse(request_url) {
             if let Some(resource) = url
@@ -434,7 +380,6 @@ fn extract_resource_url(request_url: &str, requested_audience: &[String]) -> Opt
             }
         }
     }
-    // (b) Fall back to the first parsed audience entry.
     requested_audience
         .iter()
         .map(|s| s.trim())
@@ -442,9 +387,8 @@ fn extract_resource_url(request_url: &str, requested_audience: &[String]) -> Opt
         .map(str::to_string)
 }
 
-/// Best-effort lookup of the identity's email for the audit row. Empty
-/// `subject` or any lookup failure returns an empty string — the audit row
-/// still carries `actor_id`, the email field is just for human display.
+/// Best-effort identity email for the audit row. Empty `subject` or a
+/// lookup failure returns an empty string; the email is display-only.
 async fn lookup_identity_email(state: &AppState, subject: &str) -> String {
     if subject.is_empty() {
         return String::new();
@@ -458,10 +402,8 @@ async fn lookup_identity_email(state: &AppState, subject: &str) -> String {
     }
 }
 
-/// Tagged result of `finalize_consent`. The caller needs to know whether
-/// Hydra actually accepted the grant before emitting `OAUTH_CONSENT_GRANTED`
-/// audit rows or capturing resource-URL provenance — both must only fire on
-/// a confirmed accept.
+/// Tagged result of `finalize_consent`: the caller must know whether Hydra
+/// accepted before emitting `OAUTH_CONSENT_GRANTED` or capturing provenance.
 enum FinalizeOutcome {
     Granted { redirect: Response },
     RedirectedToError { redirect: Response },
@@ -476,9 +418,8 @@ impl FinalizeOutcome {
     }
 }
 
-/// Build the id_token claim set from identity traits + granted scopes, then
-/// accept the consent challenge with Hydra. Shared between the auto-grant
-/// path and the explicit Allow-button path.
+/// Build the id_token claims from identity traits + granted scopes, then
+/// accept the consent challenge. Shared by the auto-grant and Allow paths.
 async fn finalize_consent(
     state: &AppState,
     challenge: &str,
@@ -488,10 +429,8 @@ async fn finalize_consent(
     remember: bool,
     headers: &axum::http::HeaderMap,
 ) -> FinalizeOutcome {
-    // Fan out identity + org memberships in parallel — both are
-    // independent I/O hops on the user-facing consent path. The
-    // membership fetch is skipped entirely unless the grant scope
-    // actually consumes it (the common scope set is just `openid email`).
+    // Fan out identity + org memberships in parallel; the membership fetch
+    // is skipped unless the grant scope consumes it.
     let needs_org_claims = grant_scope.iter().any(|s| s == "org" || s == "orgs");
     let identity_fut = ory::kratos::admin_get_identity(&state.ory, subject);
     let (identity_res, memberships) = if needs_org_claims {
@@ -520,10 +459,8 @@ async fn finalize_consent(
     .and_then(|id| memberships.iter().find(|m| m.org_id == id).cloned())
     .or_else(|| memberships.first().cloned());
 
-    // Pre-fetch the Forseti-owned profile when both the feature is on
-    // AND the grant includes a scope that consumes it. Skips the DB hit
-    // entirely for OSS deployments and for grants that only carry name +
-    // email (the common case).
+    // Pre-fetch the Forseti-owned profile only when the feature is on and a
+    // consuming scope is granted; skips the DB hit otherwise.
     let profile_needed = state.cfg.profiles.enabled
         && grant_scope
             .iter()
@@ -568,14 +505,10 @@ async fn finalize_consent(
     }
 }
 
-/// Fold identity traits into an id_token claims object, scoped by what the
-/// relying party asked for. `openid` carries no extra claims (Hydra sets
-/// `sub` itself from the accepted subject). `email` adds `email` /
-/// `email_verified`. `profile` adds `name`, plus `picture` + `website`
-/// from the Forseti-owned profile when one exists. `extended_profile`
-/// adds non-standard `bio`, `pronouns`, `links`. `org` adds an
-/// `{ id, slug, role, name }` object for the active org. `orgs` adds the
-/// full membership list, capped at 32 entries.
+/// Fold identity traits into id_token claims, scoped by granted scope.
+/// `email` adds `email`/`email_verified`; `profile` adds `name`/`picture`/`website`;
+/// `extended_profile` adds `bio`/`pronouns`/`links`; `org` adds the active-org
+/// object; `orgs` adds the (capped) membership list.
 fn build_id_token_claims(
     identity: Option<&ory::Identity>,
     grant_scope: &[String],
@@ -646,9 +579,8 @@ fn build_id_token_claims(
             );
         }
         if let Some(addrs) = identity.verifiable_addresses.as_ref() {
-            // The primary email is verified if any verifiable address with
-            // value == traits.email is verified. Falling back to `false`
-            // when unclear keeps us conservative.
+            // Verified if any verifiable address matching traits.email is
+            // verified; falls back to `false` when unclear.
             let email = traits.and_then(|t| t.get("email")).and_then(|v| v.as_str());
             let verified = match email {
                 Some(e) => addrs.iter().any(|a| a.value == e && a.verified),
@@ -663,8 +595,8 @@ fn build_id_token_claims(
 
     if scopes.contains("profile") {
         if let Some(name) = traits.and_then(|t| t.get("name")) {
-            // Identity schema stores `name` as either a string or
-            // `{first, last}` — flatten both into a single `name` claim.
+            // Identity schema stores `name` as a string or `{first, last}`;
+            // flatten both into a `name` claim.
             if let Some(s) = name.as_str() {
                 if !s.is_empty() {
                     claims.insert("name".to_string(), serde_json::Value::String(s.to_string()));
@@ -690,8 +622,6 @@ fn build_id_token_claims(
                 }
             }
         }
-        // Standard OIDC slots from the Forseti-owned profile, when set.
-        // Avatar comes through as `picture`; website as `website`.
         if let Some(p) = profile {
             if let Some(url) = p.avatar_url.as_deref().filter(|s| !s.is_empty()) {
                 claims.insert(

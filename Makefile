@@ -220,11 +220,11 @@ e2e-licensed: ## Run licensed-bucket Playwright e2e (requires active license act
 license-fixtures: ## Mint tests/fixtures/license/{active,expired}.blob via the issuer CLI
 	@mkdir -p tests/fixtures/license
 	cd $(LICENSE_ISSUER_DIR) && cargo run --release --quiet -- \
-		issue --tier business --feature orgs --feature saml \
+		issue --tier business --feature orgs --feature saml --feature linux_auth \
 		--customer "E2E Test" --email "e2e@example.com" \
 		> $(CURDIR)/tests/fixtures/license/active.blob
 	cd $(LICENSE_ISSUER_DIR) && cargo run --release --quiet -- \
-		issue --tier business --feature orgs --feature saml \
+		issue --tier business --feature orgs --feature saml --feature linux_auth \
 		--customer "E2E Test" --email "e2e@example.com" \
 		--expires 2024-01-01 \
 		> $(CURDIR)/tests/fixtures/license/expired.blob

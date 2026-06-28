@@ -1,13 +1,7 @@
-//! Forseti-owned member profiles.
-//!
-//! Gated by `[profiles].enabled`. Stores opt-in profile data keyed by
-//! Kratos identity_id and surfaces it three ways:
-//!
-//! 1. Edit at `/settings/profile` (extended fields form).
-//! 2. View at `/users/{identity_id}` — gated by shared-org membership.
-//! 3. OIDC claims under the `profile` (standard slots: `picture`,
-//!    `website`) and `extended_profile` (`bio`, `pronouns`, `links`)
-//!    scopes; see `src/oauth/consent.rs`.
+//! Forseti-owned member profiles, gated by `[profiles].enabled`. Opt-in data
+//! keyed by Kratos identity_id, surfaced three ways: edit at
+//! `/settings/profile`, view at `/users/{identity_id}` (shared-org gated), and
+//! OIDC `profile` / `extended_profile` claims (see `src/oauth/consent.rs`).
 
 use std::collections::HashMap;
 
@@ -30,9 +24,7 @@ pub(crate) fn router() -> Router<crate::state::AppState> {
     Router::new().route("/users/{identity_id}", get(view::show_profile))
 }
 
-/// One row in `member_profiles` plus the projected `links` list. Links
-/// are inlined as JSON in storage but exposed as a typed `Vec` to
-/// callers.
+/// One `member_profiles` row; `links` is stored as JSON, exposed as a `Vec`.
 #[derive(Debug, Clone, Default)]
 pub struct Profile {
     pub bio: Option<String>,
@@ -113,9 +105,7 @@ impl From<KeyedProfileRow> for Profile {
     }
 }
 
-/// Bulk-fetch profiles for `identity_ids`. Missing rows are simply
-/// absent from the map; callers do `.cloned().unwrap_or_default()` to
-/// get the same empty-`Profile` fallback as [`fetch`]. Empty input
+/// Bulk-fetch profiles; missing rows are absent from the map. Empty input
 /// short-circuits without touching the DB.
 pub async fn fetch_many(db: &DbPool, identity_ids: &[&str]) -> Result<HashMap<String, Profile>> {
     if identity_ids.is_empty() {
@@ -134,8 +124,7 @@ pub async fn fetch_many(db: &DbPool, identity_ids: &[&str]) -> Result<HashMap<St
         .collect())
 }
 
-/// Fetch a single profile by identity_id. Missing row → an empty
-/// `Profile` so call sites don't have to branch on `Option`.
+/// Fetch a single profile; a missing row returns an empty `Profile`.
 pub async fn fetch(db: &DbPool, id: &str) -> Result<Profile> {
     let id_owned = id.to_string();
     let row: Option<ProfileRow> = db_interact!(db, |conn| {
@@ -161,8 +150,8 @@ struct ProfileUpsert {
     updated_at: String,
 }
 
-/// Input bundle for [`upsert`]. Plain `&str` fields collapse to NULL
-/// when blank so callers can clear a field by sending it empty.
+/// Input bundle for [`upsert`]; blank fields collapse to NULL so callers can
+/// clear a field by sending it empty.
 pub struct ProfileInput<'a> {
     pub identity_id: &'a str,
     pub bio: &'a str,
@@ -173,8 +162,7 @@ pub struct ProfileInput<'a> {
     pub links: &'a [ProfileLink],
 }
 
-/// Insert-or-update the profile for `identity_id`. Empty-string inputs
-/// collapse to `NULL` so the read side can treat null and "" identically.
+/// Insert-or-update the profile for `identity_id`.
 pub async fn upsert(db: &DbPool, input: ProfileInput<'_>) -> Result<()> {
     let null_if_empty = |s: &str| {
         let t = s.trim();
@@ -200,9 +188,8 @@ pub async fn upsert(db: &DbPool, input: ProfileInput<'_>) -> Result<()> {
         updated_at: Utc::now().to_rfc3339(),
     };
     db_interact!(db, |conn| {
-        // Atomic upsert: two concurrent first-saves both racing INSERT used
-        // to trip the PK constraint and 500. `ON CONFLICT DO UPDATE` is
-        // supported by both backends (sqlite >= 3.24).
+        // ON CONFLICT DO UPDATE so two concurrent first-saves don't trip the
+        // PK constraint. Supported by both backends (sqlite >= 3.24).
         use diesel::upsert::excluded;
         diesel::insert_into(member_profiles::table)
             .values(&row)

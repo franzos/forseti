@@ -1,8 +1,7 @@
-//! `/admin/identities/*` — Kratos identity browser.
+//! `/admin/identities/*`: Kratos identity browser.
 //!
-//! Identity admin operations go through the Kratos admin API. The typed
-//! `Identity` model doesn't suffer from the `ui.nodes` bug, so the SDK
-//! types are usable directly.
+//! The typed `Identity` model doesn't suffer from the `ui.nodes` bug, so the
+//! SDK types are usable directly here (unlike the raw-JSON Kratos flows).
 
 use axum::{
     extract::{Path, Query, State},
@@ -24,8 +23,6 @@ use crate::page_chrome::PageChrome;
 use crate::render::render;
 use crate::state::AppState;
 
-// --- View models -----------------------------------------------------------
-
 pub(crate) struct IdentityRow {
     pub id: String,
     pub email: String,
@@ -43,9 +40,8 @@ fn project_row(id: &ory::Identity) -> IdentityRow {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    // Kratos treats a missing `state` as `active` (that's its own default on
-    // identity create). Mirror that so the UI doesn't render an empty red
-    // badge for identities created via APIs that omit the field.
+    // Kratos treats a missing `state` as `active`; mirror that so identities
+    // created via APIs that omit the field don't render an empty red badge.
     let state = id
         .state
         .as_ref()
@@ -76,13 +72,7 @@ pub(crate) struct AddressView {
     pub verified: bool,
 }
 
-/// Per-session row on the identity-show page. Uses the same view-model
-/// as `/settings/sessions` (see `crate::session_view::SessionView`); the
-/// difference is the action surface — admin pages link to a confirm
-/// page, the user-facing settings page POSTs directly.
 pub(crate) use crate::session_view::SessionView as SessionRow;
-
-// --- Templates -------------------------------------------------------------
 
 #[derive(askama::Template)]
 #[template(path = "admin/identities_list.html")]
@@ -90,17 +80,12 @@ struct IdentitiesListTemplate {
     chrome: PageChrome,
     admin_active: AdminSection,
     rows: Vec<IdentityRow>,
-    /// Current search input — echoed back into the textbox so the user
-    /// sees what's filtered. Renamed from `filter_email` since the
-    /// input now matches against ID *and* email.
+    /// Current search input, echoed back into the textbox.
     filter_q: String,
-    /// Opaque token for the next page when the current page is full;
-    /// empty when there's no next page.
+    /// Opaque next-page token; empty when there's no next page.
     next_page_token: String,
-    /// True when the current request carries a `page_token` — controls
-    /// the "Back to start" link. Kratos paginates with opaque tokens
-    /// (no backward seek), so the only reliable back-step is "go to
-    /// page 1".
+    /// Kratos paginates with opaque tokens (no backward seek), so the only
+    /// reliable back-step is "go to page 1".
     has_prev: bool,
 }
 
@@ -117,58 +102,46 @@ struct IdentityShowTemplate {
     /// One-time recovery code shown after a successful `POST /recovery`.
     recovery_code: Option<String>,
     recovery_link: Option<String>,
-    /// Flash from a query string redirect (e.g. "Identity disabled.").
     flash: String,
 }
 
-// --- Handlers --------------------------------------------------------------
-
 #[derive(Debug, Deserialize)]
 pub struct ListQuery {
-    /// Search input — matched against identity ID (when shaped like a
-    /// UUID) and otherwise passed to Kratos as `credentials_identifier`
-    /// (email). Single param so the form has one input.
+    /// Matched against identity ID (UUID-shaped) else passed to Kratos as
+    /// `credentials_identifier` (email).
     #[serde(default)]
     q: Option<String>,
-    /// Legacy alias — earlier versions of this page used `?email=`. Kept
-    /// so bookmarks and pre-existing links don't 404.
+    /// Legacy `?email=` alias; kept so old links don't 404.
     #[serde(default)]
     email: Option<String>,
     #[serde(default)]
     page_token: Option<String>,
 }
 
-/// Page size for both the API call AND the "is there more?" heuristic
-/// — if Kratos returns exactly this many rows, we assume a next page
-/// exists and surface a Next link.
+/// Page size, also the "is there more?" heuristic: a full page implies a next.
 const IDENTITIES_PAGE_SIZE: i64 = 25;
 
-pub async fn list(
-    State(state): State<AppState>,
-    Query(query): Query<ListQuery>,
-    admin: RequireAdminScoped,
-    csrf: Csrf,
-) -> Response {
-    let RequireAdminScoped { ctx, scope } = admin;
+pub(crate) struct IdentitySearch {
+    pub rows: Vec<IdentityRow>,
+    pub next_page_token: String,
+    pub has_prev: bool,
+}
 
-    let filter_q = query
-        .q
-        .or(query.email)
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_default();
-    let page_token = query.page_token.as_deref().filter(|s| !s.is_empty());
-
-    // Org-scoped admin restricts the listing to identities that are
-    // members of the named org. We page the join in the DB first so
-    // large orgs don't issue a single massive `?ids=...` request to
-    // Kratos, then bulk-fetch only the current page. `page_token` is
-    // a numeric offset here (vs. Kratos's opaque token on the
-    // unscoped path). Email filter runs *after* pagination, so a
-    // filtered page can be smaller than `IDENTITIES_PAGE_SIZE` — the
-    // trade-off is acceptable because filtering in SQL would require
-    // joining the Kratos identity store, which isn't visible from
-    // here.
+/// Scope-aware identity search + pagination shared by the list page and the
+/// picker. `filter_q` must already be trimmed. The Err variant carries a
+/// ready-to-send admin-error Response (DB / Kratos failures).
+pub(crate) async fn search_identities(
+    state: &AppState,
+    scope: &crate::orgs::AdminScope,
+    filter_q: &str,
+    page_token: Option<&str>,
+) -> Result<IdentitySearch, axum::response::Response> {
+    // Org-scoped: page the membership join in the DB first (so large orgs
+    // don't issue one massive `?ids=...` to Kratos) then bulk-fetch the page.
+    // `page_token` is a numeric offset here, not Kratos's opaque token. The
+    // email filter runs after pagination, so a filtered page can be smaller
+    // than `IDENTITIES_PAGE_SIZE`; SQL-side filtering would need the Kratos
+    // identity store, which isn't visible from here.
     let scoped_offset: i64 = page_token
         .and_then(|t| t.parse::<i64>().ok())
         .filter(|n| *n >= 0)
@@ -185,35 +158,30 @@ pub async fn list(
             Ok(rows) => Some(rows.into_iter().map(|m| m.identity_id).collect()),
             Err(e) => {
                 tracing::error!(error = ?e, "admin: org-scoped list_members_paged failed");
-                return render_admin_error(
-                    &state,
+                return Err(render_admin_error(
+                    state,
                     "Identities unavailable",
                     "We couldn't list org members. Please try again in a moment.",
-                );
+                ));
             }
         },
         None => None,
     };
 
-    // UUID-shaped query: do a single-identity admin GET so users can
-    // paste an ID directly into the search box. Kratos's
-    // `credentials_identifier` filter is name/email-only — it won't
-    // match identity IDs.
-    let identities = if looks_like_uuid(&filter_q) {
-        match ory::kratos::admin_get_identity_full(&state.ory, &filter_q).await {
+    // UUID-shaped query: single-identity admin GET, because Kratos's
+    // `credentials_identifier` filter is name/email-only and won't match IDs.
+    let identities = if looks_like_uuid(filter_q) {
+        match ory::kratos::admin_get_identity_full(&state.ory, filter_q).await {
             Ok(id) => vec![id],
-            // 404 (not found) on a UUID lookup is not a render error —
-            // just an empty result. Anything else (network, 5xx) bubbles.
+            // A 404 here is just an empty result, not a render error.
             Err(e) => {
                 tracing::info!(error = ?e, "admin: identity ID lookup miss");
                 Vec::new()
             }
         }
     } else if let Some(ref member_ids) = scoped_member_ids {
-        // Org-scoped — bulk-load every member's identity via Kratos's
-        // `ids` filter so the page renders in one round-trip. Email
-        // substring filter applied after the fact (small org membership
-        // sets keep this cheap).
+        // Org-scoped: bulk-load members via Kratos's `ids` filter in one
+        // round-trip; email substring filter applied after the fact.
         let mut out =
             match ory::kratos::admin_list_identities_by_ids_full(&state.ory, member_ids.clone())
                 .await
@@ -240,7 +208,7 @@ pub async fn list(
         let email_filter = if filter_q.is_empty() {
             None
         } else {
-            Some(filter_q.as_str())
+            Some(filter_q)
         };
         match ory::kratos::list_identities(
             &state.ory,
@@ -253,25 +221,22 @@ pub async fn list(
             Ok(c) => c,
             Err(e) => {
                 tracing::error!(error = ?e, "admin: list_identities failed");
-                return render_admin_error(
-                    &state,
+                return Err(render_admin_error(
+                    state,
                     "Identities unavailable",
                     "We couldn't list identities. Please try again in a moment.",
-                );
+                ));
             }
         }
     };
 
     let rows: Vec<IdentityRow> = identities.iter().map(project_row).collect();
-    // Naive next-page heuristic: a full page implies there's more.
-    // Kratos's typed SDK doesn't surface the Link header, so on the
-    // unscoped path we use the last row's ID as the opaque
-    // continuation token. The org-scoped path paginates in our own DB
-    // and threads a numeric offset through `page_token`. We can't
-    // trust a filtered row count for the "is there more?" check on
-    // the scoped path (filter runs post-DB), so we key off the
-    // pre-filter member-id count instead.
-    let next_page_token = if looks_like_uuid(&filter_q) {
+    // Next-page heuristic: a full page implies more. The typed SDK doesn't
+    // surface the Link header, so the unscoped path uses the last row's ID as
+    // the opaque token; the scoped path threads a numeric DB offset. The
+    // scoped check keys off the pre-filter member-id count (filter runs
+    // post-DB, so the filtered row count can't be trusted).
+    let next_page_token = if looks_like_uuid(filter_q) {
         String::new()
     } else if let Some(ref member_ids) = scoped_member_ids {
         if member_ids.len() == IDENTITIES_PAGE_SIZE as usize {
@@ -285,6 +250,39 @@ pub async fn list(
         String::new()
     };
     let has_prev = page_token.is_some();
+
+    Ok(IdentitySearch {
+        rows,
+        next_page_token,
+        has_prev,
+    })
+}
+
+pub async fn list(
+    State(state): State<AppState>,
+    Query(query): Query<ListQuery>,
+    admin: RequireAdminScoped,
+    csrf: Csrf,
+) -> Response {
+    let RequireAdminScoped { ctx, scope } = admin;
+
+    let filter_q = query
+        .q
+        .or(query.email)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_default();
+    let page_token = query.page_token.as_deref().filter(|s| !s.is_empty());
+
+    let search = match search_identities(&state, &scope, &filter_q, page_token).await {
+        Ok(s) => s,
+        Err(resp) => return resp,
+    };
+    let IdentitySearch {
+        rows,
+        next_page_token,
+        has_prev,
+    } = search;
 
     tracing::info!(
         action = "admin.identities.list",
@@ -305,18 +303,142 @@ pub async fn list(
 }
 
 #[derive(Debug, Deserialize)]
+pub struct PickQuery {
+    #[serde(default)]
+    return_to: Option<String>,
+    #[serde(default)]
+    q: Option<String>,
+    #[serde(default)]
+    page_token: Option<String>,
+}
+
+struct PickerRow {
+    email: String,
+    id: String,
+    state: String,
+    created_at: String,
+    created_at_pretty: String,
+    select_url: String,
+}
+
+#[derive(askama::Template)]
+#[template(path = "admin/identity_picker.html")]
+struct IdentityPickerTemplate {
+    chrome: PageChrome,
+    admin_active: AdminSection,
+    rows: Vec<PickerRow>,
+    filter_q: String,
+    return_to: String,
+    org_slug: String,
+    next_page_url: String,
+    prev_url: String,
+    invalid_return: bool,
+}
+
+fn append_query(url: &str, key: &str, value: &str) -> String {
+    let sep = if url.contains('?') { '&' } else { '?' };
+    format!("{url}{sep}{key}={}", ory_client::apis::urlencode(value))
+}
+
+pub async fn pick(
+    State(state): State<AppState>,
+    Query(query): Query<PickQuery>,
+    admin: RequireAdminScoped,
+    csrf: Csrf,
+) -> Response {
+    let RequireAdminScoped { ctx, scope } = admin;
+    let raw_rt = query.return_to.as_deref().unwrap_or("").trim().to_string();
+    let chrome = ctx.chrome(&csrf);
+
+    // safe_return_to collapses bad input to "/"; treat a collapse (or any
+    // fragment) as invalid rather than silently redirecting selections to "/".
+    let safe = crate::web::safe_return_to(&state.cfg, &raw_rt);
+    let invalid = raw_rt.is_empty() || raw_rt.contains('#') || safe != raw_rt;
+    if invalid {
+        return render(&IdentityPickerTemplate {
+            chrome,
+            admin_active: AdminSection::Identities,
+            rows: Vec::new(),
+            filter_q: String::new(),
+            return_to: String::new(),
+            org_slug: scope.slug().unwrap_or("").to_string(),
+            next_page_url: String::new(),
+            prev_url: String::new(),
+            invalid_return: true,
+        });
+    }
+    let return_to = safe.to_string();
+
+    let filter_q = query.q.as_deref().unwrap_or("").trim().to_string();
+    let page_token = query.page_token.as_deref().filter(|s| !s.is_empty());
+    let search = match search_identities(&state, &scope, &filter_q, page_token).await {
+        Ok(s) => s,
+        Err(resp) => return resp,
+    };
+
+    let rows: Vec<PickerRow> = search
+        .rows
+        .into_iter()
+        .map(|r| {
+            let label = if r.email.is_empty() {
+                r.id.clone()
+            } else {
+                r.email.clone()
+            };
+            PickerRow {
+                select_url: append_query(&return_to, "identity_id", &r.id),
+                email: label,
+                id: r.id,
+                state: r.state,
+                created_at: r.created_at,
+                created_at_pretty: r.created_at_pretty,
+            }
+        })
+        .collect();
+
+    let base = with_org("/admin/identity-picker", &scope);
+    let mut next_page_url = String::new();
+    if !search.next_page_token.is_empty() {
+        let mut u = append_query(&base, "return_to", &return_to);
+        u = append_query(&u, "page_token", &search.next_page_token);
+        if !filter_q.is_empty() {
+            u = append_query(&u, "q", &filter_q);
+        }
+        next_page_url = u;
+    }
+    let prev_url = if search.has_prev {
+        let mut u = append_query(&base, "return_to", &return_to);
+        if !filter_q.is_empty() {
+            u = append_query(&u, "q", &filter_q);
+        }
+        u
+    } else {
+        String::new()
+    };
+
+    render(&IdentityPickerTemplate {
+        chrome,
+        admin_active: AdminSection::Identities,
+        rows,
+        filter_q,
+        return_to,
+        org_slug: scope.slug().unwrap_or("").to_string(),
+        next_page_url,
+        prev_url,
+        invalid_return: false,
+    })
+}
+
+#[derive(Debug, Deserialize)]
 pub struct ShowQuery {
-    /// Opaque token for a one-shot recovery-code reveal
-    /// (`flash::take_secret_reveal`). Replaces the previous
-    /// `?recovery_code=...&recovery_link=...` URL hand-off.
+    /// Opaque token for a one-shot recovery-code reveal (`take_secret_reveal`).
     #[serde(default)]
     reveal: Option<String>,
 }
 
-/// Reject the request unless `identity_id` is a member of `scope`'s
-/// org. Forseti-wide scope is a no-op (admin sees all). Renders a
-/// "not found" rather than "forbidden" so org-scoped admins can't
-/// probe for the existence of identities outside their scope.
+/// Reject unless `identity_id` is a member of `scope`'s org (Forseti-wide
+/// scope is a no-op). Renders "not found" not "forbidden" so org-scoped
+/// admins can't probe for identities outside their scope.
 async fn require_identity_in_scope(
     state: &AppState,
     identity_id: &str,
@@ -424,8 +546,6 @@ pub async fn show(
         _ => (None, None),
     };
 
-    // Read the flash cookie (banner messages set by redirect handlers
-    // — disable / enable / delete-confirm cancel). Empty when none.
     let secure = state.cfg.self_.is_https();
     let path = format!("/admin/identities/{id}");
     let (flash_msg, clear_flash) = flash::take_flash(
@@ -506,9 +626,8 @@ pub async fn recovery(
                     );
                 }
             };
-            // Preserve scope: reveal token + org slug both ride the
-            // redirect so the show page lands back inside the same
-            // org-scoped view the action was triggered from.
+            // Reveal token + org slug ride the redirect so the show page lands
+            // back inside the same org-scoped view.
             let base = format!(
                 "/admin/identities/{}?reveal={}",
                 ory_client::apis::urlencode(&id),

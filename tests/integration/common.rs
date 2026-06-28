@@ -993,8 +993,8 @@ pub fn seed_posix_account(identity_id: &str, username: &str, uid: i64, gid: i64)
     )
     .unwrap_or_else(|e| panic!("seed posix_accounts: {e}"));
     conn.execute(
-        "INSERT INTO posix_groups (gid, name, org_id, kind, created_at) \
-         VALUES (?1, ?2, NULL, 'user', ?3)",
+        "INSERT INTO posix_groups (gid, name, kind, created_at) \
+         VALUES (?1, ?2, 'user', ?3)",
         params![gid, username, now],
     )
     .unwrap_or_else(|e| panic!("seed posix_groups: {e}"));
@@ -1012,9 +1012,10 @@ pub fn seed_posix_account(identity_id: &str, username: &str, uid: i64, gid: i64)
 }
 
 /// Seed a `host_enrollments` row for the resolver tests. `secret` is hashed
-/// the same way the server compares it (SHA-256 hex). `allowed_gid = NULL`
-/// (unscoped host). Returns nothing — the caller already knows `id`/`secret`.
-pub fn seed_host_enrollment(id: &str, hostname: &str, secret: &str, allowed_gid: Option<i64>) {
+/// the same way the server compares it (SHA-256 hex). `org_id` is the host's
+/// org; with no `host_allowed_groups` rows the host is whole-org scoped.
+/// Returns nothing — the caller already knows `id`/`secret`.
+pub fn seed_host_enrollment(id: &str, hostname: &str, secret: &str, org_id: &str) {
     let mut h = Sha256::new();
     h.update(secret.as_bytes());
     let secret_hash = hex::encode(h.finalize());
@@ -1022,11 +1023,30 @@ pub fn seed_host_enrollment(id: &str, hostname: &str, secret: &str, allowed_gid:
     let conn = forseti_db_conn();
     conn.execute(
         "INSERT INTO host_enrollments (\
-            id, hostname, secret_hash, allowed_gid, force_mfa, created_by, created_at, last_seen_at\
+            id, hostname, secret_hash, org_id, force_mfa, created_by, created_at, last_seen_at\
          ) VALUES (?1, ?2, ?3, ?4, 0, 'test-fixture', ?5, NULL)",
-        params![id, hostname, secret_hash, allowed_gid, now],
+        params![id, hostname, secret_hash, org_id, now],
     )
     .unwrap_or_else(|e| panic!("seed host_enrollments: {e}"));
+}
+
+/// Scope an already-seeded host to a set of teams by inserting directly into
+/// `host_allowed_groups(host_id, team_id)` (the table the resolver reads).
+/// Mirrors `posix::db::set_host_allowed_team_ids` for the team-scope tests.
+pub fn set_host_allowed_team_ids(host_id: &str, team_ids: &[&str]) {
+    let conn = forseti_db_conn();
+    conn.execute(
+        "DELETE FROM host_allowed_groups WHERE host_id = ?1",
+        params![host_id],
+    )
+    .unwrap_or_else(|e| panic!("clear host_allowed_groups: {e}"));
+    for tid in team_ids {
+        conn.execute(
+            "INSERT INTO host_allowed_groups (host_id, team_id) VALUES (?1, ?2)",
+            params![host_id, tid],
+        )
+        .unwrap_or_else(|e| panic!("seed host_allowed_groups: {e}"));
+    }
 }
 
 /// Delete a `host_enrollments` row (test cleanup).
@@ -1036,32 +1056,160 @@ pub fn delete_host_enrollment(id: &str) {
         .unwrap_or_else(|e| panic!("delete host_enrollments: {e}"));
 }
 
-/// Seed an org-kind `posix_groups` row (the scoped-host roster). `org_id`
-/// is nullable so a dummy NULL keeps the fixture self-contained.
-pub fn seed_org_group(gid: i64, name: &str) {
+/// Seed an `organization_members` row tying `identity_id` to `org_id` with the
+/// given `role`. Team-scope and whole-org host resolution both require an org
+/// membership in the host's org, so the team/org resolver tests seed this
+/// directly (registration only auto-joins the seeded `default` org).
+pub fn seed_org_membership(org_id: &str, identity_id: &str, role: &str) {
     let now = chrono::Utc::now().to_rfc3339();
     let conn = forseti_db_conn();
     conn.execute(
-        "INSERT INTO posix_groups (gid, name, org_id, kind, created_at) \
-         VALUES (?1, ?2, NULL, 'org', ?3)",
-        params![gid, name, now],
+        "INSERT OR IGNORE INTO organization_members (org_id, identity_id, role, added_at, added_by) \
+         VALUES (?1, ?2, ?3, ?4, NULL)",
+        params![org_id, identity_id, role, now],
     )
-    .unwrap_or_else(|e| panic!("seed org posix_groups: {e}"));
+    .unwrap_or_else(|e| panic!("seed organization_members: {e}"));
 }
 
-/// Seed an `org`-kind `posix_groups` row with a real `org_id` (the
-/// scoped-host roster as `sync_org_groups` writes it). Distinct from
-/// [`seed_org_group`], which NULLs `org_id`; the org-removal cleanup helpers
-/// key off `org_id`, so they need a non-NULL value to find the group.
-pub fn seed_org_group_with_org_id(gid: i64, name: &str, org_id: &str) {
+/// Seed an `org_teams` row. `gid` is `None` to leave the team un-allocated
+/// (the admin enroll handler allocates one via `find_or_create_team_gid`), or
+/// `Some(gid)` to pin it for the resolver group/gid lookup tests.
+pub fn seed_team(id: &str, org_id: &str, name: &str, slug: &str, gid: Option<i64>) {
     let now = chrono::Utc::now().to_rfc3339();
     let conn = forseti_db_conn();
     conn.execute(
-        "INSERT INTO posix_groups (gid, name, org_id, kind, created_at) \
-         VALUES (?1, ?2, ?3, 'org', ?4)",
-        params![gid, name, org_id, now],
+        "INSERT INTO org_teams (id, org_id, name, slug, gid, parent_id, created_at, created_by) \
+         VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, NULL)",
+        params![id, org_id, name, slug, gid, now],
     )
-    .unwrap_or_else(|e| panic!("seed org posix_groups (org_id): {e}"));
+    .unwrap_or_else(|e| panic!("seed org_teams: {e}"));
+}
+
+/// Add an `org_team_members` row (source = 'manual') tying `identity_id` to a team.
+pub fn add_team_member(team_id: &str, identity_id: &str) {
+    let now = chrono::Utc::now().to_rfc3339();
+    let conn = forseti_db_conn();
+    conn.execute(
+        "INSERT OR IGNORE INTO org_team_members (team_id, identity_id, source, added_at) \
+         VALUES (?1, ?2, 'manual', ?3)",
+        params![team_id, identity_id, now],
+    )
+    .unwrap_or_else(|e| panic!("add org_team_members: {e}"));
+}
+
+/// Remove a single `org_team_members` row — mirrors `teams::remove_member`'s
+/// net effect for the access-revocation test.
+pub fn remove_team_member(team_id: &str, identity_id: &str) {
+    let conn = forseti_db_conn();
+    conn.execute(
+        "DELETE FROM org_team_members WHERE team_id = ?1 AND identity_id = ?2",
+        params![team_id, identity_id],
+    )
+    .unwrap_or_else(|e| panic!("delete org_team_members: {e}"));
+}
+
+/// Delete an `organization_members` row (test cleanup / member removal).
+pub fn delete_org_membership(org_id: &str, identity_id: &str) {
+    let conn = forseti_db_conn();
+    conn.execute(
+        "DELETE FROM organization_members WHERE org_id = ?1 AND identity_id = ?2",
+        params![org_id, identity_id],
+    )
+    .unwrap_or_else(|e| panic!("delete organization_members: {e}"));
+}
+
+/// Seed an `organizations` row with an explicit `member_visibility`
+/// ("all"/"same_group"/"admins_only"). Registration only seeds the `default`
+/// org, so the visibility tests create their own NON-default orgs here (the
+/// `/users/{id}` predicate reads the row via `org_by_id`, and
+/// `list_memberships` joins it for name + slug).
+pub fn seed_organization(id: &str, slug: &str, name: &str, visibility: &str) {
+    let now = chrono::Utc::now().to_rfc3339();
+    let conn = forseti_db_conn();
+    conn.execute(
+        "INSERT INTO organizations (id, slug, name, created_at, member_visibility) \
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![id, slug, name, now, visibility],
+    )
+    .unwrap_or_else(|e| panic!("seed organizations: {e}"));
+}
+
+/// Delete an org plus its membership rows (test cleanup for [`seed_organization`]).
+pub fn delete_organization(id: &str) {
+    let conn = forseti_db_conn();
+    conn.execute(
+        "DELETE FROM organization_members WHERE org_id = ?1",
+        params![id],
+    )
+    .unwrap_or_else(|e| panic!("delete organization_members for org: {e}"));
+    conn.execute("DELETE FROM organizations WHERE id = ?1", params![id])
+        .unwrap_or_else(|e| panic!("delete organizations: {e}"));
+}
+
+/// Set `organizations.member_visibility` for `org_id` directly. Mirrors
+/// `orgs::set_member_visibility`'s net effect for the directory-policy tests.
+pub fn set_member_visibility(org_id: &str, v: &str) {
+    let conn = forseti_db_conn();
+    conn.execute(
+        "UPDATE organizations SET member_visibility = ?1 WHERE id = ?2",
+        params![v, org_id],
+    )
+    .unwrap_or_else(|e| panic!("set member_visibility: {e}"));
+}
+
+/// Flip `organization_members.hidden_from_directory` (the per-member directory
+/// opt-out) for `(org_id, identity_id)`. Mirrors `orgs::set_member_hidden`.
+pub fn set_member_hidden(org_id: &str, identity_id: &str, hidden: bool) {
+    let conn = forseti_db_conn();
+    conn.execute(
+        "UPDATE organization_members SET hidden_from_directory = ?1 \
+         WHERE org_id = ?2 AND identity_id = ?3",
+        params![i32::from(hidden), org_id, identity_id],
+    )
+    .unwrap_or_else(|e| panic!("set hidden_from_directory: {e}"));
+}
+
+/// Set an existing member's `role` (INSERT-OR-IGNORE seeds can't promote, so
+/// the owner-override tests flip the role mid-test through this).
+pub fn set_org_member_role(org_id: &str, identity_id: &str, role: &str) {
+    let conn = forseti_db_conn();
+    conn.execute(
+        "UPDATE organization_members SET role = ?1 WHERE org_id = ?2 AND identity_id = ?3",
+        params![role, org_id, identity_id],
+    )
+    .unwrap_or_else(|e| panic!("set organization_members.role: {e}"));
+}
+
+/// Read `organization_members.hidden_from_directory` for `(org_id, identity_id)`.
+/// `None` when no such membership row. Used to assert the opt-out toggle routes
+/// actually flipped the flag.
+pub fn member_hidden_flag(org_id: &str, identity_id: &str) -> Option<i64> {
+    let conn = forseti_db_conn();
+    conn.query_row(
+        "SELECT hidden_from_directory FROM organization_members \
+         WHERE org_id = ?1 AND identity_id = ?2",
+        params![org_id, identity_id],
+        |r| r.get(0),
+    )
+    .ok()
+}
+
+/// Delete a team plus its members and any host scopes referencing it (test
+/// cleanup). Mirrors `teams::delete_team`.
+pub fn delete_team(team_id: &str) {
+    let conn = forseti_db_conn();
+    conn.execute(
+        "DELETE FROM host_allowed_groups WHERE team_id = ?1",
+        params![team_id],
+    )
+    .unwrap_or_else(|e| panic!("delete host_allowed_groups for team: {e}"));
+    conn.execute(
+        "DELETE FROM org_team_members WHERE team_id = ?1",
+        params![team_id],
+    )
+    .unwrap_or_else(|e| panic!("delete org_team_members for team: {e}"));
+    conn.execute("DELETE FROM org_teams WHERE id = ?1", params![team_id])
+        .unwrap_or_else(|e| panic!("delete org_teams: {e}"));
 }
 
 /// Add a `posix_group_members` row tying `identity_id` to `gid`.
@@ -1157,7 +1305,7 @@ pub fn count_enabled_posix_accounts() -> i64 {
 /// Seed a `host_enrollments` row with `force_mfa = 1`. Mirrors
 /// [`seed_host_enrollment`] but flips the MFA flag so the device-auth
 /// `force_mfa` binding path can be exercised.
-pub fn seed_host_enrollment_mfa(id: &str, hostname: &str, secret: &str, allowed_gid: Option<i64>) {
+pub fn seed_host_enrollment_mfa(id: &str, hostname: &str, secret: &str, org_id: &str) {
     let mut h = Sha256::new();
     h.update(secret.as_bytes());
     let secret_hash = hex::encode(h.finalize());
@@ -1165,9 +1313,9 @@ pub fn seed_host_enrollment_mfa(id: &str, hostname: &str, secret: &str, allowed_
     let conn = forseti_db_conn();
     conn.execute(
         "INSERT INTO host_enrollments (\
-            id, hostname, secret_hash, allowed_gid, force_mfa, created_by, created_at, last_seen_at\
+            id, hostname, secret_hash, org_id, force_mfa, created_by, created_at, last_seen_at\
          ) VALUES (?1, ?2, ?3, ?4, 1, 'test-fixture', ?5, NULL)",
-        params![id, hostname, secret_hash, allowed_gid, now],
+        params![id, hostname, secret_hash, org_id, now],
     )
     .unwrap_or_else(|e| panic!("seed host_enrollments (mfa): {e}"));
 }
@@ -1296,21 +1444,6 @@ pub fn delete_posix_account(identity_id: &str) {
         params![identity_id],
     )
     .unwrap_or_else(|e| panic!("delete posix_accounts: {e}"));
-}
-
-/// Count the `org`-kind `posix_group_members` rows for `identity_id` (joined
-/// to `posix_groups.kind = 'org'`). Powers the Orgs-gate assertion: zero org
-/// memberships when Orgs is unlicensed, ≥1 once licensed.
-pub fn count_org_group_memberships(identity_id: &str) -> i64 {
-    let conn = forseti_db_conn();
-    conn.query_row(
-        "SELECT COUNT(*) FROM posix_group_members m \
-         JOIN posix_groups g ON g.gid = m.gid \
-         WHERE m.identity_id = ?1 AND g.kind = 'org'",
-        params![identity_id],
-        |r| r.get(0),
-    )
-    .unwrap_or_else(|e| panic!("count org group memberships: {e}"))
 }
 
 /// Mint a fresh DCR Initial Access Token directly via the portal DB,
@@ -1693,6 +1826,391 @@ pub async fn spawn_fake_mcp_server(expected_audience: &str) -> FakeMcpServer {
         handle,
         shutdown: tx,
     }
+}
+
+// --- OAuth/OIDC flow helpers ----------------------------------------------
+//
+// Shared by the contract tests that need to drive a full authorization-code
+// grant through the portal's `/oauth/consent` bridge (consent accept/deny,
+// id_token claim shape, authorized-apps grants). Lifted out of `oauth.rs` so
+// every OAuth-shaped test reuses the same hop-walking logic.
+
+/// Bearer token configured in the playground's `[audit].kratos_webhook_token`
+/// (and `[internal]`). The Kratos webhook + internal endpoints authenticate
+/// with it.
+pub const WEBHOOK_TOKEN: &str = "dev-playground-token-change-me";
+
+/// Build the Hydra `/oauth2/auth` URL for an authorization-code grant.
+/// `extra` is appended verbatim (already `&key=value`-shaped, or empty).
+pub fn oauth_auth_url(client_id: &str, redirect_uri: &str, scope: &str, extra: &str) -> String {
+    let scope_plus = scope.replace(' ', "+");
+    format!(
+        "{HYDRA_PUBLIC}/oauth2/auth?client_id={client_id}\
+         &response_type=code\
+         &scope={scope_plus}\
+         &redirect_uri={redirect_uri}\
+         &state=forseti-test-state{extra}"
+    )
+}
+
+/// Follow an `/oauth2/auth` chain on `client` (auto-redirect) until the
+/// portal's consent page renders, then pull out `(consent_challenge, _csrf,
+/// body)`. Panics if the chain doesn't land on `/oauth/consent` (e.g. an
+/// unexpected auto-grant), since the consent contract tests can't proceed
+/// without the form.
+pub async fn drive_to_consent(client: &Client, auth_url: &str) -> (String, String, String) {
+    let res = client
+        .get(auth_url)
+        .send()
+        .await
+        .expect("follow auth chain to consent");
+    let final_url = res.url().to_string();
+    assert!(
+        final_url.contains("/oauth/consent"),
+        "expected to land on /oauth/consent; got {final_url}"
+    );
+    let body = res.text().await.expect("consent body");
+    let consent_challenge =
+        extract_input_value(&body, "consent_challenge").expect("consent_challenge hidden input");
+    let csrf = extract_input_value(&body, "_csrf").expect("_csrf hidden input");
+    (consent_challenge, csrf, body)
+}
+
+/// POST `/oauth/consent` with `decision=accept` carrying the given
+/// `grant_scope` set (and optional `remember`), then chase the resulting
+/// 303s on `client` (redirects disabled) until the callback URL surfaces;
+/// return its `code`. `None` if the chain ends somewhere unexpected.
+pub async fn consent_accept_chase_code(
+    client: &Client,
+    csrf: &str,
+    consent_challenge: &str,
+    grant_scopes: &[&str],
+    remember: bool,
+) -> Option<String> {
+    let loc = consent_submit_chase_callback(
+        client,
+        csrf,
+        consent_challenge,
+        "accept",
+        grant_scopes,
+        remember,
+    )
+    .await?;
+    extract_query_param(&loc, "code")
+}
+
+/// POST `/oauth/consent` with `decision=deny`, then chase the 303s and return
+/// the final callback `Location` (which should carry `error=access_denied`).
+pub async fn consent_deny_chase_location(
+    client: &Client,
+    csrf: &str,
+    consent_challenge: &str,
+) -> Option<String> {
+    consent_submit_chase_callback(client, csrf, consent_challenge, "deny", &[], false).await
+}
+
+/// Shared worker behind [`consent_accept_chase_code`] /
+/// [`consent_deny_chase_location`]. POSTs the consent form then walks each
+/// 303 hop (the `client` must have redirects disabled) until a `Location`
+/// pointing at `/callback` surfaces, returning that URL verbatim.
+async fn consent_submit_chase_callback(
+    client: &Client,
+    csrf: &str,
+    consent_challenge: &str,
+    decision: &str,
+    grant_scopes: &[&str],
+    remember: bool,
+) -> Option<String> {
+    let mut body = vec![
+        ("_csrf", csrf.to_string()),
+        ("consent_challenge", consent_challenge.to_string()),
+        ("decision", decision.to_string()),
+    ];
+    if remember {
+        body.push(("remember", "true".to_string()));
+    }
+    for s in grant_scopes {
+        body.push(("grant_scope", (*s).to_string()));
+    }
+    let body_str: String = body
+        .iter()
+        .map(|(k, v)| format!("{}={}", form_urlencode(k), form_urlencode(v)))
+        .collect::<Vec<_>>()
+        .join("&");
+
+    let mut resp = client
+        .post(format!("{PORTAL}/oauth/consent"))
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(body_str)
+        .send()
+        .await
+        .ok()?;
+    for _ in 0..20 {
+        if !resp.status().is_redirection() {
+            return None;
+        }
+        let loc = resp
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|h| h.to_str().ok())?
+            .to_string();
+        if loc.contains("/callback") {
+            return Some(loc);
+        }
+        let next = match reqwest::Url::parse(&loc) {
+            Ok(u) => u,
+            Err(_) => resp.url().join(&loc).ok()?,
+        };
+        resp = client.get(next).send().await.ok()?;
+    }
+    None
+}
+
+/// Exchange an authorization `code` at Hydra's token endpoint. Returns the
+/// parsed token response JSON (`access_token`, `id_token`, `scope`, …).
+pub async fn exchange_code_for_tokens(
+    client_id: &str,
+    client_secret: &str,
+    redirect_uri: &str,
+    code: &str,
+) -> Value {
+    let client = browser_client();
+    let res = client
+        .post(format!("{HYDRA_PUBLIC}/oauth2/token"))
+        .form(&[
+            ("grant_type", "authorization_code"),
+            ("client_id", client_id),
+            ("client_secret", client_secret),
+            ("redirect_uri", redirect_uri),
+            ("code", code),
+        ])
+        .send()
+        .await
+        .expect("token exchange transport");
+    assert!(
+        res.status().is_success(),
+        "token exchange: {} body {}",
+        res.status(),
+        res.text().await.unwrap_or_default()
+    );
+    res.json().await.expect("token body")
+}
+
+/// Decode the (unverified) claim set out of a JWT's payload segment. Tests
+/// only inspect claim *shape*; signature verification is Hydra's job and is
+/// covered separately by the device-grant `verify_id_token` path.
+pub fn decode_jwt_claims(jwt: &str) -> Value {
+    let payload = jwt.split('.').nth(1).expect("jwt has a payload segment");
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .expect("jwt payload is base64url");
+    serde_json::from_slice(&bytes).expect("jwt payload is json")
+}
+
+/// Pull `value="..."` out of the `<input name="<name>">` element in an HTML
+/// blob. Scans to the next `>` so it won't grab a value from a sibling input.
+pub fn extract_input_value(html: &str, name: &str) -> Option<String> {
+    let needle = format!("name=\"{name}\"");
+    let mut start = 0usize;
+    while let Some(idx) = html[start..].find(&needle) {
+        let abs = start + idx;
+        let after = &html[abs + needle.len()..];
+        let elem_end = after.find('>').unwrap_or(after.len());
+        let elem = &after[..elem_end];
+        if let Some(vi) = elem.find("value=\"") {
+            let val = &elem[vi + "value=\"".len()..];
+            if let Some(end) = val.find('"') {
+                return Some(val[..end].to_string());
+            }
+        }
+        start = abs + needle.len();
+    }
+    None
+}
+
+/// `application/x-www-form-urlencoded` value encoder, kept self-contained so
+/// the test surface doesn't pull in an encoding crate.
+pub fn form_urlencode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(b as char)
+            }
+            b' ' => out.push('+'),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+// --- Kratos / Hydra admin-side assertions ---------------------------------
+
+/// List a Kratos identity's active session IDs via the admin API
+/// (`GET /admin/identities/{id}/sessions`). Used to grab a victim session ID
+/// to feed the self-service / admin revoke endpoints, and to assert a session
+/// is gone afterwards.
+pub async fn kratos_identity_session_ids(identity_id: &str) -> Vec<String> {
+    let client = browser_client();
+    let res = client
+        .get(format!(
+            "{KRATOS_ADMIN}/admin/identities/{identity_id}/sessions?per_page=50"
+        ))
+        .send()
+        .await
+        .expect("list identity sessions transport");
+    if res.status() == StatusCode::NO_CONTENT || !res.status().is_success() {
+        return Vec::new();
+    }
+    let body: Value = res.json().await.unwrap_or(Value::Null);
+    body.as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|s| s["id"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Whether `client`'s cookie jar still resolves to an active Kratos session
+/// (`/sessions/whoami` → 200). Used to assert a revoke actually killed a
+/// session.
+pub async fn whoami_is_active(client: &Client) -> bool {
+    let res = client
+        .get(format!("{KRATOS_PUBLIC}/sessions/whoami"))
+        .header("Accept", "application/json")
+        .send()
+        .await;
+    matches!(res, Ok(r) if r.status().is_success())
+}
+
+/// Read the current session ID off a client's `/sessions/whoami`. `None` when
+/// the jar carries no active session. Used to target a specific (non-current)
+/// session for the self-service revoke tests.
+pub async fn whoami_session_id(client: &Client) -> Option<String> {
+    let res = client
+        .get(format!("{KRATOS_PUBLIC}/sessions/whoami"))
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .ok()?;
+    if !res.status().is_success() {
+        return None;
+    }
+    let body: Value = res.json().await.ok()?;
+    body["id"].as_str().map(str::to_string)
+}
+
+/// Count Hydra consent sessions for a subject via the admin API
+/// (`GET /admin/oauth2/auth/sessions/consent?subject=...`). Used to assert the
+/// account-delete saga and the per-client revoke actually wiped grants.
+pub async fn hydra_consent_session_count(subject: &str) -> usize {
+    let client = browser_client();
+    let res = client
+        .get(format!(
+            "{HYDRA_ADMIN}/admin/oauth2/auth/sessions/consent?subject={subject}"
+        ))
+        .send()
+        .await
+        .expect("list consent sessions transport");
+    if res.status() == StatusCode::NO_CONTENT || !res.status().is_success() {
+        return 0;
+    }
+    let body: Value = res.json().await.unwrap_or(Value::Null);
+    body.as_array().map(|a| a.len()).unwrap_or(0)
+}
+
+/// POST a synthetic Kratos webhook event to the portal's internal ingest
+/// endpoint (`/internal/audit/kratos?action=...`) with the playground bearer.
+/// Returns the response status. Mirrors what Kratos's webhook hook posts.
+pub async fn post_kratos_webhook(action: &str, actor_id: &str, actor_email: &str) -> StatusCode {
+    let client = browser_client();
+    let now = chrono::Utc::now().to_rfc3339();
+    let payload = serde_json::json!({
+        "actor_id": actor_id,
+        "actor_email": actor_email,
+        "target_id": actor_id,
+        "issued_at": now,
+        "metadata": {},
+    });
+    client
+        .post(format!("{INTERNAL}/internal/audit/kratos?action={action}"))
+        .bearer_auth(WEBHOOK_TOKEN)
+        .json(&payload)
+        .send()
+        .await
+        .expect("POST internal/audit/kratos")
+        .status()
+}
+
+/// Whether an `audit_events` row exists for `(action, target_id)`. Polls
+/// briefly to absorb insert latency on the diesel pool (audit writes are
+/// fire-and-forget from the request path). Shared by the webhook +
+/// admin-action contract tests.
+pub fn audit_row_exists(action: &str, target_id: &str) -> bool {
+    let conn = forseti_db_conn();
+    for _ in 0..20 {
+        let ok: bool = conn
+            .query_row(
+                "SELECT 1 FROM audit_events WHERE action = ?1 AND target_id = ?2 LIMIT 1",
+                params![action, target_id],
+                |_| Ok(true),
+            )
+            .unwrap_or(false);
+        if ok {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    false
+}
+
+/// Seed a `member_profiles` row so the `profile` / `extended_profile`
+/// id_token claims (picture, website, bio, pronouns, links) have something to
+/// project. `links` is `(label, url)` pairs serialised to the `links_json`
+/// shape `profiles::fetch` expects. Requires `[profiles].enabled = true`.
+pub fn seed_member_profile(
+    identity_id: &str,
+    avatar_url: &str,
+    website: &str,
+    bio: &str,
+    pronouns: &str,
+    links: &[(&str, &str)],
+) {
+    let now = chrono::Utc::now().to_rfc3339();
+    let links_json = serde_json::Value::Array(
+        links
+            .iter()
+            .map(|(label, url)| serde_json::json!({"label": label, "url": url}))
+            .collect(),
+    )
+    .to_string();
+    let conn = forseti_db_conn();
+    conn.execute(
+        "INSERT OR REPLACE INTO member_profiles \
+            (identity_id, bio, location, pronouns, website, avatar_url, links_json, updated_at) \
+         VALUES (?1, ?2, NULL, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            identity_id,
+            bio,
+            pronouns,
+            website,
+            avatar_url,
+            links_json,
+            now
+        ],
+    )
+    .unwrap_or_else(|e| panic!("seed member_profiles: {e}"));
+}
+
+/// Delete a `member_profiles` row (test cleanup).
+pub fn delete_member_profile(identity_id: &str) {
+    let conn = forseti_db_conn();
+    conn.execute(
+        "DELETE FROM member_profiles WHERE identity_id = ?1",
+        params![identity_id],
+    )
+    .unwrap_or_else(|e| panic!("delete member_profiles: {e}"));
 }
 
 /// Skip the test if the portal isn't reachable. Returns `true` when the

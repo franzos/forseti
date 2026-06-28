@@ -218,10 +218,8 @@ fn build_show_view(
     discovery: crate::ory::discovery::OidcDiscovery,
     discovery_ok: bool,
 ) -> ClientShowTemplate {
-    // Provenance fields surfaced under the configuration block. Lifted
-    // off the Forseti-owned `oauth_client_metadata` row before we hand
-    // it to `project_row`, which discards them — the show page is the
-    // only consumer.
+    // Lift provenance off the metadata row before `project_row` discards it;
+    // the show page is the only consumer.
     let (provenance_audience, provenance_resource_url) = match meta.as_ref() {
         Some(m) => (
             m.audience.clone().unwrap_or_default(),
@@ -249,13 +247,11 @@ fn build_show_view(
         .unwrap_or_default();
     let skip_consent = client.skip_consent.unwrap_or(false);
     let grant_types_selected = client.grant_types.clone().unwrap_or_default();
-    // One audience URI per line — matches the textarea format the edit
-    // form expects on POST.
+    // One URI per line, matching the textarea format the edit form posts.
     let audience = client.audience.clone().unwrap_or_default().join("\n");
     let require_pkce = read_require_pkce(&client);
-    // Diff this client's registered scopes against the documented set so
-    // operators see which ones will show up as raw strings on the consent
-    // screen. Sorted + deduped for stable rendering.
+    // Scopes with no description show as raw strings on the consent screen;
+    // surface them so the operator knows. Sorted + deduped for stable render.
     let mut missing_scope_descriptions: Vec<String> = scope_str
         .split_whitespace()
         .filter(|s| {
@@ -268,9 +264,8 @@ fn build_show_view(
     missing_scope_descriptions.sort();
     missing_scope_descriptions.dedup();
 
-    // Same `?reveal=` channel is used by create + rotate-secret. Pattern-
-    // match on the variant so the template only sees the field(s)
-    // relevant to the flow that minted the reveal.
+    // create + rotate-secret share the `?reveal=` channel; match the variant
+    // so the template sees only the fields for the flow that minted it.
     let (secret_revealed, registration_access_token, setup_note) = match reveal {
         Some(SecretReveal::ClientCreated {
             secret,

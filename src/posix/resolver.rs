@@ -1,13 +1,18 @@
 //! The `/posix/v1/*` resolver HTTP API consumed by enrolled hosts' NSS/SSH
-//! integration. Mounted on the INTERNAL listener; every handler is gated by
-//! the [`RequirePosixHost`] Basic-auth extractor.
+//! integration. Every handler is gated by the [`RequirePosixHost`] Basic-auth
+//! extractor.
 //!
-//! Access control hinges on `host.allowed_gid`:
-//! - `None` (unscoped): single lookups resolve any account/group, but
-//!   enumeration returns empty so a host can't slurp the whole directory.
-//! - `Some(gid)` (scoped): everything is restricted to enabled members of
-//!   the named org group, which is re-asserted to be `kind = "org"` per
-//!   request (defense in depth — never trust the stored allowed_gid alone).
+//! Access control hinges on the host's org/team scope (see [`scope`]):
+//! - whole-org (no allowed teams): resolves provisioned members of the host's
+//!   org; `group` enumeration emits each org team that has a gid.
+//! - team-scoped (one or more allowed teams): restricted to provisioned members
+//!   of those teams (any-of-N); `group` enumeration emits only those teams. Each
+//!   team's org is asserted == the host's org in the db layer, so a cross-org
+//!   team can never widen visibility.
+//!
+//! Group lookups also resolve user-private groups (UPG): a gid/name mapping to a
+//! `kind = "user"` group is served single-member, but only when its owning
+//! account is visible on the host. UPGs are never enumerated.
 
 use axum::extract::{Json as JsonBody, Path, State};
 use axum::http::StatusCode;
@@ -53,12 +58,9 @@ impl From<db::PosixAccount> for PasswdEntry {
     }
 }
 
-/// Per-IP rate limit for the resolver. Coarse on purpose: keyed by source IP,
-/// so hosts behind one NAT share a bucket. A host-keyed extractor would be a
-/// future hardening (rate_limit.rs has no host-id extractor yet).
+/// Coarse per-source-IP resolver rate limit; hosts behind one NAT share a bucket.
 const RESOLVER_RATE_PER_MINUTE: u32 = 600;
 
-/// Tiny empty 429 for machine clients — no HTML page, no JSON envelope.
 fn rate_limit_error(_err: tower_governor::GovernorError) -> Response {
     StatusCode::TOO_MANY_REQUESTS.into_response()
 }
@@ -84,61 +86,62 @@ pub fn router() -> Router<AppState> {
     )
 }
 
-/// 500 helper: a db error must not look like a NOTFOUND to the daemon.
+/// 500, not 404: a db error must not look like a miss to the daemon.
 fn db_error(e: anyhow::Error, ctx: &str) -> Response {
     tracing::error!(error = ?e, "posix resolver: {ctx}");
     StatusCode::INTERNAL_SERVER_ERROR.into_response()
 }
 
-/// Resolve `host.allowed_gid` into a concrete scope. Returns:
-/// - `Ok(None)` — unscoped host.
-/// - `Ok(Some(gid))` — scoped host, `gid` confirmed to be an org group.
-/// - `Err(response)` — misconfigured scoped host (gid missing or not org);
-///   the caller serves the supplied empty/not-found `response`.
-async fn resolve_scope(
-    state: &AppState,
-    host: &RequirePosixHost,
-    misconfigured: Response,
-) -> Result<Option<u32>, Response> {
-    let Some(gid) = host.allowed_gid else {
-        return Ok(None);
+/// A host's resolved scope. Always carries the host's org.
+enum HostScope {
+    /// Empty allowed-team set: any provisioned member of the org may log in;
+    /// no org-level group is emitted.
+    WholeOrg(String),
+    /// Restricted to these team uuids (any-of-N), all within the org.
+    Teams(String, Vec<String>),
+}
+
+async fn resolve_scope(state: &AppState, host: &RequirePosixHost) -> Result<HostScope, Response> {
+    let team_ids = match db::host_allowed_team_ids(&state.db, &host.host_id).await {
+        Ok(t) => t,
+        Err(e) => return Err(db_error(e, "scope load failed")),
     };
-    match db::group_by_gid(&state.db, gid).await {
-        Ok(Some(g)) if g.kind == "org" => Ok(Some(gid)),
-        Ok(_) => {
-            tracing::warn!(
-                host_id = %host.host_id,
-                gid,
-                "posix resolver: host's allowed_gid is missing or not an org group; serving empty"
-            );
-            Err(misconfigured)
-        }
-        Err(e) => Err(db_error(e, "scope re-assert failed")),
+    if team_ids.is_empty() {
+        Ok(HostScope::WholeOrg(host.org_id.clone()))
+    } else {
+        Ok(HostScope::Teams(host.org_id.clone(), team_ids))
     }
 }
 
 async fn passwd_all(State(state): State<AppState>, host: RequirePosixHost) -> Response {
-    let scope = match resolve_scope(
-        &state,
-        &host,
-        Json(Vec::<PasswdEntry>::new()).into_response(),
-    )
-    .await
-    {
-        Ok(s) => s,
+    let accounts = match resolve_scope(&state, &host).await {
+        Ok(HostScope::WholeOrg(org)) => db::accounts_in_org(&state.db, &org).await,
+        Ok(HostScope::Teams(org, teams)) => accounts_in_teams(&state, &org, &teams).await,
         Err(r) => return r,
     };
-    match scope {
-        // Unscoped hosts never enumerate the directory.
-        None => Json(Vec::<PasswdEntry>::new()).into_response(),
-        Some(gid) => match db::accounts_in_gid(&state.db, gid).await {
-            Ok(rows) => {
-                let out: Vec<PasswdEntry> = rows.into_iter().map(PasswdEntry::from).collect();
-                Json(out).into_response()
-            }
-            Err(e) => db_error(e, "passwd_all scoped query failed"),
-        },
+    match accounts {
+        Ok(a) => Json(a.into_iter().map(PasswdEntry::from).collect::<Vec<_>>()).into_response(),
+        Err(e) => db_error(e, "passwd_all failed"),
     }
+}
+
+/// Union of provisioned members across teams, deduped by identity, stable by username.
+async fn accounts_in_teams(
+    state: &AppState,
+    org: &str,
+    teams: &[String],
+) -> anyhow::Result<Vec<db::PosixAccount>> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for tid in teams {
+        for a in db::accounts_in_team(&state.db, org, tid).await? {
+            if seen.insert(a.identity_id.clone()) {
+                out.push(a);
+            }
+        }
+    }
+    out.sort_by(|a, b| a.username.cmp(&b.username));
+    Ok(out)
 }
 
 async fn passwd_by_name(
@@ -167,9 +170,8 @@ async fn passwd_by_uid(
     serve_account_scoped(&state, &host, account).await
 }
 
-/// Return the account as a passwd entry, enforcing the shared host-scope
-/// decision: an unscoped host gets it outright; a scoped host gets it only if
-/// the account is visible under [`scope::account_visible_on_host`].
+/// Return the account as a passwd entry only if visible under
+/// [`scope::account_visible_on_host`].
 async fn serve_account_scoped(
     state: &AppState,
     host: &RequirePosixHost,
@@ -183,24 +185,121 @@ async fn serve_account_scoped(
 }
 
 async fn group_all(State(state): State<AppState>, host: RequirePosixHost) -> Response {
-    let scope = match resolve_scope(
-        &state,
-        &host,
-        Json(Vec::<GroupEntry>::new()).into_response(),
-    )
-    .await
-    {
-        Ok(s) => s,
+    let (org, teams) = match resolve_scope(&state, &host).await {
+        Ok(HostScope::WholeOrg(org)) => match crate::orgs::teams::list_teams(&state.db, &org).await
+        {
+            Ok(ts) => (
+                org,
+                ts.into_iter()
+                    .filter(|t| t.gid.is_some())
+                    .map(|t| t.id)
+                    .collect::<Vec<_>>(),
+            ),
+            Err(e) => return db_error(e, "group_all team list failed"),
+        },
+        Ok(HostScope::Teams(org, teams)) => (org, teams),
         Err(r) => return r,
     };
-    match scope {
-        None => Json(Vec::<GroupEntry>::new()).into_response(),
-        // Scoped hosts see exactly their one org group (sufficient for M1).
-        Some(gid) => match group_entry(&state, gid).await {
-            Ok(Some(g)) => Json(vec![g]).into_response(),
-            Ok(None) => Json(Vec::<GroupEntry>::new()).into_response(),
-            Err(e) => db_error(e, "group_all scoped query failed"),
+    let mut out = Vec::new();
+    for tid in teams {
+        match team_group_entry(&state, &org, &tid).await {
+            Ok(Some(g)) => out.push(g),
+            Ok(None) => {}
+            Err(e) => return db_error(e, "group_all entry failed"),
+        }
+    }
+    Json(out).into_response()
+}
+
+/// GroupEntry for a team (must have a gid + belong to org). UPG groups are NOT
+/// enumerated here, only single-lookup.
+async fn team_group_entry(
+    state: &AppState,
+    org: &str,
+    team_id: &str,
+) -> anyhow::Result<Option<GroupEntry>> {
+    use crate::posix::allocate::posix_group_name;
+    let Some(team) = crate::orgs::teams::list_teams(&state.db, org)
+        .await?
+        .into_iter()
+        .find(|t| t.id == team_id)
+    else {
+        return Ok(None);
+    };
+    let Some(gid) = team.gid else {
+        return Ok(None);
+    };
+    let members = db::accounts_in_team(&state.db, org, team_id)
+        .await?
+        .into_iter()
+        .map(|a| a.username)
+        .collect();
+    Ok(Some(GroupEntry {
+        name: posix_group_name(&team),
+        gid: gid as u32,
+        members,
+    }))
+}
+
+async fn group_by_gid(
+    State(state): State<AppState>,
+    host: RequirePosixHost,
+    Path(gid): Path<u32>,
+) -> Response {
+    match db::team_by_gid_in_org(&state.db, &host.org_id, gid).await {
+        Ok(Some(team)) => return serve_team_group(&state, &host.org_id, &team).await,
+        Ok(None) => {}
+        Err(e) => return db_error(e, "group_by_gid team lookup failed"),
+    }
+    serve_user_private_group_by_gid(&state, &host, gid).await
+}
+
+async fn serve_team_group(
+    state: &AppState,
+    org: &str,
+    team: &crate::orgs::teams::Team,
+) -> Response {
+    use crate::posix::allocate::posix_group_name;
+    let Some(gid) = team.gid else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    match db::accounts_in_team(&state.db, org, &team.id).await {
+        Ok(accts) => Json(GroupEntry {
+            name: posix_group_name(team),
+            gid: gid as u32,
+            members: accts.into_iter().map(|a| a.username).collect(),
+        })
+        .into_response(),
+        Err(e) => db_error(e, "team group members failed"),
+    }
+}
+
+/// UPG by gid: served only if the owning account is visible on the host. uid !=
+/// primary gid (separate sequence bands), so resolve via account_by_primary_gid,
+/// not account_by_uid.
+async fn serve_user_private_group_by_gid(
+    state: &AppState,
+    host: &RequirePosixHost,
+    gid: u32,
+) -> Response {
+    let account = match db::group_by_gid(&state.db, gid).await {
+        Ok(Some(g)) if g.kind == "user" => match db::account_by_primary_gid(&state.db, gid).await {
+            Ok(Some(a)) => a,
+            Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+            Err(e) => return db_error(e, "upg owner lookup failed"),
         },
+        Ok(_) => return StatusCode::NOT_FOUND.into_response(),
+        Err(e) => return db_error(e, "upg group lookup failed"),
+    };
+    match scope::account_visible_on_host(&state.db, host, &account).await {
+        Ok(true) => Json(GroupEntry {
+            name: account.username.clone(),
+            gid,
+            members: vec![account.username],
+        })
+        .into_response(),
+        Ok(false) => StatusCode::NOT_FOUND.into_response(),
+        Err(e) => db_error(e, "upg scope check failed"),
     }
 }
 
@@ -209,70 +308,26 @@ async fn group_by_name(
     host: RequirePosixHost,
     Path(name): Path<String>,
 ) -> Response {
-    let scope = match resolve_scope(&state, &host, StatusCode::NOT_FOUND.into_response()).await {
-        Ok(s) => s,
-        Err(r) => return r,
-    };
-    let group = match db::group_by_name(&state.db, &name).await {
-        Ok(Some(g)) => g,
-        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
-        Err(e) => return db_error(e, "group_by_name lookup failed"),
-    };
-    serve_group_scoped(&state, scope, group).await
-}
-
-async fn group_by_gid(
-    State(state): State<AppState>,
-    host: RequirePosixHost,
-    Path(gid): Path<u32>,
-) -> Response {
-    let scope = match resolve_scope(&state, &host, StatusCode::NOT_FOUND.into_response()).await {
-        Ok(s) => s,
-        Err(r) => return r,
-    };
-    let group = match db::group_by_gid(&state.db, gid).await {
-        Ok(Some(g)) => g,
-        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
-        Err(e) => return db_error(e, "group_by_gid lookup failed"),
-    };
-    serve_group_scoped(&state, scope, group).await
-}
-
-/// Return the group with its members, enforcing scope: an unscoped host gets
-/// any group; a scoped host gets the group ONLY if it is the allowed gid.
-async fn serve_group_scoped(
-    state: &AppState,
-    scope: Option<u32>,
-    group: db::PosixGroup,
-) -> Response {
-    if let Some(allowed) = scope {
-        if group.gid as u32 != allowed {
-            return StatusCode::NOT_FOUND.into_response();
-        }
+    match db::team_by_posix_name_in_org(&state.db, &host.org_id, &name).await {
+        Ok(Some(team)) => return serve_team_group(&state, &host.org_id, &team).await,
+        Ok(None) => {}
+        Err(e) => return db_error(e, "group_by_name team lookup failed"),
     }
-    match db::group_member_usernames(&state.db, group.gid as u32).await {
-        Ok(members) => Json(GroupEntry {
-            name: group.name,
-            gid: group.gid as u32,
-            members,
+    let account = match db::account_by_username(&state.db, &name).await {
+        Ok(Some(a)) if a.enabled == 1 => a,
+        Ok(_) => return StatusCode::NOT_FOUND.into_response(),
+        Err(e) => return db_error(e, "group_by_name upg lookup failed"),
+    };
+    match scope::account_visible_on_host(&state.db, &host, &account).await {
+        Ok(true) => Json(GroupEntry {
+            name: account.username.clone(),
+            gid: account.gid as u32,
+            members: vec![account.username],
         })
         .into_response(),
-        Err(e) => db_error(e, "group member lookup failed"),
+        Ok(false) => StatusCode::NOT_FOUND.into_response(),
+        Err(e) => db_error(e, "group_by_name scope failed"),
     }
-}
-
-/// Build a `GroupEntry` for `gid` (the group row + its members), or `None`
-/// when the group doesn't exist.
-async fn group_entry(state: &AppState, gid: u32) -> anyhow::Result<Option<GroupEntry>> {
-    let Some(group) = db::group_by_gid(&state.db, gid).await? else {
-        return Ok(None);
-    };
-    let members = db::group_member_usernames(&state.db, gid).await?;
-    Ok(Some(GroupEntry {
-        name: group.name,
-        gid: group.gid as u32,
-        members,
-    }))
 }
 
 async fn authorized_keys(
@@ -280,8 +335,8 @@ async fn authorized_keys(
     host: RequirePosixHost,
     Path(name): Path<String>,
 ) -> Response {
-    // Empty body is the "no keys" answer sshd expects; reuse it for every
-    // miss (misconfigured host, unknown/disabled account, out-of-scope).
+    // Empty body is sshd's "no keys"; reuse it for every miss so a probe can't
+    // distinguish unknown/disabled/out-of-scope.
     let account = match db::account_by_username(&state.db, &name).await {
         Ok(Some(a)) if a.enabled == 1 => a,
         Ok(_) => return text_plain(String::new()),
@@ -299,7 +354,7 @@ async fn authorized_keys(
     let now = chrono::Utc::now();
     let body = keys
         .into_iter()
-        // Serve-time expiry: drop any key whose expires_at is past.
+        // Serve-time expiry.
         .filter(|k| {
             k.expires_at
                 .as_deref()
@@ -319,42 +374,27 @@ fn text_plain(body: String) -> Response {
 // --- offline auth (M3a) --------------------------------------------------
 
 /// The complete current set of offline verifiers this host may verify against
-/// while partitioned. The host wholesale-replaces its keystore from the result,
-/// so withdrawal (disable / de-scope / clear / force_mfa-flip) is just absence
-/// from the next pull.
+/// while partitioned. The host wholesale-replaces its keystore, so withdrawal
+/// (disable / de-scope / clear / force_mfa-flip) is just absence from the next pull.
 ///
-/// force_mfa hosts get an **empty** set unconditionally: an MFA host requires
-/// network for login, closing the AAL2-downgrade where going offline would skip
-/// the second factor. This check precedes any DB work.
+/// force_mfa hosts get an empty set unconditionally: closes the AAL2-downgrade
+/// where going offline would skip the second factor. Checked before any DB work.
 async fn offline_verifiers(State(state): State<AppState>, host: RequirePosixHost) -> Response {
     if !state.cfg.posix.offline_auth_enabled || host.force_mfa {
         return Json(OfflineVerifiersResponse { verifiers: vec![] }).into_response();
     }
 
-    // Candidate accounts = the accounts visible on this host: scoped hosts see
-    // their org-group members, unscoped hosts see every enabled account. (Unlike
-    // `passwd_all`, an unscoped host DOES get the offline set — it can already
-    // resolve+authenticate these users online.) `accounts_in_gid` and
-    // `list_enabled_accounts` both filter `enabled = 1` already.
-    let scope = match resolve_scope(
-        &state,
-        &host,
-        Json(OfflineVerifiersResponse { verifiers: vec![] }).into_response(),
-    )
-    .await
-    {
-        Ok(s) => s,
+    // Candidates: accounts visible under the host's scope (both queries filter enabled=1).
+    let candidates = match resolve_scope(&state, &host).await {
+        Ok(HostScope::WholeOrg(org)) => match db::accounts_in_org(&state.db, &org).await {
+            Ok(rows) => rows,
+            Err(e) => return db_error(e, "offline_verifiers org query failed"),
+        },
+        Ok(HostScope::Teams(org, teams)) => match accounts_in_teams(&state, &org, &teams).await {
+            Ok(rows) => rows,
+            Err(e) => return db_error(e, "offline_verifiers team query failed"),
+        },
         Err(r) => return r,
-    };
-    let candidates = match scope {
-        None => match db::list_enabled_accounts(&state.db).await {
-            Ok(rows) => rows,
-            Err(e) => return db_error(e, "offline_verifiers unscoped account query failed"),
-        },
-        Some(gid) => match db::accounts_in_gid(&state.db, gid).await {
-            Ok(rows) => rows,
-            Err(e) => return db_error(e, "offline_verifiers scoped account query failed"),
-        },
     };
 
     let ids: Vec<String> = candidates.iter().map(|a| a.identity_id.clone()).collect();
@@ -384,9 +424,8 @@ async fn offline_verifiers(State(state): State<AppState>, host: RequirePosixHost
     Json(OfflineVerifiersResponse { verifiers }).into_response()
 }
 
-/// Hard cap on a single offline-audit batch. A host queues offline-auth events
-/// while partitioned and flushes them on reconnect; bound the batch so a
-/// compromised or buggy host can't flood the audit table in one request.
+/// Cap on a single offline-audit batch so a compromised/buggy host can't flood
+/// the audit table in one request.
 const OFFLINE_AUDIT_MAX_BATCH: usize = 256;
 
 #[derive(serde::Deserialize)]
@@ -405,11 +444,10 @@ struct OfflineAuditEvent {
     occurred_at: String,
 }
 
-/// Ingest a host's queued offline-auth events into the server audit log. Each
-/// event lands as a `posix.offline.auth_{succeeded,failed}` row carrying only
-/// host_id + username + a coarse reason (the SafeMetadata deny-list blocks the
-/// passphrase/verifier regardless). Malformed entries are skipped; an oversized
-/// batch is rejected outright.
+/// Ingest a host's queued offline-auth events into the server audit log as
+/// `posix.offline.auth_{succeeded,failed}` rows (host_id + username + coarse
+/// reason; SafeMetadata blocks the passphrase/verifier regardless). Malformed
+/// entries are skipped; an oversized batch is rejected.
 async fn offline_audit(
     State(state): State<AppState>,
     host: RequirePosixHost,
@@ -421,7 +459,7 @@ async fn offline_audit(
 
     let mut written = 0usize;
     for ev in batch.events {
-        // Skip garbage: an event with no username carries nothing auditable.
+        // No username means nothing auditable.
         if ev.username.trim().is_empty() {
             continue;
         }
@@ -431,7 +469,7 @@ async fn offline_audit(
         } else {
             action::POSIX_OFFLINE_AUTH_FAILED
         };
-        // Coarse reason only; truncate so a hostile host can't bloat the row.
+        // Truncate so a hostile host can't bloat the row.
         let reason: String = ev.reason.chars().take(128).collect();
         let occurred: String = ev.occurred_at.chars().take(64).collect();
         let meta = SafeMetadata::from_pairs(&[

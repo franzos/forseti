@@ -1,19 +1,15 @@
 //! Offline-auth verifier (pure). Mints the Argon2id PHC string Forseti stores
 //! and ships to enrolled hosts so a partitioned host can verify a dedicated
-//! offline passphrase locally. Mirrors M2's `BindingInputs` split: this module
-//! is the security core, free of DB/HTTP — set/clear/projection plumbing lives
-//! elsewhere.
+//! offline passphrase locally. Security core, free of DB/HTTP.
 //!
-//! The server stores ONLY this verifier (salt + params embedded in the PHC
-//! string). No pepper server-side — the host owns its own HMAC pepper, so a
-//! stolen server DB still costs the full Argon2id work factor per guess.
+//! No pepper server-side: the host owns its own HMAC pepper, so a stolen server
+//! DB still costs the full Argon2id work factor per guess.
 use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::{Algorithm, Argon2, Params, Version};
 use serde::Serialize;
 
-/// Hard floor on the offline passphrase. ≥8 chars, enforced server-side; it's
-/// a *passphrase*, never a "PIN" (short PINs are M3b/TPM).
+/// Hard floor on the offline passphrase (>=8 chars). A passphrase, never a PIN.
 pub const OFFLINE_MIN_LEN: usize = 8;
 /// Argon2id memory cost in KiB (64 MiB).
 pub const ARGON2_M_KIB: u32 = 65536;
@@ -21,8 +17,8 @@ pub const ARGON2_M_KIB: u32 = 65536;
 pub const ARGON2_T: u32 = 3;
 /// Argon2id parallelism (lanes).
 pub const ARGON2_P: u32 = 1;
-/// Verifier scheme version stamped on each row. Bumped if the KDF shape changes
-/// so a host can refuse a verifier it doesn't understand.
+/// Verifier scheme version; bumped if the KDF shape changes so a host can refuse
+/// a verifier it doesn't understand.
 pub const OFFLINE_ALGO_VERSION: i32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,8 +26,8 @@ pub enum SetSecretError {
     TooShort,
 }
 
-/// Build the configured Argon2id hasher. Params are fixed consts, so the only
-/// failure mode is a programmer error in the constants — surfaced via expect.
+/// Argon2id hasher with the fixed const params; the only failure mode is a bad
+/// constant, surfaced via expect.
 fn hasher() -> Argon2<'static> {
     let params = Params::new(ARGON2_M_KIB, ARGON2_T, ARGON2_P, None)
         .expect("static Argon2 params are valid");
@@ -53,11 +49,8 @@ pub fn mint_verifier(passphrase: &str) -> Result<String, SetSecretError> {
     Ok(phc)
 }
 
-/// One row in the `/posix/v1/offline_verifiers` projection: the username, the
-/// Argon2id verifier the host re-peppers and stores, the TTL (seconds) the host
-/// stamps the credential with, and the algo version the host uses to refuse a
-/// scheme it doesn't understand. No pepper, no identity id — the host keys by
-/// username.
+/// One row in the `/posix/v1/offline_verifiers` projection. No pepper, no
+/// identity id: the host re-peppers the verifier and keys by username.
 #[derive(Debug, Clone, Serialize)]
 pub struct OfflineVerifier {
     pub username: String,
@@ -66,17 +59,17 @@ pub struct OfflineVerifier {
     pub algo_version: i32,
 }
 
-/// Top-level body of the `/posix/v1/offline_verifiers` endpoint. The host
-/// wholesale-replaces its keystore from `verifiers`; an empty list withdraws
-/// every offline credential (force_mfa hosts always get this).
+/// Body of `/posix/v1/offline_verifiers`. The host wholesale-replaces its
+/// keystore; an empty list withdraws every offline credential (force_mfa hosts
+/// always get this).
 #[derive(Debug, Clone, Serialize)]
 pub struct OfflineVerifiersResponse {
     pub verifiers: Vec<OfflineVerifier>,
 }
 
 /// Verify `passphrase` against a stored PHC string. Returns `false` on any
-/// mismatch or malformed PHC — never panics on attacker-supplied input.
-#[cfg_attr(not(test), allow(dead_code))] // host re-implements verification; server-side use is tests only.
+/// mismatch or malformed PHC; never panics on attacker-supplied input.
+#[cfg_attr(not(test), allow(dead_code))] // host re-implements verification; server-side use is tests only
 pub fn verify(passphrase: &str, phc: &str) -> bool {
     let Ok(parsed) = PasswordHash::new(phc) else {
         return false;

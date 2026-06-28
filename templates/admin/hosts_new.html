@@ -32,15 +32,44 @@
       </label>
 
       <label class="flex flex-col gap-stack-xs">
-        <span class="font-label-md text-label-md text-on-surface">Allowed GID</span>
-        <input type="number"
-               name="allowed_gid"
-               min="0"
-               value="{{ allowed_gid }}"
-               placeholder="2000"
-               class="font-body-md text-body-md bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2 w-32">
-        <span class="font-label-sm text-label-sm text-on-surface-variant">Restrict this host to members of one group. Leave blank to allow any group.</span>
+        <span class="font-label-md text-label-md text-on-surface">Organization</span>
+        <select name="org_id"
+                required
+                class="font-body-md text-body-md bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2">
+          {% for o in orgs %}
+            <option value="{{ o.id }}" {% if o.selected %}selected{% endif %}>{{ o.name }}</option>
+          {% endfor %}
+        </select>
+        <span class="font-label-sm text-label-sm text-on-surface-variant">The host belongs to this org. Fixed after enrollment.</span>
       </label>
+
+      <fieldset class="flex flex-col gap-stack-sm">
+        <legend class="font-label-md text-label-md text-on-surface">Allowed teams</legend>
+        {% if !any_teams %}
+          <p class="font-body-sm text-body-sm text-on-surface-variant">
+            No teams exist yet. This host will allow any org member. Scoping a host to specific teams needs the Organizations feature.
+          </p>
+        {% else %}
+          <span class="font-label-sm text-label-sm text-on-surface-variant">Restrict this host to members of the selected teams. Only teams in the chosen org apply; select none to allow any org member.</span>
+          {% for g in team_groups %}
+            {% if !g.teams.is_empty() %}
+              <div class="flex flex-col gap-stack-xs">
+                <span class="font-label-sm text-label-sm text-on-surface-variant">{{ g.org_name }}</span>
+                {% for t in g.teams %}
+                  <label class="flex items-center gap-stack-sm">
+                    <input type="checkbox"
+                           name="team_ids"
+                           value="{{ t.id }}"
+                           {% if t.checked %}checked{% endif %}
+                           class="rounded border-outline-variant">
+                    <span class="font-body-md text-body-md text-on-surface">{{ t.name }}</span>
+                  </label>
+                {% endfor %}
+              </div>
+            {% endif %}
+          {% endfor %}
+        {% endif %}
+      </fieldset>
 
       <label class="flex flex-col gap-stack-xs">
         <span class="flex items-center gap-stack-sm">

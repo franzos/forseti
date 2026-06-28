@@ -1,8 +1,4 @@
-//! Bootstrap + router composition.
-//!
-//! [`run`] wires tracing, config, the Ory client bundle, and the merged
-//! feature routers into an `axum::serve` call with graceful shutdown. It is
-//! the single entry point invoked from `main`.
+//! Bootstrap + router composition. [`run`] is the single entry point invoked from `main`.
 
 use std::future::IntoFuture;
 use std::net::SocketAddr;
@@ -37,10 +33,8 @@ pub(crate) async fn healthz() -> &'static str {
     "ok"
 }
 
-/// Liveness gate consulted by orchestrators. Returns 503 when the
-/// background webhook worker is silent for too long — a stuck or dead
-/// worker that liveness wouldn't otherwise notice. The threshold is
-/// generous (4× the 5-second tick) so a slow Postgres / paused VM
+/// Returns 503 when the background webhook worker has been silent too long. The
+/// threshold is generous (4x the 5-second tick) so a slow Postgres / paused VM
 /// doesn't trip a false unready.
 pub(crate) async fn readyz(State(state): State<AppState>) -> Response {
     const WORKER_STALE_SECS: i64 = 20;
@@ -66,10 +60,7 @@ pub(crate) async fn run() -> anyhow::Result<()> {
 
     let cfg = AppConfig::load()?;
 
-    // Fail loudly when the audit webhook bearer is missing rather than
-    // letting Forseti boot with the webhook endpoint silently closed.
-    // The endpoint is the only documented path for Kratos audit events, so
-    // an empty token here is always a deployment bug.
+    // Empty token means the audit webhook endpoint boots silently closed; always a deployment bug.
     if cfg.audit.webhook_token.is_empty() {
         eprintln!(
             "config error: audit.webhook_token must be set; the audit webhook endpoint \
@@ -79,6 +70,9 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         std::process::exit(1);
     }
 
+    // Reject overlapping posix uid/gid bands at boot before a team gid can collide with a user gid on a host.
+    cfg.posix.validate_bands()?;
+
     let ory = OryClients::from_config(&cfg);
 
     let db = DbPool::init(&cfg.database)?;
@@ -86,52 +80,31 @@ pub(crate) async fn run() -> anyhow::Result<()> {
     maybe_run_migrations(&db, &cfg.database).await?;
     warn_if_sqlite_in_production(&db, &cfg.self_.url);
 
-    // Load (or generate) the RSA key the outbound webhooks sign with.
-    // Done before the worker spins up so the JWKS endpoint is queryable
-    // by the time the first delivery lands on a receiver.
+    // Load before the worker spins up so the JWKS endpoint is queryable by the first delivery.
     let signing_key =
         webhook::SigningKey::load_or_generate(std::path::Path::new(&cfg.webhook.signing_key_path))?;
 
-    // Shared shutdown token: one Ctrl+C / SIGTERM fans out to the HTTP
-    // listeners *and* the webhook background tasks so the runtime can
-    // wind down cleanly. `CancellationToken` is the idiomatic tokio
-    // primitive for this — every clone observes the same one-shot
-    // cancellation, with no broadcast-channel capacity or Lagged
-    // semantics to worry about.
+    // One Ctrl+C / SIGTERM fans out to the HTTP listeners and the webhook background tasks.
     let shutdown = CancellationToken::new();
 
-    // Resolve the master cookie-signing secret. Hex-decoded when
-    // possible (operators paste `openssl rand -hex 32`); raw bytes
-    // otherwise. Falls back to a per-boot ephemeral 32-byte key with a
-    // loud warning — fine for dev (cookies dropped on restart) but a
-    // misconfiguration in production.
     let cookie_secret = resolve_cookie_secret(cfg.security.cookie_secret.as_deref());
 
-    // Phase 1: account-deletion outbox. Reconcile any PENDING rows that
-    // were stranded by a prior crash (between writing the rows and the
-    // Kratos delete), then spin up the worker that drains CONFIRMED rows.
+    // Reconcile PENDING rows stranded by a crash between writing the rows and the Kratos delete, then drain CONFIRMED rows.
     if let Err(e) = webhook::reconcile_pending(&db, &ory).await {
         tracing::warn!(error = %e, "webhook reconcile_pending failed at startup");
     }
     let webhook_worker = webhook::spawn_worker(db.clone(), cfg.webhook.clone(), shutdown.clone());
-    // Periodic reconcile so stuck PENDING rows don't sit until the
-    // next Forseti restart. Runs every 60s; bounded to rows older than
-    // 5 minutes so it can't interfere with in-flight sagas.
+    // Periodic reconcile (every 60s, rows older than 5 minutes) so stuck PENDING rows don't wait for the next restart.
     webhook::spawn_reconcile(db.clone(), ory.clone(), shutdown.clone());
 
-    // Boot the license gate. `commercial::store::load` falls back to
-    // `Unlicensed` on missing row or verification failure, so Forseti
-    // boots cleanly on both OSS deployments and stale-key scenarios.
+    // `store::load` falls back to `Unlicensed` on missing row or verification failure, so OSS and stale-key deployments boot cleanly.
     let grace_days = commercial::GRACE_DAYS;
     let initial_status = commercial::store::load(&db, grace_days).await;
     let license = LicenseHandle::new(initial_status, grace_days);
     // Status is otherwise only recomputed at boot / activate, so a license that booted Active never crosses into grace.
     commercial::spawn_reclassify(license.clone(), shutdown.clone());
 
-    // Hourly POSIX reconcile: purge posix rows for identities deleted
-    // out-of-band via the Kratos admin API (the per-delete-site cascade
-    // can't see those). Defense-in-depth; conservative — never purges on
-    // a Kratos lookup error.
+    // Hourly POSIX reconcile for identities deleted out-of-band via the Kratos admin API; never purges on a Kratos lookup error.
     crate::posix::spawn_reconcile(db.clone(), ory.clone(), shutdown.clone());
 
     let cfg_internal_bind = cfg.internal.bind.clone();
@@ -147,13 +120,8 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         discovery: crate::state::DiscoveryCache::default(),
     };
 
-    // Forseti-owned routes that render CSRF-protected forms or handle
-    // CSRF-protected POSTs. The CSRF middleware mints `forseti_csrf` on the
-    // way in and appends `Set-Cookie` on the way out; handlers read the
-    // token via the `Csrf` extractor instead of re-fetching the cookie.
-    // `/healthz`, `/readyz`, the kratos webhook, and the static asset
-    // service stay outside the layer — they don't render forms and would
-    // only pollute responses with an unused Set-Cookie.
+    // Forseti-owned CSRF-protected forms/POSTs. The middleware mints `forseti_csrf` and appends `Set-Cookie`;
+    // `/healthz`, `/readyz`, the kratos webhook, and static assets stay outside the layer (no forms).
     let csrf_routes = Router::new()
         .route("/", get(dashboard::root))
         .merge(auth::router())
@@ -173,9 +141,7 @@ pub(crate) async fn run() -> anyhow::Result<()> {
             state.clone(),
             crate::csrf::middleware,
         ))
-        // Lazy auto-join into the Default org. Cheap-skips when no Kratos
-        // session cookie is present, so unauthenticated routes inside this
-        // bundle (login, registration, claim-email, etc.) pay nothing.
+        // Lazy auto-join into the Default org; cheap-skips when no Kratos session cookie is present.
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             crate::orgs::middleware::auto_join_default_org,
@@ -185,16 +151,13 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         .merge(csrf_routes)
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
-        // Public JWKS for outbound webhook signature verification (RFC 8417
-        // SETs). Sits alongside `/healthz` / `/readyz` so it stays outside
-        // the CSRF layer — no cookies, no forms.
+        // Public JWKS for outbound webhook signature verification (RFC 8417 SETs); outside the CSRF layer.
         .route(
             "/.well-known/webhook-jwks.json",
             get(webhook::jwks_endpoint),
         )
         .merge(discovery::router());
-    // SSO routes mount only when [saml] is configured; inside the audit
-    // layer, outside CSRF (Jackson's callback is a cross-site GET).
+    // SSO routes mount only when [saml] is configured; outside CSRF (Jackson's callback is a cross-site GET).
     if state.cfg.saml.is_some() {
         public_app = public_app.merge(crate::saml::router());
     }
@@ -207,11 +170,7 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         .layer(TraceLayer::new_for_http())
         .with_state(state.clone());
 
-    // Internal listener: machine-to-machine endpoints only. No CSRF layer
-    // (no cookies, no forms), no readiness probes (those stay on the
-    // public listener so k8s / load-balancer probes don't have to know
-    // about a second port). Today this only carries the audit webhook;
-    // future internal endpoints land here too.
+    // Internal listener: machine-to-machine endpoints only. No CSRF, no readiness probes (those stay on the public listener).
     let internal_app = Router::new()
         .merge(audit::kratos_webhook::router())
         .merge(crate::posix::router())
@@ -232,10 +191,6 @@ pub(crate) async fn run() -> anyhow::Result<()> {
     let public_listener = tokio::net::TcpListener::bind(public_addr).await?;
     let internal_listener = tokio::net::TcpListener::bind(internal_addr).await?;
 
-    // Hand each listener its own clone of the shutdown token (the
-    // webhook background tasks are already holding clones). One
-    // Ctrl+C / SIGTERM fires `cancel()` once and every clone observes
-    // it.
     let public_shutdown = shutdown.clone();
     let internal_shutdown = shutdown.clone();
     let signal_shutdown = shutdown.clone();
@@ -244,11 +199,8 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         signal_shutdown.cancel();
     });
 
-    // `into_make_service_with_connect_info` puts the TCP peer
-    // `SocketAddr` into request extensions so tower_governor's
-    // `PeerIpKeyExtractor` (used by the per-IP rate limiters when
-    // `proxy.trust_forwarded_for = false`) can see it. Harmless for
-    // every other handler — extensions are pull-based.
+    // `into_make_service_with_connect_info` puts the TCP peer `SocketAddr` into request extensions so
+    // tower_governor's `PeerIpKeyExtractor` can see it when `proxy.trust_forwarded_for = false`.
     let public_fut = axum::serve(
         public_listener,
         public_app.into_make_service_with_connect_info::<SocketAddr>(),
@@ -272,10 +224,8 @@ pub(crate) async fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Run embedded migrations on startup unless the operator has opted out via
-/// `FORSETI_DATABASE__SKIP_MIGRATIONS=1` / `[database].skip_migrations = true`.
-/// Default-on is the self-hoster ergonomics call from `TODO.md` §0; the
-/// opt-out exists for deploys that gate schema changes through a pipeline.
+/// Run embedded migrations on startup unless `[database].skip_migrations` opts out
+/// (for deploys that gate schema changes through a pipeline).
 async fn maybe_run_migrations(db: &DbPool, cfg: &DatabaseConfig) -> anyhow::Result<()> {
     if cfg.skip_migrations {
         tracing::info!("database migrations skipped (skip_migrations = true)");
@@ -286,10 +236,8 @@ async fn maybe_run_migrations(db: &DbPool, cfg: &DatabaseConfig) -> anyhow::Resu
     Ok(())
 }
 
-/// Sqlite + a production-shaped Forseti URL is the multi-instance corruption
-/// footgun called out in `TODO.md` §0. We can't see other instances from
-/// here, only deployment shape — so we log a warn and (separately) surface
-/// the same fact on `/admin/status`.
+/// Sqlite + a production-shaped Forseti URL is a multi-instance corruption footgun.
+/// We can only see deployment shape from here, so we warn (and also surface it on `/admin/status`).
 fn warn_if_sqlite_in_production(db: &DbPool, self_url: &str) {
     if db.backend() != DatabaseBackend::Sqlite {
         return;
@@ -303,12 +251,9 @@ fn warn_if_sqlite_in_production(db: &DbPool, self_url: &str) {
     );
 }
 
-/// Materialise the master cookie-signing secret. Hex string preferred
-/// (operators paste `openssl rand -hex 32`); a string that fails hex
-/// decode is treated as raw UTF-8 bytes. A configured secret shorter
-/// than 32 key bytes hard-fails boot. Missing config → 32 random bytes
-/// for this process only, with a loud warning so the operator knows
-/// cookies won't survive restart.
+/// Materialise the master cookie-signing secret. Hex string preferred (`openssl rand -hex 32`),
+/// otherwise raw UTF-8 bytes; under 32 bytes hard-fails boot. Missing config falls back to 32
+/// per-process random bytes with a warning (cookies won't survive restart).
 fn resolve_cookie_secret(configured: Option<&str>) -> Arc<[u8]> {
     if let Some(raw) = configured.map(str::trim).filter(|s| !s.is_empty()) {
         let key: Box<[u8]> = match hex::decode(raw) {

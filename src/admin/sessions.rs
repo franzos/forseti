@@ -1,4 +1,4 @@
-//! `/admin/sessions` — global session list + revoke.
+//! `/admin/sessions`: global session list + revoke.
 //!
 //! Kratos's admin API exposes every active session across all identities.
 //! The list view paginates with an opaque `page_token`; revoking goes via
@@ -47,13 +47,10 @@ struct SessionsListTemplate {
     active_only: bool,
     /// Flash from a redirect after a successful revoke.
     flash: String,
-    /// Opaque token for the next page when the current page is full;
-    /// empty when there's no next page.
+    /// Opaque next-page token; empty when there's no next page.
     next_page_token: String,
-    /// True when the current request carries a `page_token` — controls
-    /// the "Back to start" link. Kratos paginates with opaque tokens
-    /// (no backward seek), so the only reliable back-step is "go to
-    /// page 1".
+    /// Kratos paginates with opaque tokens (no backward seek), so the only
+    /// reliable back-step is "go to page 1".
     has_prev: bool,
 }
 
@@ -65,14 +62,11 @@ pub struct ListQuery {
     page_token: Option<String>,
 }
 
-/// Page size for both the API call AND the "is there more?" heuristic
-/// — if Kratos returns exactly this many rows, we assume a next page
-/// exists and surface a Next link.
+/// Page size, also the "is there more?" heuristic: a full page implies a next.
 const SESSIONS_PAGE_SIZE: i64 = 100;
 
-/// Page size for the org-scoped path: we iterate one page of org
-/// members and fan out per-identity session lookups. Bound matches
-/// `admin/identities.rs` so the surfaces page in lock-step.
+/// Page size for the org-scoped path; matches `admin/identities.rs` so the
+/// surfaces page in lock-step.
 const SESSIONS_ORG_PAGE_SIZE: i64 = 25;
 
 pub async fn list(
@@ -90,16 +84,11 @@ pub async fn list(
     );
     let page_token = query.page_token.as_deref().filter(|s| !s.is_empty());
 
-    // Org-scoped: fan out per-member session lookups. Pagination is a
-    // numeric offset over the org's member list (matches the org-scoped
-    // pagination convention in `admin/identities.rs`). Forseti-wide:
-    // pass-through the opaque Kratos page_token.
-    //
-    // `org_scoped_member_count` distinguishes "we got a full member
-    // page → there may be more members" from "less than a full page →
-    // last page" for the next_page_token heuristic later. None means
-    // we took the Forseti-wide branch and pagination follows the
-    // Kratos-token convention.
+    // Org-scoped: fan out per-member session lookups, paginating with a numeric
+    // member offset (matching `admin/identities.rs`). Forseti-wide passes the
+    // opaque Kratos page_token through. `org_scoped_member_count` is Some only
+    // on the org path and feeds the next-page heuristic; a full member page
+    // implies more members.
     let (sessions, org_scoped_member_count): (Vec<_>, Option<i64>) = match scope.org_id() {
         Some(org_id) => {
             let offset: i64 = page_token
@@ -125,9 +114,8 @@ pub async fn list(
                 }
             };
             let member_count = members.len() as i64;
-            // Fan out per-identity session lookups with bounded
-            // concurrency. A 25-member org would otherwise pay 25 serial
-            // Kratos round-trips; cap matches `webhooks::resolve_client_names`.
+            // Bounded concurrency, else a 25-member org pays 25 serial Kratos
+            // round-trips; cap matches `webhooks::resolve_client_names`.
             const MAX_CONCURRENT: usize = 8;
             let mut slots: Vec<Option<Vec<ory::Session>>> =
                 (0..members.len()).map(|_| None).collect();
@@ -245,12 +233,10 @@ pub async fn list(
         })
         .collect();
 
-    // Naive next-page heuristic. Two pagination schemes:
-    //   * Forseti-wide: Kratos's opaque page_token (we use the last
-    //     row's session ID — Kratos accepts session IDs as tokens).
-    //   * org-scoped: numeric member offset — when we got a full
-    //     member page back, hand out `offset + page_size` so the next
-    //     click advances over members, not sessions.
+    // Next-page heuristic, two schemes:
+    //   * Forseti-wide: last row's session ID as Kratos's opaque token.
+    //   * org-scoped: numeric member offset, advanced by a page when the
+    //     member page came back full, so the next click advances over members.
     let next_page_token = match org_scoped_member_count {
         Some(member_count) if member_count == SESSIONS_ORG_PAGE_SIZE => {
             let current_offset: i64 = page_token
@@ -303,9 +289,8 @@ pub async fn revoke_confirm(
     csrf: Csrf,
 ) -> Response {
     let RequireAdminScoped { ctx, scope } = admin;
-    // Verify the target session belongs to the scope BEFORE rendering
-    // the confirm page so an org owner can't fish for the existence of
-    // sessions outside their scope by URL-guessing.
+    // Verify scope before rendering the confirm page so an org owner can't fish
+    // for sessions outside their scope by URL-guessing.
     if let Err(resp) = require_session_in_scope(&state, &id, &scope).await {
         return resp;
     }
@@ -345,11 +330,8 @@ pub async fn revoke(
     if !form.confirmed() {
         return Redirect::to(&redirect_to).into_response();
     }
-    // Re-verify scope ownership on the write path. The confirm-page
-    // check already filtered out cross-org URL fishing, but we don't
-    // trust the round-trip — a stale tab with a swapped `?org=` could
-    // otherwise attempt to revoke a session it never had access to
-    // enumerate.
+    // Re-verify scope on the write path; don't trust the round-trip, since a
+    // stale tab with a swapped `?org=` could otherwise revoke a foreign session.
     if let Err(resp) = require_session_in_scope(&state, &id, &scope).await {
         return resp;
     }

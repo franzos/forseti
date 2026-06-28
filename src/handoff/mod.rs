@@ -9,39 +9,25 @@
 //!
 //! The handler validates the client against Hydra, origin-matches the
 //! `referrer_uri` against the client's registered `redirect_uris` (plus
-//! `client_uri`), then sets the signed `forseti_app_referrer` cookie that
-//! drives the "Continuing from <App>" banner on subsequent settings
-//! pages. After validation it 302s the user to the per-action target
-//! (e.g. `2fa` → `/settings/2fa`).
+//! `client_uri`), sets the signed `forseti_app_referrer` cookie that drives
+//! the "Continuing from <App>" banner, then 302s to the per-action target.
 //!
 //! ## Trust model
 //!
-//! `client_id` must resolve to a real Hydra client. `referrer_uri` must
-//! share its origin with one of the client's registered URIs — without
-//! this gate, anyone who can mint a client could phish: register
-//! `redirect_uris=["https://attacker.com/x"]`, send users to
-//! `/handoff?referrer=mine&referrer_uri=https://attacker.com/y` and the
-//! banner ("Return to Mine") would point at a URL the attacker chose
-//! at link time. Origin-binding confines the spoof to URIs the client
-//! legitimately controls.
-//!
-//! The banner data (`client_name`, `logo_uri`) is read from Hydra at
-//! entry, not taken from the URL — otherwise the referrer URL becomes
-//! a brand-spoofing vector ("Return to PayPal" with a non-PayPal URI).
+//! `referrer_uri` must share its origin with one of the client's registered
+//! URIs; without that gate anyone who can mint a client could phish (point
+//! the "Return to <App>" banner at an attacker-chosen URL). Banner data
+//! (`client_name`, `logo_uri`) is read from Hydra, not the URL, so the
+//! referrer URL can't become a brand-spoofing vector.
 //!
 //! ## Sibling endpoints
 //!
-//! - `GET /handoff/return` — clear cookie, 302 to the stored
-//!   `referrer_uri`. The "Return to <App>" banner button's target.
-//! - `POST /handoff/dismiss` (CSRF-protected) — clear cookie, redirect
-//!   to the current page. The dismiss "×" on the banner.
+//! - `GET /handoff/return` — clear cookie, 302 to the stored `referrer_uri`.
+//! - `POST /handoff/dismiss` (CSRF-protected) — clear cookie, redirect back.
 //!
-//! The action whitelist is a deliberate stability contract: external
-//! apps reference verbs like `2fa` and `password`, not Forseti-internal
-//! paths like `/settings/2fa`. Renaming the routes doesn't break
-//! callers; adding a new surface requires a new entry here. Destructive
-//! actions (account deletion) are intentionally omitted — users
-//! navigate there from Forseti's own nav, in a context they chose.
+//! The action whitelist is a stability contract: external apps reference
+//! verbs (`2fa`, `password`) not internal paths, so renaming routes doesn't
+//! break callers. Destructive actions (account deletion) are omitted.
 
 pub mod cookie;
 
@@ -64,9 +50,8 @@ use crate::state::AppState;
 
 use cookie::{clear_referrer_cookie, read_referrer_cookie, set_referrer_cookie, ReferrerPayload};
 
-/// View-model handed to Askama for rendering the "Continuing from
-/// <App>" banner. Constructed from a verified [`ReferrerPayload`]; the
-/// fields are exactly what `_referrer_banner.html` reads, no more.
+/// View-model for the "Continuing from <App>" banner, built from a verified
+/// [`ReferrerPayload`].
 #[derive(Debug, Clone)]
 pub struct ReferrerBannerView {
     pub client_name: String,
@@ -82,13 +67,8 @@ impl From<ReferrerPayload> for ReferrerBannerView {
     }
 }
 
-/// Axum extractor that reads the verified app-referrer cookie off the
-/// request, or `None` when the cookie is absent / expired / tampered.
-/// Settings handlers consume it and thread the value into their
-/// template structs as `referrer_banner: Option<ReferrerBannerView>`.
-///
-/// Infallible — handlers stay readable (`banner: ReferrerBanner` in
-/// the argument list, not `Result<ReferrerBanner, _>`).
+/// Extractor reading the verified app-referrer cookie, or `None` when it's
+/// absent / expired / tampered. Infallible so handlers stay readable.
 pub struct ReferrerBanner(pub Option<ReferrerBannerView>);
 
 impl<S> FromRequestParts<S> for ReferrerBanner
@@ -170,9 +150,8 @@ pub(crate) async fn handoff_enter(
 ) -> Response {
     let target = action_target(q.action.as_deref());
 
-    // Both referrer params are required together — one without the other
-    // doesn't make sense. If neither is set, this is a "stable deep-link"
-    // request (no banner, no audit): land on the target and we're done.
+    // Both referrer params are required together. Neither set is a stable
+    // deep-link (no banner, no audit): just land on the target.
     let (referrer_id, referrer_uri) = match (q.referrer.as_deref(), q.referrer_uri.as_deref()) {
         (None, None) | (None, Some(_)) => return Redirect::to(target).into_response(),
         (Some(_), None) => return invalid_referrer(),
@@ -250,10 +229,9 @@ pub(crate) async fn handoff_enter(
     redirect_with_cookie(target, &set_cookie)
 }
 
-/// `GET /handoff/return` — the "Return to <App>" banner button.
-/// Clears the cookie and 302s to the stored `referrer_uri`. Idempotent
-/// (clears regardless of whether a cookie was present) — a GET so it's
-/// a plain anchor in the banner partial.
+/// `GET /handoff/return` — the "Return to <App>" banner button. Clears the
+/// cookie and 302s to the stored `referrer_uri`. Idempotent; a GET so it's a
+/// plain anchor.
 pub(crate) async fn handoff_return(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -265,10 +243,9 @@ pub(crate) async fn handoff_return(
         state.cfg.handoff.referrer_cookie_ttl_seconds,
     );
 
-    // Re-validate the stored URI against the client's *current* Hydra config:
-    // the cookie's ~1h TTL leaves a window where the client could be deleted
-    // or have its registered URIs narrowed. Fall back to `/` if it no longer
-    // origin-matches.
+    // Re-validate against the client's current Hydra config: the ~1h cookie
+    // TTL leaves a window where URIs could be narrowed. Fall back to `/` if it
+    // no longer origin-matches.
     let target = match &payload {
         Some(p) => match ory::hydra::get_client(&state.ory, &p.client_id).await {
             Ok(client) if client_origin_matches(&client, &p.referrer_uri) => p.referrer_uri.clone(),
@@ -280,9 +257,8 @@ pub(crate) async fn handoff_return(
     let secure = state.cfg.self_.is_https();
     let clear = clear_referrer_cookie(secure);
 
-    // No CSRF token: the banner's "Return to <app>" must stay a plain anchor,
-    // and the only effect is clearing a self-scoped UX cookie then redirecting
-    // to an origin-revalidated target — idempotent and non-destructive.
+    // No CSRF token: the banner anchor only clears a self-scoped UX cookie and
+    // redirects to an origin-revalidated target (idempotent, non-destructive).
     if let Some(p) = payload {
         let _ = audit::log(
             &state.db,
@@ -296,10 +272,8 @@ pub(crate) async fn handoff_return(
     redirect_with_cookie(&target, &clear)
 }
 
-/// `POST /handoff/dismiss` — the "×" on the banner. Clears the cookie
-/// globally (so the banner stays gone across pages) and redirects back
-/// to wherever the user was. CSRF-protected because it has a server-
-/// side side-effect (cookie clear).
+/// `POST /handoff/dismiss` — the banner "×". Clears the cookie and redirects
+/// back. CSRF-protected because it has a server-side side-effect.
 pub(crate) async fn handoff_dismiss(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -318,12 +292,9 @@ pub(crate) async fn handoff_dismiss(
 }
 
 /// Canonical action verbs advertised on `/.well-known/forseti-configuration`
-/// as `handoff_actions_supported`. One entry per logical surface —
-/// aliases (`totp`, `mfa`, `linked_providers`) accepted by
-/// [`action_target`] are not listed here; the canonical form is the
-/// integration contract.
-///
-/// Destructive actions (account deletion) are intentionally absent.
+/// as `handoff_actions_supported`. Aliases accepted by [`action_target`]
+/// aren't listed; the canonical form is the integration contract.
+/// Destructive actions (account deletion) are absent.
 pub(crate) const HANDOFF_ACTIONS: &[&str] = &[
     "2fa",
     "password",
@@ -333,13 +304,9 @@ pub(crate) const HANDOFF_ACTIONS: &[&str] = &[
     "authorized-apps",
 ];
 
-/// Mapping from public action verb → Forseti-internal path. Source of
-/// stability for the external integration contract: rename
-/// `/settings/2fa` and only this table changes, the public verb
-/// `?action=2fa` stays the same.
-///
-/// Destructive actions (account deletion) are intentionally absent —
-/// see module docs.
+/// Public action verb → Forseti-internal path. The stability boundary for the
+/// integration contract: rename `/settings/2fa` and only this table changes.
+/// Destructive actions are absent (see module docs).
 fn action_target(action: Option<&str>) -> &'static str {
     match action.unwrap_or("").trim() {
         "2fa" | "totp" | "mfa" => "/settings/2fa",
@@ -352,11 +319,9 @@ fn action_target(action: Option<&str>) -> &'static str {
     }
 }
 
-/// True when `candidate_uri`'s origin (scheme+host+port) appears among
-/// the client's `redirect_uris` (and `client_uri`). Empty / un-parseable
-/// inputs return false. Origin comparison is intentional: registering
-/// every conceivable "return URL" is impractical, and origin-binding
-/// gives us the same trust guarantee as OAuth2's redirect-URI matching
+/// True when `candidate_uri`'s origin (scheme+host+port) appears among the
+/// client's `redirect_uris` (and `client_uri`). Origin comparison rather than
+/// full-URL: it gives the same trust guarantee as redirect-URI matching
 /// without forcing the integrator to enumerate every page.
 fn client_origin_matches(client: &ory_client::models::OAuth2Client, candidate_uri: &str) -> bool {
     let Some(candidate) = parse_origin(candidate_uri) else {
@@ -394,11 +359,8 @@ fn parse_origin(url_str: &str) -> Option<String> {
     }
 }
 
-/// Uniform 400 response for every `/handoff` validation failure
-/// (missing `referrer_uri`, unknown `client_id`, origin mismatch).
-/// Returning the same body for all branches keeps the endpoint from
-/// being a client-id existence oracle: an attacker can't distinguish
-/// "no such client" from "client exists but origin doesn't match".
+/// Uniform 400 for every `/handoff` validation failure. One body for all
+/// branches keeps the endpoint from being a client-id existence oracle.
 fn invalid_referrer() -> Response {
     (StatusCode::BAD_REQUEST, "invalid referrer parameters").into_response()
 }
@@ -439,9 +401,8 @@ mod tests {
 
     #[test]
     fn handoff_actions_constant_resolves_to_non_hub_routes() {
-        // Every advertised verb must resolve somewhere meaningful —
-        // catches the drift where someone removes a route but forgets
-        // to drop the verb from the discovery doc.
+        // Every advertised verb must resolve off the hub; catches a route
+        // removed without dropping the verb from the discovery doc.
         for verb in HANDOFF_ACTIONS {
             assert_ne!(
                 action_target(Some(verb)),

@@ -27,25 +27,17 @@ pub(crate) struct SettingsProfileTemplate {
     pub(crate) form_method: String,
     pub(crate) flow_messages: Vec<MessageView>,
     pub(crate) groups: GroupedNodes,
-    /// `[profiles].enabled` — gates the extended-fields form below.
     pub(crate) profiles_enabled: bool,
-    /// Existing extended-profile values (or empty when no row yet).
-    /// Each field is plain text; the template binds them as `value`
-    /// attributes on the second form.
     pub(crate) bio: String,
     pub(crate) location: String,
     pub(crate) pronouns: String,
     pub(crate) website: String,
     pub(crate) avatar_url: String,
-    /// Serialised as one `<textarea>` (one `label|url` per line). v1
-    /// keeps the editing UI dead-simple; a reorder/drag UI would belong
-    /// in v2.
+    /// One `label|url` per line, edited as a single textarea.
     pub(crate) links_text: String,
-    /// Set after a successful POST. Template renders a green note.
     pub(crate) extended_saved: bool,
-    /// Mirrors the dashboard's "Email address" account-health row: `false`
-    /// when the identity has at least one unverified `verifiable_address`.
-    /// Drives the "Not verified" hint shown below the email field.
+    /// `false` when the identity has any unverified `verifiable_address`;
+    /// drives the "Not verified" hint.
     pub(crate) email_verified: bool,
     pub(crate) referrer_banner: Option<crate::handoff::ReferrerBannerView>,
 }
@@ -105,10 +97,8 @@ pub(crate) async fn settings_profile_extended_save(
         return resp;
     }
 
-    // URLs must parse as http(s) with a host when present — these get
-    // emitted as OIDC `website`/`picture` claims to relying parties, so a
-    // prefix check isn't enough. Empty strings collapse to NULL in
-    // storage, so the user can clear a field by submitting it blank.
+    // URLs are emitted as OIDC `website`/`picture` claims, so validate full
+    // http(s)-with-host rather than a prefix. Empty clears the field (NULL).
     let url_ok = |s: &str| {
         let t = s.trim();
         if t.is_empty() {
@@ -177,9 +167,7 @@ pub(crate) async fn settings_profile_extended_save(
     Redirect::to("/settings/profile?profile_saved=1").into_response()
 }
 
-/// Parse the textarea-edited links: one `label|url` per line. Empty
-/// lines + malformed lines silently dropped so the form stays
-/// forgiving.
+/// Parse one `label|url` per line; empty and malformed lines are dropped.
 fn parse_links(raw: &str) -> Vec<ProfileLink> {
     raw.lines()
         .filter_map(|line| {

@@ -1,20 +1,6 @@
-//! Forseti-owned database — pool init, backend selection, migrations.
-//!
-//! Forseti keeps its own DB, separate from the Kratos/Hydra Postgres.
-//! Two backends are first-class:
-//!
-//! - **sqlite** — single `.db` file next to the binary; zero-ops for
-//!   self-hosters. Default when no `[database]` config is present.
-//! - **Postgres** — pooling, replication, horizontal scale; the right choice
-//!   for any multi-instance deployment.
-//!
-//! Sync `diesel` runs on `deadpool-diesel`'s `spawn_blocking` worker so both
-//! backends share one query path. `diesel_async` was considered but its
-//! sqlite story is still experimental — uniformly sync keeps the code
-//! straightforward.
-//!
-//! See `TODO.md` §0 for the design rationale and `looks_like_production`
-//! footgun mitigation.
+//! Forseti-owned database (separate from the Kratos/Hydra Postgres): pool init, backend selection, migrations.
+//! Two first-class backends, sqlite (zero-ops self-host default) and Postgres (multi-instance). Sync `diesel`
+//! runs on `deadpool-diesel`'s blocking worker so both backends share one query path.
 
 use deadpool_diesel::{
     postgres::{Manager as PgManager, Pool as PgPool, Runtime as PgRuntime},
@@ -50,14 +36,10 @@ use crate::config::{DatabaseBackend, DatabaseConfig};
 const SQLITE_MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations/sqlite");
 const POSTGRES_MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations/postgres");
 
-/// SQLite has one writer at a time. Allowing many connections only deepens
-/// the queue on the write lock and chews up tokio blocking-pool workers.
-/// Small fixed cap leaves headroom for concurrent reads while keeping the
-/// write contention bounded.
+/// SQLite has one writer at a time; more connections only deepen the write-lock queue and burn blocking workers.
 const SQLITE_MAX_POOL: usize = 8;
 
-/// Pool handle stored in `AppState`. The variants share an identical Rust
-/// query API — handlers dispatch through `interact` regardless of backend.
+/// Pool handle stored in `AppState`; both variants share one Rust query API via `interact`.
 #[derive(Clone)]
 pub enum DbPool {
     Sqlite(SqlitePool),
@@ -66,28 +48,18 @@ pub enum DbPool {
 
 impl DbPool {
     /// Initialise a pool from `[database]` config. Picks the backend from the
-    /// URL scheme. Sqlite URLs may use a `sqlite://` prefix or a raw path —
-    /// both work.
+    /// URL scheme. Sqlite URLs may use a `sqlite://` prefix or a raw path; both work.
     pub fn init(cfg: &DatabaseConfig) -> anyhow::Result<Self> {
         match cfg.backend() {
             DatabaseBackend::Sqlite => {
                 let path = sqlite_path(&cfg.url);
                 let manager = SqliteManager::new(path, SqliteRuntime::Tokio1);
-                // SQLite serialises writers — letting deadpool's default
-                // (num_cpus × 4) connections fight over the single write
-                // lock just turns into `SQLITE_BUSY` under load. Cap to a
-                // small number; concurrent readers under WAL still
-                // proceed without blocking.
                 let pool = SqlitePool::builder(manager)
                     .max_size(SQLITE_MAX_POOL)
                     .post_create(Hook::async_fn(|conn, _metrics| {
                         Box::pin(async move {
                             conn.interact(|c: &mut SqliteConnection| {
-                                // WAL: concurrent readers don't block writers
-                                // and vice versa. busy_timeout: wait up to 5s
-                                // when a writer is holding the lock instead of
-                                // immediately failing with SQLITE_BUSY.
-                                // foreign_keys: not on by default in sqlite.
+                                // WAL so readers/writers don't block; busy_timeout waits instead of SQLITE_BUSY; FKs off by default in sqlite.
                                 diesel::sql_query("PRAGMA journal_mode = WAL").execute(c)?;
                                 diesel::sql_query("PRAGMA busy_timeout = 5000").execute(c)?;
                                 diesel::sql_query("PRAGMA foreign_keys = ON").execute(c)?;
@@ -123,8 +95,7 @@ impl DbPool {
         }
     }
 
-    /// Run the embedded migrations matching the active backend. Idempotent —
-    /// diesel's harness skips already-applied migrations.
+    /// Run the embedded migrations for the active backend. Idempotent: diesel's harness skips applied ones.
     pub async fn run_migrations(&self) -> anyhow::Result<()> {
         match self {
             DbPool::Sqlite(pool) => {
@@ -193,21 +164,15 @@ impl DbPool {
     }
 }
 
-/// Dispatch a sync diesel closure over whichever backend `DbPool` is
-/// holding. The closure body is monomorphised once per backend (textual
-/// macro expansion), so any diesel-DSL expression that compiles against
-/// both `SqliteConnection` and `PgConnection` works inside.
-///
-/// Two ergonomic forms:
+/// Dispatch a sync diesel closure over whichever backend `DbPool` holds. The body expands once per backend,
+/// so any DSL expression compiling against both `SqliteConnection` and `PgConnection` works. Deadpool/interact
+/// errors collapse into `anyhow`.
 ///
 /// ```ignore
 /// db_interact!(db, |conn| {
 ///     diesel::insert_into(t::table).values(&rows).execute(conn)
 /// }).await?
 /// ```
-///
-/// Returns whatever the closure returns wrapped in `Result<_,
-/// anyhow::Error>` (deadpool / interact errors collapse into anyhow).
 #[macro_export]
 macro_rules! db_interact {
     ($db:expr, |$conn:ident| $body:block) => {{

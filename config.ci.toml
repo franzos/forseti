@@ -65,6 +65,11 @@ audit_retention_days = 90
 rate_limit_per_minute = 100
 rate_limit_per_hour = 1000
 
+# Public /users/{id} view + members-roster links. The profile-visibility e2e
+# specs (same-group directory, profile teams/hosts) drive this surface.
+[profiles]
+enabled = true
+
 # Mounts /sso/{slug} + /sso/callback so the SAML integration tests run.
 # Jackson itself is NOT in the playground; the suite only exercises the
 # Forseti-side paths (neutral pages, state validation).

@@ -2,9 +2,19 @@
 //! policy is unit-testable in isolation; callers feed the existing-id slice
 //! from a SELECT (inside their transaction).
 
+use crate::orgs::teams::Team;
+
+/// NSS-safe group name for a team: its slug if POSIX-valid, else `team-<id>`.
+pub fn posix_group_name(t: &Team) -> String {
+    if is_valid_username(&t.slug) {
+        t.slug.clone()
+    } else {
+        format!("team-{}", t.id)
+    }
+}
+
 /// POSIX portable username: `[a-z_][a-z0-9_-]*`, 1..=32 chars. Stricter than
-/// useradd's default on purpose — these names flow into NSS.
-#[allow(dead_code)] // used by posix::db provisioning (later task)
+/// useradd's default on purpose: these names flow into NSS.
 pub fn is_valid_username(s: &str) -> bool {
     let bytes = s.as_bytes();
     if bytes.is_empty() || bytes.len() > 32 {
@@ -21,6 +31,7 @@ pub fn is_valid_username(s: &str) -> bool {
 
 /// Next free id: `max(existing) + 1`, or `base` when none allocated at/above
 /// base. `existing` need not be sorted; ids below `base` are ignored.
+#[allow(dead_code)] // pure helper; DB allocation currently goes through sequences::next_in_band.
 pub fn next_id(base: u32, existing: &[u32]) -> u32 {
     match existing.iter().copied().filter(|&id| id >= base).max() {
         Some(m) => m + 1,

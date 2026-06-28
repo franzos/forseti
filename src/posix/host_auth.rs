@@ -1,7 +1,6 @@
-//! HTTP Basic authentication for enrolled hosts on the `/posix/v1/*`
-//! resolver API. Credentials are `host_id:secret`; the secret is compared
-//! against the stored SHA-256 hash in constant time so a probing client
-//! can't time its way to a valid secret.
+//! HTTP Basic auth for enrolled hosts on the `/posix/v1/*` resolver API.
+//! Credentials are `host_id:secret`; the secret is compared against the stored
+//! SHA-256 hash in constant time so a probe can't time its way to a valid secret.
 
 use axum::extract::{FromRef, FromRequestParts};
 use axum::http::request::Parts;
@@ -19,12 +18,12 @@ use crate::state::AppState;
 /// argument once HTTP Basic has validated the `host_id:secret` pair.
 pub struct RequirePosixHost {
     pub host_id: String,
-    pub allowed_gid: Option<u32>,
+    pub org_id: String,
     pub force_mfa: bool,
 }
 
 /// Parse a `Basic <base64(host_id:secret)>` header into its credential pair.
-/// Any deviation — wrong scheme, bad base64, non-utf8, no `:` — yields `None`.
+/// Any deviation (wrong scheme, bad base64, non-utf8, no `:`) yields `None`.
 fn parse_basic(header: &str) -> Option<(String, String)> {
     let encoded = header.strip_prefix("Basic ")?;
     let decoded = BASE64.decode(encoded).ok()?;
@@ -63,8 +62,7 @@ where
 
         let row = match db::host_by_id(&app_state.db, &host_id).await {
             Ok(Some(row)) => row,
-            // Unknown host and bad secret return the same 401 — never leak
-            // which of the two it was.
+            // Unknown host and bad secret both 401: never leak which.
             Ok(None) => return Err(unauthorized()),
             Err(e) => {
                 tracing::error!(error = ?e, host_id, "posix host auth: db lookup failed");
@@ -72,16 +70,14 @@ where
             }
         };
 
-        // Constant-time compare of the hex hashes so an attacker can't time
-        // their way to a valid secret. ct_eq is false on length mismatch.
+        // Constant-time compare; ct_eq is false on length mismatch.
         let computed = hash_token(&secret);
         if !bool::from(row.secret_hash.as_bytes().ct_eq(computed.as_bytes())) {
             return Err(unauthorized());
         }
 
-        // Throttle the last_seen write: skip it unless the row is stale
-        // (>60s) so a busy resolver doesn't issue a write per lookup.
-        // Best-effort — a failed touch must never fail the request.
+        // Skip the last_seen write unless the row is stale (>60s) so a busy
+        // resolver doesn't write per lookup. Best-effort: never fails the request.
         let now = Utc::now();
         let stale = row
             .last_seen_at
@@ -97,7 +93,7 @@ where
 
         Ok(RequirePosixHost {
             host_id,
-            allowed_gid: row.allowed_gid.map(|g| g as u32),
+            org_id: row.org_id.clone(),
             force_mfa: row.force_mfa != 0,
         })
     }
@@ -116,9 +112,9 @@ mod tests {
         assert_eq!(parse_basic("Bearer aG9zdC0xOnMzY3JldA=="), None);
         assert_eq!(parse_basic("Basic !!!notbase64"), None);
         assert_eq!(parse_basic("garbage"), None);
-        // base64("host-1") = "aG9zdC0x" — no colon, so no credential pair.
+        // base64("host-1") = "aG9zdC0x", no colon, so no credential pair.
         assert_eq!(parse_basic("Basic aG9zdC0x"), None);
-        // base64("host-1:a:b") = "aG9zdC0xOmE6Yg==" — split on the first colon.
+        // base64("host-1:a:b") = "aG9zdC0xOmE6Yg==", split on the first colon.
         assert_eq!(
             parse_basic("Basic aG9zdC0xOmE6Yg=="),
             Some(("host-1".to_string(), "a:b".to_string()))

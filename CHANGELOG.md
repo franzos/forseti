@@ -1,5 +1,19 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- POSIX provisioning: searchable identity picker, accept a UUID or an email
+- Edit an enrolled host after enrollment
+- Scope a host to any of several org groups, not just one
+
+### Changed
+- Grouped the admin and settings navigation into labelled sections
+
+### Fixed
+- Login-screen sign-out hit a CSRF 403 on the account-switch path
+- "Revoke access" on Authorized apps failed against Hydra v2 (it sent a client id and the revoke-all flag together, which Hydra rejects with a 400)
+
 ## [0.1.8] - 2026-06-24
 
 ### Added

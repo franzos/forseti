@@ -1,11 +1,9 @@
 //! `/settings/offline-access` — set, change, or clear a dedicated offline
-//! passphrase (M3a). A Forseti-owned POST surface (NOT a Kratos settings flow):
-//! modeled on `settings_profile_extended_save`, it does a plain `RequireSession`
-//! + `Csrf` write against the Forseti-owned `offline_secrets` table.
+//! passphrase. Forseti-owned POST surface (not a Kratos settings flow).
 //!
-//! The passphrase is NEVER echoed back, never put in a redirect URL, never
-//! logged, and never written to audit metadata — only the Argon2id verifier is
-//! stored, and the audit row carries the identity id alone.
+//! The passphrase is NEVER echoed back, put in a redirect URL, logged, or
+//! written to audit metadata: only the Argon2id verifier is stored, and the
+//! audit row carries the identity id alone.
 
 use askama::Template;
 use axum::extract::State;
@@ -26,11 +24,7 @@ use crate::state::AppState;
 #[template(path = "settings_offline_access.html")]
 pub(crate) struct SettingsOfflineAccessTemplate {
     pub(crate) chrome: PageChrome,
-    /// True when the identity already has an offline passphrase set — toggles
-    /// the "change / remove" affordances vs. the first-time "set" copy.
     pub(crate) has_secret: bool,
-    /// Hard floor on the passphrase length, surfaced in the form hint and the
-    /// too-short flash.
     pub(crate) min_len: usize,
     pub(crate) flash: String,
     pub(crate) referrer_banner: Option<crate::handoff::ReferrerBannerView>,

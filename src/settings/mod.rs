@@ -1,11 +1,7 @@
 //! User-facing `/settings/*` surface: profile, password (incl. recovery
-//! hand-off), 2FA, sessions, linked providers, plus the hub redirector
-//! Kratos sends every settings flow through.
-//!
-//! Each submodule owns one section: template + handler + section-specific
-//! render helper. The shared gate / fetch / privileged-refresh dance lives
-//! here in `fetch_settings_subpage`. The Profile and Password renderers live
-//! here; the other sections own their own render helpers.
+//! hand-off), 2FA, sessions, linked providers, plus the hub redirector Kratos
+//! sends every settings flow through. The shared gate / fetch /
+//! privileged-refresh dance lives here in `fetch_settings_subpage`.
 
 use axum::extract::{Query, State};
 use axum::http::HeaderMap;
@@ -102,23 +98,16 @@ async fn settings_hub(
     banner: crate::handoff::ReferrerBanner,
 ) -> Response {
     // Kratos's `selfservice.flows.settings.ui_url` points at `/settings`, so
-    // every settings flow Kratos initiates (whether from `/settings/profile`
-    // or the post-recovery hand-off) lands here with `?flow=<id>`. We
-    // inspect the flow's `request_url` to figure out which sub-page the user
-    // was actually heading for and forward them there. Falls back to the
-    // profile editor when the original target can't be determined.
+    // every settings flow lands here with `?flow=<id>`. Inspect the flow's
+    // `request_url` to recover the originally-targeted sub-page.
     if let Some(flow_id) = query.flow.as_deref() {
         let cookie = cookies::cookie_header(&headers);
         let target_section =
             match ory::kratos::get_flow(&state.ory, FlowKind::Settings, flow_id, &cookie).await {
                 Ok(FlowFetch::Ok(flow)) => settings_section_from_flow(&flow),
-                // When we can't read the flow (gone, AAL2 required, or transport
-                // error) we don't know the originally-requested sub-page. Land
-                // the user on /settings/password rather than /settings/profile:
-                // recovery hand-offs are the dominant case for this fallback,
-                // and "set a new password" is the only thing they can actually
-                // finish there. Wrong choice for a non-recovery flow just costs
-                // an extra click in the sidebar.
+                // Unreadable flow: fall back to /settings/password since
+                // recovery hand-offs (where it's the only finishable action)
+                // dominate this case.
                 _ => SettingsSection::Password,
             };
         let url = format!(
@@ -142,16 +131,12 @@ pub(crate) enum SettingsSection {
     TwoFactor,
     Sessions,
     LinkedProviders,
-    /// Account overview page (`/settings/account`). Only used as a redirect
-    /// target by the hub dispatcher; never goes through `render_settings`.
     AccountOverview,
-    /// Danger zone — account self-deletion. Doesn't consume a Kratos
-    /// settings group; uses the flow only as a privileged-session probe.
+    /// Account self-deletion: uses the flow only as a privileged-session probe.
     Account,
 }
 
 impl SettingsSection {
-    /// Bare slug for `/settings/{slug}` redirect targets.
     fn as_slug(self) -> &'static str {
         match self {
             SettingsSection::Profile => "profile",
@@ -176,11 +161,9 @@ impl SettingsSection {
     }
 }
 
-/// The subset of [`SettingsSection`] that `settings_subpage` / `render_settings`
-/// actually render inline (they share the same flow-driven template shape). The
-/// other sections hand-roll their own templates and drive `fetch_settings_subpage`
-/// directly, so they never reach the generic renderer — encoding that here keeps
-/// the renderer's match exhaustive without an `unreachable!`.
+/// The subset of [`SettingsSection`] rendered inline by `render_settings`.
+/// Encoding it separately keeps the renderer's match exhaustive without an
+/// `unreachable!`.
 #[derive(Clone, Copy)]
 pub(crate) enum InlineRenderSection {
     Profile,
@@ -194,7 +177,6 @@ impl InlineRenderSection {
             InlineRenderSection::Password => SettingsSection::Password,
         }
     }
-    /// Kratos group consumed as the "primary CTA" hint by `mark_settings_primary`.
     fn group(self) -> &'static str {
         match self {
             InlineRenderSection::Profile => "profile",
@@ -203,30 +185,9 @@ impl InlineRenderSection {
     }
 }
 
-/// Read the flow's `request_url` and infer which settings sub-page the user
-/// was navigating to. Kratos always lands the flow on `selfservice.flows.settings.ui_url`,
-/// so we encode the actual section in the `return_to` portion of the
-/// browser-init URL and recover it here.
-///
-/// Two origins funnel into this:
-///   * Normal navigation from `/settings/profile` or `/settings/password` —
-///     `request_url` carries an explicit `return_to=<self>/settings/<section>`
-///     which uniquely identifies the target.
-///   * Recovery hand-off — after a successful `/recovery` flow Kratos issues a
-///     fresh settings flow (Kratos's `selfservice.flows.recovery.after.password`
-///     hook) without a `return_to`, expecting the UI to land the user on
-///     `/settings/password` so they can pick a new password. We detect this
-///     by inspecting the `request_url`'s path (`/self-service/recovery/...`
-///     when the flow originated from a recovery hand-off; Kratos preserves
-///     the originating path inside `internal_context.recovery_link_token` on
-///     newer versions, but the `request_url` is the stable cross-version
-///     signal).
-///
 /// True when this settings flow was issued by Kratos's `recovery.after.password`
-/// hook — i.e. the user just successfully completed `/recovery` and is now in
-/// the privileged window where they must change their password. Mirrors the
-/// detection in [`settings_section_from_flow`] but as a boolean we can pass
-/// into the template for focused-mode rendering.
+/// hook (user just completed `/recovery` and is in the privileged
+/// change-password window). Drives focused-mode rendering.
 fn is_recovery_handoff(flow: &serde_json::Value) -> bool {
     let url = flow
         .get("request_url")
@@ -246,11 +207,8 @@ fn is_recovery_handoff(flow: &serde_json::Value) -> bool {
     false
 }
 
-/// Compute the privileged-session deadline as RFC3339, taking the flow's
-/// `issued_at` (the moment Kratos opened the privileged window for this
-/// hand-off) and adding Kratos's `privileged_session_max_age` (15m in our
-/// playground config). Returns `None` when the flow lacks a parseable
-/// `issued_at`.
+/// Privileged-session deadline as RFC3339: flow `issued_at` plus Kratos's
+/// `privileged_session_max_age` (15m). `None` when `issued_at` is unparseable.
 fn privileged_deadline_rfc3339(flow: &serde_json::Value) -> Option<String> {
     let issued = flow.get("issued_at").and_then(|v| v.as_str())?;
     let parsed = chrono::DateTime::parse_from_rfc3339(issued).ok()?;
@@ -264,7 +222,7 @@ fn settings_section_from_flow(flow: &serde_json::Value) -> SettingsSection {
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    // Explicit `return_to` takes precedence — that's how `/settings/profile`
+    // Explicit `return_to` takes precedence: that's how `/settings/profile`
     // and `/settings/password` advertise their target.
     let query = url.split_once('?').map(|(_, q)| q).unwrap_or("");
     let decoded = url::form_urlencoded::parse(query.as_bytes())
@@ -286,11 +244,9 @@ fn settings_section_from_flow(flow: &serde_json::Value) -> SettingsSection {
     if decoded.ends_with("/settings/linked-providers") {
         return SettingsSection::LinkedProviders;
     }
-    // The account-delete confirm page reuses the privileged-session
-    // gate via `fetch_settings_subpage`, so it issues a Kratos settings
-    // flow with `return_to=.../settings/account/delete`. The hub
-    // dispatcher needs to know how to land the user back there;
-    // otherwise the unknown-target fallback drops them on /profile.
+    // account-delete confirm reuses the privileged-session gate, so its flow
+    // carries `return_to=.../settings/account/delete`; route it back there
+    // instead of the unknown-target /profile fallback.
     if decoded.ends_with("/settings/account/delete") {
         return SettingsSection::Account;
     }
@@ -298,12 +254,8 @@ fn settings_section_from_flow(flow: &serde_json::Value) -> SettingsSection {
         return SettingsSection::AccountOverview;
     }
 
-    // No `return_to`. Recovery hand-offs land here — Kratos issues the
-    // post-recovery settings flow from the recovery endpoint, so the
-    // `request_url` (or the flow's internal context) carries that origin.
-    // Routing recovery-originated flows to /settings/password is what the
-    // design brief specifies, and it's also the only place the user can
-    // actually finish the recovery (set a new password).
+    // No `return_to`: recovery hand-offs land here. Route them to
+    // /settings/password, the only place they can finish (set a new password).
     if url.contains("/self-service/recovery") {
         return SettingsSection::Password;
     }
@@ -319,29 +271,19 @@ fn settings_section_from_flow(flow: &serde_json::Value) -> SettingsSection {
         }
     }
 
-    // Fall back to password when we genuinely can't tell. Kratos's code-based
-    // recovery hand-off lands here without a return_to and (in v1.3.1) without
-    // the `recovery_*` keys in internal_context, so the explicit checks above
-    // miss it. Routing to /settings/password is the only way the user can
-    // actually finish the recovery (set a new password); the alternative —
-    // /settings/profile — left the user staring at trait fields they didn't
-    // need and unable to navigate to /password (the AAL2 step-up loop made
-    // sidebar links useless until they re-authed). Wrong choice for an
-    // unusual non-recovery fall-through just costs a sidebar click.
+    // Fall back to password: Kratos's code-based recovery hand-off (v1.3.1)
+    // lands here with no return_to and no `recovery_*` internal_context keys,
+    // and /settings/password is the only place it can be finished.
     SettingsSection::Password
 }
 
-/// Outcome of fetching a Kratos settings flow on behalf of a sub-page.
-///
-/// `Ok((session, flow))` lets callers run their own renderer. `Err(resp)` is
-/// a fully-formed early-return (redirect / error page) the caller hands back
-/// directly. The shape lets callers use `?` to short-circuit.
+/// `Err(resp)` is a fully-formed early-return (redirect / error page) so
+/// callers can `?`-short-circuit; `Ok` lets them run their own renderer.
 pub(crate) type SettingsFlowOutcome = Result<(ory::Session, Box<serde_json::Value>), Response>;
 
-/// Run the shared gate + fetch for a settings sub-page. Used by all settings
-/// sub-page handlers (profile, password, 2fa, sessions equivalent paths,
-/// linked-providers) so the privileged-refresh redirect, missing-flow init,
-/// and gone-flow re-init behaviour stays consistent.
+/// Shared gate + fetch for a settings sub-page: keeps the privileged-refresh
+/// redirect, missing-flow init, and gone-flow re-init consistent across
+/// handlers.
 pub(crate) async fn fetch_settings_subpage(
     state: &AppState,
     headers: &HeaderMap,
@@ -377,12 +319,9 @@ pub(crate) async fn fetch_settings_subpage(
             Err(Redirect::to(&url).into_response())
         }
         Ok(FlowFetch::PrivilegedRequired(reason)) => {
-            // The two privileged-session 403 reasons (`session_refresh_required`
-            // / `session_aal2_required`) need different `/login` parameters.
-            // Sending `refresh=true` when Kratos wanted `aal=aal2` is what
-            // livelocks the user on `/settings/*` after a recovery hand-off:
-            // refresh proves "you're still you" but doesn't satisfy the AAL2
-            // requirement, so /login bounces them straight back.
+            // The two 403 reasons need different `/login` params: sending
+            // `refresh=true` when Kratos wanted `aal=aal2` livelocks the user
+            // on `/settings/*` after a recovery hand-off.
             let url = match reason {
                 crate::ory::PrivilegedReason::Aal2Required => {
                     crate::auth::aal2_step_up_url(&return_to_full)
@@ -431,8 +370,7 @@ pub(crate) async fn settings_subpage(
             Err(resp) => return resp,
         };
     let is_profile = matches!(section, InlineRenderSection::Profile);
-    // Profile page needs the Forseti-owned extended fields too.
-    // Load lazily so non-profile sections don't pay for it.
+    // Load the Forseti-owned extended fields only for the profile section.
     let profile = if is_profile && state.cfg.profiles.enabled {
         Some(
             crate::profiles::fetch(&state.db, &sess.identity_id)
@@ -495,13 +433,9 @@ fn render_settings(
         }
         InlineRenderSection::Password => {
             if is_recovery_handoff(flow) {
-                // After a successful password change in the recovery hand-off,
-                // send the user to the dashboard. Kratos itself stays on the
-                // settings UI with a "Your changes have been saved!" message
-                // (no `after.password.default_browser_return_url` is set),
-                // which is right for normal settings edits but wrong for the
-                // recovery hand-off — the whole point of focused mode is to
-                // land on a working session once the new credential is in place.
+                // Land on the dashboard once the new credential is in place;
+                // Kratos's default "changes saved" settings screen is wrong for
+                // focused recovery mode.
                 if flow_state(flow) == "success" {
                     return Redirect::to("/").into_response();
                 }

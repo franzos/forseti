@@ -37,8 +37,8 @@ const VALIDATION_FAILED_BODY: &str =
 const UPSTREAM_FAILED_BODY: &str =
     "The sign-on service is temporarily unavailable. Please try again.";
 
-/// Jackson speaks the workspace reqwest (0.13); the Ory SDK's shared
-/// client is the renamed reqwest-0.12 type, so it can't be reused here.
+/// Jackson speaks the workspace reqwest (0.13); the Ory SDK's shared client
+/// is the renamed reqwest-0.12 type, so it can't be reused here.
 pub(crate) fn http_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
@@ -68,9 +68,7 @@ fn error_page(state: &AppState, body: &str) -> Response {
     render_error_boundary(state, "Single sign-on failed", body, "/login", "Sign in")
 }
 
-/// Why a sign-on was refused — drives the copy on `saml_blocked.html`.
-/// The template `{% match %}`es on this so each block reason gets accurate
-/// guidance instead of the unverified-email copy for all three.
+/// Why a sign-on was refused; drives the copy on `saml_blocked.html`.
 #[derive(Clone, Copy)]
 pub(crate) enum BlockedReason {
     /// Existing identity holds the email but hasn't verified it.
@@ -115,7 +113,7 @@ pub async fn start(
     let Some(cfg) = state.cfg.saml.as_ref() else {
         return neutral_unavailable(&state);
     };
-    // GraceReadOnly keeps logins working — only a hard lock gates.
+    // GraceReadOnly keeps logins working; only a hard lock gates.
     if matches!(state.license.feature(Feature::Saml), FeatureStatus::Locked) {
         let _ = audit::log(
             &state.db,
@@ -398,13 +396,12 @@ async fn resolve_identity(
     email: &str,
     profile: &jackson::JacksonProfile,
 ) -> anyhow::Result<Resolution> {
-    // Opaque subject; may be empty for transient-NameID IdPs, in which case
-    // the whole subject branch is skipped and keying stays email-only.
+    // Opaque subject; empty for transient-NameID IdPs, where the subject
+    // branch is skipped and keying stays email-only.
     let subject = profile.id.trim();
     let subject_opt = (!subject.is_empty()).then_some(subject);
 
-    // 0. Durable: subject lookup. Org-scoped, so cross-org-safe like the
-    //    email fast-path below. Skipped for subjectless logins.
+    // Durable subject lookup (org-scoped, cross-org-safe).
     if let Some(subject) = subject_opt {
         if let Some((linked, row_email)) = db::link_subject(&state.db, org_id, subject).await? {
             match kratos::admin_get_identity_optional(&state.ory, &linked).await? {
@@ -414,7 +411,7 @@ async fn resolve_identity(
         }
     }
 
-    // 1. Legacy/bootstrap: existing email-keyed link.
+    // Legacy/bootstrap: existing email-keyed link.
     if let Some(linked) = db::link_for(&state.db, org_id, email).await? {
         match kratos::admin_get_identity_optional(&state.ory, &linked).await? {
             // Backfill the subject onto the legacy row.

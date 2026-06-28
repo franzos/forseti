@@ -18,116 +18,70 @@ pub struct AppConfig {
     #[serde(rename = "self")]
     pub self_: SelfConfig,
     pub brand: BrandConfig,
-    /// Dashboard "Your apps" cards. Optional — section is omitted when empty.
+    /// Dashboard "Your apps" cards. Optional; section is omitted when empty.
     #[serde(default)]
     pub apps: Vec<AppEntry>,
     /// OAuth2 scope descriptions surfaced on the consent screen.
     #[serde(default)]
     pub oauth: OAuthConfig,
-    /// Admin-surface configuration. Defaulting to an empty allowlist means
-    /// `/admin/*` is effectively closed until the operator opts in.
+    /// Admin-surface configuration. An empty allowlist closes `/admin/*` until the operator opts in.
     #[serde(default)]
     pub admin: AdminConfig,
-    /// Forseti-owned database. Defaulted so a freshly-cloned checkout boots
-    /// against a local sqlite file without any explicit config.
+    /// Forseti-owned database. Defaulted so a fresh checkout boots against a local sqlite file.
     #[serde(default)]
     pub database: DatabaseConfig,
-    /// Audit log configuration. Defaults are usable without any operator
-    /// input except `webhook_token`, which is required for the Kratos
-    /// webhook receiver to accept inbound events.
+    /// Audit log configuration. Usable on defaults except `webhook_token`, required for the Kratos receiver.
     #[serde(default)]
     pub audit: AuditConfig,
-    /// Internal HTTP listener for machine-to-machine endpoints (today: the
-    /// audit webhook receiver). Lives on a separate listener so the trust
-    /// boundary is configured at the network layer, not policed by
-    /// per-handler ACLs.
+    /// Internal HTTP listener for machine-to-machine endpoints; separate so the trust boundary is set at the network layer.
     #[serde(default)]
     pub internal: InternalConfig,
-    /// Commercial-tier license gate. All fields are optional — the OSS
-    /// default ships with no license configured, surfaces an upsell on
-    /// every gated feature, and uses a 14-day grace window when an
-    /// activated license expires.
+    /// Commercial-tier license gate. All fields optional; OSS ships unlicensed with an upsell on gated features.
     #[serde(default)]
     pub license: LicenseConfig,
-    /// Identity-management knobs. Today this only carries the
-    /// `unverified-prune` TTL; future identity-shaped settings land here.
+    /// Identity-management knobs (today only the `unverified-prune` TTL).
     #[serde(default)]
     pub identity: IdentityConfig,
-    /// SMTP outbound for Forseti-originated mail (invite + claim-email).
-    /// Kratos's courier handles its own self-service mail (verification,
-    /// recovery); the Forseti-owned mails go through this transport.
-    /// Disabled by default — when `enabled = false`, the send sites
-    /// log + skip, leaving the token/code accessible via the DB so the
-    /// operator can still hand-deliver in dev.
+    /// SMTP for Forseti-originated mail (invite + claim-email); Kratos's courier handles its own self-service mail.
+    /// When `enabled = false` the send sites log + skip, leaving the token/code in the DB for hand-delivery in dev.
     #[serde(default)]
     pub smtp: SmtpConfig,
-    /// Forseti-owned member profiles (bio, links, etc.). Off by default —
-    /// flip to true on team/intranet deployments where users want to be
-    /// findable; leave off for SaaS deployments where org-mates shouldn't
-    /// see each other's profile data.
+    /// Forseti-owned member profiles. Off by default; leave off where org-mates shouldn't see each other's data.
     #[serde(default)]
     pub profiles: ProfilesConfig,
-    /// Outbound webhook signing. Currently used only by the
-    /// account-deletion fan-out (`src/webhook.rs`) — payloads are signed
-    /// as RFC 8417 Security Event Tokens (EdDSA / Ed25519 JWS, RFC 8037)
-    /// and verified by receivers against Forseti's published JWKS at
-    /// `/.well-known/webhook-jwks.json`. The key is auto-generated on
-    /// first boot when the file is missing.
+    /// Outbound webhook signing (account-deletion fan-out). Payloads are RFC 8417 SETs (EdDSA/Ed25519); key auto-generated on first boot.
     #[serde(default)]
     pub webhook: WebhookConfig,
     /// Per-IP rate limits for `/claim-email` + `/claim-email/confirm`.
-    /// Defaulted to the historical hardcoded values (5/min, 30/hour) so
-    /// production behaviour is unchanged when the section is omitted.
     #[serde(default)]
     pub claim_email: ClaimEmailConfig,
-    /// Per-IP rate limits for `/handoff*` plus referrer-cookie TTL.
-    /// Caps probing of which `client_id` values exist in Hydra.
-    /// Defaults (30/min, 300/hour, 1h cookie) keep legitimate users
-    /// untouched while making enumeration slow.
+    /// Per-IP rate limits for `/handoff*` plus referrer-cookie TTL; caps probing of which `client_id`s exist in Hydra.
     #[serde(default)]
     pub handoff: HandoffConfig,
-    /// One-shot flash cookie + `secret_reveals` row TTLs. Defaults are
-    /// 60 seconds for each — long enough for the browser to follow the
-    /// redirect on a slow network, short enough that an admin who
-    /// navigates away loses the reveal.
+    /// One-shot flash cookie + `secret_reveals` row TTLs.
     #[serde(default)]
     pub flash: FlashConfig,
-    /// Organizations subsystem knobs — active-org cookie TTL and
-    /// invite expiry. Defaults: 30 days for the cookie, 7 days for
-    /// invites.
+    /// Organizations subsystem knobs (active-org cookie TTL, invite expiry).
     #[serde(default)]
     pub orgs: OrgsConfig,
     /// SAML SSO bridge. `None` (default) = feature fully off.
     #[serde(default)]
     pub saml: Option<SamlConfig>,
-    /// Deployment-shape knob: is Forseti behind a trusted reverse
-    /// proxy that strips and re-adds `X-Forwarded-For` / `X-Real-IP`
-    /// / `Forwarded`? Used by the audit middleware (audited client
-    /// IP) and the per-IP rate limiters (DCR proxy, handoff,
-    /// claim-email). One switch because the underlying question is
-    /// the same regardless of consumer.
+    /// Whether Forseti sits behind a reverse proxy that strips and re-adds forwarded-for headers.
+    /// Consumed by the audit middleware (client IP) and the per-IP rate limiters.
     #[serde(default)]
     pub proxy: ProxyConfig,
-    /// Operator-supplied secret material. Today this only carries
-    /// `cookie_secret`, the master key the flash / active_org /
-    /// app_referrer signed-cookie codec mixes with per-cookie salts.
+    /// Operator-supplied secret material (today only `cookie_secret`).
     #[serde(default)]
     pub security: SecurityConfig,
-    /// POSIX account materialisation (Linux auth). uid/gid allocation
-    /// bases, default login shell, home-dir prefix, and the free-tier
-    /// seat cap. Defaults work out of the box; a commercial license
-    /// raises the seat cap.
+    /// POSIX account materialisation (Linux auth): uid/gid bands, shell, home prefix, free-tier seat cap.
     #[serde(default)]
-    #[allow(dead_code)] // read by the posix provisioning handler (later task)
+    #[allow(dead_code)]
     pub posix: PosixConfig,
 }
 
-/// Operator-supplied secrets. `cookie_secret` seeds the HMAC keys
-/// for every Forseti-signed cookie (flash banner, active org,
-/// app referrer). Accepts a hex string (`openssl rand -hex 32`) or
-/// raw bytes; falls back to a per-boot ephemeral key when unset, so
-/// fresh checkouts boot without configuration but production
-/// deployments survive restarts.
+/// Operator-supplied secrets. `cookie_secret` seeds the HMAC keys for every Forseti-signed cookie;
+/// hex string (`openssl rand -hex 32`) or raw bytes, falling back to a per-boot ephemeral key when unset.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct SecurityConfig {
     #[serde(default)]
@@ -152,6 +106,19 @@ pub struct PosixConfig {
     pub uid_base: u32,
     /// First gid handed out for auto-created primary/org groups.
     pub gid_base: u32,
+    /// Size of the user uid band starting at `uid_base`.
+    #[serde(default = "default_user_uid_size")]
+    #[allow(dead_code)] // uid-band ceiling not yet enforced
+    pub user_uid_size: u32,
+    /// Size of the user-private gid band starting at `gid_base`.
+    #[serde(default = "default_user_gid_size")]
+    pub user_gid_size: u32,
+    /// Base of the team-gid band. MUST be disjoint from the user gid band.
+    #[serde(default = "default_group_gid_base")]
+    pub group_gid_base: u32,
+    /// Size of the team-gid band.
+    #[serde(default = "default_group_gid_size")]
+    pub group_gid_size: u32,
     pub default_shell: String,
     /// Home dir is `{home_prefix}/{username}` unless overridden per account.
     pub home_prefix: String,
@@ -160,45 +127,25 @@ pub struct PosixConfig {
     /// Confidential OAuth client id Forseti drives the RFC 8628 device grant
     /// as for Linux PAM auth. Created (if absent) by `posix-init-client`.
     pub pam_client_id: String,
-    /// Client secret for `pam_client_id` when using `client_secret_basic`
-    /// auth. `None` = let `posix-init-client` mint one (revealed once). Once
-    /// `private_key_jwt` lands this becomes a fallback knob.
+    /// Client secret for `pam_client_id`. `None` = let `posix-init-client` mint one (revealed once).
     pub pam_client_secret: Option<String>,
-    /// Hard wall-clock cap (seconds) on a single device-auth poll loop. Kept
-    /// strictly below sshd's `LoginGraceTime` (default 120s) so an abandoned
-    /// flow can't pin the login. The PAM module honours this; Forseti returns
-    /// it so the daemon can bound its own polling.
+    /// Wall-clock cap (seconds) on a device-auth poll loop. Kept below sshd's `LoginGraceTime` (120s) so an abandoned flow can't pin the login.
     pub device_poll_cap_secs: u64,
-    /// `iat` freshness window (seconds) for the device id_token. Rejects a
-    /// token whose `iat` is older than this — a tight replay guard layered on
-    /// top of `exp`.
+    /// `iat` freshness window (seconds) for the device id_token; a replay guard layered on top of `exp`.
     pub id_token_iat_window_secs: u64,
-    /// `auth_time` freshness window (seconds) for `force_mfa` hosts (R11). An
-    /// AAL2 session older than this won't unlock a force_mfa host — an
-    /// hours-old MFA shouldn't grant root.
+    /// `auth_time` freshness window (seconds) for `force_mfa` hosts; an hours-old AAL2 session shouldn't grant root.
     pub mfa_auth_time_window_secs: u64,
-    /// Expected `iss` on the device id_token. Hydra advertises whatever its
-    /// own `urls.self.issuer` is set to, which can differ from
-    /// `[hydra].public_url` (e.g. the playground's `host.containers.internal`
-    /// vs `localhost`). `None` falls back to `[hydra].public_url` at the
-    /// binding call site (R10's issuer-host subtlety).
+    /// Expected `iss` on the device id_token. Hydra's `urls.self.issuer` can differ from `[hydra].public_url`
+    /// (e.g. `host.containers.internal` vs `localhost`); `None` falls back to `[hydra].public_url`.
     #[serde(default)]
     pub hydra_issuer: Option<String>,
-    /// Master switch for offline auth (M3a). When off, no offline verifiers are
-    /// provisioned to hosts and the settings page hides the offline-passphrase
-    /// surface.
+    /// Master switch for offline auth. Off hides the offline-passphrase surface and provisions no verifiers.
     pub offline_auth_enabled: bool,
-    /// TTL (hours) stamped on each provisioned offline verifier. A host refuses
-    /// a credential older than this since its last successful poll — bounds the
-    /// offline window on a partitioned host.
+    /// TTL (hours) on each provisioned offline verifier; bounds the offline window on a partitioned host.
     pub offline_ttl_hours: u64,
-    /// Hard cap (hours) on how long a host may keep using an offline credential
-    /// measured from the last successful *online* auth, regardless of TTL
-    /// refreshes. Defense against a long-de-scoped-but-never-online host.
+    /// Hard cap (hours) on offline-credential use measured from the last successful online auth, regardless of TTL refreshes.
     pub offline_max_lifetime_hours: u64,
-    /// Hard floor on the offline passphrase length, enforced server-side. Kept
-    /// configurable but never below the [`posix::offline::OFFLINE_MIN_LEN`]
-    /// hard wall (8).
+    /// Server-side floor on offline passphrase length; never below [`posix::offline::OFFLINE_MIN_LEN`] (8).
     pub offline_min_len: usize,
 }
 
@@ -207,6 +154,10 @@ impl Default for PosixConfig {
         Self {
             uid_base: 1_000_000,
             gid_base: 2_000_000, // disjoint from uid space so uids/gids never numerically collide
+            user_uid_size: 1_000_000,
+            user_gid_size: 1_000_000,
+            group_gid_base: 3_000_000,
+            group_gid_size: 1_000_000,
             default_shell: "/bin/sh".to_string(), // Guix has no /bin/bash
             home_prefix: "/home".to_string(),
             free_seats: 25,
@@ -221,6 +172,39 @@ impl Default for PosixConfig {
             offline_max_lifetime_hours: 168,
             offline_min_len: 8,
         }
+    }
+}
+
+fn default_user_uid_size() -> u32 {
+    1_000_000
+}
+fn default_user_gid_size() -> u32 {
+    1_000_000
+}
+fn default_group_gid_base() -> u32 {
+    3_000_000
+}
+fn default_group_gid_size() -> u32 {
+    1_000_000
+}
+
+impl PosixConfig {
+    /// Hard invariant: the user-private gid band and the team-gid band must be
+    /// disjoint intervals, else a team gid could numerically collide with a user
+    /// gid on a host (cross-group ownership collision).
+    pub fn validate_bands(&self) -> anyhow::Result<()> {
+        let user_gid_end = self.gid_base.saturating_add(self.user_gid_size);
+        let team_gid_end = self.group_gid_base.saturating_add(self.group_gid_size);
+        let disjoint = user_gid_end <= self.group_gid_base || team_gid_end <= self.gid_base;
+        anyhow::ensure!(
+            disjoint,
+            "posix gid bands overlap: user [{}, {}) vs team [{}, {})",
+            self.gid_base,
+            user_gid_end,
+            self.group_gid_base,
+            team_gid_end
+        );
+        Ok(())
     }
 }
 
@@ -258,10 +242,6 @@ impl SelfConfig {
 pub struct BrandConfig {
     #[serde(default = "default_brand_name")]
     pub name: String,
-    // Surfaced in templates today as part of the configurable brand block,
-    // and reserved for the support-email link on the future error/contact
-    // pages. Kept on the parsed struct so the field is documented and
-    // validated even before the templates pick it up.
     #[allow(dead_code)]
     pub support_email: Option<String>,
     pub logo_url: Option<String>,
@@ -279,11 +259,6 @@ fn default_consent_intro() -> String {
 }
 
 /// One card on the dashboard "Your apps" section. Configured per deployment.
-///
-/// NOTE: a per-app icon used to live here (Material Symbols name). It was
-/// dropped because the dashboard template never consumed it. If we want
-/// icons back later, reintroduce `pub icon: Option<String>` and surface it
-/// in `templates/dashboard.html`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct AppEntry {
     pub name: String,
@@ -300,19 +275,17 @@ pub struct OAuthConfig {
     #[serde(default)]
     pub scope_descriptions: std::collections::HashMap<String, String>,
     /// DCR `client_name` denylist. Case-insensitive substring match against
-    /// the posted `client_name`. Operators replace the list entirely — if
+    /// the posted `client_name`. Operators replace the list entirely; if
     /// the key is absent from `config.toml`, the code-baked defaults in
     /// `crate::oauth::register::RESERVED_NAMES_DEFAULT` are used.
     #[serde(default)]
     pub dcr_reserved_names: Option<Vec<String>>,
-    /// Per-IP rate limit on `POST /oauth2/register` — max requests per
-    /// minute. In-memory, per-process. `None` falls back to the code-side
-    /// default (10). Set to `0` to disable the per-minute bucket.
+    /// Per-IP rate limit on `POST /oauth2/register`, max requests per minute. In-memory, per-process.
+    /// `None` falls back to the code-side default (10). Set to `0` to disable the per-minute bucket.
     #[serde(default)]
     pub dcr_ip_rate_per_minute: Option<u32>,
-    /// Per-IP rate limit on `POST /oauth2/register` — max requests per
-    /// hour. Enforced in parallel with the per-minute bucket. `None`
-    /// falls back to 100. Set to `0` to disable the per-hour bucket.
+    /// Per-IP rate limit on `POST /oauth2/register`, max requests per hour, in parallel with the per-minute bucket.
+    /// `None` falls back to 100. Set to `0` to disable the per-hour bucket.
     #[serde(default)]
     pub dcr_ip_rate_per_hour: Option<u32>,
     /// Per-IAT registration cap over a rolling 24-hour window opened by
@@ -323,17 +296,9 @@ pub struct OAuthConfig {
     pub dcr_iat_daily_limit: Option<u32>,
 }
 
-/// Admin-surface gating. Operators add the emails of users who should be
-/// allowed through `/admin/*` here; everyone else gets a 403 even with a
-/// valid session. AAL2 is enforced separately at the route guard.
-///
-/// Why a config allowlist rather than a Kratos identity-schema role: the
-/// Forseti is operator-deployed infrastructure — keeping admin membership
-/// in declarative config (a single source of truth, easy to diff in
-/// version control) is simpler than carrying a `role` trait through the
-/// schema and writing migrations for it. The trade-off is that adding a
-/// new admin requires a config reload rather than a database write; for
-/// the small number of operators this is aimed at, that's a feature.
+/// Admin-surface gating: emails allowed through `/admin/*`; everyone else gets 403 even with a valid session.
+/// AAL2 is enforced separately at the route guard. A config allowlist (not a Kratos role) keeps admin membership
+/// in version-controllable declarative config; adding an admin needs a config reload, not a DB write.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct AdminConfig {
     /// Lowercased on read; matched case-insensitively against the session's
@@ -355,12 +320,8 @@ impl AdminConfig {
     }
 }
 
-/// Forseti-owned database. Separate from the Kratos/Hydra Postgres — schema
-/// isolation, independent backups, no risk of colliding with Ory migrations.
-///
-/// The URL scheme picks the backend: `sqlite://...` or `postgres://...`. The
-/// default — sqlite at `./forseti.db` next to the binary — is deliberate
-/// self-hoster ergonomics. Operators who want Postgres set this explicitly.
+/// Forseti-owned database, separate from the Kratos/Hydra Postgres. The URL scheme picks the backend
+/// (`sqlite://...` or `postgres://...`); default sqlite at `./forseti.db` for self-hoster ergonomics.
 #[derive(Debug, Clone, Deserialize)]
 pub struct DatabaseConfig {
     /// `sqlite://path/to/file.db` or `postgres://user:pass@host/db`.
@@ -436,7 +397,7 @@ impl DatabaseConfig {
                     return false;
                 }
                 // Note: 2001:db8::/32 (documentation prefix) is intentionally
-                // NOT treated as non-prod — it's reserved for examples, not
+                // NOT treated as non-prod: it's reserved for examples, not
                 // private deployments.
                 true
             }
@@ -446,20 +407,9 @@ impl DatabaseConfig {
 
 /// Audit log configuration.
 ///
-/// `webhook_token` gates the `/internal/audit/kratos` receiver and must be
-/// shared with the Kratos config (`FORSETI_AUDIT__WEBHOOK_TOKEN` env var).
-/// Forseti refuses to boot when this is empty — the audit webhook
-/// endpoint requires bearer authentication and a misconfigured deployment
-/// should fail loudly at startup rather than silently accept (or reject)
-/// every inbound event.
-///
-/// `ip_salt` is optional. If unset, the salt is derived from `self.url`
-/// plus a domain constant in `audit::ip_salt()`, mirroring the pattern in
-/// `flash.rs`. Operators who want to rotate IP hashing without rotating
-/// flash signatures set this explicitly.
-///
-/// `audit_retention_days` is the default for the `audit-prune` subcommand
-/// when invoked without an explicit override.
+/// `webhook_token` gates the `/internal/audit/kratos` receiver and must match the Kratos config;
+/// Forseti refuses to boot when empty. `ip_salt` is optional (derived from `self.url` via `audit::ip_salt()`
+/// when unset). `audit_retention_days` is the `audit-prune` default.
 #[derive(Debug, Clone, Deserialize)]
 pub struct AuditConfig {
     #[serde(default)]
@@ -480,13 +430,8 @@ impl Default for AuditConfig {
     }
 }
 
-/// Internal listener configuration. Today this binds the audit webhook
-/// receiver; future machine-to-machine endpoints land on the same listener.
-///
-/// The default `127.0.0.1:8081` keeps the surface invisible from outside
-/// the host — operators running Forseti inside a container or behind a
-/// reverse proxy override `bind` to `0.0.0.0:8081` (or a specific private
-/// interface) so Kratos in another container can reach it.
+/// Internal listener (today: the audit webhook receiver). Default `127.0.0.1:8081` keeps it host-local;
+/// containerised deployments override `bind` so Kratos in another container can reach it.
 #[derive(Debug, Clone, Deserialize)]
 pub struct InternalConfig {
     #[serde(default = "default_internal_bind")]
@@ -505,10 +450,8 @@ fn default_internal_bind() -> String {
     "127.0.0.1:8081".to_string()
 }
 
-/// SMTP connection scheme. Picks lettre's transport builder at runtime:
-/// plaintext goes through `builder_dangerous`, STARTTLS and SMTPS go
-/// through the typed `relay`/`starttls_relay` constructors so a TLS
-/// config slip is an init error rather than a `None.unwrap()` later.
+/// SMTP connection scheme picking lettre's transport builder: plaintext via `builder_dangerous`,
+/// STARTTLS/SMTPS via the typed `relay`/`starttls_relay` so a TLS slip is an init error.
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum SmtpScheme {
@@ -597,10 +540,7 @@ fn default_smtp_port() -> u16 {
 }
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct ProfilesConfig {
-    /// Gates `/settings/profile`'s extended-fields form, the public
-    /// `/users/{id}` view, the members-roster link, and the
-    /// `extended_profile` OIDC scope. Off by default — operators opt in
-    /// per deployment.
+    /// Gates the extended-profile form, the public `/users/{id}` view, the roster link, and the `extended_profile` scope.
     #[serde(default)]
     pub enabled: bool,
 }
@@ -609,24 +549,17 @@ fn default_audit_retention_days() -> i64 {
     90
 }
 
-/// Commercial-tier configuration. Only two knobs the operator can tune —
-/// where to send "upgrade" CTAs. The post-expiry grace window is a fixed
-/// 30 days ([`crate::commercial::GRACE_DAYS`]), not config-tunable. The
-/// signed license blob itself lives in the `forseti_license` DB
-/// table; activation happens at `/admin/license`, not in `config.toml`.
+/// Commercial-tier configuration. The grace window is fixed ([`crate::commercial::GRACE_DAYS`]); the
+/// signed license blob lives in the `forseti_license` table and activates at `/admin/license`, not here.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct LicenseConfig {
-    /// URL surfaced as the "Upgrade" CTA on the upsell page and lock
-    /// badges. Empty default falls back to a mailto: link built from
-    /// `brand.support_email` at render time.
+    /// "Upgrade" CTA URL on the upsell page and lock badges; empty falls back to a `brand.support_email` mailto.
     #[serde(default)]
     pub purchase_url: String,
 }
 
-/// SAML SSO bridge (commercial, strictly opt-in). Absent ⇒ the `/sso/*`
-/// routes are not mounted and Forseti has zero SAML footprint. The bridge
-/// itself (Jackson / Ory Polis) is operator-deployed; Forseti only
-/// orchestrates against it. See `docs/commercial/saml.md`.
+/// SAML SSO bridge (commercial, opt-in). Absent = `/sso/*` unmounted, zero SAML footprint. The bridge
+/// (Jackson / Ory Polis) is operator-deployed; Forseti only orchestrates against it. See `docs/commercial/saml.md`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct SamlConfig {
     /// Browser-facing base URL of the Jackson instance, e.g.
@@ -650,8 +583,7 @@ pub struct SamlConfig {
     pub sp_entity_id: Option<String>,
 }
 
-/// Jackson's default `samlAudience` — the SP entity id the customer's IdP
-/// admin configures when `[saml].sp_entity_id` is unset.
+/// Jackson's default `samlAudience`: the SP entity id the customer's IdP admin configures when `[saml].sp_entity_id` is unset.
 pub const DEFAULT_SP_ENTITY_ID: &str = "https://saml.boxyhq.com";
 
 impl SamlConfig {
@@ -672,18 +604,11 @@ fn default_saml_schema_id() -> String {
     "default".to_string()
 }
 
-/// Identity-management knobs. Defaulted so the OSS deployment ships
-/// reasonable values without `[identity]` in `config.toml`.
+/// Identity-management knobs, defaulted so OSS ships sane values without `[identity]`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct IdentityConfig {
-    /// Reaper window for the `unverified-prune` CLI / cron. Identities
-    /// whose verifiable addresses include at least one unverified entry
-    /// and whose `created_at` is older than this many days are deleted.
-    /// Default 7 — aggressive but reasonable (GitHub uses 30, which is
-    /// fine for a consumer site but too leniant for a single-tenant
-    /// Forseti deployment where an unverified squatter blocks the legitimate owner
-    /// for weeks). Operators dial up when they have a slower-onboarding
-    /// flow.
+    /// `unverified-prune` window: identities with an unverified address and `created_at` older than this many days are deleted.
+    /// Default 7 keeps an unverified squatter from blocking the legitimate owner; dial up for slower onboarding.
     #[serde(default = "default_unverified_ttl_days")]
     pub unverified_ttl_days: i64,
 }
@@ -700,42 +625,25 @@ fn default_unverified_ttl_days() -> i64 {
     7
 }
 
-/// Outbound-webhook signing config. Forseti owns one Ed25519 (EdDSA) key
-/// that signs every account-lifecycle Security Event Token (see
-/// `src/webhook.rs`). Receivers verify with the public half via the JWKS
-/// endpoint at `/.well-known/webhook-jwks.json`.
-///
-/// `signing_key_path` is the on-disk PEM (PKCS#8) file. When missing on
-/// boot, Forseti auto-generates a fresh Ed25519 key, writes it with `0600`
-/// permissions, and logs a warning so the operator knows to back it up.
-/// Same idiom as the sqlite default — self-hoster ergonomics first;
-/// production deployments override.
+/// Outbound-webhook signing. One Ed25519 key signs every account-lifecycle SET (`src/webhook.rs`);
+/// receivers verify via `/.well-known/webhook-jwks.json`. A missing `signing_key_path` is auto-generated `0600` on boot.
 #[derive(Debug, Clone, Deserialize)]
 pub struct WebhookConfig {
     #[serde(default = "default_webhook_signing_key_path")]
     pub signing_key_path: String,
-    /// Worker poll interval (seconds). The worker wakes every tick to
-    /// drain the CONFIRMED outbox; lowering this trades CPU for delivery
-    /// latency, raising it trades latency for less DB pressure.
+    /// Worker poll interval (seconds); trades delivery latency against DB pressure.
     #[serde(default = "default_webhook_tick_seconds")]
     pub tick_seconds: u64,
     /// Maximum delivery attempts before a row is dead-lettered.
     #[serde(default = "default_webhook_max_attempts")]
     pub max_attempts: i32,
-    /// Hard age cap (hours). A row that's been around longer than this
-    /// gets dead-lettered on the next attempt regardless of
-    /// `max_attempts` — guards against rows wedged by clock skew or
-    /// permanently-broken receivers.
+    /// Hard age cap (hours); a row older than this is dead-lettered regardless of `max_attempts` (clock skew / dead receivers).
     #[serde(default = "default_webhook_max_age_hours")]
     pub max_age_hours: i64,
-    /// Exponential-backoff ceiling (seconds). Retries grow as
-    /// `60s * 2^attempts` capped at this value, with ±25% jitter.
+    /// Exponential-backoff ceiling (seconds). Retries grow as `60s * 2^attempts`, capped here, with +-25% jitter.
     #[serde(default = "default_webhook_backoff_cap_seconds")]
     pub backoff_cap_seconds: i64,
-    /// How long a worker holds a claim on an outbox row (seconds). The
-    /// HTTP send has a 10s timeout, so the default 60s leaves comfortable
-    /// room for bookkeeping. If a worker crashes between claim and send,
-    /// the row becomes visible again after this window.
+    /// Claim lease on an outbox row (seconds). A worker crashing between claim and send frees the row after this window.
     #[serde(default = "default_webhook_claim_lease_seconds")]
     pub claim_lease_seconds: i64,
 }
@@ -777,18 +685,9 @@ fn default_webhook_claim_lease_seconds() -> i64 {
     60
 }
 
-/// Per-IP rate-limit knobs for the Forseti-owned `/claim-email` flow.
-///
-/// The 6-digit one-time code on the claim-email confirm step is ~20
-/// bits of entropy. The per-mint attempt cap (`MAX_CLAIM_CODE_ATTEMPTS`
-/// in `identity::claim_email`) bounds one mint; without a per-IP cap an
-/// attacker can mint repeatedly and grind in parallel. Defaults
-/// (5/min + 30/hour) keep a legitimate user (mint → retype once or
-/// twice) well inside the budget while making distributed grind take
-/// days, not hours.
-///
-/// Operators dial these up in dev so integration tests (which share
-/// the loopback bucket) don't 429 on subsequent runs.
+/// Per-IP rate limits for the `/claim-email` flow. The per-mint attempt cap bounds one mint; this caps
+/// repeated minting so the ~20-bit confirm code can't be ground in parallel. Dial up in dev so integration
+/// tests sharing the loopback bucket don't 429.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ClaimEmailConfig {
     #[serde(default = "default_claim_email_per_minute")]
@@ -814,25 +713,15 @@ fn default_claim_email_per_hour() -> u32 {
     30
 }
 
-/// Per-IP rate limits for `/handoff*` (RP-initiated account-management
-/// deep-links). The handler hits Hydra's admin API on every entry —
-/// without a cap, an attacker can probe for which `client_id` values
-/// exist via timing or load on Hydra. The uniform 400 in
-/// `invalid_referrer()` collapses the response body across all
-/// validation failures; this knob caps the rate.
-///
-/// Defaults (30/min, 300/hour, 1h cookie) match the historical
-/// hardcoded values and stay well above any legitimate user's pattern
-/// (handoff entries are once-per-session, not per-page-view).
+/// Per-IP rate limits for `/handoff*`. The handler hits Hydra's admin API on every entry; this caps
+/// probing of which `client_id`s exist. Defaults stay well above any legitimate once-per-session pattern.
 #[derive(Debug, Clone, Deserialize)]
 pub struct HandoffConfig {
     #[serde(default = "default_handoff_per_minute")]
     pub rate_limit_per_minute: u32,
     #[serde(default = "default_handoff_per_hour")]
     pub rate_limit_per_hour: u32,
-    /// TTL for the signed `forseti_app_referrer` cookie that drives the
-    /// "Return to <App>" banner. After this elapses the banner stops
-    /// appearing — the user is firmly back inside Forseti.
+    /// TTL for the signed `forseti_app_referrer` cookie driving the "Return to <App>" banner.
     #[serde(default = "default_handoff_referrer_ttl_seconds")]
     pub referrer_cookie_ttl_seconds: u64,
 }
@@ -859,9 +748,7 @@ fn default_handoff_referrer_ttl_seconds() -> u64 {
     60 * 60
 }
 
-/// Flash cookie + secret-reveal TTLs. Both default to 60 seconds —
-/// long enough for the browser to follow a redirect on a slow link
-/// but short enough that a navigated-away admin loses the reveal.
+/// Flash cookie + secret-reveal TTLs. Both default to 60s: enough to follow a redirect, short enough that a navigated-away admin loses the reveal.
 #[derive(Debug, Clone, Deserialize)]
 pub struct FlashConfig {
     #[serde(default = "default_flash_cookie_ttl_seconds")]
@@ -887,13 +774,8 @@ fn default_flash_reveal_ttl_seconds() -> u64 {
     60
 }
 
-/// Organizations subsystem TTLs. `active_org_cookie_ttl_seconds` is
-/// how long the signed `forseti_active_org` cookie stays valid; 30
-/// days matches the documented "session" feel of org switching.
-/// `invite_ttl_days` is how long a freshly minted org invitation can
-/// be redeemed before it expires — 7 days balances "let the invitee
-/// see it next week" against "expired stale invites stop being
-/// claimable."
+/// Organizations subsystem TTLs: `active_org_cookie_ttl_seconds` (signed `forseti_active_org` cookie validity)
+/// and `invite_ttl_days` (how long a minted invitation stays claimable).
 #[derive(Debug, Clone, Deserialize)]
 pub struct OrgsConfig {
     #[serde(default = "default_active_org_cookie_ttl_seconds")]
@@ -919,12 +801,7 @@ fn default_invite_ttl_days() -> i64 {
     7
 }
 
-/// Sanity ceilings for rate-limit knobs. An operator typo
-/// (`per_window = 1_000_000`) shouldn't silently disable protection —
-/// any value above the ceiling is clamped at config-load time with a
-/// `tracing::warn!` so it's visible at boot. Ceilings are generous for
-/// any legitimate Forseti rate-limited endpoint and act as a misconfig
-/// sentinel.
+/// Sanity ceilings for rate-limit knobs: a typo like `per_window = 1_000_000` is clamped at load with a warn, so it can't silently disable protection.
 const RATE_LIMIT_PER_MINUTE_CEILING: u32 = 1_000;
 const RATE_LIMIT_PER_HOUR_CEILING: u32 = 10_000;
 const RATE_LIMIT_PER_DAY_CEILING: u32 = 100_000;
@@ -1093,7 +970,7 @@ mod tests {
 
     #[test]
     fn looks_like_production_true_for_ipv6_documentation_prefix() {
-        // 2001:db8::/32 is RFC 3849 documentation space — reserved for
+        // 2001:db8::/32 is RFC 3849 documentation space, reserved for
         // examples, not private use. Treated as production-shaped.
         assert!(DatabaseConfig::looks_like_production(
             "https://[2001:db8::1]/"
@@ -1167,6 +1044,21 @@ mod tests {
         assert_eq!(p.device_poll_cap_secs, 90);
         assert_eq!(p.id_token_iat_window_secs, 120);
         assert_eq!(p.mfa_auth_time_window_secs, 300);
+    }
+
+    #[test]
+    fn posix_default_bands_are_disjoint() {
+        let p = PosixConfig::default();
+        // user gid band [gid_base, gid_base+size) must not overlap team-gid band.
+        assert!(p.group_gid_base >= p.gid_base + p.user_gid_size);
+        assert!(p.validate_bands().is_ok());
+    }
+
+    #[test]
+    fn posix_overlapping_bands_rejected() {
+        let mut p = PosixConfig::default();
+        p.group_gid_base = p.gid_base; // overlap the user gid band
+        assert!(p.validate_bands().is_err());
     }
 
     // --- clamp_rate_limits -------------------------------------------------

@@ -44,6 +44,21 @@ Owners add people to a named org by inviting them:
 
 Only **verified** email addresses can accept an invite — the invitee must have confirmed their email with Forseti before they can join. A leaked or forwarded invite link can't be replayed once it's expired or already been accepted.
 
+## Teams
+
+A team is a named subset of an org's members. Teams are a commercial feature everywhere, including the Default org: managing them requires a license with the Organizations capability.
+
+Owners manage teams from the org's **Teams** page (`/settings/organization/teams`, or `/settings/organizations/<slug>/teams` for a named org). From there an owner can create a team, rename or delete it, and add or remove org members. Only people who already belong to the org can be added to its teams.
+
+Teams do two things:
+
+- **Member visibility.** With the `same_group` member-visibility policy, members can see each other in the directory only when they share at least one team. Teams are how you carve up who sees whom.
+- **Host scoping.** When you enroll a Linux host, you pick which org it belongs to and then scope it either to the whole org (any member may log in) or to one or more of that org's teams (only members of those teams may log in, and they're grouped together on the host). A host belongs to exactly one org, fixed at enrollment: you can change its team scope later, but not its org.
+
+Deleting a team removes it from any host that was scoped to it; the host falls back to whatever scope remains (whole-org if it had no other teams).
+
+A member's public profile page surfaces the teams they belong to, so people can see how they're organized. Owners viewing another member's profile see only the teams that sit in orgs they own. For Linux hosts, a member can see which hosts their own account can reach, and a Forseti operator can see the same for any account from the admin surface; org owners deliberately can't enumerate another org's reachable hosts.
+
 ## Branding
 
 Each org can carry its own **logo** and **support email**. When set, these override the global brand: the org's logo shows in the nav header and its support email appears on help and error pages, so each tenant sees their own branding.

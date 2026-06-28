@@ -149,10 +149,12 @@ jobs:
           test "$(wc -c < license-issuer/keys/private.bin)" -eq 32 \
             || { echo "decoded issuer key is not 32 bytes — wrong secret encoding"; exit 1; }
           # Mirrors `make license-fixtures`' active.blob, minus --expires
-          # (lifetime). Tier label is cosmetic; the saml + orgs features are
-          # what the licensed bucket gates on.
+          # (lifetime). Tier label is cosmetic; the orgs + saml + linux_auth
+          # features are what the licensed bucket gates on (linux_auth gates the
+          # profile-hosts + host-scoping specs; without it they pass vacuously
+          # via the omitted-section path).
           ( cd license-issuer && cargo run --release --quiet -- \
-              issue --tier business --feature orgs --feature saml \
+              issue --tier business --feature orgs --feature saml --feature linux_auth \
               --customer "CI SAML e2e" --email "e2e@example.com" ) \
             > tests/fixtures/license/active.blob
           # Wipe the key as soon as the blob is signed.

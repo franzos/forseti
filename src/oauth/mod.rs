@@ -1,7 +1,6 @@
 //! OAuth2/OIDC bridge handlers: Hydra's login / consent / logout redirect
-//! targets. Each submodule owns one leg of the federated flow — Forseti
-//! resolves the Kratos session, projects identity traits into id_token
-//! claims, and accepts (or rejects) the Hydra challenge.
+//! targets. Forseti resolves the Kratos session, projects identity traits
+//! into id_token claims, and accepts (or rejects) the Hydra challenge.
 
 use axum::extract::DefaultBodyLimit;
 use axum::routing::{get, post};
@@ -32,11 +31,8 @@ pub(crate) fn default_scope_description(scope: &str) -> Option<&'static str> {
     })
 }
 
-/// Per-IP rate-limit defaults applied to `POST /oauth2/register` when
-/// the operator hasn't overridden via config. 10/min + 100/hour is the
-/// belt-and-suspenders pairing against credential-stuffing and slow-drip
-/// abuse respectively. Both buckets run in parallel; a request must
-/// satisfy both to pass.
+/// Per-IP rate-limit defaults for `POST /oauth2/register`. 10/min guards
+/// bursts, 100/hour slow-drip abuse; a request must satisfy both buckets.
 const DEFAULT_DCR_IP_RATE_PER_MINUTE: u32 = 10;
 const DEFAULT_DCR_IP_RATE_PER_HOUR: u32 = 100;
 
@@ -52,37 +48,20 @@ pub(crate) fn router(oauth_cfg: &OAuthConfig, proxy_cfg: &ProxyConfig) -> Router
             get(logout::oauth_logout).post(logout::oauth_logout_submit),
         )
         // RFC 8628 device-verification screen (Hydra's `verification_uri`).
-        // Browser-facing forms → inside the CSRF layer (mounted via the
-        // `csrf_routes` bundle in `app::run`).
         .route(
             "/oauth/device",
             get(device_verify::device_verify).post(device_verify::device_verify_submit),
         )
         .route("/oauth/device/done", get(device_verify::device_done))
-        // Forseti-fronted RFC 7591 DCR endpoint. Mounted at the canonical
-        // `/oauth2/register` path so the URL Hydra advertises in its
-        // discovery document is the one MCP clients actually call.
-        // Authenticated by an Initial Access Token, not a session cookie
-        // — no CSRF (the proxy isn't a browser form).
-        //
-        // The two `GovernorLayer`s stack so a request must pass *both*
-        // buckets. Attached only to this one route via a nested
-        // `Router` — the rest of Forseti stays un-throttled.
+        // Forseti-fronted RFC 7591 DCR endpoint at the canonical
+        // `/oauth2/register` path Hydra advertises in discovery. No CSRF (not
+        // a browser form); rate-limited via the nested router below.
         .merge(register_router(oauth_cfg, proxy_cfg))
 }
 
-/// Build the DCR proxy sub-router with its per-IP rate limit layers
-/// attached. Kept inline rather than living in `register.rs` because
-/// layer composition is a routing concern, not a handler concern.
-/// The per-minute and per-hour buckets monomorphise through
-/// [`crate::rate_limit::apply`], which keeps the `NoOpMiddleware` type
-/// it returns inferred (the type is private at the `tower_governor`
-/// re-export).
-///
-/// Per-request body cap for the DCR proxy. A valid RFC 7591 client
-/// registration payload is a few hundred bytes; 64 KiB leaves comfortable
-/// headroom for verbose `redirect_uris` arrays without giving abusers a
-/// multi-megabyte slot. Exceeding this cap yields a 413 from axum.
+/// Per-request body cap for the DCR proxy. A valid RFC 7591 payload is a few
+/// hundred bytes; 64 KiB leaves headroom for verbose `redirect_uris` without
+/// giving abusers a multi-megabyte slot. Exceeding it yields a 413.
 const DCR_BODY_LIMIT_BYTES: usize = 64 * 1024;
 
 fn register_router(oauth_cfg: &OAuthConfig, proxy_cfg: &ProxyConfig) -> Router<AppState> {
@@ -97,11 +76,9 @@ fn register_router(oauth_cfg: &OAuthConfig, proxy_cfg: &ProxyConfig) -> Router<A
         .dcr_ip_rate_per_hour
         .unwrap_or(DEFAULT_DCR_IP_RATE_PER_HOUR);
 
-    // Per-minute + per-hour stack — a request must satisfy both
-    // buckets. Strict (peer-IP) mode requires
-    // `into_make_service_with_connect_info::<SocketAddr>()` at the
-    // serve site so `ConnectInfo` is present in extensions; see
-    // `app::run`.
+    // Strict (peer-IP) mode requires
+    // `into_make_service_with_connect_info::<SocketAddr>()` at the serve site
+    // so `ConnectInfo` is in extensions; see `app::run`.
     rate_limit::dual_window(
         r,
         proxy_cfg.trust_forwarded_for,

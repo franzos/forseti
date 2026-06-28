@@ -1521,6 +1521,7 @@ non-endpoint client values.
 | Route | Method | Handler | File:line |
 | --- | --- | --- | --- |
 | `/admin/identities` | GET | `list` | `src/admin/identities.rs:170` |
+| `/admin/identity-picker` | GET | `pick` | `src/admin/identities.rs:378` |
 | `/admin/identities/{id}` | GET | `show` | `src/admin/identities.rs:275` |
 | `/admin/identities/{id}/recovery` | POST | `recovery` | `src/admin/identities.rs:416` |
 | `/admin/identities/{id}/disable` | GET | `disable_confirm` | `src/admin/identities.rs:462` |
@@ -1562,6 +1563,28 @@ this explicit. Admin must follow up via `/admin/sessions` if desired.
 Flash cookies carry per-action banners ("Identity disabled." / "Identity
 enabled.") scoped to the identity's show path.
 
+#### Identity picker (`/admin/identity-picker`)
+
+A reusable, org-scoped identity chooser — `pick`
+(`src/admin/identities.rs:378`), gated by `RequireAdminScoped` so it
+honours `?org=<slug>` like the rest of the admin surface. It backs the
+POSIX provisioning "Select user" step (see [POSIX accounts](#posix-accounts)),
+and any future caller that needs to hand the operator a search-and-pick
+list of identities rather than ask for a raw UUID.
+
+The caller passes `?return_to=<path>`. `pick` validates it through
+`crate::web::safe_return_to` (`src/web.rs`) and treats an empty value, a
+fragment, or any URL that `safe_return_to` rewrites as **invalid** — the
+template renders an error rather than silently redirecting selections to
+`/`, so a foreign or malformed `return_to` can't be used to bounce the
+operator off-site. Rows come from the shared `search_identities`
+(`src/admin/identities.rs:156`) — the same paginated, org-scoped Kratos
+lookup the list page uses, with an optional `?q=` email filter and
+`?page_token=` cursor. Each row's *Select* link is
+`append_query(return_to, "identity_id", <uuid>)`
+(`src/admin/identities.rs:373`), so clicking it 303s the operator back to
+`return_to` with `?identity_id=<uuid>` appended — no JS, no client state.
+
 ### Sessions
 
 `/admin/sessions` — `src/admin/sessions.rs`. Global session list across all
@@ -1588,6 +1611,109 @@ banner ("Session revoked.").
 
 Note the confirm copy: "If this is your own session you'll be signed out."
 The admin's own session lives in the same list and can be revoked.
+
+### POSIX accounts
+
+`/admin/posix/*` — `src/admin/posix.rs`. Materialise a Kratos identity into
+a POSIX account (uid/gid/shell/home + primary group) that enrolled Linux
+hosts then resolve over the [POSIX resolver API](#posix-resolver-api-linux-integration).
+The resolver, device-auth, and offline-auth machinery are separate sections
+below; this is the operator-facing provisioning surface only.
+
+| Route | Method | Handler | File:line |
+| --- | --- | --- | --- |
+| `/admin/posix` | GET | `list` | `src/admin/posix.rs` |
+| `/admin/posix/new` | GET | `new` | `src/admin/posix.rs:174` |
+| `/admin/posix/new` | POST | `provision` | `src/admin/posix.rs:244` |
+| `/admin/posix/{id}` | GET | `account` | `src/admin/posix.rs` |
+| `/admin/posix/{id}/keys` | POST | `add_key` | `src/admin/posix.rs` |
+| `/admin/posix/{id}/keys/{key_id}/delete` | POST | `delete_key` | `src/admin/posix.rs` |
+| `/admin/posix/{id}/disable` | POST | `disable` | `src/admin/posix.rs` |
+| `/admin/posix/{id}/enable` | POST | `enable` | `src/admin/posix.rs` |
+| `/admin/posix/{id}/delete` | POST | `delete` | `src/admin/posix.rs` |
+
+Route mount: `src/admin/mod.rs:138-149`.
+
+#### Two-step provisioning (`/admin/posix/new`)
+
+The form is a **two-step, no-JS** flow. `new`
+(`src/admin/posix.rs:174`) takes an optional `?identity_id=<uuid>` query
+param (`NewQuery`):
+
+- **Step 1 — choose the identity.** With no `identity_id` the form renders
+  empty: the operator either clicks **Select user**, which links to the
+  [identity picker](#identity-picker-adminidentity-picker) with
+  `return_to=/admin/posix/new`, or types a UUID / email into the field.
+  The picker's *Select* link bounces back to `/admin/posix/new?identity_id=<uuid>`.
+- **Step 2 — fill in the account.** When `identity_id` is present, `new`
+  resolves it via `kratos::admin_get_identity_optional` and renders the
+  identity's email read-only, carrying the resolved UUID as a hidden field.
+  A POSIX-safe username suggestion derived from the email local-part
+  (`suggest_username`, `src/admin/posix.rs:218`) is pre-filled as the
+  editable username value. shell defaults from `[posix].default_shell`. An
+  unresolvable id collapses back to the empty step-1 form rather than
+  erroring.
+
+`provision` (`src/admin/posix.rs:244`) verifies CSRF, then resolves the
+submitted identity field to a canonical UUID — accepting **either** a UUID
+**or** an email:
+
+- `crate::format::looks_like_uuid` (`src/format.rs:107`) true → treat as a
+  UUID, confirm it exists via `admin_get_identity_optional`.
+- otherwise → resolve the typed email via
+  `kratos::admin_find_identity_by_email` (`src/ory/kratos.rs:553`), a unique
+  `credentials_identifier` lookup. **Caveat:** an identity that exists only
+  through OIDC/SAML has no password credentials identifier, so a typed email
+  may not resolve — the picker (authoritative hidden UUID) is the reliable
+  path for those.
+
+Either way the target identity must exist before provisioning — a phantom
+id would create an orphan the hourly reconcile sweep deletes. On success it
+checks the seat cap (`seat_available` / `effective_cap`, free tier from
+`[posix].free_seats`, raised by a `LinuxAuth` license), calls
+`posix::db::provision_account` (which creates the account plus its
+user-private primary group only — org/team membership is read at request time
+by the resolver, not mirrored), emits `POSIX_ACCOUNT_PROVISIONED`, and 303s to
+`/admin/posix/{identity_id}`.
+Validation / collision / cap failures re-render the form with an inline
+`error_message`.
+
+```mermaid
+sequenceDiagram
+    actor A as Admin
+    participant P as Forseti
+    participant K as Kratos
+    A->>P: GET /admin/posix/new
+    P-->>A: render form (step 1: empty)
+    alt pick from list
+        A->>P: GET /admin/identity-picker?return_to=/admin/posix/new
+        P->>K: search_identities (org-scoped, optional ?q=)
+        K-->>P: identities page
+        P-->>A: picker rows, each Select → return_to?identity_id=<uuid>
+        A->>P: click Select → GET /admin/posix/new?identity_id=<uuid>
+    else type UUID / email
+        A->>P: GET /admin/posix/new?identity_id=<uuid>
+    end
+    P->>K: admin_get_identity_optional(uuid)
+    K-->>P: identity (email)
+    P-->>A: render form (step 2: email read-only, username suggested)
+    A->>P: POST /admin/posix/new (_csrf, identity_id, username, shell)
+    P->>P: verify CSRF
+    alt identity_id looks like UUID
+        P->>K: admin_get_identity_optional(uuid)
+    else typed email
+        P->>K: admin_find_identity_by_email(email)
+    end
+    K-->>P: canonical identity / none
+    P->>P: seat-cap check, provision_account, org-group sync, audit
+    P-->>A: 303 /admin/posix/{identity_id}
+```
+
+On the account page (`/admin/posix/{id}`): add/remove SSH keys (served to
+sshd's `AuthorizedKeysCommand` by the resolver), disable/enable (disabling
+frees a seat; identifiers are retained), and delete. See the operator guide's
+[Provisioning an account](../operator-guide.md#provisioning-an-account) for
+the operator-facing walkthrough.
 
 ### Audit Log
 
@@ -1821,6 +1947,17 @@ sequenceDiagram
 
 Owners can update roles (`POST .../members/{id}/role`) and remove members (`POST .../members/{id}/remove`). The remove handler refuses when the target is the last owner — the org would become ungovernable.
 
+The listing is **visibility-filtered**: a signed-in non-member (and non-admin) gets a `404`, and each row is passed through the `visible(...)` predicate so a non-owner only sees the members the org's `member_visibility` policy permits (the Default org is `admins_only`, so a non-owner sees only themselves). Owners additionally set the policy (`POST .../members/visibility`) and members toggle their own directory opt-out (`POST .../members/{id}/hidden`). The same predicate also gates the public profile view `GET /users/{id}`. Full model in [organizations-internals.md § Member visibility](organizations-internals.md#member-visibility).
+
+#### Profile teams and reachable hosts
+
+Once the `/users/{id}` page passes the visibility gate, `show_profile` (`src/profiles/view.rs`) can render two extra sections, each behind its own commercial feature gate and a distinct audience rule:
+
+- **Teams** (gated by `Feature::Orgs`). The audience is widest for the subject themselves: **self** sees all their teams across every org, an **AAL2 global admin** (`admin.allowed_emails` + `session_satisfies_aal2`) sees all of them too, and an **org owner** viewing another member sees only the teams that live in orgs the viewer *owns* (intersected with the shared+visible org set already computed for the page). A plain member sees no teams section. Each chip is `team name · org name`.
+- **Reachable Linux hosts** (gated by `Feature::LinuxAuth`). This section is **self or AAL2 global admin only** — owners never see it, even for members of orgs they own. Showing owners the host set would turn the profile into an enumeration oracle for another org's infrastructure, so the audience is deliberately narrower than the teams section. The list comes from the read-only `hosts_reachable_by` projection (`src/posix/db.rs`), a set-based intersection of the subject's orgs/teams against host scopes (whole-org hosts always reach; team-scoped hosts need a team hit), and is empty unless the subject has an *enabled* POSIX account.
+
+The AAL2 admin POSIX detail page (`/admin/posix/{id}`, `src/admin/posix.rs`) mirrors both surfaces — same teams list and the same `hosts_reachable_by` projection — so an operator managing an account sees exactly what that account can reach. The whole page is `Cache-Control: private, no-store` since the output varies by viewer.
+
 ### Invite + accept
 
 `POST /settings/organization/members/invite` (singular) or `POST /settings/organizations/{slug}/members/invite` (plural) — handler in `src/orgs/invite.rs::post_invite_for`.
@@ -1983,11 +2120,13 @@ sequenceDiagram
     Host->>Internal: GET /posix/v1/passwd/name/{name}<br/>Authorization: Basic host_id:secret
     Internal->>Internal: RequirePosixHost: host_by_id + constant-time<br/>SHA-256 hash compare → 401 on mismatch
     Internal->>DB: account_by_username (enabled only)
-    alt host.allowed_gid = Some(gid)
-        Internal->>DB: group_by_gid(gid) — re-assert kind='org'
-        Internal->>DB: is_member(gid, identity_id)
+    Internal->>DB: account_visible_on_host(host.org_id, account)
+    alt host has scoped teams (host_allowed_groups)
+        Internal->>DB: is_team_member_provisioned(org_id, team_id, identity_id)
+    else whole-org host (no scoped teams)
+        Internal->>DB: is_org_member_provisioned(org_id, identity_id)
     end
-    DB-->>Internal: row(s)
+    DB-->>Internal: visible? (joins posix_accounts enabled=1)
     Internal-->>Host: 200 JSON / 404 / text-plain keys
 ```
 
@@ -2000,28 +2139,33 @@ best-effort, throttled to once per 60s.
 Routes (`src/posix/resolver.rs`):
 
 ```
-GET /posix/v1/passwd                 all enabled accounts (scoped) / []
+GET /posix/v1/passwd                 enabled members of the host's org / teams
 GET /posix/v1/passwd/name/{name}     one account by username
 GET /posix/v1/passwd/uid/{uid}       one account by uid
-GET /posix/v1/group                  the org group (scoped) / []
-GET /posix/v1/group/name/{name}      one group by name
-GET /posix/v1/group/gid/{gid}        one group by gid
+GET /posix/v1/group                  the host org's teams (those with a gid)
+GET /posix/v1/group/name/{name}      one team by name (or a user-private group)
+GET /posix/v1/group/gid/{gid}        one team by gid (or a user-private group)
 GET /posix/v1/authorized_keys/{name} text/plain, one key per line
 ```
 
-Access-control policy hinges on the host's `allowed_gid`:
+A host belongs to exactly one org (`host_enrollments.org_id`); its scope is the
+set of that org's team uuids in `host_allowed_groups` (any-of-N). Membership is
+resolved at request time by joining `posix_accounts(enabled = 1)` — there is no
+mirror. Access-control policy:
 
-- **Unscoped (`allowed_gid = NULL`)** — single lookups resolve any
-  enabled account / any group. **Enumeration returns empty** (`passwd` → `[]`,
-  `group` → `[]`) so a single host can't slurp the whole directory.
-- **Scoped (`allowed_gid = Some(gid)`)** — every request re-asserts that
-  `gid` is a `kind = 'org'` group (defense in depth; the stored value is
-  never trusted on its own). If it's missing or not an org group, the host
-  is treated as misconfigured (`tracing::warn!` + empty/404 for everything).
-  Otherwise results are restricted to enabled members of `gid`: `passwd`
-  lists those members, single passwd lookups 404 unless the account is an
-  enabled member, `group`/`group/*` only ever return the one allowed org
-  group, and `authorized_keys` serves keys only for in-scope members.
+- **Whole-org (no scoped teams)** — every account/group decision is "is this a
+  provisioned, enabled member of the host's org?" (`is_org_member_provisioned`).
+  `passwd` enumerates the org's provisioned members; there is **no enumerable
+  org group** (`group` lists only the org's teams that have a gid), so a host
+  can't dump an org roster via `getent group`.
+- **Team-scoped** — restricted to provisioned members of the listed teams
+  (`is_team_member_provisioned`), each team re-asserted to belong to the host's
+  org (cross-org teams fail closed). `group`/`group/*` return those teams as
+  Unix groups; `authorized_keys` serves keys only for visible members.
+- **User-private groups** — `group/gid` and `group/name` also resolve an
+  account's own primary (`kind='user'`) group as a single-member group, but only
+  when that account is visible on the host (so `id`/`ls -l` show a name, not a
+  bare number); these are never enumerated by `group`.
 
 `authorized_keys` resolves name → enabled account → `authorized_keys_for`,
 **drops any key whose `expires_at` is non-null and `<= now`** (serve-time

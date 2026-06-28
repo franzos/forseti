@@ -1,10 +1,5 @@
-//! Shared per-IP rate-limit helper.
-//!
-//! Wraps `tower_governor::GovernorLayer` so callers don't have to
-//! re-do the burst-size + refill-period arithmetic on each call. The
-//! error handler is caller-supplied so JSON endpoints (RFC 7591 DCR)
-//! and HTML endpoints (`/claim-email`) can render limit-exceeded
-//! responses in their own shapes.
+//! Shared per-IP rate-limit helper wrapping `tower_governor::GovernorLayer`. The error handler is
+//! caller-supplied so JSON (RFC 7591 DCR) and HTML (`/claim-email`) endpoints render their own shapes.
 
 use std::sync::Arc;
 
@@ -16,11 +11,8 @@ use tower_governor::GovernorLayer;
 
 use crate::state::AppState;
 
-/// Mount one `tower_governor` bucket onto `r`. Generic over the key
-/// extractor so callers pick the trust model (`PeerIpKeyExtractor` for
-/// strict mode, `SmartIpKeyExtractor` when an upstream proxy is
-/// trusted). `total_ms` is the rolling window in milliseconds;
-/// `per_window` is the burst size — the cap on requests per window.
+/// Mount one `tower_governor` bucket onto `r`. The key extractor picks the trust model (`PeerIpKeyExtractor`
+/// strict, `SmartIpKeyExtractor` when a proxy is trusted). `total_ms` is the window, `per_window` the burst cap;
 /// `per_window == 0` disables the bucket and returns `r` unmodified.
 pub(crate) fn apply<K, F>(
     r: Router<AppState>,
@@ -49,11 +41,8 @@ where
     r.layer(GovernorLayer::new(Arc::new(cfg)).error_handler(error_handler))
 }
 
-/// Attach paired per-minute + per-hour buckets to `r`, picking the key
-/// extractor from the deployment-shape `trust_xff` flag
-/// (`cfg.proxy.trust_forwarded_for`). Collapses the
-/// `if trust { Smart } else { Peer }` × two-windows ladder that every
-/// rate-limited entry point used to duplicate.
+/// Attach paired per-minute + per-hour buckets to `r`, picking the key extractor from `trust_xff`
+/// (`cfg.proxy.trust_forwarded_for`).
 pub(crate) fn dual_window<F>(
     r: Router<AppState>,
     trust_xff: bool,

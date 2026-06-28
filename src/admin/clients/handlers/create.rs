@@ -77,9 +77,8 @@ struct ClientFormTemplate {
     /// to require PKCE. Stored in `metadata.forseti.require_pkce`.
     /// Enforcement actually lives in Hydra config (`oauth2.pkce.enforced_for_public_clients`).
     require_pkce: bool,
-    /// `client.metadata.forseti.account_deletion_url` — POST'd by the
-    /// user when an app, hit, wants to receive a signed delete
-    /// notification on account self-deletion (Phase 1).
+    /// `client.metadata.forseti.account_deletion_url`: where to POST a signed
+    /// delete notification on account self-deletion.
     account_deletion_url: String,
     /// Preset slug ("mcp" etc.) carried through the form as a hidden
     /// input so create() can stamp it into metadata. Empty when the
@@ -267,18 +266,14 @@ pub async fn new(
     }
 
     match query.type_.as_deref() {
-        // No `?type=` → show the picker.
         None | Some("") => render(&ClientTypePickerTemplate {
             chrome,
             admin_active: AdminSection::Clients,
             options: picker_cards(),
             app_cards: crate::admin::clients::app_templates::app_template_cards(),
         }),
-        // Recognised slug → form pre-filled from the preset defaults.
         Some(slug) => match Preset::from_slug(slug) {
             Some(preset) => {
-                // Seed an empty form with the preset's editable defaults,
-                // then share the field assembly with the re-render path.
                 let seed = seed_form_from_preset(preset);
                 render(&ClientFormTemplate::from_form(
                     chrome,
@@ -288,9 +283,8 @@ pub async fn new(
                     String::new(),
                 ))
             }
-            // Unknown slug → bounce to the picker so the operator picks
-            // one consciously. Avoids a stale link silently landing on a
-            // half-filled form.
+            // Unknown slug bounces to the picker, so a stale link doesn't
+            // land on a half-filled form.
             None => Redirect::to("/admin/clients/new").into_response(),
         },
     }
@@ -311,9 +305,8 @@ pub async fn create(
         return resp;
     }
 
-    // Helper: re-render the form preserving every field the operator just
-    // typed, so a validation/Hydra error doesn't wipe their input. Used by
-    // both error branches below.
+    // Re-render preserving every typed field so a validation/Hydra error
+    // doesn't wipe the operator's input.
     let rerender = |error_message: String| -> Response {
         let chrome = ctx.chrome(&csrf);
         let preset = Preset::from_slug(&form.client_type);
@@ -363,26 +356,12 @@ pub async fn create(
                     }
                 }
             }
-            // Admin-created clients are implicitly verified — the act of
-            // an operator creating the client through the form is the
-            // vouching. Stamp the Forseti-side metadata row so the show
-            // page and consent screen don't need a separate
-            // "creator implicitly trusted" branch. DCR-registered
-            // clients arrive via `/oauth2/register` (different handler),
-            // which inserts `source = "dcr"` + `verification = "unverified"`.
-            // INSERT failure here is logged but doesn't fail the create
-            // (Hydra has already committed); the row will be created
-            // lazily on first verify/unverify if it's missing.
+            // Admin-created clients are implicitly verified (creating via the
+            // form is the vouching). DCR clients arrive via `/oauth2/register`
+            // as `source = "dcr"` + `verification = "unverified"`. INSERT
+            // failure is logged but doesn't fail the create (Hydra already
+            // committed); the row is created lazily on first verify/unverify.
             if !id.is_empty() {
-                // Org targeting precedence:
-                //   1. AdminScope::Org → that org's id (caller is acting
-                //      as owner of an explicit org via `?org=<slug>`).
-                //   2. AdminScope::Forseti → admin's active-org cookie
-                //      via `orgs::active_org`. Non-Default targets are
-                //      re-gated on the Orgs license so a Forseti admin
-                //      whose cookie points at a non-Default org can't
-                //      sneak a client into a locked org via direct POST.
-                //   3. Default org as the final fallback.
                 let target_org = resolve_create_target_org(&state, &headers, &ctx, &scope).await;
                 if let Err(e) = oauth_client_metadata::insert_admin_verified(
                     &state.db,
@@ -416,10 +395,9 @@ pub async fn create(
                     )),
             )
             .await;
-            // Stash the secret + registration token server-side and
-            // redirect with only a UUID-shaped token in the URL. Avoids
-            // leaking the freshly minted secret into browser history,
-            // server logs, or any proxy/CDN in the redirect chain.
+            // Stash the secret + token server-side; redirect with only a
+            // UUID-shaped token, so the secret never lands in browser history,
+            // logs, or a proxy/CDN in the redirect chain.
             let reveal = SecretReveal::ClientCreated {
                 secret: new.client_secret.clone().unwrap_or_default(),
                 registration_access_token: new
@@ -501,12 +479,10 @@ mod template_seed_tests {
             form.redirect_uris,
             "https://YOUR_DOMAIN/users/auth/openid_connect/callback"
         );
-        // Base preset (web_app) drives the technical defaults + the stamped type.
+        // Base preset (web_app) drives the technical defaults + stamped type.
         assert_eq!(form.client_type, "web_app");
         assert!(form.grant_types.contains(&"authorization_code".to_string()));
-        // GitLab template doesn't require PKCE.
         assert!(form.require_pkce.is_none());
-        // GitLab has no offline_access, so no refresh_token grant.
         assert!(!form.grant_types.contains(&"refresh_token".to_string()));
     }
 

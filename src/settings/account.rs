@@ -2,14 +2,10 @@
 //!
 //! The deletion is a saga over the Forseti-owned webhook outbox: every app
 //! the user has consent grants with gets a signed delete notification.
-//! See `TODO.md` §1 for the full design (state machine, retry policy,
-//! reconciliation).
 //!
-//! Privileged-session enforcement reuses the same `?refresh=true` gate
-//! that `/settings/password` uses — we initiate a Kratos settings flow
-//! purely as a "is this session privileged?" probe, then proceed with
-//! our own delete code. Kratos's admin delete doesn't enforce re-auth
-//! itself, so we have to do it here.
+//! Privileged-session enforcement reuses the `?refresh=true` gate from
+//! `/settings/password` (a Kratos settings flow as a "is this session
+//! privileged?" probe), because Kratos's admin delete doesn't enforce re-auth.
 
 use askama::Template;
 use axum::extract::{Query, State};
@@ -35,9 +31,7 @@ use crate::FlowQuery;
 
 use super::{fetch_settings_subpage, SettingsSection};
 
-/// Card listing on `GET /settings/account/delete` so the user can see
-/// *which* apps will receive the delete notification. Adds one Hydra
-/// admin call to the render — cheap relative to the trust benefit.
+/// One app shown on the delete-confirm card as a notification target.
 #[derive(Debug, Clone)]
 pub(crate) struct NotifiedApp {
     pub(crate) name: String,
@@ -55,17 +49,14 @@ struct SettingsAccountTemplate {
 struct SettingsAccountDeleteConfirmTemplate {
     chrome: PageChrome,
     notified_apps: Vec<NotifiedApp>,
-    /// Kratos settings flow id, threaded through the form action so the
-    /// POST handler can re-run the same privileged-session check via
-    /// `fetch_settings_subpage`. Without it, the POST would land with no
-    /// `?flow=` and bounce through a fresh Kratos init, losing the form
-    /// body.
+    /// Threaded through the form action so the POST re-runs the same
+    /// privileged-session check; without it the POST bounces through a fresh
+    /// Kratos init and loses the form body.
     flow_id: String,
     referrer_banner: Option<crate::handoff::ReferrerBannerView>,
 }
 
-/// `GET /settings/account` — danger zone landing page. Only needs an
-/// active session; the privileged-session check is deferred to the
+/// Danger-zone landing page; the privileged-session check is deferred to the
 /// confirm page.
 pub(crate) async fn settings_account(
     State(state): State<AppState>,
@@ -79,9 +70,7 @@ pub(crate) async fn settings_account(
     })
 }
 
-/// `GET /settings/account/delete` — confirm page. Gated behind the
-/// privileged-session refresh window (via `fetch_settings_subpage`), so
-/// landing here means the user has freshly re-authenticated.
+/// Delete-confirm page; gated behind the privileged-session refresh window.
 pub(crate) async fn settings_account_delete(
     State(state): State<AppState>,
     Query(query): Query<FlowQuery>,
@@ -122,8 +111,7 @@ pub(crate) async fn settings_account_delete(
 pub(crate) struct DeleteForm {
     #[serde(rename = "_csrf")]
     pub(crate) csrf: Option<String>,
-    /// Belt-and-braces: the form asks the user to type their email so a
-    /// stray click can't trigger a destructive action.
+    /// Typed-email confirmation so a stray click can't trigger the delete.
     #[serde(default)]
     pub(crate) confirm_email: String,
 }
@@ -141,8 +129,8 @@ pub(crate) async fn settings_account_delete_submit(
         return resp;
     }
 
-    // Same privileged gate as the GET — if the privileged window lapsed
-    // between confirm and submit, bounce back through `/login?refresh=true`.
+    // Re-run the privileged gate in case the window lapsed between confirm and
+    // submit.
     let session =
         match fetch_settings_subpage(&state, &headers, &query, SettingsSection::Account, &sess)
             .await
@@ -151,7 +139,7 @@ pub(crate) async fn settings_account_delete_submit(
             Err(resp) => return resp,
         };
 
-    // Belt-and-braces: typed-email confirm must match the session's email.
+    // Typed-email confirm must match the session's email.
     let session_email_str = session_email(&session);
     if !form
         .confirm_email
@@ -189,9 +177,8 @@ async fn run_delete_saga(state: &AppState, session: &ory::Session, actx: &AuditC
         "account self-delete: saga starting"
     );
 
-    // Block before anything destructive: refuse to orphan an org whose
-    // only owner is leaving while other members remain. Solo orgs (sole
-    // owner, no other members) are not returned and delete normally.
+    // Before anything destructive: refuse to orphan an org whose only owner is
+    // leaving while other members remain. Solo orgs delete normally.
     match crate::orgs::db::orgs_where_sole_owner_with_other_members(&state.db, &user_id).await {
         Ok(blocking) if !blocking.is_empty() => {
             let names = blocking
@@ -228,15 +215,9 @@ async fn run_delete_saga(state: &AppState, session: &ory::Session, actx: &AuditC
         }
     }
 
-    // Enumerate which apps need notification — every consent-granted
-    // client with an `account_deletion_url` is a target. With SETs the
-    // signing key is Forseti-owned (not per-client), so there's no
-    // additional opt-in to mint.
-    //
-    // Bail BEFORE the destructive call if Hydra is unreachable. Letting
-    // the saga proceed with an empty target list would destroy the
-    // Kratos identity while leaving every integrator with a stale copy
-    // and no notification — a silent compliance regression.
+    // Bail BEFORE the destructive call if Hydra is unreachable: proceeding with
+    // an empty target list would destroy the identity while leaving every
+    // integrator with a stale copy and no notification.
     let targets = match collect_webhook_targets(state, &user_id).await {
         Ok(t) => t,
         Err(e) => {
@@ -255,8 +236,7 @@ async fn run_delete_saga(state: &AppState, session: &ory::Session, actx: &AuditC
     };
     let target_count = targets.len();
 
-    // Saga step 4: enqueue PENDING rows. Empty `targets` short-circuits
-    // and `enqueue_pending` writes nothing.
+    // Enqueue PENDING rows (empty `targets` writes nothing).
     if let Err(e) = webhook::enqueue_pending(
         &state.db,
         &state.signing_key,
@@ -275,17 +255,16 @@ async fn run_delete_saga(state: &AppState, session: &ory::Session, actx: &AuditC
         );
     }
 
-    // Saga step 5: best-effort Hydra session revoke. Don't block on it.
+    // Best-effort Hydra session revoke; don't block on it.
     if let Err(e) = ory::hydra::revoke_consent_sessions_for_subject(&state.ory, &user_id).await {
         tracing::warn!(error = %e, "hydra revoke during self-delete failed (continuing)");
     }
 
-    // Saga step 6: the destructive call. On failure, flip outbox to
-    // ABORTED so the worker never sends and surface an error to the user.
+    // The destructive call. On failure, flip the outbox to ABORTED so the
+    // worker never sends.
     match ory::kratos::admin_delete_identity(&state.ory, &user_id).await {
         Ok(()) => {
-            // Cascade: drop every org membership the now-deleted identity
-            // held. Mirrors the admin-delete path so neither route leaves
+            // Cascade: drop org memberships so neither delete route leaves
             // ghost rows on the members page.
             match crate::orgs::db::remove_member_everywhere(&state.db, &user_id).await {
                 Ok(n) if n > 0 => tracing::info!(
@@ -300,20 +279,17 @@ async fn run_delete_saga(state: &AppState, session: &ory::Session, actx: &AuditC
                     "self-delete: org_members cleanup failed",
                 ),
             }
-            // Cascade: purge POSIX rows. An orphan would leave a usable
-            // login for a deleted identity. Best-effort; never abort.
+            // Cascade: purge POSIX rows, else an orphan leaves a usable login
+            // for a deleted identity. Best-effort.
             if let Err(e) = crate::posix::db::delete_account_rows(&state.db, &user_id).await {
                 tracing::error!(error = ?e, identity_id = %user_id, "failed to purge posix rows on identity delete");
             }
             if let Err(e) = webhook::confirm_event(&state.db, event_id).await {
                 tracing::error!(error = %e, event_id = %event_id, "outbox confirm failed; rows stay PENDING and will be reconciled at startup");
             }
-            // Compliance-critical: account self-deletion must leave an
-            // audit trail. Identity is already destroyed, so we can't
-            // unwind on Err — but `audit::log` emits a structured
-            // `audit_fallback` stderr line so the row stays recoverable
-            // from log scrapes. Log loudly here too so operators see it
-            // in their primary log stream.
+            // Compliance-critical audit trail. The identity is already gone so
+            // we can't unwind on Err; `audit::log` emits an `audit_fallback`
+            // stderr line, and we log loudly here for the primary stream.
             if let Err(e) = audit::log(
                 &state.db,
                 AuditEvent::new(action::ACCOUNT_SELF_DELETED)
@@ -336,11 +312,9 @@ async fn run_delete_saga(state: &AppState, session: &ory::Session, actx: &AuditC
                     "CRITICAL audit row for account.self_deleted failed to persist; recover from audit_fallback stderr event"
                 );
             }
-            // Saga step 7: log out the browser. The Kratos identity is
-            // gone server-side, but the browser still holds the Kratos
-            // session cookie until it expires. Clear it explicitly so
-            // the user doesn't briefly carry a stale cookie back to any
-            // surface that hasn't yet observed the 401.
+            // Clear the now-stale Kratos session cookie the browser still
+            // holds, so it isn't carried back to a surface that hasn't yet
+            // observed the 401.
             let mut response = Redirect::to("/login?msg=account_deleted").into_response();
             let secure = state.cfg.self_.is_https();
             if let Ok(hv) = axum::http::HeaderValue::from_str(&clear_kratos_session_cookie(secure))
@@ -375,26 +349,19 @@ async fn run_delete_saga(state: &AppState, session: &ory::Session, actx: &AuditC
     }
 }
 
-/// Pull every consent grant for `user_id` and emit one webhook target
-/// per (client_id, account_deletion_url) pair. The receiver verifies the
-/// signed SET against Forseti's published JWKS — no shared-secret
-/// minting needed any more.
+/// One webhook target per (client_id, account_deletion_url) consent grant.
 ///
-/// Returns `Err` when the Hydra consent-session lookup itself fails.
-/// Callers must treat this as fatal to the saga: silently proceeding
-/// with an empty target list lets the destructive Kratos delete go
-/// through while integrators never learn the user is gone. The confirm
-/// page's `list_apps_to_notify` swallows the same failure deliberately —
-/// rendering an incomplete app list on a read-only screen is acceptable;
-/// dropping fan-out on the write path is not.
+/// `Err` (Hydra lookup failure) is fatal to the saga: proceeding with an empty
+/// target list would delete the identity while integrators never learn the user
+/// is gone. `list_apps_to_notify` swallows the same failure because its
+/// read-only screen tolerates an incomplete list; the write path doesn't.
 async fn collect_webhook_targets(
     state: &AppState,
     user_id: &str,
 ) -> anyhow::Result<Vec<webhook::WebhookTarget>> {
     let sessions = ory::hydra::list_consent_sessions_by_subject(&state.ory, user_id).await?;
 
-    // De-duplicate by client_id — a user can have many consent sessions
-    // with the same client (one per device / scope set).
+    // De-duplicate by client_id (many consent sessions per client).
     let mut seen: std::collections::HashSet<String> = Default::default();
     let mut targets = Vec::new();
     for sess in sessions {
@@ -448,10 +415,8 @@ async fn list_apps_to_notify(state: &AppState, user_id: &str) -> Vec<NotifiedApp
     apps
 }
 
-/// Pull `metadata.forseti.account_deletion_url` from a Hydra client's
-/// `metadata` blob. Hydra has no typed field for this — we park it
-/// under our namespaced subobject so we don't collide with anything
-/// the operator or other tooling stores there.
+/// `metadata.forseti.account_deletion_url` from a Hydra client. Namespaced
+/// under `forseti` to avoid colliding with other tooling's metadata.
 fn deletion_url_from_metadata(metadata: Option<&serde_json::Value>) -> Option<String> {
     metadata?
         .get("forseti")?
@@ -472,25 +437,13 @@ fn render_delete_failure(state: &AppState, body: &str) -> Response {
     .into_response()
 }
 
-/// Build a `Set-Cookie` header value that clears the Kratos session
-/// cookie (`ory_kratos_session`) on the browser. The cookie attributes
-/// (`Path=/`, `HttpOnly`, `SameSite=Lax`, optional `Secure`, plus a
-/// past `Expires` to trigger eviction) match the shape Kratos itself
-/// emits in the path-prefixed single-host topology recommended by
-/// `docs/operator-guide-proxy.md` — same name + same path + same
-/// domain, so the browser overwrites the existing cookie.
+/// Clear the `ory_kratos_session` cookie. Attributes match what Kratos emits
+/// in the path-prefixed single-host topology so the browser overwrites it.
 ///
-/// Expiry is signalled via `Expires=Thu, 01 Jan 1970 00:00:00 GMT`
-/// (not `Max-Age=0`) for parity with `flash::clear_flash_cookie` —
-/// avoids a `time` crate dep, and both browser semantics are
-/// equivalent in practice.
-///
-/// In a split-origin deployment (Kratos on a separate host or subdomain
-/// from Forseti) the browser scopes Kratos's cookie to Kratos's
-/// origin, and this header is a no-op from Forseti — the stale
-/// cookie sticks until the next request to Kratos returns 401 and
-/// clears it server-side. Documented limitation; lives with the proxy
-/// shape choice.
+/// In a split-origin deployment (Kratos on a separate host/subdomain) the
+/// browser scopes Kratos's cookie to Kratos's origin, so this is a no-op until
+/// the next request to Kratos returns 401. Documented limitation of the proxy
+/// shape.
 fn clear_kratos_session_cookie(secure: bool) -> String {
     let mut s = Cookie::build(("ory_kratos_session", ""))
         .path("/")
@@ -499,8 +452,8 @@ fn clear_kratos_session_cookie(secure: bool) -> String {
         .secure(secure)
         .build()
         .to_string();
-    // Past `Expires` mirrors what `clear_flash_cookie` does — fixed RFC
-    // 1123 string in the epoch, no extra dep on a time-formatting crate.
+    // Fixed epoch `Expires` (not `Max-Age=0`) to avoid a time-formatting dep,
+    // matching `clear_flash_cookie`.
     s.push_str("; Expires=Thu, 01 Jan 1970 00:00:00 GMT");
     s
 }

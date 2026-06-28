@@ -1,12 +1,10 @@
-//! Tower middleware that fires the lazy auto-join into the Default org
-//! once per request when a Kratos session is present. Hoisted out of the
-//! `RequireSession` extractor so session resolution stays a pure read.
+//! Tower middleware firing the lazy Default-org auto-join once per request
+//! when a Kratos session is present, kept out of `RequireSession` so session
+//! resolution stays a pure read.
 //!
-//! Also caches the resolved [`ory::Session`] in request extensions so the
-//! session extractors don't pay the whoami round-trip a second time. Any
-//! failure (no cookie, Kratos transport hiccup) silently forwards to the
-//! next handler — auto-join is opportunistic, the next authenticated
-//! request retries.
+//! Caches the resolved session in request extensions so the extractors skip a
+//! second whoami. Any failure forwards silently; auto-join is opportunistic
+//! and the next authenticated request retries.
 
 use axum::extract::{Request, State};
 use axum::middleware::Next;

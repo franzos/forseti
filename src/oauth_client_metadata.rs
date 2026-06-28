@@ -1,42 +1,16 @@
 //! Forseti-owned trust-boundary state for Hydra OAuth2 clients.
 //!
-//! Why this lives Forseti-side rather than on `metadata.forseti.*` of the
-//! Hydra client itself: DCR-registered clients receive a
-//! `registration_access_token` (RAT) in the response of `POST
-//! /oauth2/register`. RFC 7592's PUT `/oauth2/register/{id}` (Hydra
-//! handles that directly — Forseti does not proxy that path) lets the
-//! RAT-bearer replace the full client representation, **including
-//! `metadata`**. So if verification state lived on the Hydra client, a
-//! self-registered client could flip its own
-//! `metadata.forseti.verification` from `"unverified"` to `"verified"`
-//! and forge the trust badge on the consent screen. Verified against
-//! Hydra v26.2.0 `client/handler.go::setOidcDynamicClient` (lines 285,
-//! 338-388), which persists the request's `Metadata` field
-//! unconditionally.
+//! Why this lives Forseti-side, not on the Hydra client's
+//! `metadata.forseti.*`: a DCR client's `registration_access_token` (RAT)
+//! can PUT the full client representation via RFC 7592 (Hydra-handled),
+//! including `metadata`. So trust state on the Hydra client would be
+//! self-forgeable: a client could flip its own `verification` to
+//! `"verified"`. This table is unreachable by the RAT (no Forseti route
+//! mutates it from a Hydra-issued credential).
 //!
-//! Everything in this module reads/writes the `oauth_client_metadata`
-//! table only. The RAT cannot reach this table — there is no Forseti
-//! route that mutates rows based on a Hydra-issued credential.
-//!
-//! Trust-boundary fields:
-//!
-//! - `verification`: `"verified"` | `"unverified"`. Drives the consent
-//!   badge and the admin list filter.
-//! - `verified_by` / `verified_at`: who vouched and when. Preserved on
-//!   revocation so the trust history survives.
-//! - `verification_revoked_by` / `verification_revoked_at`: who pulled
-//!   the vouch and when. Cleared on re-verification.
-//! - `source`: `"admin"` | `"dcr"`. Provenance. Drives the
-//!   "Self-registered" pill on the admin list.
-//! - `dcr_iat_id` / `dcr_registered_at`: link back to the IAT used for
-//!   self-registration. Durable counterpart to the audit row.
-//!
-//! Back-compat: a missing row defaults to `verified` on the consent
-//! screen and admin list. Clients created before this table existed
-//! came in through the admin UI, which is the act of vouching — the
-//! implicit-trust rule applies retroactively. Lazy creation on first
-//! verify/unverify action handles the trickle of legacy clients
-//! touched by an admin.
+//! Back-compat: a missing row defaults to `verified`; legacy clients came in
+//! through the admin UI (the act of vouching). Verify/unverify lazily insert
+//! a row for legacy clients an admin touches.
 
 use chrono::Utc;
 use diesel::prelude::*;
@@ -60,12 +34,10 @@ pub mod verification {
     pub const UNVERIFIED: &str = "unverified";
 }
 
-/// Full row projection for the read paths. `verification`-as-string is
-/// preserved (rather than collapsed to a bool) so the diesel column
-/// shape stays in sync with the table — callers that only need the bool
-/// use [`Row::is_verified`].
-// `Selectable` selects every column so the projection stays in lockstep
-// with the table; several columns aren't field-accessed in Rust yet.
+/// Full row projection for the read paths. `verification` stays a string to
+/// match the column; bool-only callers use [`Row::is_verified`].
+// Selects every column to stay in lockstep with the table; several columns
+// aren't field-accessed in Rust yet.
 #[allow(dead_code)]
 #[derive(Queryable, Selectable, Debug, Clone)]
 #[diesel(table_name = ocm)]
@@ -85,18 +57,11 @@ pub struct Row {
     /// for clients that didn't declare one — `resource_url` may still
     /// be set lazily on first consent for those.
     pub audience: Option<String>,
-    /// First observed `resource=` URL on the auth URL, or the first
-    /// entry of `requested_access_token_audience` as a fallback.
-    /// Captured lazily on the client's first successful consent and
-    /// never overwritten — first-writer-wins via a `WHERE resource_url
-    /// IS NULL` predicate.
+    /// First observed `resource=` URL (or first audience entry). Captured
+    /// lazily on first consent, first-writer-wins via `WHERE resource_url IS
+    /// NULL`.
     pub resource_url: Option<String>,
-    /// Owning organization id. Defaults to `'default'` for clients
-    /// created before orgs landed (backfilled by the migration). Read
-    /// path lands in a follow-up (step 11 in
-    /// `TODO_LICENSING_FEATURES.md`) — the field is part of the row
-    /// shape today so we don't have to migrate the diesel projection
-    /// again when filter UIs ship.
+    /// Owning organization id; defaults to `'default'` for pre-orgs clients.
     pub org_id: String,
     /// Curated app-template slug stamped at admin-create time; drives the
     /// app logo on the client list. Cosmetic only.
@@ -132,10 +97,8 @@ struct InsertRow<'a> {
     template_slug: Option<&'a str>,
 }
 
-/// Fetch the row for `client_id`. `Ok(None)` when no row exists — the
-/// caller decides how to treat the missing-row case (consent screen +
-/// admin list both default to "verified" for legacy clients; verify /
-/// unverify lazily insert).
+/// Fetch the row for `client_id`. `Ok(None)` when none exists; the caller
+/// decides the missing-row case (consent + admin list default to "verified").
 pub async fn get(db: &DbPool, client_id: &str) -> anyhow::Result<Option<Row>> {
     let id = client_id.to_string();
     let row: Option<Row> = db_interact!(db, |conn| {
@@ -148,12 +111,8 @@ pub async fn get(db: &DbPool, client_id: &str) -> anyhow::Result<Option<Row>> {
     Ok(row)
 }
 
-/// Fetch rows for a batch of client ids. Result vector is unordered;
-/// callers index it through a `client_id` lookup. Used by the admin
-/// list page to merge verification state in memory after Hydra returns
-/// the page of clients (Hydra owns the clients table, Forseti owns
-/// the metadata table — we can't `JOIN` across them, so the merge
-/// happens in Rust).
+/// Fetch rows for a batch of client ids (unordered). The admin list merges
+/// these with Hydra's clients in Rust, since the two tables can't be JOINed.
 pub async fn get_many(db: &DbPool, client_ids: &[String]) -> anyhow::Result<Vec<Row>> {
     if client_ids.is_empty() {
         return Ok(Vec::new());
@@ -168,15 +127,10 @@ pub async fn get_many(db: &DbPool, client_ids: &[String]) -> anyhow::Result<Vec<
     Ok(rows)
 }
 
-/// INSERT a fresh row for a DCR-registered client. Called from the DCR
-/// proxy after Hydra confirms the registration. `iat_id` is `Some` when
-/// the registration presented a valid Initial Access Token, and `None`
-/// for anonymous DCR (the default — Claude and friends self-register
-/// without any way to present an IAT, so the proxy lets them through and
-/// relies on the `unverified` badge + admin review as the safety
-/// mechanism). Returns Err if the row already exists (which shouldn't
-/// happen — `client_id` is Hydra-minted and globally unique) so the
-/// caller can log loudly without retrying.
+/// INSERT a fresh row for a DCR-registered client (always `unverified`).
+/// `iat_id` is `Some` for an IAT-bound registration, `None` for anonymous.
+/// Errs if the row exists (shouldn't, `client_id` is Hydra-minted) so the
+/// caller logs loudly without retrying.
 pub async fn insert_dcr(
     db: &DbPool,
     client_id: &str,
@@ -250,16 +204,13 @@ pub async fn insert_admin_verified(
     Ok(())
 }
 
-/// Inside an open transaction (concrete connection `$c`): fetch the prior
-/// verification state for `$id` ("verified" / "unverified" / "missing")
-/// and, when no row exists, lazy-insert a baseline `unverified` /
-/// `source = "admin"` legacy row so the caller's follow-up UPDATE always
-/// lands. Legacy clients predate this table; they came in via the admin
-/// UI, hence the `"admin"` provenance. Evaluates to the prior state.
+/// Inside an open transaction (`$c`): return the prior verification state for
+/// `$id` ("verified"/"unverified"/"missing"), lazy-inserting a baseline
+/// `unverified`/`source = "admin"` row when absent so the caller's UPDATE
+/// always lands.
 ///
-/// A macro (not a function) because `db_interact!` monomorphizes the
-/// transaction body for both the SQLite and Postgres connection types —
-/// a shared helper would need full dual-backend diesel bounds.
+/// A macro, not a function: `db_interact!` monomorphizes the body for both
+/// connection types, and a shared helper would need full dual-backend bounds.
 macro_rules! ensure_row_and_prior {
     ($c:expr, $id:expr, $now:expr) => {{
         let existing: Option<Row> = ocm::table
@@ -357,22 +308,9 @@ pub async fn mark_unverified(
     Ok(prior)
 }
 
-/// Stamp `resource_url` on the row for `client_id`, but only when it
-/// hasn't been recorded yet. Called from the consent flow after Hydra
-/// accepts the grant, so Forseti captures "what is this client
-/// actually used to talk to?" without depending on the DCR caller
-/// having declared an audience up front.
-///
-/// First-writer-wins: the UPDATE predicate `WHERE resource_url IS NULL`
-/// means concurrent first-consents from multiple users can't race —
-/// subsequent writers find zero rows match and the UPDATE is a no-op.
-/// Returns Ok even when the predicate matched zero rows (already
-/// captured, or no row at all for this client — legacy clients without
-/// Forseti metadata).
-/// Count rows belonging to `org_id`. Used as the org-delete precondition
-/// check — refuses to drop the org row while any client still references
-/// it, so we don't orphan Hydra clients (which Forseti can't
-/// authoritatively migrate without operator input).
+/// Count rows belonging to `org_id`. The org-delete precondition: refuses to
+/// drop the org while any client references it, so Hydra clients aren't
+/// orphaned.
 pub async fn count_for_org(db: &DbPool, org_id: &str) -> anyhow::Result<u32> {
     let org = org_id.to_string();
     let n: i64 = db_interact!(db, |conn| {
@@ -384,6 +322,9 @@ pub async fn count_for_org(db: &DbPool, org_id: &str) -> anyhow::Result<u32> {
     Ok(n.max(0) as u32)
 }
 
+/// Stamp `resource_url` only when not yet recorded. First-writer-wins via
+/// `WHERE resource_url IS NULL`; a zero-row match (already captured, or no
+/// row) still returns Ok.
 pub async fn upsert_resource_url_if_missing(
     db: &DbPool,
     client_id: &str,

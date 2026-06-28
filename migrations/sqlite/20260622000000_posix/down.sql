@@ -1,7 +1,12 @@
 DROP INDEX IF EXISTS idx_group_members_identity;
 DROP INDEX IF EXISTS idx_ssh_keys_identity;
+DROP INDEX IF EXISTS idx_org_team_members_identity;
+DROP INDEX IF EXISTS idx_org_teams_org;
 DROP TABLE IF EXISTS ssh_authorized_keys;
 DROP TABLE IF EXISTS host_enrollments;
+DROP TABLE IF EXISTS posix_sequences;
+DROP TABLE IF EXISTS org_team_members;
+DROP TABLE IF EXISTS org_teams;
 DROP TABLE IF EXISTS posix_group_members;
 DROP TABLE IF EXISTS posix_groups;
 DROP TABLE IF EXISTS posix_accounts;

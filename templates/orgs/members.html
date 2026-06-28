@@ -21,6 +21,15 @@
         <p class="font-body-md text-body-md text-on-surface-variant mt-1">
           Owners can promote / demote members and remove anyone except the last owner.
         </p>
+        {% if !is_owner %}
+          {% if visibility == "admins_only" %}
+            <p class="font-body-sm text-on-surface-variant mt-1">Only administrators can see the full member list.</p>
+          {% else if visibility == "same_group" %}
+            <p class="font-body-sm text-on-surface-variant mt-1">You see members who share a team with you.</p>
+          {% else %}
+            <p class="font-body-sm text-on-surface-variant mt-1">All members are visible.</p>
+          {% endif %}
+        {% endif %}
       </header>
 
       {% if is_owner %}
@@ -50,6 +59,31 @@
               Send invite
             </button>
           </form>
+        </div>
+      {% endif %}
+
+      {% if is_owner %}
+        <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg">
+          <h2 class="font-headline-md text-headline-md text-on-surface mb-stack-md">Directory visibility</h2>
+          <form method="POST"
+                action="{% if is_default %}/settings/organization/members/visibility{% else %}/settings/organizations/{{ org.slug }}/members/visibility{% endif %}"
+                class="flex flex-col md:flex-row gap-stack-md items-end">
+            <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+            <label class="flex flex-col gap-1 flex-1">
+              <span class="font-label-sm text-label-sm text-on-surface-variant">Who can see the member list</span>
+              <select name="visibility"
+                      class="border border-outline-variant rounded-lg px-3 py-2 bg-surface-container-low">
+                <option value="all" {% if visibility == "all" %}selected{% endif %}>All members</option>
+                <option value="same_group"
+                        {% if visibility == "same_group" %}selected{% endif %}>Same team only</option>
+                <option value="admins_only"
+                        {% if visibility == "admins_only" %}selected{% endif %}>Administrators only</option>
+              </select>
+            </label>
+            <button type="submit"
+                    class="bg-primary text-on-primary rounded-lg px-4 py-2 font-label-md text-label-md">Save</button>
+          </form>
+          <p class="font-body-sm text-on-surface-variant mt-stack-sm">Same team only requires at least one team to exist first.</p>
         </div>
       {% endif %}
 
@@ -92,6 +126,7 @@
                         <span class="text-on-surface-variant">&mdash;</span>
                       {% endif %}
                       {% if m.is_self %}<span class="text-on-surface-variant">(you)</span>{% endif %}
+                      {% if m.hidden %}<span class="ml-1 px-1.5 py-0.5 rounded bg-surface-container text-on-surface-variant font-label-sm text-label-sm">Hidden</span>{% endif %}
                     </span>
                   </div>
                 </td>
@@ -115,15 +150,34 @@
                 </td>
                 <td class="px-stack-md py-stack-sm font-body-sm text-on-surface-variant">{{ m.added_at }}</td>
                 <td class="px-stack-md py-stack-sm text-right">
-                  {% if is_owner && !m.is_self %}
-                    <form method="POST"
-                          action="{% if is_default %}/settings/organization/members/{{ m.identity_id }}/remove{% else %}/settings/organizations/{{ org.slug }}/members/{{ m.identity_id }}/remove{% endif %}"
-                          onsubmit="return confirm('Remove {{ m.email }}?');"
-                          class="inline">
-                      <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
-                      <button type="submit" class="text-error font-label-sm">Remove</button>
-                    </form>
-                  {% endif %}
+                  <div class="inline-flex items-center gap-3">
+                    {% if is_owner || m.is_self %}
+                      <form method="POST"
+                            action="{% if is_default %}/settings/organization/members/{{ m.identity_id }}/hidden{% else %}/settings/organizations/{{ org.slug }}/members/{{ m.identity_id }}/hidden{% endif %}"
+                            class="inline">
+                        <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+                        <input type="hidden"
+                               name="hidden"
+                               value="{% if m.hidden %}false{% else %}true{% endif %}">
+                        <button type="submit" class="font-label-sm text-primary">
+                          {% if m.hidden %}
+                            Show
+                          {% else %}
+                            Hide
+                          {% endif %}
+                        </button>
+                      </form>
+                    {% endif %}
+                    {% if is_owner && !m.is_self %}
+                      <form method="POST"
+                            action="{% if is_default %}/settings/organization/members/{{ m.identity_id }}/remove{% else %}/settings/organizations/{{ org.slug }}/members/{{ m.identity_id }}/remove{% endif %}"
+                            onsubmit="return confirm('Remove {{ m.email }}?');"
+                            class="inline">
+                        <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+                        <button type="submit" class="text-error font-label-sm">Remove</button>
+                      </form>
+                    {% endif %}
+                  </div>
                 </td>
               </tr>
             {% endfor %}

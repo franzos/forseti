@@ -1,9 +1,5 @@
-//! View-model for the top-nav active-org dropdown.
-//!
-//! Every layout template that renders the header reads this struct via the
-//! base template's `org_nav` block. OSS deployments see a single Default
-//! row in the dropdown (visually present-but-trivial); commercial
-//! deployments see the full membership list.
+//! View-model for the top-nav active-org dropdown, read by the base
+//! template's `org_nav` block.
 
 use serde::Serialize;
 
@@ -11,11 +7,9 @@ use crate::orgs::Membership;
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct OrgNav {
-    /// Currently-active org. `None` when the user has no memberships
-    /// (shouldn't happen in practice — registration auto-joins Default).
+    /// Currently-active org. `None` when the user has no memberships.
     pub active: Option<Membership>,
-    /// Every org the user belongs to, sorted by name. Capped to 32 entries
-    /// at the consent layer; the dropdown shows the full list.
+    /// Every org the user belongs to, sorted by name (the dropdown is uncapped).
     pub memberships: Vec<Membership>,
 }
 
@@ -36,8 +30,7 @@ impl OrgNav {
     }
 }
 
-/// Cap applied to the `orgs` OIDC claim (per the spec). The nav dropdown
-/// itself is uncapped.
+/// Cap on the `orgs` OIDC claim. The nav dropdown itself is uncapped.
 pub const ORGS_CLAIM_CAP: usize = 32;
 
 #[cfg(test)]

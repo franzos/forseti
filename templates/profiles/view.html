@@ -78,6 +78,33 @@
           </div>
         {% endif %}
 
+        {% if show_teams && !teams.is_empty() %}
+          <div class="mt-stack-md flex flex-col gap-stack-sm">
+            <h2 class="font-label-md text-label-md text-on-surface-variant">Teams</h2>
+            <div class="flex flex-wrap gap-stack-sm">
+              {% for team in teams %}
+                <span class="bg-secondary-container text-on-secondary-container rounded-full px-3 py-1 font-label-sm text-label-sm">{{ team.name }}
+                  {% if !team.org_name.is_empty() %} <span class="text-on-surface-variant">&middot; {{ team.org_name }}</span>{% endif %}
+                </span>
+              {% endfor %}
+            </div>
+          </div>
+        {% endif %}
+
+        {% if show_hosts && !hosts.is_empty() %}
+          <div class="mt-stack-md flex flex-col gap-stack-sm">
+            <h2 class="font-label-md text-label-md text-on-surface-variant">Linux hosts</h2>
+            <ul class="flex flex-col gap-1">
+              {% for host in hosts %}
+                <li class="font-body-sm text-body-sm text-on-surface">
+                  <span class="font-mono">{{ host.hostname }}</span>
+                  {% if !host.org_name.is_empty() %} <span class="text-on-surface-variant">&middot; {{ host.org_name }}</span>{% endif %}
+                </li>
+              {% endfor %}
+            </ul>
+          </div>
+        {% endif %}
+
         <p class="font-body-sm text-body-sm text-on-surface-variant mt-stack-md">Profile updated {{ updated_humanised }}.</p>
       </div>
     </article>

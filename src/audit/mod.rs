@@ -49,8 +49,6 @@
 //! goes through [`with_audit_purge`], which sets the backend-specific
 //! override inside the same transaction as the DELETE. A crash mid-prune
 //! rolls everything back atomically — no separate boot-time reset needed.
-//!
-//! See `TODO.md` §2.
 
 pub mod kratos_webhook;
 
@@ -135,6 +133,7 @@ pub mod action {
     pub const ADMIN_SESSION_REVOKED: &str = "admin.session.revoked";
     // posix host enrollment (`src/admin/hosts.rs`)
     pub const HOST_ENROLLED: &str = "host.enrolled";
+    pub const HOST_UPDATED: &str = "host.updated";
     pub const HOST_REVOKED: &str = "host.revoked";
     pub const HOST_SECRET_ROTATED: &str = "host.secret_rotated";
     // posix account provisioning (`src/admin/posix.rs`)
@@ -167,6 +166,15 @@ pub mod action {
     pub const ORG_MEMBER_ADDED: &str = "org.member.added";
     pub const ORG_MEMBER_REMOVED: &str = "org.member.removed";
     pub const ORG_MEMBER_ROLE_CHANGED: &str = "org.member.role_changed";
+    pub const ORG_VISIBILITY_CHANGED: &str = "org.visibility_changed";
+    pub const ORG_MEMBER_DIRECTORY_HIDDEN: &str = "org.member.directory_hidden";
+    pub const ORG_MEMBER_DIRECTORY_UNHIDDEN: &str = "org.member.directory_unhidden";
+    // org teams (`src/orgs/teams.rs`), wired by the teams settings surface.
+    pub const ORG_TEAM_CREATED: &str = "org.team.created";
+    pub const ORG_TEAM_RENAMED: &str = "org.team.renamed";
+    pub const ORG_TEAM_DELETED: &str = "org.team.deleted";
+    pub const ORG_TEAM_MEMBER_ADDED: &str = "org.team.member_added";
+    pub const ORG_TEAM_MEMBER_REMOVED: &str = "org.team.member_removed";
     // account-self (#1)
     pub const ACCOUNT_SELF_DELETED: &str = "account.self_deleted";
     // commercial license (`src/commercial/`)
@@ -211,6 +219,7 @@ pub mod target_kind {
     pub const POSIX_ACCOUNT: &str = "posix_account";
     pub const LICENSE: &str = "license";
     pub const ORG: &str = "org";
+    pub const TEAM: &str = "team";
     pub const SAML_CONNECTION: &str = "saml_connection";
 }
 
@@ -911,8 +920,6 @@ fn escape_like(s: &str) -> String {
     out
 }
 
-/// Load up to `filter.limit` rows newest-first, plus a total count for
-/// pagination. Limit is clamped to `[1, 200]` per the design.
 /// Fetch a single event by id. Used by the `/admin/audit/{id}` detail
 /// page so an operator can inspect the full metadata + request context
 /// without the summary table having to carry them.

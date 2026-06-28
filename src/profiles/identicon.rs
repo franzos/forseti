@@ -1,27 +1,19 @@
-//! Deterministic SVG identicon — no external crate, no upload pipeline.
-//!
-//! Hash the identity_id with SHA-256, use the first byte trio as an HSL
-//! colour (fixed saturation/lightness for readability), and the next
-//! few bytes as a 5x5 mirrored cell pattern. Output is a compact SVG
-//! that templates inline via `{{ identicon }}|safe`.
+//! Deterministic SVG identicon: SHA-256 of the seed picks an HSL hue and a 5x5
+//! mirrored cell pattern. Templates inline the SVG via `{{ identicon }}|safe`.
 
 use sha2::{Digest, Sha256};
 
-/// Render a 64x64 SVG identicon for `seed`. The fixed viewBox lets the
-/// caller scale via CSS (e.g. width: 96px on the profile page, 32px in
-/// the roster).
+/// Render a 64x64 SVG identicon for `seed`; the fixed viewBox lets callers
+/// scale via CSS.
 pub fn render(seed: &str) -> String {
     let hash = Sha256::digest(seed.as_bytes());
-    // First three bytes pick the foreground hue; saturation/lightness
-    // pinned to values that read well on both light and dark cards.
     // u32 to dodge overflow: 255 * 360 = 91 800 > u16::MAX.
     let hue = u32::from(hash[0]) * 360 / 255;
     let fg = format!("hsl({hue}, 65%, 55%)");
     let bg = "hsl(0, 0%, 96%)";
 
-    // 5x5 grid mirrored across the vertical axis — only the 3 leftmost
-    // cells per row are randomised (columns 3-4 mirror columns 1-0).
-    // 5 rows × 3 cells = 15 bits, well inside the next two hash bytes.
+    // 5x5 grid mirrored across the vertical axis: 5 rows x 3 left cells = 15
+    // bits, taken from the next two hash bytes.
     let bits = u16::from(hash[1]) | (u16::from(hash[2]) << 8);
 
     let mut cells = String::with_capacity(512);
@@ -34,7 +26,6 @@ pub fn render(seed: &str) -> String {
                 cells.push_str(&format!(
                     r#"<rect x="{x}" y="{y}" width="12" height="12" fill="{fg}"/>"#
                 ));
-                // Mirror onto the right side unless we're on the middle column.
                 if col < 2 {
                     let mirror_x = (4 - col) * 12 + 2;
                     cells.push_str(&format!(

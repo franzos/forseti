@@ -43,21 +43,26 @@ export function adminCredsFromEnv(): AdminCreds | null {
 export async function signInAdminAal2(page: Page, creds: AdminCreds): Promise<void> {
   await signInAal1(page, creds.email, creds.password);
 
-  // Force the AAL2 step-up flow regardless of where AAL1 landed us. This
-  // path is what an admin sees in the wild when they hit any `/admin/*`
-  // URL with only an AAL1 session.
-  await page.goto('/login?aal=aal2');
-  // TOTP form. The lookup_secret input also has `required` set on it
-  // (e2e-review skill's "Known traps") but Playwright's `.click()` on
-  // the totp-named submit button works because Playwright submits with
-  // the right submitter; the browser-side validity check only fires on
-  // visible required inputs and Kratos templates hide the lookup_secret
-  // when the totp screen is showing.
-  const totpInput = page.locator('input[name="totp_code"]');
+  // The password step either landed us off `/login` with an AAL1 session, or
+  // (with `session.whoami.required_aal: highest_available`) advanced straight
+  // into the in-flow AAL2 form at `/login?flow=…`. Only force the explicit
+  // step-up flow when the TOTP form isn't already showing.
+  let totpInput = page.locator('input[name="totp_code"]');
+  if (!(await totpInput.isVisible().catch(() => false))) {
+    // What an admin sees in the wild when they hit any `/admin/*` URL with
+    // only an AAL1 session.
+    await page.goto('/login?aal=aal2');
+    totpInput = page.locator('input[name="totp_code"]');
+  }
+  // The lookup_secret input also has `required` set on it (e2e-review skill's
+  // "Known traps") but Playwright's `.click()` on the totp-named submit button
+  // works because Playwright submits with the right submitter; the
+  // browser-side validity check only fires on visible required inputs and
+  // Kratos templates hide the lookup_secret when the totp screen is showing.
   await totpInput.waitFor({ state: 'visible' });
   await totpInput.fill(computeTotp(creds.totpSecret));
   await Promise.all([
-    page.waitForURL((u) => !u.search.includes('aal=aal2')),
+    page.waitForURL((u) => !u.pathname.startsWith('/login')),
     page.locator('button[name="method"][value="totp"]').click(),
   ]);
 }

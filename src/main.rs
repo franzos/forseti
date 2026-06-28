@@ -41,9 +41,7 @@ pub(crate) use web::{render_error_boundary, safe_return_to, FlowQuery};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Hand-rolled subcommand dispatch — one verb doesn't justify a CLI
-    // framework. Anything other than a recognised subcommand falls
-    // through to the HTTP server.
+    // One verb doesn't justify a CLI framework; unrecognised tokens fall through to the HTTP server.
     match std::env::args().nth(1).as_deref() {
         Some("--help" | "-h" | "help") => {
             print_top_help();
@@ -53,9 +51,7 @@ async fn main() -> anyhow::Result<()> {
             let cfg = config::AppConfig::load()?;
             let db = db::DbPool::init(&cfg.database)?;
             db.ping().await?;
-            // Migrations land the audit_events table + the `_forseti_meta`
-            // sentinel row the sqlite trigger reads. Without this the prune
-            // command on a fresh database errors with "no such table".
+            // Migrations land the audit_events table + the sqlite trigger's `_forseti_meta` sentinel row; without them a fresh-db prune hits "no such table".
             if !cfg.database.skip_migrations {
                 db.run_migrations().await?;
             }
@@ -64,8 +60,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Some("unverified-prune") => {
             let cfg = config::AppConfig::load()?;
-            // Reads + deletes go through Kratos's admin API, but each
-            // delete cascades to the local POSIX tables, so we need the pool.
+            // Deletes go through Kratos's admin API but cascade to the local POSIX tables, so the pool is needed.
             let ory = ory::OryClients::from_config(&cfg);
             let db = db::DbPool::init(&cfg.database)?;
             db.ping().await?;
@@ -115,8 +110,7 @@ async fn main() -> anyhow::Result<()> {
                             "  using the operator-supplied [posix].pam_client_secret from config"
                         );
                     } else {
-                        // One-shot reveal — Hydra won't show the plaintext
-                        // again. Operator must store it in [posix].pam_client_secret.
+                        // One-shot reveal: Hydra won't show the plaintext again.
                         println!(
                             "  client_secret (shown ONCE — store it in [posix].pam_client_secret):"
                         );
@@ -130,8 +124,7 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        // Pure file operations — no DB, no Ory clients. Forseti can't read
-        // Kratos's live config via API, so these lint/generate the files.
+        // Pure file operations: Forseti can't read Kratos's live config via API, so these lint/generate the files.
         Some("config-check") => {
             let args: Vec<String> = std::env::args().skip(2).collect();
             std::process::exit(config_cli::check(&args));
@@ -140,9 +133,7 @@ async fn main() -> anyhow::Result<()> {
             let args: Vec<String> = std::env::args().skip(2).collect();
             std::process::exit(config_cli::init(&args));
         }
-        // An unrecognised token that looks like a flag is almost certainly a
-        // typo or a misplaced server flag — show help rather than silently
-        // booting the server. A bare `forseti` (no args) still runs the server.
+        // A flag-shaped token is almost certainly a typo; show help rather than silently booting the server. A bare `forseti` still runs it.
         Some(tok) if tok.starts_with('-') => {
             print_top_help();
             std::process::exit(0);

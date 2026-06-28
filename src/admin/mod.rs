@@ -2,19 +2,15 @@
 //!
 //! Mounted under `/admin/*` from `main.rs::main`. Two-tier access model:
 //!
-//!   - [`require_admin`] — Tier 1, Forseti-wide. Session + AAL2 +
+//!   - [`require_admin`]: Tier 1, Forseti-wide. Session + AAL2 +
 //!     `config.admin.allowed_emails`.
-//!   - [`require_admin_with_scope`] — Tier 1 *or* Tier 2 routed by
-//!     `?org=<slug>`. Tier 2 is session + AAL2 + org ownership (no
-//!     allowlist check). See its docstring and `docs/operator-guide.md`
-//!     ("Admin access model") for the full rationale.
+//!   - [`require_admin_with_scope`]: Tier 1 or Tier 2 routed by `?org=<slug>`.
+//!     Tier 2 is session + AAL2 + org ownership (no allowlist check). See
+//!     `docs/operator-guide.md` ("Admin access model") for the rationale.
 //!
-//! Why a config allowlist rather than a role on the identity (Tier 1):
-//! keeps operator membership declarative and reviewable in the operator's
-//! `config.toml`, and avoids carrying a custom trait through the Kratos
-//! identity schema. The trade-off is that adding/removing a Forseti-wide
-//! admin requires a config reload; for the small operator pool this is
-//! aimed at, that's a feature.
+//! Tier 1 uses a config allowlist rather than a role on the identity so
+//! operator membership stays declarative in `config.toml` and avoids a custom
+//! trait in the Kratos schema; the cost is a config reload to change it.
 
 use askama::Template;
 use axum::{
@@ -46,9 +42,8 @@ pub mod sessions;
 pub mod status;
 pub mod webhooks;
 
-/// Build the admin sub-router. Mounted at the root in `main.rs`; every
-/// route is path-prefixed `/admin/...` directly (rather than nested) so
-/// `require_admin` sees the full request path for redirects.
+/// Build the admin sub-router. Routes are path-prefixed `/admin/...` directly
+/// (not nested) so `require_admin` sees the full request path for redirects.
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/admin", get(redirect_to_status))
@@ -76,6 +71,7 @@ pub fn router() -> Router<AppState> {
         )
         // Identities
         .route("/admin/identities", get(identities::list))
+        .route("/admin/identity-picker", get(identities::pick))
         .route("/admin/identities/{id}", get(identities::show))
         .route(
             "/admin/identities/{id}/recovery",
@@ -96,10 +92,10 @@ pub fn router() -> Router<AppState> {
             "/admin/sessions/{id}/revoke",
             get(sessions::revoke_confirm).post(sessions::revoke),
         )
-        // Audit (session-events stand-in)
+        // Audit
         .route("/admin/audit", get(audit::show))
         .route("/admin/audit/{id}", get(audit::show_one))
-        // Webhooks (Phase 1: dead-lettered account-deletion fan-out rows)
+        // Webhooks
         .route("/admin/webhooks", get(webhooks::show))
         .route("/admin/webhooks/{id}", get(webhooks::show_one))
         .route("/admin/webhooks/{id}/requeue", post(webhooks::requeue))
@@ -112,7 +108,7 @@ pub fn router() -> Router<AppState> {
             get(saml::delete_confirm).post(saml::delete),
         )
         .route("/admin/saml/{org_id}/toggle", post(saml::toggle))
-        // DCR initial access tokens — gate for /oauth2/register
+        // DCR initial access tokens
         .route("/admin/dcr-tokens", get(dcr_tokens::list))
         .route(
             "/admin/dcr-tokens/new",
@@ -122,9 +118,13 @@ pub fn router() -> Router<AppState> {
             "/admin/dcr-tokens/{id}/revoke",
             get(dcr_tokens::revoke_confirm).post(dcr_tokens::revoke),
         )
-        // Linux host enrollment (Forseti-tier; POSIX/NSS resolver)
+        // Linux host enrollment
         .route("/admin/hosts", get(hosts::list))
         .route("/admin/hosts/new", get(hosts::new).post(hosts::issue))
+        .route(
+            "/admin/hosts/{id}/edit",
+            get(hosts::edit).post(hosts::update),
+        )
         .route(
             "/admin/hosts/{id}/revoke",
             get(hosts::revoke_confirm).post(hosts::revoke),
@@ -133,7 +133,7 @@ pub fn router() -> Router<AppState> {
             "/admin/hosts/{id}/rotate",
             get(hosts::rotate_confirm).post(hosts::rotate),
         )
-        // POSIX accounts (Forseti-tier; license-aware seat cap)
+        // POSIX accounts
         .route("/admin/posix", get(posix::list))
         .route("/admin/posix/new", get(posix::new).post(posix::provision))
         .route("/admin/posix/{id}", get(posix::account))
@@ -155,29 +155,21 @@ async fn redirect_to_status() -> Response {
     Redirect::to("/admin/status").into_response()
 }
 
-/// Outcome of running the admin auth gate. On success, the caller gets
-/// the admin's email + identity ID + a brand snapshot for templates. On
-/// failure, the gate returns a `Response` (redirect or 403 page) that
-/// the handler should return immediately.
+/// Successful outcome of the admin auth gate.
 pub struct AdminCtx {
-    /// Admin's Kratos identity id — used as `actor_id` in audit logs.
+    /// Admin's Kratos identity id; used as `actor_id` in audit logs.
     pub identity_id: String,
-    /// Admin's session email — used as `actor_email` in audit logs and the
-    /// `actor` chip in template chrome.
+    /// Admin's session email; used as `actor_email` in audit logs.
     pub email: String,
     /// Brand snapshot for templates that don't get one from state directly.
     pub brand: BrandConfig,
-    /// True when the admin's email is in `[admin].allowed_emails` (Tier 1,
-    /// Forseti-wide). False for org-scoped owners who reached an admin page
-    /// without being on the operator allowlist — they don't get the
-    /// Forseti-wide "Admin" top-nav link.
+    /// True when the email is in `[admin].allowed_emails` (Tier 1). False for
+    /// org-scoped owners, who don't get the Forseti-wide "Admin" top-nav link.
     pub is_forseti_admin: bool,
 }
 
 impl AdminCtx {
     /// Build a [`PageChrome`] from this admin context and a CSRF token.
-    /// Used by admin template structs that embed `chrome: PageChrome`
-    /// alongside their `admin_active: AdminSection` sibling field.
     pub(crate) fn chrome(&self, csrf: &crate::extractors::Csrf) -> PageChrome {
         PageChrome::from_brand_with_admin(
             self.brand.clone(),
@@ -188,10 +180,9 @@ impl AdminCtx {
     }
 }
 
-/// Shared session+AAL2 prefix for both admin entry points. Resolves the
-/// Kratos session, pulls the (identity_id, email) principal, and gates on
-/// AAL2 — returning all three so the caller can layer on the divergent
-/// tail (email allowlist, or org-scope resolution).
+/// Shared session+AAL2 prefix for both admin entry points. Returns the session
+/// plus (identity_id, email) so the caller can layer on the divergent tail
+/// (email allowlist, or org-scope resolution).
 async fn gate_admin_prefix(
     state: &AppState,
     headers: &HeaderMap,
@@ -227,14 +218,11 @@ async fn gate_admin_prefix(
 /// layered on top. This is the two-tier admin model:
 ///
 /// - **Forseti-wide** (no `?org=`): operator surface. Gated by
-///   `[admin].allowed_emails` *plus* session + AAL2. Touches every org and
-///   every identity.
-/// - **Org-scoped** (`?org=<slug>`): org-owner surface. Gated by org
-///   ownership *plus* session + AAL2 — `[admin].allowed_emails` is **not**
-///   checked, by design. Org owners need to manage members / branding /
-///   invites for their own org without the operator having to allowlist
-///   every customer email. Non-Default orgs additionally require the Orgs
-///   license; locked → render the upsell page.
+///   `[admin].allowed_emails` plus session + AAL2. Touches every org.
+/// - **Org-scoped** (`?org=<slug>`): org-owner surface. Gated by org ownership
+///   plus session + AAL2; `[admin].allowed_emails` is **not** checked, so
+///   owners manage their own org without the operator allowlisting every
+///   customer email. Non-Default orgs additionally require the Orgs license.
 ///
 /// Documented for operators in `docs/operator-guide.md` ("Admin access
 /// model"). If you change which tier requires what, update that section.
@@ -261,8 +249,7 @@ pub async fn require_admin_with_scope(
             AdminScope::Forseti
         }
         AdminScopeOutcome::Resolved(other @ AdminScope::Org { .. }) => {
-            // Non-Default orgs need the license. Default org's admin
-            // surface stays OSS-tier.
+            // Non-Default orgs need the license; the Default org stays OSS-tier.
             let org_id_str = other.org_id().unwrap_or("").to_string();
             if org_id_str != crate::orgs::DEFAULT_ORG_ID {
                 crate::extractors::gate_orgs_feature_or_upsell(state, csrf_token, &email)?;
@@ -290,13 +277,9 @@ pub async fn require_admin_with_scope(
     ))
 }
 
-/// Gate every admin handler through these checks. On any failure, returns
-/// `Err(Response)` carrying the redirect / forbidden page the caller
-/// should hand back to axum.
-///
-/// The `path` argument is the request's pathname (e.g. `/admin/clients`),
-/// used as the `return_to` for the `/login` redirects so the user lands
-/// straight back on their target after re-authing.
+/// Tier 1 admin gate. On failure returns the redirect / forbidden page to hand
+/// back to axum. `path` is used as `return_to` so a `/login` redirect lands
+/// back on the target after re-authing.
 pub async fn require_admin(
     state: &AppState,
     headers: &HeaderMap,
@@ -325,10 +308,8 @@ pub async fn require_admin(
     })
 }
 
-/// Render the admin 403 page. Mirrors `main.rs::render_error_boundary` but
-/// scoped to admin — uses the admin base layout so the "Admin" banner is
-/// still visible (signals that the user *is* on the admin path, they're
-/// just not allowed through).
+/// Render the admin 403 page using the admin base layout so the "Admin" banner
+/// stays visible (the user is on the admin path, just not allowed through).
 fn render_forbidden(state: &AppState, title: &str, body: &str) -> Response {
     let tpl = AdminForbiddenTemplate {
         chrome: PageChrome::from_parts(state, String::new(), String::new()),
@@ -348,9 +329,7 @@ struct AdminForbiddenTemplate {
     body: String,
 }
 
-/// Shared confirmation form for destructive POST actions. Every confirm
-/// page renders one of these and the action POST handler verifies the
-/// CSRF + handles `confirm=yes`.
+/// Shared confirmation form for destructive POST actions.
 #[derive(Debug, Deserialize)]
 pub struct ConfirmForm {
     #[serde(rename = "_csrf")]
@@ -365,9 +344,8 @@ impl ConfirmForm {
     }
 }
 
-/// Which admin section the sidebar should highlight. Replaces the
-/// previous `admin_active: String` plumbing — handlers pass the variant
-/// and the template calls `.as_slug()` to compare against link targets.
+/// Which admin section the sidebar should highlight; the template calls
+/// `.as_slug()` to compare against link targets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AdminSection {
     Status,
@@ -403,11 +381,8 @@ impl AdminSection {
     }
 }
 
-/// Shared destructive-action confirmation page. Used by clients (rotate
-/// / delete), identities (disable / delete), sessions (revoke), and DCR
-/// tokens (revoke). Every site renders the same HTML; only `title`,
-/// `body`, and `submit_label` vary. The submit button is always rendered
-/// in the destructive (red) style.
+/// Shared destructive-action confirmation page; only `title`, `body`, and
+/// `submit_label` vary. The submit button is always destructive (red).
 #[derive(askama::Template)]
 #[template(path = "admin/confirm.html")]
 pub(crate) struct ConfirmTemplate {
@@ -420,9 +395,7 @@ pub(crate) struct ConfirmTemplate {
     pub(crate) submit_label: &'static str,
 }
 
-/// Render a simple error response with a generic admin 500. Used by sub-
-/// modules when an upstream call fails irrecoverably. Templates wrap this
-/// via the shared `admin/error.html` layout.
+/// Render a generic admin error page for an irrecoverable upstream failure.
 pub fn render_admin_error(state: &AppState, title: &str, body: &str) -> Response {
     let tpl = AdminErrorTemplate {
         chrome: PageChrome::from_parts(state, String::new(), String::new()),
@@ -440,10 +413,9 @@ struct AdminErrorTemplate {
     body: String,
 }
 
-/// Append `?org=<slug>` (or `&org=<slug>` if a query string is already
-/// present) to `url` when the request is org-scoped, so redirects thread the
-/// active scope and an org-scoped admin doesn't bounce out of the surface
-/// after a POST. Forseti-wide scope is a no-op.
+/// Append `?org=<slug>` to `url` when org-scoped, so redirects thread the
+/// active scope and don't bounce an org-scoped admin out after a POST.
+/// Forseti-wide scope is a no-op.
 pub(crate) fn with_org(url: &str, scope: &crate::orgs::AdminScope) -> String {
     let Some(slug) = scope.slug() else {
         return url.to_string();

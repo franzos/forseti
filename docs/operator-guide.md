@@ -458,8 +458,12 @@ Account-materialisation knobs plus the interactive PAM device-auth settings. The
 
 | Key                         | Type            | Default              | Description                                                                                                          |
 |-----------------------------|-----------------|----------------------|--------------------------------------------------------------------------------------------------------------------|
-| `uid_base`                  | u32             | `1000000`            | First uid handed out. Accounts allocate monotonically upward from here.                                             |
-| `gid_base`                  | u32             | `2000000`            | First gid handed out for auto-created primary and org groups. Deliberately disjoint from the uid space so uids and gids never numerically collide. |
+| `uid_base`                  | u32             | `1000000`            | First uid handed out. Accounts allocate monotonically upward from here, and ids are never reused. |
+| `gid_base`                  | u32             | `2000000`            | First gid handed out for auto-created user-private groups. Deliberately disjoint from the uid space so uids and gids never numerically collide. |
+| `user_uid_size`             | u32             | `1000000`            | Size of the user uid band `[uid_base, uid_base + user_uid_size)`.                                                   |
+| `user_gid_size`             | u32             | `1000000`            | Size of the user-private gid band `[gid_base, gid_base + user_gid_size)`.                                           |
+| `group_gid_base`            | u32             | `3000000`            | First gid handed out for team groups. The team-gid band must not overlap the user-private gid band (Forseti refuses to boot if they collide). |
+| `group_gid_size`            | u32             | `1000000`            | Size of the team-gid band `[group_gid_base, group_gid_base + group_gid_size)`.                                      |
 | `default_shell`             | string          | `"/bin/sh"`          | Login shell written onto a new account unless overridden per account. OS-specific — `/bin/bash` on Debian, `/run/current-system/profile/bin/bash` on Guix System. `/bin/sh` is the safe default because Guix has no `/bin/bash`. |
 | `home_prefix`               | string          | `"/home"`            | Home dir is `{home_prefix}/{username}` unless overridden per account.                                               |
 | `free_seats`                | u32             | `25`                 | Free-tier seat cap — how many *enabled* accounts you can provision without a commercial license. See [Seat cap](#seat-cap). |
@@ -474,6 +478,10 @@ Account-materialisation knobs plus the interactive PAM device-auth settings. The
 [posix]
 uid_base = 1000000
 gid_base = 2000000
+user_uid_size = 1000000
+user_gid_size = 1000000
+group_gid_base = 3000000
+group_gid_size = 1000000
 default_shell = "/bin/sh"
 home_prefix = "/home"
 free_seats = 25
@@ -488,6 +496,8 @@ mfa_auth_time_window_secs = 300
 ```
 
 The picked uid/gid bases sit well above the system range so Forseti-managed accounts never clash with packages that create their own service users.
+
+Three numeric bands carve up the space: user uids `[uid_base, uid_base + user_uid_size)`, user-private gids `[gid_base, gid_base + user_gid_size)`, and team gids `[group_gid_base, group_gid_base + group_gid_size)`. The two gid bands must be disjoint, and Forseti validates this at startup, refusing to boot if they overlap, because a team gid colliding with a user-private gid would silently cross-grant file access. Ids are allocated monotonically and never reused (tracked in the `posix_sequences` table): a reused uid/gid would silently reassign ownership of files left on disk or in backups by a deleted account.
 
 ### Enrolling a host
 
@@ -507,9 +517,10 @@ A host has to identify itself to the resolver before it can resolve anything.
 
 Enrolling a host gives it the *right* to resolve; provisioning is what creates something to resolve.
 
-1. Go to **Admin → POSIX accounts** (`/admin/posix`), then **New** (`/admin/posix/new`).
-2. Supply the Kratos **identity id** and a **username**. uid, gid, login shell, and home dir default from `[posix]` (uid/gid auto-allocated, shell/home derived) — override them on the form if a particular account needs something specific.
-3. Submit. Forseti creates the POSIX account plus its primary group.
+1. Go to **Admin → POSIX accounts** (`/admin/posix`), then **New** (`/admin/posix/new`). This is a two-step, no-JS flow.
+2. **Pick the identity.** Either click **Select user** to open the identity picker (a searchable, org-scoped list of identities — each row has a *Select* link that returns you to the form with that identity filled in), or type a Kratos identity UUID or an email address into the field. A typed email is resolved to its identity against Kratos at submit time. Identities that exist *only* via OIDC/SAML may not resolve by typed email — for those, use the picker; it's the reliable path.
+3. **Set the account details.** Once an identity is chosen the form shows its email read-only and carries the resolved UUID. A **username** suggestion derived from the email's local-part is pre-filled and editable. uid, gid, login shell, and home dir default from `[posix]` (uid/gid auto-allocated, shell/home derived) — override them on the form if a particular account needs something specific. The login shell must exist on the device(s) that serve this account; `/bin/sh` is the safe cross-distro default (Guix has no `/bin/bash`).
+4. Submit. Forseti creates the POSIX account plus its primary group.
 
 On the account page (`/admin/posix/{id}`):
 
@@ -528,7 +539,7 @@ Provisioning a *new* enabled account consumes a seat. The cap depends on your li
 
 Disabling an account frees its seat (see above); deleting one frees it too. The list page (`/admin/posix`) shows the current `enabled / cap` count so you can see how much headroom you have.
 
-If your hosts are scoped to organisations (a host with an `allowed_gid` set to an `org`-kind group resolves only that org's members), Forseti mirrors each provisioned identity's org memberships into POSIX `org`-kind groups — but **only when the commercial Organizations feature is licensed**. Without the Orgs license you still get the per-account primary group; you just don't get the org→group mirroring. The mirror happens at provision time.
+Each host belongs to one organisation (set at enrollment). You can scope a host to the whole org (it resolves all of that org's provisioned members) or to specific **teams** within the org (it resolves only those teams' members). Team membership is resolved live by the resolver at request time — there is no mirroring step, so changes take effect on the next lookup. Creating and managing teams requires the commercial **Organizations** feature; without it a host resolves its org as a whole. Provisioning a POSIX account always also creates that account's own primary group regardless of license.
 
 ### Enabling PAM login (device-auth)
 

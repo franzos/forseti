@@ -1,7 +1,9 @@
 -- POSIX/Linux account integration (sqlite). posix_accounts maps a Forseti
--- identity to a uid/gid/home/shell; posix_groups + posix_group_members model
--- supplementary group membership; host_enrollments registers nss/pam hosts;
--- ssh_authorized_keys holds per-identity public keys.
+-- identity to a uid/gid/home/shell; posix_groups holds ONLY user-private
+-- (kind='user') primary groups; org_teams/org_team_members are the org-domain
+-- team model the resolver reads at request time; host_enrollments registers
+-- nss/pam hosts (one org each); ssh_authorized_keys holds per-identity keys;
+-- posix_sequences holds never-reused id high-water marks.
 
 CREATE TABLE posix_accounts (
   identity_id TEXT PRIMARY KEY,
@@ -18,7 +20,7 @@ CREATE TABLE posix_accounts (
 
 CREATE TABLE posix_groups (
   gid INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE,
-  org_id TEXT, kind TEXT NOT NULL,
+  kind TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
 
@@ -27,9 +29,38 @@ CREATE TABLE posix_group_members (
   PRIMARY KEY (gid, identity_id)
 );
 
+CREATE TABLE org_teams (
+  id TEXT PRIMARY KEY,
+  org_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  slug TEXT NOT NULL,
+  gid INTEGER UNIQUE,
+  parent_id TEXT,
+  created_at TEXT NOT NULL,
+  created_by TEXT,
+  UNIQUE (org_id, name),
+  UNIQUE (org_id, slug)
+);
+CREATE INDEX idx_org_teams_org ON org_teams (org_id);
+
+CREATE TABLE org_team_members (
+  team_id TEXT NOT NULL,
+  identity_id TEXT NOT NULL,
+  source TEXT NOT NULL DEFAULT 'manual',
+  added_at TEXT NOT NULL,
+  PRIMARY KEY (team_id, identity_id)
+);
+CREATE INDEX idx_org_team_members_identity ON org_team_members (identity_id);
+
+CREATE TABLE posix_sequences (
+  name TEXT PRIMARY KEY,
+  next INTEGER NOT NULL
+);
+
 CREATE TABLE host_enrollments (
   id TEXT PRIMARY KEY, hostname TEXT NOT NULL, secret_hash TEXT NOT NULL,
-  allowed_gid INTEGER, force_mfa INTEGER NOT NULL DEFAULT 0,
+  org_id TEXT NOT NULL,
+  force_mfa INTEGER NOT NULL DEFAULT 0,
   created_by TEXT, created_at TEXT NOT NULL, last_seen_at TEXT
 );
 

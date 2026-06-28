@@ -1,9 +1,5 @@
 //! Diesel queries for the organizations / organization_members /
 //! organization_invites tables.
-//!
-//! Every public function here is async (via [`db_interact`]) and returns
-//! `anyhow::Result<_>`. Callers in handler code unwrap into responses via
-//! the usual `tracing::error!` + bail pattern.
 
 use std::sync::Arc;
 
@@ -14,11 +10,11 @@ use serde::Serialize;
 use crate::db::DbPool;
 use crate::db_interact;
 use crate::schema::{
-    organization_invites, organization_members, organizations, saml_connections, saml_links,
+    host_allowed_groups, org_team_members, org_teams, organization_invites, organization_members,
+    organizations, saml_connections, saml_links,
 };
 
-/// Projection over `organizations`. `support_email` + `logo_url` override
-/// the global `[brand]` config when set.
+/// `support_email` + `logo_url` override the global `[brand]` config when set.
 // `created_by` is selected by `as_select()` but not read at runtime.
 #[allow(dead_code)]
 #[derive(Queryable, Selectable, Debug, Clone, Serialize)]
@@ -31,6 +27,7 @@ pub struct Org {
     pub support_email: Option<String>,
     pub created_at: String,
     pub created_by: Option<String>,
+    pub member_visibility: String,
 }
 
 // `added_by` is selected by `as_select()` but not read at runtime.
@@ -43,11 +40,10 @@ pub struct OrgMember {
     pub role: String,
     pub added_at: String,
     pub added_by: Option<String>,
+    pub hidden_from_directory: i32,
 }
 
-/// View-model joining org + role for the active-org / nav dropdown paths.
-/// Distinct from [`OrgMember`] because the consumer is rendering a list of
-/// orgs the caller belongs to and needs name + slug per row.
+/// Org + role view-model for the nav dropdown; carries name + slug per row.
 #[derive(Debug, Clone, Serialize)]
 pub struct Membership {
     pub org_id: String,
@@ -84,10 +80,8 @@ impl OrgInvite {
     }
 }
 
-/// Hard cap applied to every unbounded list query in this module. Pages
-/// that need more rows must paginate explicitly; the default is a
-/// defence-in-depth safety net against a runaway query (e.g. an
-/// accidentally-huge org or a join that scanned too much).
+/// Defence-in-depth cap on every unbounded list query in this module; pages
+/// needing more rows must paginate explicitly.
 pub const MAX_ROWS_PER_LIST: i64 = 500;
 
 // --- reads ---------------------------------------------------------------
@@ -136,10 +130,8 @@ pub async fn list_memberships(db: &DbPool, identity_id: &str) -> anyhow::Result<
     list_memberships_limited(db, identity_id, MAX_ROWS_PER_LIST).await
 }
 
-/// Like [`list_memberships`] but with a caller-supplied row cap. The
-/// `orgs` OIDC claim caps at [`crate::orgs::nav::ORGS_CLAIM_CAP`]; push
-/// that cap into SQL so we don't load a multi-thousand-row membership
-/// set just to truncate it in-memory.
+/// [`list_memberships`] with a caller-supplied row cap, pushed into SQL so a
+/// large membership set isn't loaded just to be truncated in-memory.
 pub async fn list_memberships_limited(
     db: &DbPool,
     identity_id: &str,
@@ -168,11 +160,7 @@ pub async fn list_memberships_limited(
     Ok(out)
 }
 
-/// Cheap "does this identity belong to ANY org?" probe used by the lazy
-/// auto-join path in [`crate::extractors::RequireSession`]. One indexed
-/// lookup against `organization_members.identity_id`. Returns
-/// `Ok(true)` on the first matching row and `Ok(false)` on no match;
-/// errors propagate so the caller can decide whether to log + retry.
+/// Cheap "does this identity belong to ANY org?" probe for the auto-join path.
 pub async fn has_any_membership(db: &DbPool, identity_id: &str) -> anyhow::Result<bool> {
     let i = identity_id.to_string();
     let row: Option<String> = db_interact!(db, |conn| {
@@ -207,9 +195,8 @@ pub async fn list_members(db: &DbPool, org_id: &str) -> anyhow::Result<Vec<OrgMe
     list_members_paged(db, org_id, MAX_ROWS_PER_LIST, 0).await
 }
 
-/// Paginated `list_members`. `limit` rows, skipping the first `offset`.
-/// Ordered by `added_at` ASC then `identity_id` ASC so the page boundary
-/// is stable across calls (added_at ties would otherwise float).
+/// Paginated `list_members`. Orders by `added_at` then `identity_id` so the
+/// page boundary is stable when `added_at` ties.
 pub async fn list_members_paged(
     db: &DbPool,
     org_id: &str,
@@ -232,9 +219,8 @@ pub async fn list_members_paged(
     Ok(rows)
 }
 
-/// Convenience read for the members page — pairs each member with the
-/// email trait fetched from Kratos. One bulk Kratos call via the SDK's
-/// `ids` filter, then an in-memory join.
+/// Pairs each member with their Kratos email trait via one bulk `ids` call,
+/// then an in-memory join.
 pub async fn list_member_profiles(
     db: &DbPool,
     ory: &Arc<crate::ory::OryClients>,
@@ -362,6 +348,23 @@ pub async fn delete_org(db: &DbPool, org_id: &str) -> anyhow::Result<()> {
             diesel::delete(saml_links::table.filter(saml_links::org_id.eq(&id))).execute(c)?;
             diesel::delete(saml_connections::table.filter(saml_connections::org_id.eq(&id)))
                 .execute(c)?;
+            let team_ids: Vec<String> = org_teams::table
+                .filter(org_teams::org_id.eq(&id))
+                .select(org_teams::id)
+                .load(c)?;
+            if !team_ids.is_empty() {
+                diesel::delete(
+                    org_team_members::table.filter(org_team_members::team_id.eq_any(&team_ids)),
+                )
+                .execute(c)?;
+                diesel::delete(
+                    host_allowed_groups::table
+                        .filter(host_allowed_groups::team_id.eq_any(&team_ids)),
+                )
+                .execute(c)?;
+                diesel::delete(org_teams::table.filter(org_teams::id.eq_any(&team_ids)))
+                    .execute(c)?;
+            }
             diesel::delete(organizations::table.filter(organizations::id.eq(&id))).execute(c)?;
             Ok(())
         })
@@ -379,15 +382,10 @@ struct NewMember<'a> {
     added_by: Option<&'a str>,
 }
 
-/// Transactional auto-join for the Default org. Combines the
-/// member-count check with the insert in one transaction so two
-/// concurrent first-user registrations can't both be promoted to
-/// `owner` — only one of the two transactions will observe an empty
-/// member set; the other will see the first writer's row and fall back
-/// to `member`.
-///
-/// Role resolution goes through the unit-tested `pick_default_role`
-/// helper so the policy lives in exactly one place.
+/// Transactional auto-join for the Default org. Member-count check + insert
+/// in one transaction so two concurrent first-user registrations can't both
+/// be promoted to `owner`: only one observes an empty member set, the other
+/// sees the first writer's row and falls back to `member`.
 pub async fn auto_join_default_txn(
     db: &DbPool,
     admin_cfg: &crate::config::AdminConfig,
@@ -400,14 +398,11 @@ pub async fn auto_join_default_txn(
     let now = Utc::now().to_rfc3339();
     db_interact!(db, |conn| {
         conn.transaction::<_, diesel::result::Error, _>(|c| {
-            // Re-read the Default org's member count *inside* the txn —
-            // this is the protection against the race. SERIALIZABLE
-            // isolation isn't required: sqlite serialises writers via
-            // the WAL write lock, and postgres's default READ COMMITTED
-            // is fine because we only ever insert (never update) members
-            // here. The losing transaction either sees the winner's row
-            // (count > 0 → member) or fails its insert with a unique
-            // constraint violation (already a member, idempotent).
+            // Member count re-read inside the txn is the race guard.
+            // SERIALIZABLE isn't needed: sqlite serialises writers via the WAL
+            // write lock, postgres READ COMMITTED is fine since we only insert.
+            // The loser sees the winner's row (count > 0 → member) or hits the
+            // unique constraint (already a member, idempotent).
             let count: i64 = organization_members::table
                 .filter(organization_members::org_id.eq(super::DEFAULT_ORG_ID))
                 .count()
@@ -470,16 +465,12 @@ pub async fn remove_member(db: &DbPool, org_id: &str, identity_id: &str) -> anyh
     Ok(())
 }
 
-/// Drop every membership row that points at `identity_id`, across every
-/// org. Called from the identity-delete path so reclaimed or admin-
-/// deleted identities don't leave dangling rows that show up on the
-/// members page (and trip up the last-owner guard with phantom owners).
-/// Returns the number of rows removed.
+/// Drop every membership row for `identity_id` across all orgs, so a deleted
+/// identity leaves no dangling rows (which would trip the last-owner guard
+/// with phantom owners). Returns the number of rows removed.
 //
-// POSIX org-group cleanup: both callers (admin `delete_identity_audited`,
-// self-delete in `settings/account`) also call `posix::db::delete_account_rows`,
-// which purges ALL of the identity's `posix_group_members` — so the org-group
-// mirror is already covered; no extra posix cleanup needed here.
+// Org-team membership lives in `org_team_members`, not `posix_group_members`,
+// so this also purges team rows via `teams::remove_identity_from_all_teams`.
 pub async fn remove_member_everywhere(db: &DbPool, identity_id: &str) -> anyhow::Result<usize> {
     let ident = identity_id.to_string();
     let affected = db_interact!(db, |conn| {
@@ -488,6 +479,9 @@ pub async fn remove_member_everywhere(db: &DbPool, identity_id: &str) -> anyhow:
         )
         .execute(conn)
     })?;
+    if let Err(e) = super::teams::remove_identity_from_all_teams(db, identity_id).await {
+        tracing::error!(error = ?e, identity_id, "failed to purge org-team membership on identity delete");
+    }
     Ok(affected)
 }
 
@@ -498,16 +492,12 @@ pub(crate) fn blocks_self_deletion(owners: i64, members: i64) -> bool {
     owners == 1 && members > 1
 }
 
-/// Orgs where `identity_id` is the *sole* owner AND at least one other
-/// member exists — i.e. orgs that would be left ungovernable if this
-/// identity vanished. Returns `(org_id, org_name)` pairs.
+/// Orgs where `identity_id` is the sole owner AND another member exists,
+/// returned as `(org_id, org_name)` to block account self-deletion. A solo
+/// org (sole owner, no other members) is intentionally not returned.
 ///
-/// Used to block account self-deletion: a solo org (sole owner, no other
-/// members) is intentionally *not* returned, so deleting it proceeds.
-///
-/// Counts are computed in SQL via two grouped count queries (owners-per-org
-/// and members-per-org) — backend-agnostic across sqlite/postgres (no
-/// `FILTER`). Org names are fetched only for the surviving orgs.
+/// Two grouped count queries instead of a `FILTER` keep this backend-agnostic
+/// across sqlite/postgres.
 pub async fn orgs_where_sole_owner_with_other_members(
     db: &DbPool,
     identity_id: &str,
@@ -579,6 +569,42 @@ pub async fn update_role(
                 .filter(organization_members::identity_id.eq(&ident)),
         )
         .set(organization_members::role.eq(&role_s))
+        .execute(conn)
+        .map(|_| ())
+    })?;
+    Ok(())
+}
+
+pub async fn set_member_visibility(
+    db: &DbPool,
+    org_id: &str,
+    v: crate::orgs::visibility::MemberVisibility,
+) -> anyhow::Result<()> {
+    let (id, val) = (org_id.to_string(), v.as_str().to_string());
+    db_interact!(db, |conn| {
+        diesel::update(organizations::table.filter(organizations::id.eq(&id)))
+            .set(organizations::member_visibility.eq(&val))
+            .execute(conn)
+            .map(|_| ())
+    })?;
+    Ok(())
+}
+
+pub async fn set_member_hidden(
+    db: &DbPool,
+    org_id: &str,
+    identity_id: &str,
+    hidden: bool,
+) -> anyhow::Result<()> {
+    let (oid, iid) = (org_id.to_string(), identity_id.to_string());
+    let flag = i32::from(hidden);
+    db_interact!(db, |conn| {
+        diesel::update(
+            organization_members::table
+                .filter(organization_members::org_id.eq(&oid))
+                .filter(organization_members::identity_id.eq(&iid)),
+        )
+        .set(organization_members::hidden_from_directory.eq(flag))
         .execute(conn)
         .map(|_| ())
     })?;
@@ -664,22 +690,17 @@ pub async fn list_org_invites(db: &DbPool, org_id: &str) -> anyhow::Result<Vec<O
 pub enum InviteFinalizeOutcome {
     /// Membership row written and invite stamped accepted.
     Accepted,
-    /// The invite was already accepted before this txn ran — no write
-    /// happened, the caller should surface an "already accepted" error.
+    /// Invite already accepted before this txn ran; no write happened.
     AlreadyAccepted,
 }
 
-/// Atomically (a) check the invite isn't already accepted, (b) write
-/// the membership row if missing, and (c) stamp the invite as
-/// `accepted_at = now, accepted_by = identity_id`. Returns
-/// [`InviteFinalizeOutcome::AlreadyAccepted`] when step (a) finds the
-/// invite already used; in that case no DB state changes.
+/// Atomically write the membership row (if missing) and stamp the invite
+/// accepted. Returns [`InviteFinalizeOutcome::AlreadyAccepted`] (no state
+/// change) when the invite was already used.
 ///
-/// The "already accepted" check uses the `UPDATE ... WHERE accepted_at
-/// IS NULL` pattern: if zero rows are affected, the invite was already
-/// accepted by a concurrent caller (or had been used in a previous
-/// session). The membership write happens first; the unique constraint
-/// on `(org_id, identity_id)` swallows the duplicate idempotently.
+/// The `UPDATE ... WHERE accepted_at IS NULL` pattern is the concurrency
+/// guard: zero rows affected means a concurrent caller already accepted. The
+/// membership insert's unique `(org_id, identity_id)` swallows the duplicate.
 pub async fn finalize_invite_txn(
     db: &DbPool,
     token: &str,
@@ -694,10 +715,8 @@ pub async fn finalize_invite_txn(
     let now = Utc::now().to_rfc3339();
     let outcome = db_interact!(db, |conn| {
         conn.transaction::<InviteFinalizeOutcome, diesel::result::Error, _>(|c| {
-            // Membership insert first. Use an `ON CONFLICT DO NOTHING`-
-            // equivalent by detecting and swallowing the unique
-            // constraint violation so the txn doesn't abort when the
-            // user is already a member (idempotent on retries).
+            // Swallow the unique-constraint violation (ON CONFLICT DO NOTHING
+            // equivalent) so the txn doesn't abort when already a member.
             match diesel::insert_into(organization_members::table)
                 .values(NewMember {
                     org_id: &org,
@@ -713,17 +732,13 @@ pub async fn finalize_invite_txn(
                     diesel::result::DatabaseErrorKind::UniqueViolation,
                     _,
                 )) => {
-                    // Already a member — fine, proceed to stamp the
-                    // invite as accepted.
+                    // Already a member; proceed to stamp the invite accepted.
                 }
                 Err(e) => return Err(e),
             }
 
-            // Stamp the invite as accepted atomically: only the writer
-            // that observes `accepted_at IS NULL` updates a row. If
-            // zero rows change, the invite was already accepted by a
-            // concurrent caller (or previously) — signal that to the
-            // caller so it can return an "already accepted" message.
+            // Only the writer observing `accepted_at IS NULL` updates a row;
+            // zero rows means a concurrent (or prior) caller already accepted.
             let affected = diesel::update(
                 organization_invites::table
                     .filter(organization_invites::token.eq(&token))
@@ -772,12 +787,8 @@ pub fn slugify(name: &str) -> String {
     }
 }
 
-/// Suggest a unique slug from `name`. If `slugify(name)` is free, return
-/// it; otherwise append `-2`, `-3`, ... until a free slug is found.
-///
-/// Loads every slug starting with `<base>` in one query, then walks the
-/// candidate suffixes in memory. Bounded `LIKE` (no user-controlled
-/// wildcards) — `base` comes from `slugify` so it's `[a-z0-9-]+`.
+/// Suggest a unique slug from `name`, appending `-2`, `-3`, ... on collision.
+/// The `LIKE` prefix is safe: `base` comes from `slugify`, so `[a-z0-9-]+`.
 pub async fn suggest_slug(db: &DbPool, name: &str) -> anyhow::Result<String> {
     let base = slugify(name);
     let prefix = format!("{base}%");
@@ -793,7 +804,6 @@ pub async fn suggest_slug(db: &DbPool, name: &str) -> anyhow::Result<String> {
     if !taken.contains(&base) {
         return Ok(base);
     }
-    // Upper bound matches the previous behaviour (2..1000).
     for n in 2..=1000 {
         let candidate = format!("{base}-{n}");
         if !taken.contains(&candidate) {
@@ -856,8 +866,7 @@ mod tests {
     #[test]
     fn invite_is_expired_malformed_treated_as_expired() {
         let inv = invite_with_expiry("not-a-date");
-        // Bad timestamps default to "expired" so the invite cannot be
-        // used — failing closed.
+        // Bad timestamps fail closed to "expired".
         assert!(inv.is_expired(now()));
     }
 
@@ -875,10 +884,7 @@ mod tests {
 
     #[test]
     fn slugify_handles_unicode_by_dropping() {
-        // Non-ASCII chars get collapsed to dashes (then trimmed/merged).
         let s = slugify("Café Münchën");
-        // Each non-ascii char produces a separator; result is bounded
-        // by the alphanumeric anchors that remain.
         assert!(s.starts_with("caf"));
         assert!(s.contains('-'));
         assert!(!s.starts_with('-') && !s.ends_with('-'));
@@ -886,11 +892,8 @@ mod tests {
 
     #[test]
     fn slugify_edge_cases() {
-        // Empty input → fallback `"org"`.
         assert_eq!(slugify(""), "org");
-        // All-punctuation also falls back.
         assert_eq!(slugify("!!!"), "org");
-        // Leading / trailing punctuation gets trimmed.
         assert_eq!(slugify("---hi---"), "hi");
     }
 }

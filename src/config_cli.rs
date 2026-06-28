@@ -125,7 +125,7 @@ fn first_secret<'a>(root: &'a Value, path: &[&str]) -> Option<&'a str> {
 }
 
 // ---------------------------------------------------------------------------
-// Check logic — operates on parsed Values so it's testable without the FS.
+// Check logic operates on parsed Values so it's testable without the FS.
 // ---------------------------------------------------------------------------
 
 fn check_kratos(root: &Value) -> Vec<Finding> {
@@ -147,7 +147,7 @@ fn check_kratos(root: &Value) -> Vec<Finding> {
         )),
     }
 
-    // selfservice.flows.settings.required_aal — the critical one.
+    // selfservice.flows.settings.required_aal: the critical one.
     match dig_str(root, &["selfservice", "flows", "settings", "required_aal"]) {
         Some("highest_available") => {
             findings.push(Finding::ok(
@@ -177,7 +177,7 @@ fn check_kratos(root: &Value) -> Vec<Finding> {
         )),
     }
 
-    // webauthn passwordless — only relevant when webauthn is enabled.
+    // webauthn passwordless: only relevant when webauthn is enabled.
     if dig_bool(root, &["selfservice", "methods", "webauthn", "enabled"]) == Some(true) {
         let passwordless = dig_bool(
             root,
@@ -240,7 +240,7 @@ fn check_kratos(root: &Value) -> Vec<Finding> {
         )),
     }
 
-    // secrets.cipher — must be exactly 32 chars.
+    // secrets.cipher: must be exactly 32 chars.
     match first_secret(root, &["secrets", "cipher"]) {
         Some(s) if !is_placeholder(s) && s.len() == 32 => {
             findings.push(Finding::ok("secrets.cipher", "<set, 32 chars>"));
@@ -294,7 +294,7 @@ fn check_hydra(root: &Value) -> Vec<Finding> {
         )),
     }
 
-    // urls.login / urls.consent / urls.logout — should point at Forseti.
+    // urls.login / urls.consent / urls.logout: should point at Forseti.
     for endpoint in ["login", "consent", "logout"] {
         match dig_str(root, &["urls", endpoint]) {
             Some(u) if !is_placeholder(u) => {
@@ -431,7 +431,7 @@ fn wants_help(args: &[String]) -> bool {
 /// Resolve a config file path by precedence: explicit `--flag`, then env var,
 /// then the dev default (only if it exists on disk). A path from the flag or
 /// env is honoured even if missing (the caller surfaces a "file not found"
-/// error on read) — but a non-existent default is treated as "no source",
+/// error on read), but a non-existent default is treated as "no source",
 /// returning `Err` so we never silently lint a phantom file.
 fn resolve_config_path(
     flag: Option<&str>,
@@ -562,7 +562,7 @@ fn load_yaml(path: &Path) -> anyhow::Result<Value> {
 }
 
 // ---------------------------------------------------------------------------
-// config-init — generate a recommended Kratos + Hydra config.
+// config-init: generate a recommended Kratos + Hydra config.
 // ---------------------------------------------------------------------------
 
 #[derive(Default)]
@@ -604,7 +604,7 @@ fn yaml_scalar(s: &str) -> String {
 }
 
 /// Reject operator values carrying control chars or newlines before they reach
-/// the templated YAML — single-line URLs/DSNs/SMTP URIs never need them, and
+/// the templated YAML (single-line URLs/DSNs/SMTP URIs never need them), and
 /// they're the vector for scalar-breakout key injection.
 fn reject_control_chars(label: &str, value: &str) -> Result<(), String> {
     if value.chars().any(char::is_control) {
@@ -616,7 +616,7 @@ fn reject_control_chars(label: &str, value: &str) -> Result<(), String> {
 }
 
 /// CSPRNG-backed alphanumeric secret of exactly `len` chars. `rand::rng()` is
-/// `ThreadRng`, seeded from the OS RNG — same source the rest of the crate
+/// `ThreadRng`, seeded from the OS RNG, the same source the rest of the crate
 /// uses for tokens (`csrf.rs`, `dcr_tokens.rs`).
 fn random_secret(len: usize) -> String {
     rand::rng()
@@ -714,7 +714,7 @@ fn render_configs(inputs: &InitInputs) -> (String, String, Vec<String>) {
     let (smtp, ph) = or_placeholder(&inputs.smtp_uri, "SMTP_URI");
     note_missing(ph, "--smtp-uri");
 
-    // Generated secrets — never placeholders.
+    // Generated secrets, never placeholders.
     let kratos_cookie = random_secret(32);
     let kratos_cipher = random_secret(32);
     let pairwise_salt = random_secret(32);
@@ -1049,7 +1049,7 @@ pub(crate) fn init(args: &[String]) -> i32 {
 
     let (kratos_yaml, hydra_yaml, missing) = render_configs(&inputs);
 
-    // Files embed CSPRNG secrets + DB/SMTP passwords — write owner-only (0600).
+    // Files embed CSPRNG secrets + DB/SMTP passwords; write owner-only (0600).
     if let Err(e) = write_secret_file(kratos_out, &kratos_yaml) {
         eprintln!("error: writing {kratos_out}: {e}");
         return 1;
@@ -1121,7 +1121,7 @@ mod tests {
         serde_yaml_ng::from_str(yaml).expect("test yaml parses")
     }
 
-    fn severity_of<'a>(findings: &'a [Finding], key: &str) -> Option<Severity> {
+    fn severity_of(findings: &[Finding], key: &str) -> Option<Severity> {
         findings.iter().find(|f| f.key == key).map(|f| f.severity)
     }
 

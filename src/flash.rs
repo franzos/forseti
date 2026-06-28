@@ -1,32 +1,12 @@
-//! Server-side flash storage for one-shot reveals and short-lived
-//! redirect-message banners.
+//! Server-side flash storage for one-shot reveals and short-lived redirect banners.
 //!
-//! Two mechanisms live here:
+//! 1. Secret reveal store ([`store_secret_reveal`] / [`take_secret_reveal`]): a Forseti-owned DB table keyed
+//!    by an opaque token so secrets never ride the redirect URL (history/logs/CDN). Single-use; DB-backed so
+//!    a multi-instance deployment can mint on one node and reveal on another.
+//! 2. Flash cookie ([`store_flash`] / [`take_flash`]): a one-shot, HMAC-signed, path-scoped cookie the next
+//!    render reads and clears. Tampering invalidates the HMAC and the cookie is dropped.
 //!
-//! 1. **Secret reveal store** ([`store_secret_reveal`] / [`take_secret_reveal`]).
-//!    The admin "client created" / "client secret rotated" / "recovery code
-//!    generated" handlers used to ferry the freshly minted secret through
-//!    the redirect URL (`?secret=...&rat=...`). That leaked the secret into
-//!    browser history, server logs, and any proxy/CDN in the redirect chain.
-//!    This module replaces the URL hand-off with a Forseti-owned DB table
-//!    keyed by a UUID; the redirect carries only that token. The receiver
-//!    calls [`take_secret_reveal`] which deletes and returns the payload
-//!    (single use). Rows older than the configured TTL are pruned
-//!    best-effort on access. DB-backed (not in-process) so a multi-instance
-//!    deployment can mint on one node and reveal on another without sticky
-//!    routing.
-//!
-//! 2. **Flash cookie** ([`store_flash`] / [`take_flash`]). The admin and
-//!    settings redirect handlers used to thread a status banner through
-//!    `?msg=...` — the same browser-history / log concern applies, plus the
-//!    URL is a tampering vector (`?msg=Your+account+was+disabled.+Click+here+for+more...`).
-//!    The flash cookie is a one-shot, HMAC-signed, path-scoped cookie that
-//!    the next render reads and clears. Tampering invalidates the HMAC; the
-//!    cookie is dropped silently in that case.
-//!
-//! The cookie HMAC key is derived from the operator-supplied
-//! `[security].cookie_secret` plus a per-cookie salt — see
-//! [`crate::signed_cookie`].
+//! The cookie HMAC key derives from `[security].cookie_secret` plus a per-cookie salt (see [`crate::signed_cookie`]).
 
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Redirect, Response};
@@ -39,11 +19,7 @@ use crate::db_interact;
 use crate::schema::secret_reveals;
 use crate::signed_cookie::{unix_seconds_now, SignedCookie};
 
-/// Revealed-secret payload. Each variant carries exactly the fields the
-/// matching admin flow needs to surface once on the next render. Stored
-/// in the Forseti-owned DB; serialised as a tagged JSON object in the
-/// `secret_reveals.payload` column — the `"kind"` discriminator lets the
-/// taker pattern-match without optional-field gymnastics.
+/// Revealed-secret payload, serialised as a `"kind"`-tagged JSON object in `secret_reveals.payload`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SecretReveal {
@@ -57,19 +33,15 @@ pub enum SecretReveal {
         #[serde(default)]
         setup_note: String,
     },
-    /// `/admin/clients/{id}/rotate-secret` — fresh client secret.
+    /// `/admin/clients/{id}/rotate-secret`: fresh client secret.
     ClientSecretRotated { secret: String },
-    /// `/admin/identities/{id}/recovery` — Kratos recovery code + the
-    /// matching recovery URL.
+    /// `/admin/identities/{id}/recovery`: Kratos recovery code + the matching recovery URL.
     RecoveryCode { code: String, link: String },
-    /// `/admin/dcr-tokens` issue — raw Initial Access Token (shown once;
-    /// only the hash is persisted).
+    /// `/admin/dcr-tokens` issue: raw Initial Access Token (shown once; only the hash is persisted).
     DcrInitialAccessToken { token: String },
-    /// `/admin/hosts` enroll / rotate — `host_id` plus the raw host secret
-    /// (shown once; only the hash is persisted).
+    /// `/admin/hosts` enroll / rotate: `host_id` plus the raw host secret (shown once; only the hash is persisted).
     HostSecret { host_id: String, secret: String },
-    /// `/claim-email` mint — 6-digit code + the target identity id the
-    /// confirm step will delete on match.
+    /// `/claim-email` mint: 6-digit code + the target identity id the confirm step deletes on match.
     ClaimEmailCode { code: String, identity_id: String },
 }
 
@@ -95,12 +67,8 @@ fn prune_cutoff(ttl_seconds: u64) -> String {
     (Utc::now() - chrono::Duration::seconds(ttl_seconds as i64)).to_rfc3339()
 }
 
-/// Store a reveal payload and return an opaque token (UUID v4 hex) to embed
-/// in the redirect URL. The token has no semantic meaning outside this
-/// module — treat it like a session id, not like an authorisation grant.
-///
-/// `reveal_ttl_seconds` controls best-effort pruning of stale rows on the
-/// same call.
+/// Store a reveal payload and return an opaque token to embed in the redirect URL (treat like a session id).
+/// `reveal_ttl_seconds` drives best-effort pruning of stale rows on the same call.
 pub async fn store_secret_reveal(
     db: &DbPool,
     reveal_ttl_seconds: u64,
@@ -138,14 +106,9 @@ pub async fn store_secret_reveal(
     Ok(token)
 }
 
-/// Peek at the reveal for `token` without consuming it. Returns the
-/// payload and the row's current `attempts` count. Use this for flows
-/// that need to verify a one-time code: peek to compare, then either
-/// [`take_secret_reveal`] on success (deletes the row) or
-/// [`bump_secret_reveal_attempts`] on failure (increments + optionally
-/// deletes once over the limit).
-///
-/// Returns `None` for unknown / expired / failed tokens.
+/// Peek at the reveal for `token` without consuming it, returning the payload and current `attempts`.
+/// For one-time-code flows: peek to compare, then [`take_secret_reveal`] on success or
+/// [`bump_secret_reveal_attempts`] on failure. `None` for unknown / expired / failed tokens.
 pub async fn peek_secret_reveal(
     db: &DbPool,
     reveal_ttl_seconds: u64,
@@ -189,23 +152,10 @@ async fn peek_secret_reveal_inner(
     Ok(result)
 }
 
-/// Increment the per-row attempt counter; delete the row when the new
-/// count is `>= max_attempts`. Used by the claim-email confirm flow to
-/// hard-fail after N wrong-code submissions instead of letting the
-/// attacker grind to TTL.
-///
-/// Returns `Ok(true)` when the row was deleted (i.e. exhausted),
-/// `Ok(false)` when it was incremented but still in budget, and `Err`
-/// on DB failure.
-///
-/// The increment is a single atomic `SET attempts = attempts + 1`
-/// rather than a read-modify-write. On Postgres READ COMMITTED two
-/// concurrent wrong-code submissions would otherwise both read
-/// `attempts = N` and both write `N+1`, losing one increment and
-/// letting an attacker double the per-mint grind budget by submitting
-/// in parallel. The atomic form takes a row lock — the second
-/// transaction blocks on the first's commit, re-reads the latest
-/// committed value, and increments off that.
+/// Increment the per-row attempt counter, deleting the row at `>= max_attempts`. Returns `Ok(true)` when
+/// exhausted (deleted), `Ok(false)` when still in budget. The atomic `SET attempts = attempts + 1` (not a
+/// read-modify-write) takes a row lock so two concurrent wrong-code submissions can't both write `N+1` under
+/// READ COMMITTED and double the grind budget.
 pub async fn bump_secret_reveal_attempts(
     db: &DbPool,
     token: &str,
@@ -241,10 +191,8 @@ pub async fn bump_secret_reveal_attempts(
     Ok(exhausted)
 }
 
-/// Take the reveal for `token`, if any. Returns `None` for unknown /
-/// expired / failed tokens. The row is deleted on success — reveals are
-/// single-use, enforced atomically by a SELECT + DELETE inside one
-/// transaction.
+/// Take the reveal for `token`, deleting it on success (single-use, enforced by SELECT + DELETE in one transaction).
+/// `None` for unknown / expired / failed tokens.
 pub async fn take_secret_reveal(
     db: &DbPool,
     reveal_ttl_seconds: u64,
@@ -351,10 +299,7 @@ pub fn take_flash(
 
 // --- Response helpers ----------------------------------------------------
 
-/// 303 redirect to `target`, carrying a single `Set-Cookie` header (typically
-/// the value produced by [`store_flash`]). A malformed cookie string is
-/// dropped silently — the redirect still goes through, just without the
-/// flash banner.
+/// 303 redirect to `target` carrying one `Set-Cookie` (typically from [`store_flash`]). A malformed cookie is dropped.
 pub(crate) fn redirect_with_cookie(target: &str, cookie: &str) -> Response {
     let mut resp = Redirect::to(target).into_response();
     if let Ok(hv) = axum::http::HeaderValue::from_str(cookie) {
@@ -364,10 +309,7 @@ pub(crate) fn redirect_with_cookie(target: &str, cookie: &str) -> Response {
     resp
 }
 
-/// Append an optional `Set-Cookie` value to an already-rendered response.
-/// No-op when `cookie` is `None`. Used to ferry the flash-clear cookie
-/// returned by [`take_flash`] onto a GET render after the CSRF cookie has
-/// already been attached.
+/// Append an optional `Set-Cookie` (e.g. the flash-clear from [`take_flash`]) to a response. No-op on `None`.
 pub(crate) fn attach_set_cookie(mut resp: Response, cookie: Option<String>) -> Response {
     crate::web::append_set_cookie(&mut resp, cookie);
     resp

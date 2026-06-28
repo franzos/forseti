@@ -355,8 +355,7 @@ fn aged_out(row_id: &str, created_at: &str, max_age_hours: i64) -> bool {
     }
 }
 
-/// Exponential backoff with ±25% jitter, capped at `cap_secs`. Matches
-/// the Stripe-shape convention called out in `TODO.md` §1.
+/// Exponential backoff with ±25% jitter, capped at `cap_secs`.
 fn backoff_seconds(attempt: i32, cap_secs: i64) -> i64 {
     use rand::Rng;
     // Anything past 30d is operator misconfig — the outbox DEADs rows long

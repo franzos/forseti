@@ -27,10 +27,7 @@ pub(crate) use crate::session_view::SessionView;
 pub(crate) struct SettingsSessionsTemplate {
     pub(crate) chrome: PageChrome,
     pub(crate) sessions: Vec<SessionView>,
-    /// True when there's at least one non-current session — controls the
-    /// "Sign out of all other devices" CTA.
     pub(crate) has_other_sessions: bool,
-    /// Success / info flash piped through `?msg=` (e.g. "Signed out 2 other sessions").
     pub(crate) flash: String,
     pub(crate) referrer_banner: Option<crate::handoff::ReferrerBannerView>,
 }
@@ -66,10 +63,8 @@ pub(crate) async fn settings_sessions(
     };
 
     let mut rows: Vec<SessionView> = Vec::with_capacity(other_sessions.len() + 1);
-    // Kratos's `/sessions` returns *other* sessions only; the current one is
-    // the one whose cookie we forwarded. Synthesize a row for it from
-    // `whoami` so the UI shows a complete picture (and so the "Current" badge
-    // has somewhere to land).
+    // Kratos's `/sessions` returns other sessions only; synthesize the current
+    // one from `whoami` so the UI shows a complete picture.
     rows.push(SessionView::from_kratos(&session, true));
     for s in &other_sessions {
         rows.push(SessionView::from_kratos(s, false));

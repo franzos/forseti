@@ -48,7 +48,7 @@ The boundary is deliberately simple:
 | SAML SSO (`/sso/{slug}`) | Unavailable | Per-org connections |
 | Linux auth core (resolver, host enrollment, SSH keys) | Full | Full |
 | Linux POSIX accounts | Up to the free seat cap | Up to the license's seat cap |
-| Org→POSIX-group mirroring | n/a (Default only) | With the Organizations feature |
+| Team-scoped Linux host access | n/a (whole-org only) | Scope hosts to org teams |
 
 OSS ships exactly one real default org and every code path treats it like any other org — there's no stubbed single-tenant mode. The license simply lets you add more orgs and switch SAML on, so an unlicensed deployment is always a fully working single tenant.
 
@@ -59,7 +59,7 @@ Linux authentication is a hybrid: the capability is free, and a license raises o
 - **Free / OSS.** Everything operational: the resolver that serves passwd/group/SSH-key data to your hosts, host enrollment (and secret rotation/revocation), adding SSH keys, and provisioning POSIX accounts up to the free seat cap (`free_seats`, default 25). A single-machine or small-fleet operator never needs a license to run Linux auth.
 - **Commercial — higher seat cap.** A license carrying the Linux-authentication feature raises the cap from `free_seats` to the license's seat allowance, so you can provision more accounts. This is the only thing the license changes about Linux auth.
 - **Resolution is never gated.** Whatever your license state, an already-provisioned account keeps resolving — a lapsed or missing license can stop you *adding* accounts but can never lock an existing user out of a machine. In the 30-day grace window after expiry, the cap falls back to the free tier for *new* provisioning (consistent with grace being read-only), while existing accounts keep working.
-- **Org→POSIX-group mirroring needs Organizations.** If you scope hosts to organisations, mirroring an account's org memberships into POSIX groups requires the **Organizations** feature — it's part of the multi-org capability, not Linux auth on its own. Without it you still get each account's primary group.
+- **Team-scoped host access needs Organizations.** A host always belongs to one org and can resolve that org as a whole on Linux auth alone. Scoping a host to specific **teams** within the org (finer-grained host access) requires the **Organizations** feature — it's part of the multi-org capability, not Linux auth on its own. Membership is resolved live at request time; there is no group-mirroring step.
 
 The operator-facing how-to (enrolling hosts, provisioning accounts, the seat cap in practice) is in the [operator guide → Linux authentication](../operator-guide.md#linux-authentication).
 

@@ -29,6 +29,204 @@ fn extract_form_csrf(html: &str) -> Option<String> {
     Some(tail[..value_end].to_string())
 }
 
+/// Local copy of admin.rs's private skip helper.
+async fn admin_client_or_skip() -> Option<reqwest::Client> {
+    let c = try_admin_signed_in_client().await;
+    if c.is_none() {
+        eprintln!(
+            "Skipping admin happy-path test: \
+FORSETI_ADMIN_TEST_EMAIL/PASSWORD/TOTP_CODE not set or sign-in failed."
+        );
+    }
+    c
+}
+
+#[tokio::test]
+async fn posix_new_two_step_prefills_email() {
+    if !portal_reachable().await {
+        eprintln!("portal not reachable; skipping");
+        return;
+    }
+    let Some(client) = admin_client_or_skip().await else {
+        return;
+    };
+    let email = unique_email("twostep");
+    let id = kratos_admin_create_identity(&email).await;
+
+    let body = client
+        .get(format!("{PORTAL}/admin/posix/new"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        body.contains("/admin/identity-picker?return_to=/admin/posix/new"),
+        "step 1 must offer the picker"
+    );
+    assert!(
+        !body.contains("name=\"username\""),
+        "username field hidden in step 1"
+    );
+
+    let body = client
+        .get(format!("{PORTAL}/admin/posix/new?identity_id={id}"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(body.contains(&email), "step 2 shows the selected email");
+    assert!(
+        body.contains(&format!("value=\"{id}\"")),
+        "hidden authoritative UUID"
+    );
+    assert!(
+        body.contains("name=\"username\""),
+        "username field present in step 2"
+    );
+
+    delete_test_identity(&id).await.ok();
+}
+
+#[tokio::test]
+async fn provision_accepts_email() {
+    if !portal_reachable().await {
+        eprintln!("portal not reachable; skipping");
+        return;
+    }
+    let Some(client) = admin_client_or_skip().await else {
+        return;
+    };
+    let email = unique_email("byemail");
+    let id = kratos_admin_create_identity(&email).await;
+    let username = format!("byemail{}", chrono::Utc::now().timestamp_millis() % 50_000);
+
+    let body = client
+        .get(format!("{PORTAL}/admin/posix/new?identity_id={id}"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let csrf = extract_form_csrf(&body).expect("_csrf on step 2");
+
+    let res = client
+        .post(format!("{PORTAL}/admin/posix/new"))
+        .form(&[
+            ("_csrf", csrf.as_str()),
+            ("identity_id", email.as_str()),
+            ("username", username.as_str()),
+            ("shell", "/bin/sh"),
+        ])
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        res.url().as_str().contains(&format!("/admin/posix/{id}")),
+        "typing an email should resolve to the identity and provision; landed at {}",
+        res.url()
+    );
+
+    delete_test_identity(&id).await.ok();
+}
+
+#[tokio::test]
+async fn provision_rejects_unknown_email() {
+    if !portal_reachable().await {
+        eprintln!("portal not reachable; skipping");
+        return;
+    }
+    let Some(client) = admin_client_or_skip().await else {
+        return;
+    };
+    // A real identity, used only to obtain a session-bound CSRF token from
+    // the step-2 render before we POST a deliberately unresolvable email.
+    let email = unique_email("csrfsrc");
+    let id = kratos_admin_create_identity(&email).await;
+    let body = client
+        .get(format!("{PORTAL}/admin/posix/new?identity_id={id}"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let csrf = extract_form_csrf(&body).expect("_csrf on step 2");
+
+    let bogus = "no-such-user@nonexistent.example";
+    let res = client
+        .post(format!("{PORTAL}/admin/posix/new"))
+        .form(&[
+            ("_csrf", csrf.as_str()),
+            ("identity_id", bogus),
+            ("username", "nobodyx"),
+            ("shell", "/bin/sh"),
+        ])
+        .send()
+        .await
+        .unwrap();
+    let landed = res.url().to_string();
+    let text = res.text().await.unwrap();
+    assert!(
+        landed.ends_with("/admin/posix/new"),
+        "unknown email must re-render the form, not redirect; landed at {landed}"
+    );
+    // The error string's quotes are HTML-escaped in the render, so match on
+    // the stable prefix plus the (special-char-free) email separately.
+    assert!(
+        text.contains("No identity found for") && text.contains(bogus),
+        "expected unknown-email error message in the re-rendered form"
+    );
+
+    delete_test_identity(&id).await.ok();
+}
+
+#[tokio::test]
+async fn identity_picker_renders_select_links() {
+    if !portal_reachable().await {
+        eprintln!("portal not reachable; skipping");
+        return;
+    }
+    let Some(client) = admin_client_or_skip().await else {
+        return;
+    };
+    let email = unique_email("picker");
+    let id = kratos_admin_create_identity(&email).await;
+
+    let res = client
+        .get(format!(
+            "{PORTAL}/admin/identity-picker?return_to=/admin/posix/new&q={email}"
+        ))
+        .send()
+        .await
+        .expect("GET picker");
+    assert!(res.status().is_success());
+    let body = res.text().await.unwrap();
+    assert!(
+        body.contains(&format!("/admin/posix/new?identity_id={id}")),
+        "row should carry a Select link back to return_to with identity_id"
+    );
+
+    let res = client
+        .get(format!(
+            "{PORTAL}/admin/identity-picker?return_to=https://evil.example/x"
+        ))
+        .send()
+        .await
+        .expect("GET picker bad rt");
+    let body = res.text().await.unwrap();
+    assert!(
+        body.contains("Invalid return target"),
+        "must reject foreign return_to"
+    );
+
+    delete_test_identity(&id).await.ok();
+}
+
 #[tokio::test]
 async fn self_delete_purges_posix_rows() {
     assert!(portal_reachable().await);
@@ -96,10 +294,13 @@ async fn self_delete_purges_posix_rows() {
     // No cleanup — the identity is already gone.
 }
 
-/// Black-box exercise of the `/posix/v1/*` resolver on the internal
-/// listener: host Basic auth, a single passwd lookup, authorized_keys, the
-/// enumeration-returns-empty rule for an unscoped (allowed_gid = NULL) host,
-/// and a 401 on a wrong secret.
+/// Black-box exercise of the `/posix/v1/*` resolver on the internal listener
+/// for a WHOLE-ORG host (no `host_allowed_groups` rows): host Basic auth, a
+/// single passwd lookup, authorized_keys, enumeration limited to the host
+/// org's provisioned members, and a 401 on a wrong secret.
+///
+/// Uses a non-default org so enumeration is isolated to the seeded member
+/// (every registered user auto-joins the `default` org).
 #[tokio::test]
 async fn resolver_unscoped_host_basic_lookups() {
     assert!(portal_reachable().await);
@@ -111,11 +312,13 @@ async fn resolver_unscoped_host_basic_lookups() {
     let uid = 71_000 + seed;
     let gid = 71_000 + seed;
     let username = format!("posixresolver{seed}");
+    let org_id = format!("test-org-wholeorg-{seed}");
     seed_posix_account(&identity_id, &username, uid, gid);
+    seed_org_membership(&org_id, &identity_id, "member");
 
     let host_id = format!("test-host-{seed}");
     let secret = "s3cret-resolver";
-    seed_host_enrollment(&host_id, "fixture.example", secret, None);
+    seed_host_enrollment(&host_id, "fixture.example", secret, &org_id);
 
     // Plain client (no cookie jar): the resolver is Basic-auth only.
     let client = reqwest::Client::new();
@@ -144,7 +347,8 @@ async fn resolver_unscoped_host_basic_lookups() {
     let body = res.text().await.expect("keys body");
     assert_eq!(body.trim(), "ssh-ed25519 AAAATEST test@fixture");
 
-    // 3. Enumeration on an unscoped host returns an empty array.
+    // 3. Whole-org enumeration lists the org's provisioned members (just the
+    //    one seeded into this isolated org).
     let res = client
         .get(format!("{INTERNAL}/posix/v1/passwd"))
         .basic_auth(&host_id, Some(secret))
@@ -153,10 +357,16 @@ async fn resolver_unscoped_host_basic_lookups() {
         .expect("GET passwd (enumerate)");
     assert_eq!(res.status(), StatusCode::OK);
     let body: Value = res.json().await.expect("passwd_all json");
+    let names: Vec<&str> = body
+        .as_array()
+        .expect("passwd_all array")
+        .iter()
+        .filter_map(|e| e["name"].as_str())
+        .collect();
     assert_eq!(
-        body,
-        serde_json::json!([]),
-        "unscoped enumeration must be empty"
+        names,
+        vec![username.as_str()],
+        "whole-org enumeration must list exactly the org's provisioned member"
     );
 
     // 4. Wrong secret → 401.
@@ -169,43 +379,57 @@ async fn resolver_unscoped_host_basic_lookups() {
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 
     delete_host_enrollment(&host_id);
+    delete_org_membership(&org_id, &identity_id);
     user.cleanup().await;
 }
 
-/// Scoped host (`allowed_gid = Some`): only members of the org group are
-/// reachable, enumeration is restricted to them, and an `allowed_gid` that
-/// points at a non-org (`kind='user'`) gid fails closed (resolves nothing).
+/// Team-scoped host (one `host_allowed_groups` row): only members of the
+/// allowed team are reachable, enumeration is restricted to them, the team's
+/// gid resolves the roster, and a host scoped to a team that belongs to a
+/// DIFFERENT org fails closed (resolves nothing) — a cross-org team can never
+/// widen visibility.
 #[tokio::test]
 async fn resolver_scoped_host_enforces_gid() {
     assert!(portal_reachable().await);
 
-    const ORG_GID: i64 = 2_500_000;
+    const TEAM_GID: i64 = 2_500_000;
+    let stamp = chrono::Utc::now().timestamp_millis();
+    let org_id = format!("test-org-scoped-{stamp}");
+    let team_id = format!("test-team-scoped-{stamp}");
 
-    // In-scope member.
+    // In-scope member: org member + team member.
     let member = register_test_user("posix-scoped-in").await;
     let member_id = member.identity_id.clone();
-    let seed_a = chrono::Utc::now().timestamp_millis() % 50_000;
+    let seed_a = stamp % 50_000;
     let member_uid = 72_000 + seed_a;
     let member_gid = 72_000 + seed_a;
     let member_name = format!("posixscopedin{seed_a}");
     seed_posix_account(&member_id, &member_name, member_uid, member_gid);
+    seed_org_membership(&org_id, &member_id, "member");
+    seed_team(
+        &team_id,
+        &org_id,
+        "engineering",
+        "engineering",
+        Some(TEAM_GID),
+    );
+    add_team_member(&team_id, &member_id);
 
-    seed_org_group(ORG_GID, "engineering");
-    add_posix_group_member(ORG_GID, &member_id);
-
-    // Out-of-scope account (NOT a member of ORG_GID).
+    // Out-of-scope account: org member but NOT a member of the allowed team.
     let outsider = register_test_user("posix-scoped-out").await;
     let outsider_id = outsider.identity_id.clone();
-    let seed_b = (chrono::Utc::now().timestamp_millis() + 1) % 50_000;
+    let seed_b = (stamp + 1) % 50_000;
     let outsider_uid = 73_000 + seed_b;
     let outsider_gid = 73_000 + seed_b;
     let outsider_name = format!("posixscopedout{seed_b}");
     seed_posix_account(&outsider_id, &outsider_name, outsider_uid, outsider_gid);
+    seed_org_membership(&org_id, &outsider_id, "member");
 
-    // Scoped host bound to the org gid.
+    // Host scoped to the team.
     let host_id = format!("test-scoped-host-{seed_a}");
     let secret = "s3cret-scoped";
-    seed_host_enrollment(&host_id, "scoped.example", secret, Some(ORG_GID));
+    seed_host_enrollment(&host_id, "scoped.example", secret, &org_id);
+    set_host_allowed_team_ids(&host_id, &[team_id.as_str()]);
 
     let client = reqwest::Client::new();
 
@@ -237,9 +461,9 @@ async fn resolver_scoped_host_enforces_gid() {
         "out-of-scope account must 404 on a scoped host"
     );
 
-    // Group roster by gid lists the member.
+    // Group roster by the team gid lists the member.
     let res = client
-        .get(format!("{INTERNAL}/posix/v1/group/gid/{ORG_GID}"))
+        .get(format!("{INTERNAL}/posix/v1/group/gid/{TEAM_GID}"))
         .basic_auth(&host_id, Some(secret))
         .send()
         .await
@@ -247,7 +471,7 @@ async fn resolver_scoped_host_enforces_gid() {
     assert_eq!(
         res.status(),
         StatusCode::OK,
-        "org group lookup should be 200"
+        "team group lookup should be 200"
     );
     let body: Value = res.json().await.expect("group json");
     let members = body["members"].as_array().expect("group members array");
@@ -255,7 +479,7 @@ async fn resolver_scoped_host_enforces_gid() {
         members
             .iter()
             .any(|m| m == &Value::from(member_name.clone())),
-        "org roster must include the member; got {members:?}"
+        "team roster must include the member; got {members:?}"
     );
 
     // Scoped enumeration contains the member but not the outsider.
@@ -282,29 +506,37 @@ async fn resolver_scoped_host_enforces_gid() {
         "scoped enumeration must NOT include the out-of-scope account; got {names:?}"
     );
 
-    // Fail-closed: a host whose allowed_gid is a kind='user' gid (the
-    // member's own primary group) resolves nothing.
-    let bad_host_id = format!("test-userscoped-host-{seed_a}");
-    let bad_secret = "s3cret-userscoped";
-    seed_host_enrollment(
-        &bad_host_id,
-        "userscoped.example",
-        bad_secret,
-        Some(member_gid),
+    // Fail-closed: a host (in `org_id`) scoped to a team that belongs to a
+    // DIFFERENT org resolves nothing, even for a real member of that foreign
+    // team — the resolver asserts each allowed team's org == the host's org.
+    let other_org = format!("test-org-foreign-{stamp}");
+    let foreign_team = format!("test-team-foreign-{stamp}");
+    seed_team(
+        &foreign_team,
+        &other_org,
+        "foreign-eng",
+        "foreign-eng",
+        Some(TEAM_GID + 1),
     );
+    add_team_member(&foreign_team, &member_id);
+
+    let bad_host_id = format!("test-foreignscope-host-{seed_a}");
+    let bad_secret = "s3cret-foreignscope";
+    seed_host_enrollment(&bad_host_id, "foreignscope.example", bad_secret, &org_id);
+    set_host_allowed_team_ids(&bad_host_id, &[foreign_team.as_str()]);
 
     let res = client
         .get(format!("{INTERNAL}/posix/v1/passwd"))
         .basic_auth(&bad_host_id, Some(bad_secret))
         .send()
         .await
-        .expect("GET passwd (user-gid scoped)");
+        .expect("GET passwd (foreign-org team scoped)");
     assert_eq!(res.status(), StatusCode::OK);
-    let body: Value = res.json().await.expect("user-gid passwd_all json");
+    let body: Value = res.json().await.expect("foreign-team passwd_all json");
     assert_eq!(
         body,
         serde_json::json!([]),
-        "a non-org allowed_gid must fail closed (empty enumeration)"
+        "a foreign-org allowed team must fail closed (empty enumeration)"
     );
 
     let res = client
@@ -312,57 +544,161 @@ async fn resolver_scoped_host_enforces_gid() {
         .basic_auth(&bad_host_id, Some(bad_secret))
         .send()
         .await
-        .expect("GET passwd/name (user-gid scoped)");
+        .expect("GET passwd/name (foreign-org team scoped)");
     assert_eq!(
         res.status(),
         StatusCode::NOT_FOUND,
-        "a non-org allowed_gid must fail closed (no name resolution)"
+        "a foreign-org allowed team must fail closed (no name resolution)"
     );
 
     delete_host_enrollment(&bad_host_id);
     delete_host_enrollment(&host_id);
-    delete_posix_group_members(ORG_GID);
-    delete_posix_group(ORG_GID);
+    delete_team(&foreign_team);
+    delete_team(&team_id);
+    delete_org_membership(&org_id, &member_id);
+    delete_org_membership(&org_id, &outsider_id);
     member.cleanup().await;
     outsider.cleanup().await;
 }
 
-/// Org-membership removal must revoke the ex-member from the org's POSIX
-/// mirror, so a host SCOPED to that org's gid stops resolving them (H1).
+/// A host scoped to TWO teams resolves a member of EITHER team, and 404s a
+/// non-member of both (any-of-N scope via `host_allowed_groups`). Both teams
+/// (and all three accounts) live in one non-default org.
+#[tokio::test]
+async fn host_scoped_to_two_groups_resolves_either() {
+    assert!(portal_reachable().await);
+
+    const TEAM_GID_A: i64 = 2_700_000;
+    const TEAM_GID_B: i64 = 2_710_000;
+    let stamp = chrono::Utc::now().timestamp_millis();
+    let org_id = format!("test-org-two-{stamp}");
+    let team_a = format!("test-team-two-a-{stamp}");
+    let team_b = format!("test-team-two-b-{stamp}");
+
+    // Member of team A.
+    let member_a = register_test_user("posix-two-a").await;
+    let member_a_id = member_a.identity_id.clone();
+    let seed_a = stamp % 50_000;
+    let member_a_uid = 75_000 + seed_a;
+    let member_a_name = format!("posixtwoa{seed_a}");
+    seed_posix_account(&member_a_id, &member_a_name, member_a_uid, member_a_uid);
+
+    // Member of team B.
+    let member_b = register_test_user("posix-two-b").await;
+    let member_b_id = member_b.identity_id.clone();
+    let seed_b = (stamp + 1) % 50_000;
+    let member_b_uid = 76_000 + seed_b;
+    let member_b_name = format!("posixtwob{seed_b}");
+    seed_posix_account(&member_b_id, &member_b_name, member_b_uid, member_b_uid);
+
+    // Org member of neither team.
+    let outsider = register_test_user("posix-two-out").await;
+    let outsider_id = outsider.identity_id.clone();
+    let seed_c = (stamp + 2) % 50_000;
+    let outsider_uid = 77_000 + seed_c;
+    let outsider_name = format!("posixtwoout{seed_c}");
+    seed_posix_account(&outsider_id, &outsider_name, outsider_uid, outsider_uid);
+
+    for id in [&member_a_id, &member_b_id, &outsider_id] {
+        seed_org_membership(&org_id, id, "member");
+    }
+    seed_team(&team_a, &org_id, "two-eng", "two-eng", Some(TEAM_GID_A));
+    seed_team(&team_b, &org_id, "two-ops", "two-ops", Some(TEAM_GID_B));
+    add_team_member(&team_a, &member_a_id);
+    add_team_member(&team_b, &member_b_id);
+
+    // Host scoped to BOTH teams.
+    let host_id = format!("test-twogrp-host-{seed_a}");
+    let secret = "s3cret-twogrp";
+    seed_host_enrollment(&host_id, "two.example", secret, &org_id);
+    set_host_allowed_team_ids(&host_id, &[team_a.as_str(), team_b.as_str()]);
+
+    let client = reqwest::Client::new();
+
+    for name in [&member_a_name, &member_b_name] {
+        let res = client
+            .get(format!("{INTERNAL}/posix/v1/passwd/name/{name}"))
+            .basic_auth(&host_id, Some(secret))
+            .send()
+            .await
+            .expect("GET passwd/name member");
+        assert_eq!(
+            res.status(),
+            StatusCode::OK,
+            "member of either scoped team should be 200 ({name})"
+        );
+        let body: Value = res.json().await.expect("member passwd json");
+        assert_eq!(body["name"], *name);
+    }
+
+    let res = client
+        .get(format!("{INTERNAL}/posix/v1/passwd/name/{outsider_name}"))
+        .basic_auth(&host_id, Some(secret))
+        .send()
+        .await
+        .expect("GET passwd/name outsider");
+    assert_eq!(
+        res.status(),
+        StatusCode::NOT_FOUND,
+        "a non-member of both scoped teams must 404"
+    );
+
+    delete_host_enrollment(&host_id);
+    delete_team(&team_a);
+    delete_team(&team_b);
+    for id in [&member_a_id, &member_b_id, &outsider_id] {
+        delete_org_membership(&org_id, id);
+    }
+    member_a.cleanup().await;
+    member_b.cleanup().await;
+    outsider.cleanup().await;
+}
+
+/// Org-membership removal must revoke the ex-member from the org's teams, so a
+/// host SCOPED to one of that org's teams stops resolving them (H1).
 ///
-/// Seeds the licensed-state shape directly via rusqlite (an `org`-kind
-/// `posix_groups` row keyed by a real `org_id` + a membership), proves the
-/// scoped host resolves the member, then applies the exact net effect of
-/// `posix::db::remove_identity_from_org_group` — `DELETE FROM
-/// posix_group_members WHERE gid = <org gid> AND identity_id = ?` — and
-/// asserts the host no longer resolves the ex-member.
+/// Seeds the team-model shape directly via rusqlite (org membership + a team +
+/// a team membership), proves the scoped host resolves the member, then applies
+/// the exact net effect of removing the identity from the org — purge their
+/// team memberships (`teams::remove_identity_from_org_teams`) and drop the org
+/// membership row — and asserts the host no longer resolves the ex-member.
 ///
 /// TODO: the full handler path (`POST .../members` remove → the wired
-/// `remove_identity_from_org_group` call) needs an active Orgs license to
-/// pass `require_org_owner_with_license`; the integration harness has no
-/// license-activation path (the licensed e2e bucket does it over HTTP).
-/// The handler → helper wiring is covered by `cargo check`; this test pins
-/// the resulting access-revocation invariant the resolver enforces.
+/// `remove_identity_from_org_teams` call) needs an active Orgs license to pass
+/// `require_org_owner_with_license`; the integration harness has no
+/// license-activation path (the licensed e2e bucket does it over HTTP). The
+/// handler → helper wiring is covered by `cargo check`; this test pins the
+/// resulting access-revocation invariant the resolver enforces.
 #[tokio::test]
 async fn org_member_removal_revokes_scoped_host_access() {
     assert!(portal_reachable().await);
 
-    const ORG_GID: i64 = 2_600_000;
-    let org_id = format!("test-org-{}", chrono::Utc::now().timestamp_millis());
+    const TEAM_GID: i64 = 2_600_000;
+    let stamp = chrono::Utc::now().timestamp_millis();
+    let org_id = format!("test-org-orgremove-{stamp}");
+    let team_id = format!("test-team-orgremove-{stamp}");
 
     let member = register_test_user("posix-orgremove").await;
     let member_id = member.identity_id.clone();
-    let seed = chrono::Utc::now().timestamp_millis() % 50_000;
+    let seed = stamp % 50_000;
     let member_uid = 74_000 + seed;
     let member_name = format!("posixorgremove{seed}");
     seed_posix_account(&member_id, &member_name, member_uid, member_uid);
 
-    seed_org_group_with_org_id(ORG_GID, "scoped-eng", &org_id);
-    add_posix_group_member(ORG_GID, &member_id);
+    seed_org_membership(&org_id, &member_id, "member");
+    seed_team(
+        &team_id,
+        &org_id,
+        "scoped-eng",
+        "scoped-eng",
+        Some(TEAM_GID),
+    );
+    add_team_member(&team_id, &member_id);
 
     let host_id = format!("test-orgremove-host-{seed}");
     let secret = "s3cret-orgremove";
-    seed_host_enrollment(&host_id, "orgremove.example", secret, Some(ORG_GID));
+    seed_host_enrollment(&host_id, "orgremove.example", secret, &org_id);
+    set_host_allowed_team_ids(&host_id, &[team_id.as_str()]);
 
     let client = reqwest::Client::new();
 
@@ -379,14 +715,10 @@ async fn org_member_removal_revokes_scoped_host_access() {
         "member must resolve on the scoped host before removal"
     );
 
-    // The org-removal cleanup: drop the member from the org's POSIX mirror.
-    // Mirrors `remove_identity_from_org_group`'s net effect exactly.
-    delete_org_group_member(ORG_GID, &member_id);
-    assert_eq!(
-        count_org_group_memberships(&member_id),
-        0,
-        "org-group membership must be gone after removal"
-    );
+    // The org-removal cleanup: purge team membership + drop the org membership.
+    // Mirrors `remove_identity_from_org_teams` + the org-members handler delete.
+    remove_team_member(&team_id, &member_id);
+    delete_org_membership(&org_id, &member_id);
 
     // Post-removal: the scoped host must NOT resolve the ex-member.
     let res = client
@@ -402,8 +734,7 @@ async fn org_member_removal_revokes_scoped_host_access() {
     );
 
     delete_host_enrollment(&host_id);
-    delete_posix_group_members(ORG_GID);
-    delete_posix_group(ORG_GID);
+    delete_team(&team_id);
     member.cleanup().await;
 }
 
@@ -539,80 +870,6 @@ async fn admin_posix_seat_cap_enforced_then_happy_path() {
     user.cleanup().await;
 }
 
-/// Org→posix-group sync is gated behind the commercial `Feature::Orgs`. In
-/// the default CI state (no license) provisioning a user who already belongs
-/// to an org (every user auto-joins the seeded `default` org) must NOT create
-/// any `org`-kind group or membership — only the `user`-kind primary group.
-///
-/// TODO: the licensed case (an active Orgs license → one `org`-kind group per
-/// org, shared membership) needs a license fixture activated via
-/// `/admin/license`; the integration harness has no license-activation path
-/// yet (the licensed e2e bucket does it over HTTP). Deferred, mirroring the
-/// `max_seats` TODO above.
-#[tokio::test]
-async fn admin_posix_org_group_sync_gated_off_unlicensed() {
-    if !portal_reachable().await {
-        eprintln!("portal not reachable; skipping");
-        return;
-    }
-    let Some(client) = try_admin_signed_in_client().await else {
-        eprintln!(
-            "Skipping posix-org-sync test: FORSETI_ADMIN_TEST_EMAIL/PASSWORD/TOTP_CODE not set."
-        );
-        return;
-    };
-
-    // A freshly-registered user auto-joins the seeded `default` org, so it has
-    // at least one membership the sync WOULD mirror if Orgs were licensed.
-    let user = register_test_user("posix-orgsync").await;
-    let identity_id = user.identity_id.clone();
-
-    let base = 85_000 + (chrono::Utc::now().timestamp_millis() % 40_000);
-    let username = format!("orgsync{base}");
-
-    let res = client
-        .get(format!("{PORTAL}/admin/posix/new"))
-        .send()
-        .await
-        .expect("GET /admin/posix/new");
-    assert_eq!(res.status().as_u16(), 200);
-    let body = res.text().await.unwrap_or_default();
-    let csrf = extract_form_csrf(&body).expect("csrf in provision form");
-
-    let res = client
-        .post(format!("{PORTAL}/admin/posix/new"))
-        .form(&[
-            ("_csrf", csrf.as_str()),
-            ("identity_id", identity_id.as_str()),
-            ("username", username.as_str()),
-            ("shell", ""),
-        ])
-        .send()
-        .await
-        .expect("POST provision");
-    assert!(
-        res.status().is_success(),
-        "provision status {}",
-        res.status()
-    );
-    let final_url = res.url().to_string();
-    assert!(
-        final_url.contains(&format!("/admin/posix/{identity_id}")),
-        "provision should land on the account page; got {final_url}"
-    );
-
-    // Unlicensed: no org-kind group membership mirrored — only the user-kind
-    // primary group from `provision_account`.
-    assert_eq!(
-        count_org_group_memberships(&identity_id),
-        0,
-        "unlicensed provision must not mirror org memberships into org-kind posix groups"
-    );
-
-    delete_posix_account(&identity_id);
-    user.cleanup().await;
-}
-
 /// Drive the host-enrollment admin surface end to end as a seeded admin:
 /// enroll a host (following the `?reveal=` redirect to the list page),
 /// assert the one-shot `host_id:secret` banner shows exactly once, confirm
@@ -646,7 +903,7 @@ async fn admin_host_enroll_reveal_once_then_revoke() {
         .form(&[
             ("_csrf", csrf.as_str()),
             ("hostname", hostname.as_str()),
-            ("allowed_gid", ""),
+            ("org_id", "default"),
         ])
         .send()
         .await
@@ -708,6 +965,302 @@ async fn admin_host_enroll_reveal_once_then_revoke() {
 
     // Belt-and-braces: ensure the row is gone even if the assertions above bailed.
     delete_host_enrollment(&host_id);
+}
+
+/// Enroll a SCOPED host through the real admin handler (`POST
+/// /admin/hosts/new` with repeated `team_ids=`), then prove the
+/// handler-written `host_allowed_groups` join table actually scopes the
+/// resolver: a member of the seeded team resolves 200, a non-member 404.
+///
+/// The handler enrolls into `DEFAULT_ORG_ID` and only accepts `team_ids`
+/// belonging to that org, so the team is seeded in `default` and both
+/// accounts (auto-joined to `default` at registration) qualify org-wise;
+/// team membership is what gates resolution.
+#[tokio::test]
+async fn admin_host_enroll_scoped_via_handler() {
+    if !portal_reachable().await {
+        eprintln!("portal not reachable; skipping");
+        return;
+    }
+    let Some(client) = admin_client_or_skip().await else {
+        return;
+    };
+
+    let ts = chrono::Utc::now().timestamp_millis();
+    let seed = ts % 50_000;
+    let team_id = format!("test-team-scoped-handler-{ts}");
+    // gid None: the enroll handler allocates one via find_or_create_team_gid.
+    seed_team(
+        &team_id,
+        "default",
+        &format!("scoped-handler-{ts}"),
+        &format!("scoped-handler-{ts}"),
+        None,
+    );
+
+    // Member of the seeded team.
+    let member = register_test_user("posix-scoped-handler-in").await;
+    let member_id = member.identity_id.clone();
+    let member_uid = 76_000 + seed;
+    let member_name = format!("posixscopedhin{seed}");
+    seed_posix_account(&member_id, &member_name, member_uid, member_uid);
+    seed_org_membership("default", &member_id, "member");
+    add_team_member(&team_id, &member_id);
+
+    // Non-member: an org member who is NOT in the team (proves it's the team
+    // scope, not org membership, that excludes them).
+    let other = register_test_user("posix-scoped-handler-out").await;
+    let other_id = other.identity_id.clone();
+    let other_uid = 77_000 + seed;
+    let other_name = format!("posixscopedhout{seed}");
+    seed_posix_account(&other_id, &other_name, other_uid, other_uid);
+    seed_org_membership("default", &other_id, "member");
+
+    // 1. Fetch the enroll form for a fresh portal CSRF.
+    let res = client
+        .get(format!("{PORTAL}/admin/hosts/new"))
+        .send()
+        .await
+        .expect("GET /admin/hosts/new");
+    assert_eq!(res.status().as_u16(), 200);
+    let body = res.text().await.unwrap_or_default();
+    let csrf = extract_form_csrf(&body).expect("csrf in enroll form");
+
+    // 2. POST enroll with `team_ids` = the seeded team. The redirect lands on
+    //    /admin/hosts?reveal=... with the one-shot banner.
+    let hostname = format!("it-scoped-host-{ts}");
+    let res = client
+        .post(format!("{PORTAL}/admin/hosts/new"))
+        .form(&[
+            ("_csrf", csrf.as_str()),
+            ("hostname", hostname.as_str()),
+            ("org_id", "default"),
+            ("team_ids", team_id.as_str()),
+        ])
+        .send()
+        .await
+        .expect("POST /admin/hosts/new");
+    assert_eq!(res.status().as_u16(), 200, "list page after enroll");
+    let body = res.text().await.unwrap_or_default();
+    assert!(
+        body.contains("Host credential (shown once)"),
+        "list body must include the one-shot reveal banner"
+    );
+
+    // Parse the revealed host_id:secret out of the <pre> banner exactly as
+    // `admin_host_enroll_reveal_once_then_revoke` does.
+    let cred = {
+        let pre_start = body.find("<pre").expect("reveal <pre>");
+        let open_end = body[pre_start..].find('>').expect("pre tag end") + pre_start + 1;
+        let close = body[open_end..].find("</pre>").expect("pre close") + open_end;
+        body[open_end..close].trim().to_string()
+    };
+    let (host_id, secret) = cred.split_once(':').expect("host_id:secret");
+    assert!(!host_id.is_empty(), "host_id present in reveal");
+    assert!(!secret.is_empty(), "secret present in reveal");
+
+    // 3. Resolve via the host's credentials: the member is in scope (200),
+    //    the non-member is out of scope (404) — proving the HANDLER-written
+    //    join table scopes the resolver.
+    let res = client
+        .get(format!("{INTERNAL}/posix/v1/passwd/name/{member_name}"))
+        .basic_auth(host_id, Some(secret))
+        .send()
+        .await
+        .expect("GET passwd/name member");
+    assert_eq!(
+        res.status(),
+        StatusCode::OK,
+        "in-scope member should be 200 on the handler-scoped host"
+    );
+    let res = client
+        .get(format!("{INTERNAL}/posix/v1/passwd/name/{other_name}"))
+        .basic_auth(host_id, Some(secret))
+        .send()
+        .await
+        .expect("GET passwd/name non-member");
+    assert_eq!(
+        res.status(),
+        StatusCode::NOT_FOUND,
+        "non-member must 404 on the handler-scoped host"
+    );
+
+    delete_host_enrollment(host_id);
+    delete_team(&team_id);
+    delete_posix_account(&member_id);
+    delete_posix_account(&other_id);
+    member.cleanup().await;
+    other.cleanup().await;
+}
+
+/// Enroll a host scoped to team t1 through the handler, then EDIT its scope to
+/// t2 via `POST /admin/hosts/{id}/edit`. A t2-only member must flip from 404 to
+/// 200 (and a t1-only member from 200 to 404) — proving the edit handler
+/// rewrites `host_allowed_groups`. Both teams live in `DEFAULT_ORG_ID` (the
+/// only org the enroll/edit handlers scope against).
+#[tokio::test]
+async fn admin_host_edit_changes_scope() {
+    if !portal_reachable().await {
+        eprintln!("portal not reachable; skipping");
+        return;
+    }
+    let Some(client) = admin_client_or_skip().await else {
+        return;
+    };
+
+    let ts = chrono::Utc::now().timestamp_millis();
+    let seed = ts % 50_000;
+    let team1 = format!("test-team-edit-t1-{ts}");
+    let team2 = format!("test-team-edit-t2-{ts}");
+    seed_team(
+        &team1,
+        "default",
+        &format!("edit-t1-{ts}"),
+        &format!("edit-t1-{ts}"),
+        None,
+    );
+    seed_team(
+        &team2,
+        "default",
+        &format!("edit-t2-{ts}"),
+        &format!("edit-t2-{ts}"),
+        None,
+    );
+
+    // Member of t1 only.
+    let m1 = register_test_user("posix-edit-g1").await;
+    let m1_id = m1.identity_id.clone();
+    let m1_uid = 78_000 + seed;
+    let m1_name = format!("posixeditg1{seed}");
+    seed_posix_account(&m1_id, &m1_name, m1_uid, m1_uid);
+    seed_org_membership("default", &m1_id, "member");
+    add_team_member(&team1, &m1_id);
+
+    // Member of t2 only.
+    let m2 = register_test_user("posix-edit-g2").await;
+    let m2_id = m2.identity_id.clone();
+    let m2_uid = 79_000 + seed;
+    let m2_name = format!("posixeditg2{seed}");
+    seed_posix_account(&m2_id, &m2_name, m2_uid, m2_uid);
+    seed_org_membership("default", &m2_id, "member");
+    add_team_member(&team2, &m2_id);
+
+    // 1. Enroll a host scoped to t1 via the handler.
+    let res = client
+        .get(format!("{PORTAL}/admin/hosts/new"))
+        .send()
+        .await
+        .expect("GET /admin/hosts/new");
+    assert_eq!(res.status().as_u16(), 200);
+    let body = res.text().await.unwrap_or_default();
+    let csrf = extract_form_csrf(&body).expect("csrf in enroll form");
+
+    let hostname = format!("it-edit-host-{ts}");
+    let res = client
+        .post(format!("{PORTAL}/admin/hosts/new"))
+        .form(&[
+            ("_csrf", csrf.as_str()),
+            ("hostname", hostname.as_str()),
+            ("org_id", "default"),
+            ("team_ids", team1.as_str()),
+        ])
+        .send()
+        .await
+        .expect("POST /admin/hosts/new");
+    assert_eq!(res.status().as_u16(), 200, "list page after enroll");
+    let body = res.text().await.unwrap_or_default();
+    assert!(
+        body.contains("Host credential (shown once)"),
+        "list body must include the one-shot reveal banner"
+    );
+    let cred = {
+        let pre_start = body.find("<pre").expect("reveal <pre>");
+        let open_end = body[pre_start..].find('>').expect("pre tag end") + pre_start + 1;
+        let close = body[open_end..].find("</pre>").expect("pre close") + open_end;
+        body[open_end..close].trim().to_string()
+    };
+    let (host_id, secret) = cred.split_once(':').expect("host_id:secret");
+    let host_id = host_id.to_string();
+    let secret = secret.to_string();
+    assert!(!host_id.is_empty(), "host_id present in reveal");
+
+    // Initially scoped to t1: m1 resolves, m2 does not.
+    let res = client
+        .get(format!("{INTERNAL}/posix/v1/passwd/name/{m1_name}"))
+        .basic_auth(&host_id, Some(&secret))
+        .send()
+        .await
+        .expect("GET passwd/name t1 member (pre-edit)");
+    assert_eq!(
+        res.status(),
+        StatusCode::OK,
+        "t1 member should resolve while host is scoped to t1"
+    );
+    let res = client
+        .get(format!("{INTERNAL}/posix/v1/passwd/name/{m2_name}"))
+        .basic_auth(&host_id, Some(&secret))
+        .send()
+        .await
+        .expect("GET passwd/name t2 member (pre-edit)");
+    assert_eq!(
+        res.status(),
+        StatusCode::NOT_FOUND,
+        "t2 member must 404 before the scope is changed"
+    );
+
+    // 2. Edit the host's scope to t2 (GET first for a fresh CSRF).
+    let res = client
+        .get(format!("{PORTAL}/admin/hosts/{host_id}/edit"))
+        .send()
+        .await
+        .expect("GET /admin/hosts/{id}/edit");
+    assert_eq!(res.status().as_u16(), 200);
+    let body = res.text().await.unwrap_or_default();
+    let csrf = extract_form_csrf(&body).expect("csrf in edit form");
+
+    let res = client
+        .post(format!("{PORTAL}/admin/hosts/{host_id}/edit"))
+        .form(&[
+            ("_csrf", csrf.as_str()),
+            ("hostname", hostname.as_str()),
+            ("team_ids", team2.as_str()),
+        ])
+        .send()
+        .await
+        .expect("POST /admin/hosts/{id}/edit");
+    assert!(res.status().is_success(), "edit status {}", res.status());
+
+    // 3. Scope is now t2: m2 resolves, m1 no longer does.
+    let res = client
+        .get(format!("{INTERNAL}/posix/v1/passwd/name/{m2_name}"))
+        .basic_auth(&host_id, Some(&secret))
+        .send()
+        .await
+        .expect("GET passwd/name t2 member (post-edit)");
+    assert_eq!(
+        res.status(),
+        StatusCode::OK,
+        "t2 member should resolve after the edit re-scopes the host to t2"
+    );
+    let res = client
+        .get(format!("{INTERNAL}/posix/v1/passwd/name/{m1_name}"))
+        .basic_auth(&host_id, Some(&secret))
+        .send()
+        .await
+        .expect("GET passwd/name t1 member (post-edit)");
+    assert_eq!(
+        res.status(),
+        StatusCode::NOT_FOUND,
+        "t1 member must 404 once the host is re-scoped away from t1"
+    );
+
+    delete_host_enrollment(&host_id);
+    delete_team(&team1);
+    delete_team(&team2);
+    delete_posix_account(&m1_id);
+    delete_posix_account(&m2_id);
+    m1.cleanup().await;
+    m2.cleanup().await;
 }
 
 // --- M2 Part B: device-auth flow ----------------------------------------
@@ -856,11 +1409,13 @@ async fn device_auth_happy_path_binds_and_approves() {
     let uid = 72_000 + seed;
     let gid = 72_000 + seed;
     let username = format!("devok{seed}");
+    let org_id = format!("dev-org-ok-{seed}");
     seed_posix_account(&approver.identity_id, &username, uid, gid);
+    seed_org_membership(&org_id, &approver.identity_id, "member");
 
     let host_id = format!("dev-host-ok-{seed}");
     let secret = "s3cret-dev-ok";
-    seed_host_enrollment(&host_id, "ok.example", secret, None);
+    seed_host_enrollment(&host_id, "ok.example", secret, &org_id);
 
     let (status, body) = device_init(&host_id, secret, &username).await;
     assert_eq!(status, StatusCode::OK, "device/init: {status} {body}");
@@ -898,6 +1453,7 @@ async fn device_auth_happy_path_binds_and_approves() {
 
     delete_device_sessions_for_host(&host_id);
     delete_host_enrollment(&host_id);
+    delete_org_membership(&org_id, &approver.identity_id);
     approver.cleanup().await;
 }
 
@@ -915,12 +1471,16 @@ async fn device_auth_wrong_user_denied() {
     let b_uid = 74_000 + seed;
     let alice_name = format!("devalice{seed}");
     let bob_name = format!("devbob{seed}");
+    let org_id = format!("dev-org-wrong-{seed}");
     seed_posix_account(&alice.identity_id, &alice_name, a_uid, a_uid);
     seed_posix_account(&bob.identity_id, &bob_name, b_uid, b_uid);
+    // alice is the named target, so she must be visible on the host (org member);
+    // bob only needs a signed-in browser session to drive the wrong-user approval.
+    seed_org_membership(&org_id, &alice.identity_id, "member");
 
     let host_id = format!("dev-host-wrong-{seed}");
     let secret = "s3cret-wrong";
-    seed_host_enrollment(&host_id, "wrong.example", secret, None);
+    seed_host_enrollment(&host_id, "wrong.example", secret, &org_id);
 
     // Init names ALICE, but BOB approves.
     let (status, body) = device_init(&host_id, secret, &alice_name).await;
@@ -936,6 +1496,7 @@ async fn device_auth_wrong_user_denied() {
 
     delete_device_sessions_for_host(&host_id);
     delete_host_enrollment(&host_id);
+    delete_org_membership(&org_id, &alice.identity_id);
     alice.cleanup().await;
     bob.cleanup().await;
 }
@@ -952,11 +1513,13 @@ async fn device_auth_force_mfa_aal1_denied() {
     let seed = chrono::Utc::now().timestamp_millis() % 50_000;
     let uid = 75_000 + seed;
     let username = format!("devmfa{seed}");
+    let org_id = format!("dev-org-mfa-{seed}");
     seed_posix_account(&approver.identity_id, &username, uid, uid);
+    seed_org_membership(&org_id, &approver.identity_id, "member");
 
     let host_id = format!("dev-host-mfa-{seed}");
     let secret = "s3cret-mfa";
-    seed_host_enrollment_mfa(&host_id, "mfa.example", secret, None);
+    seed_host_enrollment_mfa(&host_id, "mfa.example", secret, &org_id);
 
     let (status, body) = device_init(&host_id, secret, &username).await;
     assert_eq!(status, StatusCode::OK);
@@ -980,6 +1543,7 @@ async fn device_auth_force_mfa_aal1_denied() {
 
     delete_device_sessions_for_host(&host_id);
     delete_host_enrollment(&host_id);
+    delete_org_membership(&org_id, &approver.identity_id);
     approver.cleanup().await;
 }
 
@@ -993,23 +1557,26 @@ async fn device_auth_disabled_account_init_denied() {
     let seed = chrono::Utc::now().timestamp_millis() % 50_000;
     let uid = 76_000 + seed;
     let username = format!("devdisabled{seed}");
+    let org_id = format!("dev-org-disabled-{seed}");
     seed_posix_account(&approver.identity_id, &username, uid, uid);
+    seed_org_membership(&org_id, &approver.identity_id, "member");
     set_posix_account_enabled(&approver.identity_id, false);
 
     let host_id = format!("dev-host-disabled-{seed}");
     let secret = "s3cret-disabled";
-    seed_host_enrollment(&host_id, "disabled.example", secret, None);
+    seed_host_enrollment(&host_id, "disabled.example", secret, &org_id);
 
     let (status, _body) = device_init(&host_id, secret, &username).await;
     assert_eq!(status, StatusCode::NOT_FOUND, "disabled account init → 404");
 
     delete_device_sessions_for_host(&host_id);
     delete_host_enrollment(&host_id);
+    delete_org_membership(&org_id, &approver.identity_id);
     approver.cleanup().await;
 }
 
-/// Out-of-scope account (scoped host whose allowed_gid group the account
-/// isn't a member of) → `device/init` 404.
+/// Out-of-scope account (team-scoped host whose allowed team the account isn't
+/// a member of, though it IS an org member) → `device/init` 404.
 #[tokio::test]
 async fn device_auth_out_of_scope_init_denied() {
     if !portal_reachable().await {
@@ -1018,15 +1585,26 @@ async fn device_auth_out_of_scope_init_denied() {
     let approver = register_test_user("dev-scope").await;
     let seed = chrono::Utc::now().timestamp_millis() % 50_000;
     let uid = 77_000 + seed;
-    let org_gid = 78_000 + seed;
+    let team_gid = 78_000 + seed;
     let username = format!("devscope{seed}");
+    let org_id = format!("dev-org-scope-{seed}");
+    let team_id = format!("dev-team-scope-{seed}");
     seed_posix_account(&approver.identity_id, &username, uid, uid);
-    // Org group exists, but the account is NOT a member → out of scope.
-    seed_org_group(org_gid, &format!("scopegrp{seed}"));
+    // Org member, and the team exists, but the account is NOT a team member →
+    // out of scope on a team-scoped host.
+    seed_org_membership(&org_id, &approver.identity_id, "member");
+    seed_team(
+        &team_id,
+        &org_id,
+        &format!("scopegrp{seed}"),
+        &format!("scopegrp{seed}"),
+        Some(team_gid),
+    );
 
     let host_id = format!("dev-host-scope-{seed}");
     let secret = "s3cret-scope";
-    seed_host_enrollment(&host_id, "scope.example", secret, Some(org_gid));
+    seed_host_enrollment(&host_id, "scope.example", secret, &org_id);
+    set_host_allowed_team_ids(&host_id, &[team_id.as_str()]);
 
     let (status, _body) = device_init(&host_id, secret, &username).await;
     assert_eq!(
@@ -1037,7 +1615,8 @@ async fn device_auth_out_of_scope_init_denied() {
 
     delete_device_sessions_for_host(&host_id);
     delete_host_enrollment(&host_id);
-    delete_posix_group(org_gid);
+    delete_team(&team_id);
+    delete_org_membership(&org_id, &approver.identity_id);
     approver.cleanup().await;
 }
 
@@ -1055,9 +1634,10 @@ fn offline_verifier_usernames(body: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// `/posix/v1/offline_verifiers` projection on a SCOPED host: a member that is
-/// enabled + scoped + has an offline secret is included; disabled, de-scoped,
-/// and no-secret accounts are all excluded.
+/// `/posix/v1/offline_verifiers` projection on a team-SCOPED host: a member
+/// that is enabled + team-scoped + has an offline secret is included; disabled,
+/// de-scoped (org member but not a team member), and no-secret accounts are all
+/// excluded.
 #[tokio::test]
 async fn offline_verifiers_includes_only_eligible() {
     if !portal_reachable().await {
@@ -1066,17 +1646,26 @@ async fn offline_verifiers_includes_only_eligible() {
     }
 
     let seed = chrono::Utc::now().timestamp_millis() % 50_000;
-    // Per-run-unique org gid in a high band so a leftover row from an aborted
-    // prior run can't collide on posix_groups.gid (UNIQUE).
-    let org_gid: i64 = 2_700_000 + seed;
+    // Per-run-unique team gid in a high band so a leftover row from an aborted
+    // prior run can't collide on org_teams.gid.
+    let team_gid: i64 = 2_700_000 + seed;
+    let org_id = format!("offl-org-{seed}");
+    let team_id = format!("offl-team-{seed}");
+    seed_team(
+        &team_id,
+        &org_id,
+        &format!("offlgrp{seed}"),
+        &format!("offlgrp{seed}"),
+        Some(team_gid),
+    );
 
     // member: enabled + scoped + has-secret → included.
     let member = register_test_user("offl-member").await;
     let member_id = member.identity_id.clone();
     let member_name = format!("offlmember{seed}");
     seed_posix_account(&member_id, &member_name, 90_000 + seed, 90_000 + seed);
-    seed_org_group(org_gid, &format!("offlgrp{seed}"));
-    add_posix_group_member(org_gid, &member_id);
+    seed_org_membership(&org_id, &member_id, "member");
+    add_team_member(&team_id, &member_id);
     seed_offline_secret(
         &member_id,
         "$argon2id$v=19$m=65536,t=3,p=1$c2FsdHNhbHQ$aGFzaGhhc2g",
@@ -1087,25 +1676,28 @@ async fn offline_verifiers_includes_only_eligible() {
     let nosecret_id = nosecret.identity_id.clone();
     let nosecret_name = format!("offlnosecret{seed}");
     seed_posix_account(&nosecret_id, &nosecret_name, 91_000 + seed, 91_000 + seed);
-    add_posix_group_member(org_gid, &nosecret_id);
+    seed_org_membership(&org_id, &nosecret_id, "member");
+    add_team_member(&team_id, &nosecret_id);
 
     // disabled: scoped + has-secret but DISABLED → excluded.
     let disabled = register_test_user("offl-disabled").await;
     let disabled_id = disabled.identity_id.clone();
     let disabled_name = format!("offldisabled{seed}");
     seed_posix_account(&disabled_id, &disabled_name, 92_000 + seed, 92_000 + seed);
-    add_posix_group_member(org_gid, &disabled_id);
+    seed_org_membership(&org_id, &disabled_id, "member");
+    add_team_member(&team_id, &disabled_id);
     seed_offline_secret(
         &disabled_id,
         "$argon2id$v=19$m=65536,t=3,p=1$c2FsdHNhbHQ$aGFzaGhhc2g",
     );
     set_posix_account_enabled(&disabled_id, false);
 
-    // descoped: enabled + has-secret but NOT a member of ORG_GID → excluded.
+    // descoped: enabled + has-secret + org member but NOT a team member → excluded.
     let descoped = register_test_user("offl-descoped").await;
     let descoped_id = descoped.identity_id.clone();
     let descoped_name = format!("offldescoped{seed}");
     seed_posix_account(&descoped_id, &descoped_name, 93_000 + seed, 93_000 + seed);
+    seed_org_membership(&org_id, &descoped_id, "member");
     seed_offline_secret(
         &descoped_id,
         "$argon2id$v=19$m=65536,t=3,p=1$c2FsdHNhbHQ$aGFzaGhhc2g",
@@ -1113,7 +1705,8 @@ async fn offline_verifiers_includes_only_eligible() {
 
     let host_id = format!("offl-host-{seed}");
     let secret = "s3cret-offl";
-    seed_host_enrollment(&host_id, "offl.example", secret, Some(org_gid));
+    seed_host_enrollment(&host_id, "offl.example", secret, &org_id);
+    set_host_allowed_team_ids(&host_id, &[team_id.as_str()]);
 
     let client = reqwest::Client::new();
     let res = client
@@ -1152,7 +1745,7 @@ async fn offline_verifiers_includes_only_eligible() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|e| e["username"] == Value::from(member_name.clone()))
+        .find(|e| e["username"] == member_name.as_str())
         .expect("member row present");
     assert!(
         member_row["verifier"]
@@ -1167,8 +1760,10 @@ async fn offline_verifiers_includes_only_eligible() {
     delete_offline_secret(&disabled_id);
     delete_offline_secret(&descoped_id);
     delete_host_enrollment(&host_id);
-    delete_posix_group_members(org_gid);
-    delete_posix_group(org_gid);
+    delete_team(&team_id);
+    for id in [&member_id, &nosecret_id, &disabled_id, &descoped_id] {
+        delete_org_membership(&org_id, id);
+    }
     member.cleanup().await;
     nosecret.cleanup().await;
     disabled.cleanup().await;
@@ -1194,10 +1789,12 @@ async fn offline_verifiers_force_mfa_host_is_empty() {
         "$argon2id$v=19$m=65536,t=3,p=1$c2FsdHNhbHQ$aGFzaGhhc2g",
     );
 
-    // Unscoped force_mfa host: the user would qualify on a normal host.
+    // Whole-org force_mfa host: the user would qualify on a normal host.
+    let org_id = format!("offl-mfa-org-{seed}");
+    seed_org_membership(&org_id, &user_id, "member");
     let host_id = format!("offl-mfa-host-{seed}");
     let secret = "s3cret-offl-mfa";
-    seed_host_enrollment_mfa(&host_id, "offlmfa.example", secret, None);
+    seed_host_enrollment_mfa(&host_id, "offlmfa.example", secret, &org_id);
 
     let client = reqwest::Client::new();
     let res = client
@@ -1216,6 +1813,7 @@ async fn offline_verifiers_force_mfa_host_is_empty() {
 
     delete_offline_secret(&user_id);
     delete_host_enrollment(&host_id);
+    delete_org_membership(&org_id, &user_id);
     user.cleanup().await;
 }
 
@@ -1229,9 +1827,10 @@ async fn offline_audit_ingest_writes_rows_and_caps_batch() {
     }
 
     let seed = chrono::Utc::now().timestamp_millis() % 50_000;
+    let org_id = format!("offl-audit-org-{seed}");
     let host_id = format!("offl-audit-host-{seed}");
     let secret = "s3cret-offl-audit";
-    seed_host_enrollment(&host_id, "offlaudit.example", secret, None);
+    seed_host_enrollment(&host_id, "offlaudit.example", secret, &org_id);
 
     let client = reqwest::Client::new();
     let username = format!("offlauditeer{seed}");
@@ -1282,4 +1881,487 @@ async fn offline_audit_ingest_writes_rows_and_caps_batch() {
     );
 
     delete_host_enrollment(&host_id);
+}
+
+// --- Task 11b: cross-org tenant isolation --------------------------------
+//
+// Every host below lives in a NON-default org and every account's org/team
+// membership is seeded explicitly. Registration auto-joins `default`, so a
+// host in `default` would resolve every registered user and pass vacuously;
+// these tests use distinct orgs ("a1"/"a2") so a leak across the org boundary
+// is the only way an assertion can flip.
+
+/// Pull the `name` strings off a `/posix/v1/passwd` enumeration body.
+fn passwd_names(body: &Value) -> Vec<String> {
+    body.as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|e| e["name"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Whole-org host: enumeration + name lookup see ONLY the host org's members.
+/// alice is a member of a1, carol of a2; the a1 host must never surface carol.
+#[tokio::test]
+async fn whole_org_host_resolves_org_members_only() {
+    assert!(portal_reachable().await);
+
+    let seed = chrono::Utc::now().timestamp_millis() % 50_000;
+    let org_a1 = format!("iso1-a1-{seed}");
+    let org_a2 = format!("iso1-a2-{seed}");
+
+    let alice = register_test_user("iso1-alice").await;
+    let alice_id = alice.identity_id.clone();
+    let alice_name = format!("iso1alice{seed}");
+    seed_posix_account(&alice_id, &alice_name, 100_000 + seed, 100_000 + seed);
+    seed_org_membership(&org_a1, &alice_id, "member");
+
+    let carol = register_test_user("iso1-carol").await;
+    let carol_id = carol.identity_id.clone();
+    let carol_name = format!("iso1carol{seed}");
+    seed_posix_account(&carol_id, &carol_name, 101_000 + seed, 101_000 + seed);
+    seed_org_membership(&org_a2, &carol_id, "member");
+
+    let host_id = format!("iso1-host-{seed}");
+    let secret = "s3cret-iso1";
+    seed_host_enrollment(&host_id, "iso1.example", secret, &org_a1);
+
+    let client = reqwest::Client::new();
+
+    let res = client
+        .get(format!("{INTERNAL}/posix/v1/passwd"))
+        .basic_auth(&host_id, Some(secret))
+        .send()
+        .await
+        .expect("GET passwd (enumerate)");
+    assert_eq!(res.status(), StatusCode::OK);
+    let names = passwd_names(&res.json().await.expect("passwd_all json"));
+    assert!(
+        names.contains(&alice_name),
+        "a1 host must enumerate its own member alice; got {names:?}"
+    );
+    assert!(
+        !names.contains(&carol_name),
+        "a1 host must NOT enumerate a2's member carol; got {names:?}"
+    );
+
+    let res = client
+        .get(format!("{INTERNAL}/posix/v1/passwd/name/{carol_name}"))
+        .basic_auth(&host_id, Some(secret))
+        .send()
+        .await
+        .expect("GET passwd/name carol");
+    assert_eq!(
+        res.status(),
+        StatusCode::NOT_FOUND,
+        "a member of a different org must 404 on a whole-org host"
+    );
+
+    let res = client
+        .get(format!("{INTERNAL}/posix/v1/passwd/name/{alice_name}"))
+        .basic_auth(&host_id, Some(secret))
+        .send()
+        .await
+        .expect("GET passwd/name alice");
+    assert_eq!(res.status(), StatusCode::OK, "own-org member must resolve");
+
+    delete_host_enrollment(&host_id);
+    delete_org_membership(&org_a1, &alice_id);
+    delete_org_membership(&org_a2, &carol_id);
+    alice.cleanup().await;
+    carol.cleanup().await;
+}
+
+/// Team-scoped host: only members of the allowed team resolve, and the team's
+/// gid roster lists exactly them. alice is in team T; dave is an a1 member but
+/// not in T.
+#[tokio::test]
+async fn team_scoped_host_resolves_team_members_only() {
+    assert!(portal_reachable().await);
+
+    let seed = chrono::Utc::now().timestamp_millis() % 50_000;
+    let team_gid: i64 = 3_000_000 + seed;
+    let org_a1 = format!("iso2-a1-{seed}");
+    let team_id = format!("iso2-t1-{seed}");
+
+    let alice = register_test_user("iso2-alice").await;
+    let alice_id = alice.identity_id.clone();
+    let alice_name = format!("iso2alice{seed}");
+    seed_posix_account(&alice_id, &alice_name, 102_000 + seed, 102_000 + seed);
+    seed_org_membership(&org_a1, &alice_id, "member");
+    seed_team(&team_id, &org_a1, "Platform", "platform", Some(team_gid));
+    add_team_member(&team_id, &alice_id);
+
+    let dave = register_test_user("iso2-dave").await;
+    let dave_id = dave.identity_id.clone();
+    let dave_name = format!("iso2dave{seed}");
+    seed_posix_account(&dave_id, &dave_name, 103_000 + seed, 103_000 + seed);
+    seed_org_membership(&org_a1, &dave_id, "member");
+
+    let host_id = format!("iso2-host-{seed}");
+    let secret = "s3cret-iso2";
+    seed_host_enrollment(&host_id, "iso2.example", secret, &org_a1);
+    set_host_allowed_team_ids(&host_id, &[team_id.as_str()]);
+
+    let client = reqwest::Client::new();
+
+    let res = client
+        .get(format!("{INTERNAL}/posix/v1/passwd/name/{alice_name}"))
+        .basic_auth(&host_id, Some(secret))
+        .send()
+        .await
+        .expect("GET passwd/name alice");
+    assert_eq!(res.status(), StatusCode::OK, "team member must resolve");
+
+    let res = client
+        .get(format!("{INTERNAL}/posix/v1/passwd/name/{dave_name}"))
+        .basic_auth(&host_id, Some(secret))
+        .send()
+        .await
+        .expect("GET passwd/name dave");
+    assert_eq!(
+        res.status(),
+        StatusCode::NOT_FOUND,
+        "an org member NOT in the scoped team must 404"
+    );
+
+    let res = client
+        .get(format!("{INTERNAL}/posix/v1/group/gid/{team_gid}"))
+        .basic_auth(&host_id, Some(secret))
+        .send()
+        .await
+        .expect("GET group/gid");
+    assert_eq!(
+        res.status(),
+        StatusCode::OK,
+        "team gid roster should be 200"
+    );
+    let body: Value = res.json().await.expect("group json");
+    let members: Vec<&str> = body["members"]
+        .as_array()
+        .expect("group members array")
+        .iter()
+        .filter_map(|m| m.as_str())
+        .collect();
+    assert_eq!(
+        members,
+        vec![alice_name.as_str()],
+        "team roster must be exactly the team member alice; got {members:?}"
+    );
+
+    delete_host_enrollment(&host_id);
+    delete_team(&team_id);
+    delete_org_membership(&org_a1, &alice_id);
+    delete_org_membership(&org_a1, &dave_id);
+    alice.cleanup().await;
+    dave.cleanup().await;
+}
+
+/// A team that exists only in a FOREIGN org is invisible to the host: neither
+/// its gid nor its slug resolves on an a1 host when the team lives in a2.
+#[tokio::test]
+async fn other_org_team_is_404_on_host() {
+    assert!(portal_reachable().await);
+
+    let seed = chrono::Utc::now().timestamp_millis() % 50_000;
+    let team_gid_b: i64 = 3_100_000 + seed;
+    let org_a1 = format!("iso3-a1-{seed}");
+    let org_a2 = format!("iso3-a2-{seed}");
+    let team_b = format!("iso3-tb-{seed}");
+    let team_b_slug = format!("iso3eng{seed}");
+
+    seed_team(
+        &team_b,
+        &org_a2,
+        "Foreign Eng",
+        &team_b_slug,
+        Some(team_gid_b),
+    );
+
+    let host_id = format!("iso3-host-{seed}");
+    let secret = "s3cret-iso3";
+    seed_host_enrollment(&host_id, "iso3.example", secret, &org_a1);
+
+    let client = reqwest::Client::new();
+
+    let res = client
+        .get(format!("{INTERNAL}/posix/v1/group/gid/{team_gid_b}"))
+        .basic_auth(&host_id, Some(secret))
+        .send()
+        .await
+        .expect("GET group/gid foreign team");
+    assert_eq!(
+        res.status(),
+        StatusCode::NOT_FOUND,
+        "a foreign-org team's gid must not resolve on the host"
+    );
+
+    let res = client
+        .get(format!("{INTERNAL}/posix/v1/group/name/{team_b_slug}"))
+        .basic_auth(&host_id, Some(secret))
+        .send()
+        .await
+        .expect("GET group/name foreign team");
+    assert_eq!(
+        res.status(),
+        StatusCode::NOT_FOUND,
+        "a foreign-org team's slug must not resolve on the host"
+    );
+
+    delete_host_enrollment(&host_id);
+    delete_team(&team_b);
+}
+
+/// uid lookups are org-scoped too: bob (a2 only) must 404 by uid on an a1 host
+/// even though the account row exists and is enabled.
+#[tokio::test]
+async fn passwd_by_uid_is_org_scoped() {
+    assert!(portal_reachable().await);
+
+    let seed = chrono::Utc::now().timestamp_millis() % 50_000;
+    let org_a1 = format!("iso4-a1-{seed}");
+    let org_a2 = format!("iso4-a2-{seed}");
+    let bob_uid = 105_000 + seed;
+
+    let bob = register_test_user("iso4-bob").await;
+    let bob_id = bob.identity_id.clone();
+    let bob_name = format!("iso4bob{seed}");
+    seed_posix_account(&bob_id, &bob_name, bob_uid, bob_uid);
+    seed_org_membership(&org_a2, &bob_id, "member");
+
+    let host_id = format!("iso4-host-{seed}");
+    let secret = "s3cret-iso4";
+    seed_host_enrollment(&host_id, "iso4.example", secret, &org_a1);
+
+    let client = reqwest::Client::new();
+    let res = client
+        .get(format!("{INTERNAL}/posix/v1/passwd/uid/{bob_uid}"))
+        .basic_auth(&host_id, Some(secret))
+        .send()
+        .await
+        .expect("GET passwd/uid bob");
+    assert_eq!(
+        res.status(),
+        StatusCode::NOT_FOUND,
+        "a uid belonging to a foreign-org account must 404"
+    );
+
+    delete_host_enrollment(&host_id);
+    delete_org_membership(&org_a2, &bob_id);
+    bob.cleanup().await;
+}
+
+/// authorized_keys for a foreign-org account returns 200 with an empty body
+/// (the "no keys" answer), never the seeded key line.
+#[tokio::test]
+async fn authorized_keys_cross_org_returns_empty() {
+    assert!(portal_reachable().await);
+
+    let seed = chrono::Utc::now().timestamp_millis() % 50_000;
+    let org_a1 = format!("iso5-a1-{seed}");
+    let org_a2 = format!("iso5-a2-{seed}");
+
+    let carol = register_test_user("iso5-carol").await;
+    let carol_id = carol.identity_id.clone();
+    let carol_name = format!("iso5carol{seed}");
+    // seed_posix_account also seeds one ssh_authorized_keys row.
+    seed_posix_account(&carol_id, &carol_name, 106_000 + seed, 106_000 + seed);
+    seed_org_membership(&org_a2, &carol_id, "member");
+
+    let host_id = format!("iso5-host-{seed}");
+    let secret = "s3cret-iso5";
+    seed_host_enrollment(&host_id, "iso5.example", secret, &org_a1);
+
+    let client = reqwest::Client::new();
+    let res = client
+        .get(format!("{INTERNAL}/posix/v1/authorized_keys/{carol_name}"))
+        .basic_auth(&host_id, Some(secret))
+        .send()
+        .await
+        .expect("GET authorized_keys carol");
+    assert_eq!(
+        res.status(),
+        StatusCode::OK,
+        "authorized_keys is always 200"
+    );
+    let body = res.text().await.expect("keys body");
+    assert!(
+        body.trim().is_empty(),
+        "a foreign-org account must yield no keys; got {body:?}"
+    );
+
+    delete_host_enrollment(&host_id);
+    delete_org_membership(&org_a2, &carol_id);
+    carol.cleanup().await;
+}
+
+/// The offline-verifier projection is org-bound: a whole-org a1 host sees a1's
+/// provisioned members with secrets, never a2's.
+#[tokio::test]
+async fn offline_verifiers_are_org_bound() {
+    assert!(portal_reachable().await);
+
+    let seed = chrono::Utc::now().timestamp_millis() % 50_000;
+    let org_a1 = format!("iso6-a1-{seed}");
+    let org_a2 = format!("iso6-a2-{seed}");
+    const PHC: &str = "$argon2id$v=19$m=65536,t=3,p=1$c2FsdHNhbHQ$aGFzaGhhc2g";
+
+    let a1_user = register_test_user("iso6-a1").await;
+    let a1_id = a1_user.identity_id.clone();
+    let a1_name = format!("iso6a1u{seed}");
+    seed_posix_account(&a1_id, &a1_name, 107_000 + seed, 107_000 + seed);
+    seed_org_membership(&org_a1, &a1_id, "member");
+    seed_offline_secret(&a1_id, PHC);
+
+    let a2_user = register_test_user("iso6-a2").await;
+    let a2_id = a2_user.identity_id.clone();
+    let a2_name = format!("iso6a2u{seed}");
+    seed_posix_account(&a2_id, &a2_name, 108_000 + seed, 108_000 + seed);
+    seed_org_membership(&org_a2, &a2_id, "member");
+    seed_offline_secret(&a2_id, PHC);
+
+    let host_id = format!("iso6-host-{seed}");
+    let secret = "s3cret-iso6";
+    seed_host_enrollment(&host_id, "iso6.example", secret, &org_a1);
+
+    let client = reqwest::Client::new();
+    let res = client
+        .get(format!("{INTERNAL}/posix/v1/offline_verifiers"))
+        .basic_auth(&host_id, Some(secret))
+        .send()
+        .await
+        .expect("GET offline_verifiers");
+    assert_eq!(res.status(), StatusCode::OK);
+    let body: Value = res.json().await.expect("offline_verifiers json");
+    let names = offline_verifier_usernames(&body);
+    assert!(
+        names.contains(&a1_name),
+        "a1 host must include a1's provisioned member; got {names:?}"
+    );
+    assert!(
+        !names.contains(&a2_name),
+        "a1 host must NEVER include a2's member; got {names:?}"
+    );
+
+    delete_offline_secret(&a1_id);
+    delete_offline_secret(&a2_id);
+    delete_host_enrollment(&host_id);
+    delete_org_membership(&org_a1, &a1_id);
+    delete_org_membership(&org_a2, &a2_id);
+    a1_user.cleanup().await;
+    a2_user.cleanup().await;
+}
+
+/// A user who belongs to teams in two different orgs is partitioned per host:
+/// each host only exposes the team that lives in ITS org. eve is in team T1
+/// (a1, gid g1) and team T2 (a2, gid g2).
+#[tokio::test]
+async fn multi_org_user_sees_only_host_org_team() {
+    assert!(portal_reachable().await);
+
+    let seed = chrono::Utc::now().timestamp_millis() % 50_000;
+    let g1: i64 = 3_200_000 + seed;
+    let g2: i64 = 3_300_000 + seed;
+    let org_a1 = format!("iso7-a1-{seed}");
+    let org_a2 = format!("iso7-a2-{seed}");
+    let team1 = format!("iso7-t1-{seed}");
+    let team2 = format!("iso7-t2-{seed}");
+
+    let eve = register_test_user("iso7-eve").await;
+    let eve_id = eve.identity_id.clone();
+    let eve_name = format!("iso7eve{seed}");
+    seed_posix_account(&eve_id, &eve_name, 109_000 + seed, 109_000 + seed);
+
+    seed_org_membership(&org_a1, &eve_id, "member");
+    seed_org_membership(&org_a2, &eve_id, "member");
+    seed_team(&team1, &org_a1, "Team One", "team-one", Some(g1));
+    seed_team(&team2, &org_a2, "Team Two", "team-two", Some(g2));
+    add_team_member(&team1, &eve_id);
+    add_team_member(&team2, &eve_id);
+
+    let host1 = format!("iso7-h1-{seed}");
+    let host2 = format!("iso7-h2-{seed}");
+    let secret = "s3cret-iso7";
+    seed_host_enrollment(&host1, "iso7-h1.example", secret, &org_a1);
+    set_host_allowed_team_ids(&host1, &[team1.as_str()]);
+    seed_host_enrollment(&host2, "iso7-h2.example", secret, &org_a2);
+    set_host_allowed_team_ids(&host2, &[team2.as_str()]);
+
+    let client = reqwest::Client::new();
+
+    // H1 (a1): g1 resolves with eve, g2 (a2's team) does not.
+    let res = client
+        .get(format!("{INTERNAL}/posix/v1/group/gid/{g1}"))
+        .basic_auth(&host1, Some(secret))
+        .send()
+        .await
+        .expect("GET group/gid g1 on H1");
+    assert_eq!(
+        res.status(),
+        StatusCode::OK,
+        "g1 must resolve on its own-org host"
+    );
+    let body: Value = res.json().await.expect("g1 group json");
+    let members: Vec<&str> = body["members"]
+        .as_array()
+        .expect("members array")
+        .iter()
+        .filter_map(|m| m.as_str())
+        .collect();
+    assert_eq!(members, vec![eve_name.as_str()], "g1 roster is eve");
+
+    let res = client
+        .get(format!("{INTERNAL}/posix/v1/group/gid/{g2}"))
+        .basic_auth(&host1, Some(secret))
+        .send()
+        .await
+        .expect("GET group/gid g2 on H1");
+    assert_eq!(
+        res.status(),
+        StatusCode::NOT_FOUND,
+        "a2's team gid must not resolve on the a1 host"
+    );
+
+    // H2 (a2): symmetric.
+    let res = client
+        .get(format!("{INTERNAL}/posix/v1/group/gid/{g2}"))
+        .basic_auth(&host2, Some(secret))
+        .send()
+        .await
+        .expect("GET group/gid g2 on H2");
+    assert_eq!(
+        res.status(),
+        StatusCode::OK,
+        "g2 must resolve on its own-org host"
+    );
+    let body: Value = res.json().await.expect("g2 group json");
+    let members: Vec<&str> = body["members"]
+        .as_array()
+        .expect("members array")
+        .iter()
+        .filter_map(|m| m.as_str())
+        .collect();
+    assert_eq!(members, vec![eve_name.as_str()], "g2 roster is eve");
+
+    let res = client
+        .get(format!("{INTERNAL}/posix/v1/group/gid/{g1}"))
+        .basic_auth(&host2, Some(secret))
+        .send()
+        .await
+        .expect("GET group/gid g1 on H2");
+    assert_eq!(
+        res.status(),
+        StatusCode::NOT_FOUND,
+        "a1's team gid must not resolve on the a2 host"
+    );
+
+    delete_host_enrollment(&host1);
+    delete_host_enrollment(&host2);
+    delete_team(&team1);
+    delete_team(&team2);
+    delete_org_membership(&org_a1, &eve_id);
+    delete_org_membership(&org_a2, &eve_id);
+    eve.cleanup().await;
 }

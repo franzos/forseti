@@ -6,11 +6,9 @@
 //! list filter, and audit log can identify the operator's original
 //! intent.
 
-/// Picker card — one entry per preset on the `/admin/clients/new` page.
-/// Cards link to `/admin/clients/new?type=<slug>` which lands on the
-/// pre-filled form. `slug`/`label` come from [`Preset`]; only `blurb` is
-/// card-specific. `Clone` lets us hand a copy to the template; the
-/// struct is tiny (three `&'static str`), so it's effectively free.
+/// Picker card, one per preset on `/admin/clients/new`. Cards link to
+/// `?type=<slug>`. `slug`/`label` come from [`Preset`]; only `blurb` is
+/// card-specific.
 #[derive(Clone)]
 pub(super) struct ClientTypeCard {
     pub(super) slug: &'static str,

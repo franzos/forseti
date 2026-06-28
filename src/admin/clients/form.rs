@@ -49,20 +49,15 @@ pub(crate) struct ClientForm {
     pub(super) require_pkce: Option<String>,
     #[serde(default)]
     pub(super) skip_consent: Option<String>,
-    /// Phase 1 — `client.metadata.forseti.account_deletion_url`. Empty
-    /// string clears the field; on edit, blank is treated the same as
-    /// "no change" only if the field was absent in the underlying
-    /// `to_oauth2_client` round-trip — see implementation.
+    /// `client.metadata.forseti.account_deletion_url`. Empty string clears it.
     #[serde(default)]
     pub(super) account_deletion_url: String,
-    /// Hidden input set by the picker — preset slug ("mcp" etc.).
-    /// Stamped into `metadata.forseti.client_type`. Empty on legacy edits.
+    /// Hidden picker input: preset slug ("mcp" etc.), stamped into
+    /// `metadata.forseti.client_type`. Empty on legacy edits.
     #[serde(default)]
     pub(super) client_type: String,
-    /// Hidden input set by the picker — app-template slug ("gitlab" etc.).
-    /// Used only to re-render the template note banner on a validation
-    /// re-render; not persisted (the base preset's slug is what gets
-    /// stamped into metadata via `client_type`).
+    /// Hidden picker input: app-template slug. Only used to re-render the
+    /// template note banner on validation re-render; not persisted.
     #[serde(default)]
     pub(super) template: String,
 }
@@ -147,14 +142,9 @@ impl ClientForm {
             }
         };
 
-        // `name` is required by the form (HTML `required`), so blank should
-        // not survive an actual update — but treat it consistently with
-        // the other fields just in case.
         c.client_name = Some(parse_string(&self.name, c.client_name.as_ref()));
-        // Grants are checkboxes — an empty Vec on update means "operator
-        // unchecked everything", which we should honour rather than
-        // silently keeping the old value. (Different from text fields,
-        // where blank input is more likely to be an accident.)
+        // Grants are checkboxes: an empty Vec on update means "unchecked
+        // everything", which we honour rather than keeping the old value.
         c.grant_types = Some(self.grant_types.clone());
         c.response_types = Some(parse_list(&self.response_types, c.response_types.as_ref()));
         c.scope = Some(parse_string(&self.scope, c.scope.as_ref()));
@@ -225,12 +215,8 @@ impl ClientForm {
                 "require_pkce".to_string(),
                 serde_json::Value::Bool(require_pkce_input),
             );
-            // Client type: on create the hidden input carries the chosen
-            // preset; on update, the form re-posts the existing value
-            // (rendered from the show page). Empty input on update means
-            // "this is a legacy client without a preset" — don't fabricate
-            // one, but also don't wipe a previously stamped value if a
-            // newer form posts blank.
+            // Empty input means a legacy client without a preset: don't
+            // fabricate one, and don't wipe a previously stamped value.
             if !client_type_input.is_empty() {
                 forseti_obj.insert(
                     "client_type".to_string(),

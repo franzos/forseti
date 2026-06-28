@@ -1,21 +1,6 @@
-//! Forseti-owned discovery document — `/.well-known/forseti-configuration`.
-//!
-//! Hydra advertises the OAuth/OIDC machine surfaces (auth, token, jwks,
-//! end_session, registration_endpoint) on its own
-//! `/.well-known/openid-configuration`. This document covers everything
-//! that's Forseti-specific and *not* OIDC-shaped:
-//!
-//! - `account_management_uri` — the `/settings` hub.
-//! - `handoff_endpoint` + `handoff_actions_supported` — the deep-link
-//!   contract documented in `docs/integration-guide.md#account-self-service-deep-links`.
-//! - `webhook_jwks_uri` — the JWKS receivers use to verify outbound
-//!   RFC 8417 SETs (account-purged, future RISC events).
-//! - `webhook_events_supported` — the RISC event URIs Forseti
-//!   currently emits.
-//!
-//! Not spliced into Hydra's OIDC discovery doc deliberately — mixing the
-//! two muddles the contract and ties Forseti's discoverability to
-//! Hydra's response shape. RPs fetch this doc by URL convention.
+//! Forseti-owned discovery document at `/.well-known/forseti-configuration`, advertising the Forseti-specific,
+//! non-OIDC surfaces (account-management URI, handoff deep-links, webhook JWKS + supported RISC events).
+//! Kept separate from Hydra's OIDC discovery so Forseti's discoverability isn't tied to Hydra's response shape.
 
 use axum::extract::State;
 use axum::http::{header, StatusCode};

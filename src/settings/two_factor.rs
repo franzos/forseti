@@ -28,45 +28,28 @@ pub(crate) struct Settings2faTemplate {
     pub(crate) form_action: String,
     pub(crate) form_method: String,
     pub(crate) flow_messages: Vec<MessageView>,
-    /// CSRF + method hiddens emitted on every sub-form.
     pub(crate) hidden_defaults: Vec<InputView>,
-    /// TOTP group nodes (input fields + submit buttons).
     pub(crate) totp_nodes: Vec<InputView>,
-    /// `data:image/png;base64,…` QR for TOTP enrolment (None when already enrolled).
+    /// `data:image/png;base64,…` QR for TOTP enrolment (None when enrolled).
     pub(crate) totp_qr: Option<String>,
-    /// Plain-text secret matching the QR (None when already enrolled).
     pub(crate) totp_secret: Option<String>,
-    /// True when the identity has TOTP enabled (Kratos emits a `totp_unlink` node).
     pub(crate) totp_enrolled: bool,
-    /// Lookup-secret group nodes (generate/regenerate/disable submits).
     pub(crate) lookup_nodes: Vec<InputView>,
-    /// Freshly generated lookup codes (only present on the render right after
-    /// regeneration — Kratos discards them on subsequent fetches).
+    /// Present only on the render right after regeneration; Kratos discards
+    /// them on subsequent fetches.
     pub(crate) lookup_codes: Vec<String>,
-    /// True when the identity has recovery codes configured (Kratos emits a
-    /// `lookup_secret_disable` node).
     pub(crate) lookup_enrolled: bool,
-    /// True when the identity has a device factor (TOTP or WebAuthn/passkey)
-    /// enrolled but no recovery codes — the lone state where losing the device
-    /// means permanent lockout. Drives the forced-codes warning banner.
+    /// Device factor enrolled but no recovery codes: the lone state where
+    /// losing the device means permanent lockout. Drives the warning banner.
     pub(crate) needs_recovery_codes: bool,
-    /// True on the single render right after regenerating lookup codes —
-    /// Kratos emits a `lookup_secret_reveal` node alongside the plaintext
-    /// codes. Templates use this to distinguish "show new codes" from the
-    /// general "lookup is configured" state.
+    /// True only on the render right after regenerating lookup codes;
+    /// distinguishes "show new codes" from "lookup is configured".
     pub(crate) lookup_just_regenerated: bool,
-    /// WebAuthn / passkey group nodes. Empty when the operator hasn't
-    /// enabled webauthn in `kratos.yml`.
+    /// Empty when the operator hasn't enabled webauthn in `kratos.yml`.
     pub(crate) webauthn_nodes: Vec<InputView>,
-    /// True iff the operator enabled webauthn (i.e. Kratos emitted any
-    /// webauthn nodes on this flow). Drives the "Passkey support not enabled"
-    /// fallback.
     pub(crate) webauthn_enabled: bool,
-    /// `<script>` tags Kratos asks us to inject for the webauthn / passkey
-    /// flow — typically a single entry pointing at the Kratos-served
-    /// `/.well-known/ory/webauthn.js` helper, version-matched to the running
-    /// Kratos instance. Rendered verbatim (src + integrity + …) so the helper
-    /// always agrees with the flow's wire format.
+    /// Kratos-served `/.well-known/ory/webauthn.js` helper, rendered verbatim so
+    /// it agrees with the running Kratos's flow wire format.
     pub(crate) webauthn_scripts: Vec<ScriptView>,
     pub(crate) referrer_banner: Option<crate::handoff::ReferrerBannerView>,
 }
@@ -100,10 +83,8 @@ fn render_2fa(
     let mut webauthn_nodes = collect_input_nodes(flow, "webauthn");
     webauthn_nodes.extend(collect_input_nodes(flow, "passkey"));
 
-    // Promote the primary CTA in each section to filled-button styling so the
-    // form's intent reads clearly. The "primary" submit is the one without a
-    // destructive intent — Verify (TOTP confirm), Generate (lookup), Add key
-    // (webauthn). Unlink/disable/regenerate stay as secondary buttons.
+    // Promote the non-destructive CTA in each section (Verify / Generate / Add
+    // key); unlink/disable/regenerate stay secondary.
     promote_primary(&mut totp_nodes, &["totp_code"]);
     promote_primary(
         &mut lookup_nodes,
@@ -113,24 +94,18 @@ fn render_2fa(
 
     let (totp_qr, totp_secret) = totp_qr_and_secret(flow);
     let totp_enrolled = group_has_node(flow, "totp", "totp_unlink");
-    // Two related states that the previous heuristic conflated:
-    //   * `lookup_enrolled`: identity has lookup-secret codes configured.
-    //     Kratos emits the `lookup_secret_disable` node when there's an
-    //     existing enrolment that can be torn down.
-    //   * `lookup_just_regenerated`: this is the one render-pass right after
-    //     regeneration where Kratos emits a `lookup_secret_reveal` node AND
-    //     a non-empty list of plaintext codes. The codes are shown once;
-    //     subsequent fetches discard them.
+    // `lookup_enrolled`: Kratos emits `lookup_secret_disable` when there's an
+    // enrolment to tear down. `lookup_just_regenerated`: the one render where
+    // Kratos emits `lookup_secret_reveal` plus the plaintext codes.
     let lookup_enrolled = group_has_node(flow, "lookup_secret", "lookup_secret_disable");
     let lookup_codes = lookup_codes(flow);
     let lookup_just_regenerated =
         group_has_node(flow, "lookup_secret", "lookup_secret_reveal") && !lookup_codes.is_empty();
     let webauthn_enabled = !webauthn_nodes.is_empty();
-    // Enrolment (vs. merely-enabled) is signalled by a per-credential remove
+    // Enrolment (vs merely-enabled) is signalled by the per-credential remove
     // node Kratos emits for each registered authenticator.
     let webauthn_enrolled = group_has_node(flow, "webauthn", "webauthn_remove")
         || group_has_node(flow, "passkey", "passkey_remove");
-    // A device factor with no recovery codes is the self-lockout trap (codes are the only non-device AAL2 break-glass).
     let needs_recovery_codes = (totp_enrolled || webauthn_enrolled) && !lookup_enrolled;
     let webauthn_scripts = collect_webauthn_scripts(flow);
 
@@ -156,14 +131,12 @@ fn render_2fa(
     })
 }
 
-/// Mark the submit/button input whose `name` is in `primary_names` as the
-/// form's primary CTA. If no match is found, the first submit-or-button in
-/// the list is promoted so the form still has a visually-dominant action.
+/// Mark the input named in `primary_names` as the form's primary CTA, falling
+/// back to the first non-destructive button.
 ///
-/// `"button"` is included because Kratos's WebAuthn / passkey trigger nodes
-/// are `type="button"` (clicks fire JS via `onclickTrigger`, not a form
-/// submit). Without including them, those forms would render with no
-/// primary-styled action and look broken.
+/// `"button"` is included because Kratos's WebAuthn / passkey trigger nodes are
+/// `type="button"` (clicks fire JS, not a submit); excluding them leaves those
+/// forms with no primary-styled action.
 fn promote_primary(nodes: &mut [InputView], primary_names: &[&str]) {
     let is_button = |n: &InputView| n.input_type == "submit" || n.input_type == "button";
     let mut found = false;
@@ -174,8 +147,8 @@ fn promote_primary(nodes: &mut [InputView], primary_names: &[&str]) {
         }
     }
     if !found {
-        // Never let the fallback promote a destructive action (e.g. a
-        // `webauthn_remove` button Kratos emits before the add trigger).
+        // Never promote a destructive action (e.g. a `webauthn_remove` button
+        // Kratos emits before the add trigger).
         let is_destructive = |n: &InputView| n.name.ends_with("_remove");
         if let Some(first) = nodes
             .iter_mut()

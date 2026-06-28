@@ -1,0 +1,85 @@
+{% extends "admin/admin_shell.html" %}
+
+{% block admin_title %}Edit host{% endblock %}
+
+{% block admin_content %}
+  <div class="max-w-2xl">
+    <h1 class="font-headline-lg text-headline-lg text-on-surface mb-stack-sm">Edit host</h1>
+    <p class="font-body-md text-body-md text-on-surface-variant mb-stack-lg">
+      Update the host label, its MFA flag, and the teams it's scoped to. The secret is not shown here; rotate it from the hosts list if you need a fresh one.
+    </p>
+
+    {% if !error_message.is_empty() %}
+      <div class="bg-error-container border border-error rounded-lg p-3 mb-stack-md">
+        <p class="font-body-sm text-body-sm text-on-error-container">{{ error_message }}</p>
+      </div>
+    {% endif %}
+
+    <form method="POST"
+          action="/admin/hosts/{{ id }}/edit"
+          class="flex flex-col gap-stack-md">
+      <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+
+      <label class="flex flex-col gap-stack-xs">
+        <span class="font-label-md text-label-md text-on-surface">Hostname</span>
+        <input type="text"
+               name="hostname"
+               value="{{ hostname }}"
+               placeholder="web-01.example.com"
+               required
+               class="font-body-md text-body-md bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2">
+        <span class="font-label-sm text-label-sm text-on-surface-variant">A label for your records. Doesn't have to match the machine's actual hostname.</span>
+      </label>
+
+      <div class="flex flex-col gap-stack-xs">
+        <span class="font-label-md text-label-md text-on-surface">Organization</span>
+        <p class="font-body-md text-body-md text-on-surface">{{ org_name }}</p>
+        <span class="font-label-sm text-label-sm text-on-surface-variant">A host's org is fixed at enrollment and can't be changed here.</span>
+      </div>
+
+      <fieldset class="flex flex-col gap-stack-xs">
+        <legend class="font-label-md text-label-md text-on-surface">Allowed teams</legend>
+        {% if teams.is_empty() %}
+          <p class="font-body-sm text-body-sm text-on-surface-variant">
+            No teams exist yet. This host allows any org member. Scoping a host to specific teams needs the Organizations feature.
+          </p>
+        {% else %}
+          <div class="flex flex-col gap-stack-xs">
+            {% for t in teams %}
+              <label class="flex items-center gap-stack-sm">
+                <input type="checkbox"
+                       name="team_ids"
+                       value="{{ t.id }}"
+                       {% if t.checked %}checked{% endif %}
+                       class="rounded border-outline-variant">
+                <span class="font-body-md text-body-md text-on-surface">{{ t.name }}</span>
+              </label>
+            {% endfor %}
+          </div>
+          <span class="font-label-sm text-label-sm text-on-surface-variant">Restrict this host to members of the selected teams. Select none to allow any org member.</span>
+        {% endif %}
+      </fieldset>
+
+      <label class="flex flex-col gap-stack-xs">
+        <span class="flex items-center gap-stack-sm">
+          <input type="checkbox"
+                 name="force_mfa"
+                 value="1"
+                 {% if force_mfa %}checked{% endif %}
+                 class="rounded border-outline-variant">
+          <span class="font-label-md text-label-md text-on-surface">Force MFA on this host</span>
+        </span>
+        <span class="font-label-sm text-label-sm text-on-surface-variant">Recorded now; enforced once interactive login (PAM) ships.</span>
+      </label>
+
+      <div class="flex items-center gap-stack-md mt-stack-sm">
+        <button type="submit"
+                class="bg-primary text-on-primary font-label-md text-label-md font-bold px-4 py-2 rounded-lg hover:opacity-90 transition-opacity">
+          Save
+        </button>
+        <a href="/admin/hosts"
+           class="font-label-md text-label-md text-on-surface-variant border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">Cancel</a>
+      </div>
+    </form>
+  </div>
+{% endblock %}

@@ -11,26 +11,17 @@ use crate::db::DbPool;
 use crate::db_interact;
 use crate::schema::dcr_initial_access_tokens as iat;
 
-/// Canonical row for `dcr_initial_access_tokens`. Defined once in
-/// `admin::dcr_tokens` and re-used here (the proxy is the only other
-/// reader) so a schema/column drift can't desync the two readers; that
-/// module is reachable from here, this one isn't from there. The
-/// consume/lookup path needs all ten columns — the daily-counter pair
-/// included — which the admin list simply ignores.
+/// Canonical row for `dcr_initial_access_tokens`, reused from
+/// `admin::dcr_tokens` so the two readers can't desync on a column drift.
 pub(super) use crate::admin::dcr_tokens::StoredIat as IatRow;
 
-/// Default `dcr_iat_daily_limit` when the operator hasn't configured one.
-/// Belt-and-suspenders to `uses_remaining`: even an "unlimited" IAT can
-/// only mint this many clients per rolling 24h window.
+/// Default `dcr_iat_daily_limit`. Caps even an "unlimited" IAT to this many
+/// clients per rolling 24h window.
 pub(crate) const DEFAULT_IAT_DAILY_LIMIT: u32 = 50;
 
-/// Outcome of parsing the `Authorization` header.
-///
-/// We split "no header" from "header present but malformed" because they
-/// must lead to different responses: no header is the documented anonymous
-/// path (lands as unverified, admin reviews), while a malformed header is
-/// rejected with 401 so an attacker can't silently probe past the IAT
-/// validation by sending garbage.
+/// Outcome of parsing the `Authorization` header. "No header" (anonymous
+/// path) is split from "malformed" (rejected with 401) so a garbage header
+/// can't silently probe past IAT validation.
 pub(super) enum AuthOutcome {
     /// No `Authorization` header at all — proceed anonymously.
     None,
@@ -81,14 +72,8 @@ pub(crate) fn hash_token(raw_token: &str) -> String {
     hex::encode(h.finalize())
 }
 
-/// Parse the inbound `Authorization` header into one of three buckets:
-/// absent (anonymous DCR), malformed (rejected with 401), or a usable
-/// bearer token (passed to IAT validation).
-///
-/// We treat "header present but unusable" distinctly from "no header"
-/// because the two cases must lead to different responses — see the
-/// module docstring + the handler comment around the `AuthOutcome`
-/// match. The case-insensitive scheme match follows RFC 6750 §2.1.
+/// Parse the `Authorization` header into absent / malformed / bearer token.
+/// Case-insensitive scheme match per RFC 6750 §2.1.
 pub(super) fn parse_authorization(headers: &HeaderMap) -> AuthOutcome {
     let Some(raw_header) = headers.get("authorization") else {
         return AuthOutcome::None;
@@ -109,10 +94,9 @@ pub(super) fn parse_authorization(headers: &HeaderMap) -> AuthOutcome {
     AuthOutcome::Token(token.to_string())
 }
 
-/// Validate an IAT without consuming it. Read-only — the decrement happens
-/// in [`consume_iat`] only after all other validations pass, so a probing
-/// attacker can't burn through someone else's single-use IAT by submitting
-/// reserved names.
+/// Validate an IAT without consuming it. The decrement happens in
+/// [`consume_iat`] only after all validations pass, so name-probing can't
+/// burn through someone else's single-use IAT.
 pub(super) async fn lookup_iat(db: &DbPool, raw_token: &str) -> IatCheck {
     let hash = hash_token(raw_token);
     let now = Utc::now().to_rfc3339();
@@ -155,50 +139,28 @@ pub(super) async fn lookup_iat(db: &DbPool, raw_token: &str) -> IatCheck {
     }
 }
 
-/// Atomic decrement of `uses_remaining` + daily-counter update in one
-/// transaction. Two pieces of bookkeeping that have to move together:
+/// Atomically decrement `uses_remaining` and advance the daily counter in one
+/// transaction. `uses_remaining` (NULL = unlimited) is gated on `> 0` so
+/// concurrent racers against a single-use IAT can't both win.
 ///
-///   1. `uses_remaining`: total-lifetime cap. NULL = unlimited; integer
-///      gets decremented. Conditional on `uses_remaining > 0` (when
-///      bounded) so concurrent races against the same single-use IAT
-///      can't both win.
-///   2. `daily_use_count` + `daily_window_started_at`: rolling 24h cap.
-///      Window opens on first success; resets when the window has
-///      elapsed; rejects when the count hits `daily_limit`.
+/// Atomicity: the UPDATE's `WHERE` carries the daily-counter predicate
+/// (`daily_use_count < daily_limit`, or the observed-window match on reset),
+/// so a second racer that read the same count at a READ COMMITTED boundary
+/// matches zero rows and falls through to `DailyLimit`. Redundant but
+/// harmless on sqlite (serialised writers).
 ///
-/// **Atomicity (H1):** the UPDATE's `WHERE` clause carries the
-/// daily-counter predicate directly — `daily_use_count < daily_limit`
-/// when the window is live and `daily_limit > 0`, or
-/// `daily_window_started_at IS NULL OR daily_window_started_at =
-/// <observed>` on the window-reset path so only one of two concurrent
-/// racers performs the reset. On Postgres at READ COMMITTED two
-/// transactions can both read `daily_use_count = N` at the boundary;
-/// the predicate inside the UPDATE makes the second one match zero
-/// rows and fall through to `DailyLimit`. sqlite serialises writers,
-/// so the predicate is redundant there but harmless.
-///
-/// `daily_limit == 0` disables the daily cap entirely (counters still
-/// advance so operators can observe usage, but the threshold is never
-/// hit).
-///
-/// `in_window` UPDATEs reuse the existing `daily_window_started_at`;
-/// `reset` UPDATEs open a fresh window at `now`, gated on the observed
-/// prior value so a concurrent racer that already performed the reset
-/// doesn't get clobbered back to `count = 1`.
+/// `daily_limit == 0` disables the cap (counters still advance for observability).
 pub(super) async fn consume_iat(db: &DbPool, row: &IatRow, daily_limit: u32) -> IatConsume {
     let id = row.id.clone();
     let now = Utc::now();
     let now_str = now.to_rfc3339();
     let window_cutoff = (now - ChronoDuration::hours(24)).to_rfc3339();
 
-    // Hoist mutable values into the closure. `db_interact!` requires
-    // owned captures because the inner closure runs on a blocking
-    // worker.
     let outcome: anyhow::Result<IatConsume> = async {
         let r: IatConsume = db_interact!(db, |conn| {
             conn.transaction::<IatConsume, diesel::result::Error, _>(|c| {
-                // Re-read the row inside the transaction so we see the
-                // committed state, not the snapshot from `lookup_iat`.
+                // Re-read inside the transaction for committed state, not the
+                // `lookup_iat` snapshot.
                 let current: Option<IatRow> = iat::table
                     .filter(iat::id.eq(&id))
                     .select(IatRow::as_select())
@@ -221,8 +183,7 @@ pub(super) async fn consume_iat(db: &DbPool, row: &IatRow, daily_limit: u32) -> 
                     }
                 }
 
-                // A window is "live" only if `started_at` is set AND
-                // not older than 24h. Anything else triggers a reset.
+                // Live only if `started_at` is set and within 24h; else reset.
                 let in_window = current
                     .daily_window_started_at
                     .as_deref()
@@ -234,21 +195,16 @@ pub(super) async fn consume_iat(db: &DbPool, row: &IatRow, daily_limit: u32) -> 
                 let limit = daily_limit as i32;
                 let new_window = Some(now_str.clone());
 
-                // NULL means unlimited, so `uses_remaining - 1` keeps NULL
-                // and this guard stays true; bounded rows must still have a
-                // use left. One predicate covers both, so the
-                // bounded/unbounded split drops out of every UPDATE below.
+                // One predicate covers both: NULL (unlimited) stays NULL under
+                // `- 1` and passes; bounded rows must still have a use left.
                 let not_exhausted = iat::uses_remaining.is_null().or(iat::uses_remaining.gt(0));
                 let dec_uses = iat::uses_remaining.eq(iat::uses_remaining - 1);
                 let base = iat::table.filter(iat::id.eq(&id)).filter(not_exhausted);
 
                 let updated = if in_window {
-                    // Pre-flight: if we already know the window is at
-                    // the cap, skip the UPDATE entirely so the caller
-                    // gets the actual `daily_use_count` for the audit
-                    // row. The UPDATE's predicate below would also
-                    // catch this case (matching zero rows), but then
-                    // we'd lose the count.
+                    // Skip the UPDATE when already at the cap so the caller
+                    // keeps the actual count for the audit row (the predicate
+                    // below would match zero rows but lose the count).
                     if capped && current.daily_use_count >= limit {
                         return Ok(IatConsume::DailyLimit {
                             count: current.daily_use_count,
@@ -257,10 +213,8 @@ pub(super) async fn consume_iat(db: &DbPool, row: &IatRow, daily_limit: u32) -> 
                     let next_count = current.daily_use_count + 1;
                     let set = (dec_uses, iat::daily_use_count.eq(next_count));
                     if capped {
-                        // `daily_use_count < limit` is the atomicity
-                        // backstop for the READ COMMITTED boundary race —
-                        // a second racer that read the same count matches
-                        // zero rows here and falls through to `DailyLimit`.
+                        // `daily_use_count < limit` is the atomicity backstop
+                        // for the READ COMMITTED boundary race.
                         diesel::update(base.filter(iat::daily_use_count.lt(limit)))
                             .set(set)
                             .execute(c)?
@@ -268,9 +222,8 @@ pub(super) async fn consume_iat(db: &DbPool, row: &IatRow, daily_limit: u32) -> 
                         diesel::update(base).set(set).execute(c)?
                     }
                 } else {
-                    // Reset path: gate on the observed prior window so a
-                    // concurrent racer that already reset doesn't get
-                    // clobbered back to `count = 1`.
+                    // Gate the reset on the observed prior window so a racer
+                    // that already reset isn't clobbered back to `count = 1`.
                     let set = (
                         dec_uses,
                         iat::daily_use_count.eq(1),
@@ -288,12 +241,9 @@ pub(super) async fn consume_iat(db: &DbPool, row: &IatRow, daily_limit: u32) -> 
                     }
                 };
                 if updated == 0 {
-                    // Either someone else already decremented
-                    // `uses_remaining` to zero, or the daily-counter
-                    // predicate rejected us at the boundary. Surface
-                    // as `DailyLimit` only when we know we were inside
-                    // the window at the limit; otherwise fall back to
-                    // `Exhausted`.
+                    // Either `uses_remaining` hit zero or the daily predicate
+                    // rejected us at the boundary. `DailyLimit` only when we
+                    // were inside the window at the limit; else `Exhausted`.
                     if in_window && capped && current.daily_use_count + 1 > limit {
                         return Ok(IatConsume::DailyLimit {
                             count: current.daily_use_count,

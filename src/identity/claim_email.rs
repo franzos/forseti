@@ -14,8 +14,7 @@
 //!    unverified identity → redirects to Kratos registration with the
 //!    same email pre-filled.
 //!
-//! Kratos doesn't ship this UX out of the box — see the
-//! `unverified-email squatting` section of `TODO_LICENSING_FEATURES.md`.
+//! Kratos doesn't ship this UX out of the box.
 
 use askama::Template;
 use axum::extract::{Query, State};

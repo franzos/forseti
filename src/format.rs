@@ -1,19 +1,7 @@
-//! Small text-formatting helpers shared across handlers and view-model
-//! projections: humanising User-Agent strings, ISO-8601 timestamps, and
-//! recognising UUID-shaped strings.
-//!
-//! These live in their own module (rather than scattered private fns)
-//! because both the dashboard, the user-facing sessions page, and the
-//! admin tables need the same coarse formatting and the rules should
-//! drift together.
+//! Shared text-formatting helpers: humanising User-Agent strings, relative timestamps, and UUID-shape detection.
 
-/// Reduce a verbose User-Agent string to "Browser on OS" (e.g.
-/// "Chrome on Linux", "Firefox on macOS"). Falls back to an empty string
-/// for unrecognised UAs so the caller can decide on a placeholder.
-///
-/// Deliberately tiny — we match on a handful of substrings rather than
-/// pulling in a UA-parsing crate. Order matters: Edge/Chromium contain
-/// "Safari" tokens, so check the more specific browser names first.
+/// Reduce a User-Agent to "Browser on OS"; empty string for unrecognised UAs.
+/// Substring matching, most-specific first (Edge/Chromium UAs also contain "Safari" tokens).
 pub fn humanise_user_agent(ua: &str) -> String {
     if ua.is_empty() {
         return String::new();
@@ -47,12 +35,8 @@ pub fn humanise_user_agent(ua: &str) -> String {
     format!("{browser} on {os}")
 }
 
-/// Convert an RFC3339 timestamp into a coarse relative string ("2h ago",
-/// "yesterday", "in 15h"). Falls back to the original string if parsing
-/// fails — better to show the raw timestamp than nothing.
-///
-/// Handles both past ("X ago") and future ("in X") directions, so a
-/// single helper works for both `authenticated_at` and `expires_at`.
+/// Convert an RFC3339 timestamp into a coarse relative string ("2h ago", "yesterday", "in 15h"),
+/// handling both past and future. Falls back to the original string on parse failure.
 pub fn humanise_timestamp(iso: &str) -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -97,13 +81,8 @@ pub fn humanise_timestamp(iso: &str) -> String {
     }
 }
 
-/// True when `s` looks like a canonical 8-4-4-4-12 UUID (hex + hyphens).
-/// Used by admin list pages to decide whether a free-text search input
-/// should be treated as an ID lookup vs. a name/email filter.
-///
-/// Doesn't validate the UUID semantically (version bits, variant bits) —
-/// only the shape — because that's enough to decide "try a direct GET
-/// before falling through to a list query".
+/// True when `s` has the canonical 8-4-4-4-12 UUID shape (not validated semantically).
+/// Lets admin search decide between an ID lookup and a name/email filter.
 pub fn looks_like_uuid(s: &str) -> bool {
     let s = s.trim();
     if s.len() != 36 {
@@ -141,7 +120,7 @@ mod tests {
 
     #[test]
     fn humanise_user_agent_safari_macos() {
-        // Pure Safari — no Chrome/Edge tokens.
+        // Pure Safari, no Chrome/Edge tokens.
         let ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15";
         assert_eq!(humanise_user_agent(ua), "Safari on macOS");
     }

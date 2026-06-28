@@ -1,8 +1,8 @@
-//! `/admin/configuration` — how this OP/IdP is configured.
+//! `/admin/configuration`: how this OP/IdP is configured.
 //!
 //! A read-only window onto the moving parts: Hydra's OIDC discovery doc
 //! (endpoints + advertised capabilities), the public JWKS signing keys, and
-//! the Kratos identity schemas. Every probe is best-effort — one upstream
+//! the Kratos identity schemas. Every probe is best-effort: one upstream
 //! failure renders its section as "unavailable" without aborting the page.
 
 use axum::{extract::State, response::Response};
@@ -22,8 +22,7 @@ struct ConfigurationTemplate {
     /// Cached Hydra discovery doc. When `discovery_ok` is false this is the
     /// empty default and the template hides every discovery-derived row.
     disc: OidcDiscovery,
-    /// False when the cold discovery fetch failed (no prior cache) — drives
-    /// the "couldn't reach Hydra" note.
+    /// False when the cold discovery fetch failed (no prior cache).
     discovery_ok: bool,
     /// Convenience: issuer + the well-known discovery path. Empty when the
     /// issuer is unknown.

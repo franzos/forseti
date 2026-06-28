@@ -1,4 +1,4 @@
-//! `/admin/webhooks` — surfaces dead-lettered outbox rows so an operator
+//! `/admin/webhooks`: surfaces dead-lettered outbox rows so an operator
 //! can either retry delivery (rare; usually the receiver fixed something)
 //! or discard if delivery is genuinely no longer possible.
 //!
@@ -6,12 +6,8 @@
 //! count of `state=DEAD` rows surfaces on `/admin/status` so operators
 //! notice even if they don't open this page directly.
 //!
-//! The page is master/detail: the summary table at `/admin/webhooks` is
-//! scan-friendly (client name + age + attempts, with a single "View"
-//! action), and `/admin/webhooks/{id}` carries the full URL, full
-//! `last_error`, the signed payload, and both Requeue / Discard buttons.
-//! Discard only lives on the detail page because it's irreversible and
-//! we want the operator one extra click away from a fat-finger.
+//! Master/detail. Discard lives only on the detail page because it's
+//! irreversible: one extra click away from a fat-finger.
 
 use std::collections::{HashMap, HashSet};
 
@@ -32,12 +28,9 @@ use crate::render::render;
 use crate::state::AppState;
 use crate::webhook;
 
-/// Look up the Forseti-side metadata row for `client_id` and decide
-/// whether it lives in `scope`. Orphans (no metadata row) default to
-/// the Default org per the `oauth_client_metadata` convention, so an
-/// org-scoped admin never sees an orphan row from another org. Forseti
-/// scope is a no-op. Returns `Ok(false)` for "in scope, hide row"
-/// rather than an error so the caller can quietly filter the list.
+/// Whether `client_id` lives in `scope`. Orphans (no metadata row) default to
+/// the Default org per the `oauth_client_metadata` convention, so an org-scoped
+/// admin never sees an orphan from another org. Forseti scope is a no-op.
 async fn webhook_row_in_scope(state: &AppState, scope: &AdminScope, client_id: &str) -> bool {
     let AdminScope::Org { id: scope_org, .. } = scope else {
         return true;
@@ -58,14 +51,12 @@ async fn webhook_row_in_scope(state: &AppState, scope: &AdminScope, client_id: &
 /// One row in the dead-letter summary table.
 pub(crate) struct DeadRow {
     pub id: String,
-    /// Short prefix of the event UUID; the full id sits in the `title`
-    /// attribute (hover tooltip) and on the detail page.
+    /// Short prefix of the event UUID; the full id sits in the `title` attr.
     pub event_id_short: String,
     pub event_id: String,
     pub client_id: String,
     /// Resolved via `hydra::get_client`; falls back to `client_id` if the
-    /// client was deleted between the dead-letter being created and the
-    /// admin opening this page.
+    /// client was deleted before the admin opened this page.
     pub client_name: String,
     pub client_exists: bool,
     pub attempts: i32,
@@ -86,9 +77,7 @@ pub(crate) struct DeadDetail {
     pub created_at_pretty: String,
     pub next_attempt_at: String,
     pub state: String,
-    /// Pretty-printed JSON, or the raw payload if it didn't parse as JSON
-    /// (defensive — we always write JSON, but reading back from storage
-    /// shouldn't crash if the row was hand-edited).
+    /// Pretty-printed JSON, falling back to the raw payload if it didn't parse.
     pub payload_pretty: String,
 }
 
@@ -127,11 +116,9 @@ pub async fn show(
         }
     };
 
-    // Org-scoped: keep only rows owned by clients in the active org.
-    // Filtering in Rust after a single SELECT is acceptable for a
-    // dead-letter list (small N); a SQL-side join would require
-    // introducing a foreign-key view across Forseti-owned and
-    // webhook-owned tables that don't otherwise reference each other.
+    // Org-scoped: keep only rows owned by clients in the active org. Filtering
+    // in Rust after one SELECT is fine for a small dead-letter list; a SQL join
+    // would need a FK view across tables that don't reference each other.
     if scope.org_id().is_some() {
         let mut keep = Vec::with_capacity(outbox_rows.len());
         for r in outbox_rows.into_iter() {
@@ -340,10 +327,9 @@ pub async fn discard(
     Redirect::to(&redirect).into_response()
 }
 
-/// Look up the outbox row, then verify its client belongs to the
-/// active scope. Rendered as 404-shape rather than 403 so an
-/// org-scoped caller can't enumerate sibling-org row IDs by probing
-/// for the difference between "wrong scope" and "doesn't exist".
+/// Verify the row's client belongs to the active scope. Rendered as 404-shape
+/// not 403 so an org-scoped caller can't enumerate sibling-org row IDs by
+/// telling "wrong scope" apart from "doesn't exist".
 async fn enforce_row_scope(
     state: &AppState,
     scope: &AdminScope,
@@ -381,15 +367,11 @@ async fn enforce_row_scope(
     }
 }
 
-/// Resolve client names for the given client_ids. Returns
-/// `Some(name)` when Hydra returned a client (name may be empty if the
-/// operator never set one), `None` when the client no longer exists
-/// (deleted between dead-letter creation and operator opening this page).
+/// Resolve client names. `Some(name)` when Hydra returned a client (name may be
+/// empty), `None` when the client no longer exists.
 ///
-/// Fans out up to `MAX_CONCURRENT` lookups concurrently via
-/// `tokio::task::JoinSet` so the page renders in roughly one Hydra
-/// round-trip rather than N. Bounded so a large dead-letter table can't
-/// stampede Hydra.
+/// Fans out up to `MAX_CONCURRENT` lookups via `JoinSet` so the page renders in
+/// roughly one Hydra round-trip; bounded so a large table can't stampede Hydra.
 async fn resolve_client_names(
     state: &AppState,
     client_ids: HashSet<&str>,
@@ -437,10 +419,8 @@ async fn resolve_client_names(
     out
 }
 
-/// Pull the resolved label out of [`resolve_client_names`]. Returns
-/// `(label, exists)` — when the client is gone we still show the raw
-/// UUID (so the operator can match it back against logs) but the
-/// template renders it as plain text rather than a link.
+/// Pull the resolved `(label, exists)` out of [`resolve_client_names`]. When
+/// the client is gone we still show the raw UUID, as plain text not a link.
 fn client_label(names: &HashMap<String, Option<String>>, client_id: &str) -> (String, bool) {
     match names.get(client_id) {
         Some(Some(name)) if !name.is_empty() => (name.clone(), true),
@@ -449,9 +429,7 @@ fn client_label(names: &HashMap<String, Option<String>>, client_id: &str) -> (St
     }
 }
 
-/// First eight chars of a UUID. Enough to disambiguate in a small
-/// dead-letter list; the full id remains in the row's `title` attribute
-/// and on the detail page.
+/// First eight chars of a UUID; the full id remains in the `title` attr.
 fn short_id(id: &str) -> String {
     id.chars().take(8).collect()
 }

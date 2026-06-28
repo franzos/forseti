@@ -81,6 +81,10 @@
             <a href="{% if is_default %}/settings/organization/members{% else %}/settings/organizations/{{ org.slug }}/members{% endif %}"
                class="text-primary font-label-md">Members ({{ member_count }}) &rarr;</a>
           </li>
+          <li>
+            <a href="{% if is_default %}/settings/organization/teams{% else %}/settings/organizations/{{ org.slug }}/teams{% endif %}"
+               class="text-primary font-label-md">Teams &rarr;</a>
+          </li>
         </ul>
       </div>
 

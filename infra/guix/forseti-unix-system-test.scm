@@ -176,6 +176,44 @@
 (define %forseti-gid
   60002)
 
+;; Org/team scope fixtures (B1).  The real resolver scopes EVERY /posix/v1/*
+;; answer by the calling host's org/team (resolver.rs): a whole-org host sees
+;; all the org's provisioned members; a team-scoped host sees only the scoped
+;; team's members; a foreign org's accounts/gids are never visible.  The mock
+;; models ONE host (the daemon's test-host), so we encode that per-host scoping
+;; as a single-process FLAG-FILE toggle (the %offline-empty-flag precedent):
+;; flag ABSENT => whole-org, flag PRESENT => team-scoped to `engineering'.  The
+;; accounts are chosen so NO (name, lookup-kind) pair flips verdict across modes
+;; -- that keeps the daemon/nscd caches honest without a daemon restart:
+;;   fuser  -- org member AND in `engineering' (stable 200 in both modes);
+;;   dave   -- org member, NOT in the team: 404 on a team-scoped getpwnam
+;;             (the team-scoped negative; NEVER looked up in whole-org mode);
+;;   erin   -- org member, NOT in any team: 200 on a whole-org getpwnam
+;;             (the whole-org positive; NEVER looked up in team-scoped mode);
+;;   carol  -- a DIFFERENT org's member: never visible on this host (cross-org).
+;; dave and erin are DISJOINT identities precisely so that no (name, lookup-kind)
+;; pair is ever queried in BOTH scope modes.  NSS does not support passwd
+;; enumeration (libnss_forseti has no setpwent/getpwent), so whole-org scope can
+;; only be proven by-name; reusing one name across modes would let the negative
+;; entry cached in the team-scoped phase poison the whole-org verdict (the
+;; daemon holds its OWN negative cache that outlives an nscd flush).  Disjoint
+;; names -- not flushing -- is what keeps the two phases honest.
+(define %org-member-user "dave") ;orgA member, not in the engineering team
+(define %org-member-uid 60010)
+(define %org-member-gid 60011) ;dave's UPG gid
+(define %org-member2-user "erin") ;orgA member, not in ANY team; whole-org by-name proof
+(define %org-member2-uid 60030)
+(define %org-member2-gid 60031) ;erin's UPG gid
+(define %cross-org-user "carol") ;orgB member; never visible on this host
+(define %cross-org-uid 60020)
+(define %cross-org-gid 60021)
+(define %team-name "engineering") ;the scoped team; gid in the team band
+(define %team-gid 65000)
+(define %foreign-team-gid 66000) ;a gid that exists only in orgB
+(define %org-slug "acme") ;the org has NO enumerable group of its own
+;; Present => the mock answers as a team-scoped host; absent => whole-org.
+(define %team-scoped-flag "/run/forseti-mock-team-scoped")
+
 ;; A LOCAL account with a real /etc/shadow hash (M4 fail-closed control case).
 ;; The daemon-down account check must let this user clear PAM account management
 ;; (the module self-classifies a shadow-backed user -> PAM_IGNORE -> the
@@ -258,6 +296,32 @@
                                              #$%offline-ttl-secs)
                                            (define offline-empty-flag
                                              #$%offline-empty-flag)
+                                           ;; Org/team scope fixtures + the per-host scope toggle.
+                                           (define dave-user
+                                             #$%org-member-user)
+                                           (define dave-uid
+                                             #$%org-member-uid)
+                                           (define dave-gid
+                                             #$%org-member-gid)
+                                           (define erin-user
+                                             #$%org-member2-user)
+                                           (define erin-uid
+                                             #$%org-member2-uid)
+                                           (define erin-gid
+                                             #$%org-member2-gid)
+                                           (define carol-uid
+                                             #$%cross-org-uid)
+                                           (define team-name
+                                             #$%team-name)
+                                           (define team-gid
+                                             #$%team-gid)
+                                           (define foreign-team-gid
+                                             #$%foreign-team-gid)
+                                           (define team-scoped-flag
+                                             #$%team-scoped-flag)
+                                           ;; Present => team-scoped host; absent => whole-org host.
+                                           (define (scoped?)
+                                             (file-exists? team-scoped-flag))
 
                                            ;; passwd/group for the approving device user (== the NSS test user).
                                            (define passwd-json
@@ -277,6 +341,51 @@
                                                             "\",\"gid\":"
                                                             (number->string
                                                              gid)
+                                                            ",\"members\":[\""
+                                                            user
+                                                            "\"]}"))
+
+                                           ;; dave: an org member NOT in the team.  Served on a whole-org
+                                           ;; host (and in its UPG form), 404 on a team-scoped host.
+                                           (define dave-passwd-json
+                                             (string-append "{\"name\":\""
+                                              dave-user
+                                              "\",\"uid\":"
+                                              (number->string dave-uid)
+                                              ",\"gid\":"
+                                              (number->string dave-gid)
+                                              ",\"gecos\":\"\",\"dir\":\"/home/"
+                                              dave-user
+                                              "\",\"shell\":\"/bin/sh\"}"))
+                                           (define dave-group-json ;dave's UPG
+                                             (string-append "{\"name\":\""
+                                                            dave-user
+                                                            "\",\"gid\":"
+                                                            (number->string
+                                                             dave-gid)
+                                                            ",\"members\":[\""
+                                                            dave-user
+                                                            "\"]}"))
+                                           ;; erin: an org member NOT in any team.  Served on a whole-org
+                                           ;; host only (404 when team-scoped).  Disjoint from dave so no
+                                           ;; name is ever queried in both scope modes.
+                                           (define erin-passwd-json
+                                             (string-append "{\"name\":\""
+                                              erin-user
+                                              "\",\"uid\":"
+                                              (number->string erin-uid)
+                                              ",\"gid\":"
+                                              (number->string erin-gid)
+                                              ",\"gecos\":\"\",\"dir\":\"/home/"
+                                              erin-user
+                                              "\",\"shell\":\"/bin/sh\"}"))
+                                           ;; `engineering' team group: members = [fuser] (the in-team user).
+                                           (define team-group-json
+                                             (string-append "{\"name\":\""
+                                                            team-name
+                                                            "\",\"gid\":"
+                                                            (number->string
+                                                             team-gid)
                                                             ",\"members\":[\""
                                                             user
                                                             "\"]}"))
@@ -422,9 +531,45 @@
                                                              (number->string
                                                               uid)))
                                                   (json passwd-json))
+                                                 ;; dave: org member, not in the team.  Visible only on a
+                                                 ;; whole-org host (404 when team-scoped).
+                                                 ((string=? path
+                                                            (string-append
+                                                             "/posix/v1/passwd/name/"
+                                                             dave-user))
+                                                  (if (scoped?)
+                                                      (not-found)
+                                                      (json dave-passwd-json)))
+                                                 ;; erin: org member, not in any team.  Visible only on a
+                                                 ;; whole-org host (404 when team-scoped) -- the disjoint
+                                                 ;; whole-org by-name proof, never queried in scoped mode.
+                                                 ((string=? path
+                                                            (string-append
+                                                             "/posix/v1/passwd/name/"
+                                                             erin-user))
+                                                  (if (scoped?)
+                                                      (not-found)
+                                                      (json erin-passwd-json)))
+                                                 ;; carol: a different org's member -- her uid exists, but
+                                                 ;; never on THIS host (cross-org isolation).
+                                                 ((string=? path
+                                                            (string-append
+                                                             "/posix/v1/passwd/uid/"
+                                                             (number->string
+                                                              carol-uid)))
+                                                  (not-found))
+                                                 ;; Whole-org enumeration lists the org's members; a
+                                                 ;; team-scoped one lists only the team's.
                                                  ((string=? path
                                                    "/posix/v1/passwd")
-                                                  (json "[]")) ;anti-slurp
+                                                  (if (scoped?)
+                                                      (json (string-append
+                                                             "[" passwd-json "]"))
+                                                      (json (string-append
+                                                             "[" passwd-json ","
+                                                             dave-passwd-json ","
+                                                             erin-passwd-json
+                                                             "]"))))
                                                  ((string=? path
                                                             (string-append
                                                              "/posix/v1/group/name/"
@@ -436,9 +581,47 @@
                                                              (number->string
                                                               gid)))
                                                   (json group-json))
+                                                 ;; the engineering team group (by name and by gid).
+                                                 ((string=? path
+                                                            (string-append
+                                                             "/posix/v1/group/name/"
+                                                             team-name))
+                                                  (json team-group-json))
+                                                 ((string=? path
+                                                            (string-append
+                                                             "/posix/v1/group/gid/"
+                                                             (number->string
+                                                              team-gid)))
+                                                  (json team-group-json))
+                                                 ;; dave's UPG: only on a whole-org host.
+                                                 ((string=? path
+                                                            (string-append
+                                                             "/posix/v1/group/name/"
+                                                             dave-user))
+                                                  (if (scoped?)
+                                                      (not-found)
+                                                      (json dave-group-json)))
+                                                 ((string=? path
+                                                            (string-append
+                                                             "/posix/v1/group/gid/"
+                                                             (number->string
+                                                              dave-gid)))
+                                                  (if (scoped?)
+                                                      (not-found)
+                                                      (json dave-group-json)))
+                                                 ;; a gid that exists only in orgB -> 404 here (cross-org).
+                                                 ((string=? path
+                                                            (string-append
+                                                             "/posix/v1/group/gid/"
+                                                             (number->string
+                                                              foreign-team-gid)))
+                                                  (not-found))
+                                                 ;; group enumeration emits team groups only; the org has
+                                                 ;; NO enumerable group of its own.
                                                  ((string=? path
                                                             "/posix/v1/group")
-                                                  (json "[]"))
+                                                  (json (string-append
+                                                         "[" team-group-json "]")))
                                                  ((string=? path
                                                             (string-append
                                                              "/posix/v1/authorized_keys/"
@@ -643,6 +826,20 @@
                                                         (loop (- i 1)))
                                                        (else #f))) marionette))
 
+                               ;; Flush nscd's passwd+group caches so the next lookup hits NSS ->
+                               ;; the daemon -> the mock (used when flipping the host's scope mode).
+                               (define (nscd-flush)
+                                 (marionette-eval '(begin
+                                                     (system* #$(file-append (canonical-package
+                                                                              glibc)
+                                                                 "/sbin/nscd")
+                                                              "-i" "passwd")
+                                                     (system* #$(file-append (canonical-package
+                                                                              glibc)
+                                                                 "/sbin/nscd")
+                                                              "-i" "group")
+                                                     #t) marionette))
+
                                (test-runner-current (system-test-runner #$output))
                                (test-begin "forseti-unix")
 
@@ -724,6 +921,190 @@
                                              ((0 . out) (string->number (string-trim-right
                                                                          out)))
                                              (_ #f)))
+
+                               ;; --- (2b) org/team scope: team-scoped, whole-org, cross-org, UPG -
+                               ;; The single mock host flips scope via %team-scoped-flag (present =>
+                               ;; team-scoped to `engineering', absent => whole-org).  Team-scoped runs
+                               ;; FIRST.  The whole-org by-name positive uses a DISTINCT identity (erin)
+                               ;; from the team-scoped negative (dave): no (name, lookup-kind) pair is
+                               ;; queried in both modes, so a negative entry cached in the team-scoped
+                               ;; phase (nscd, or the daemon's own cache, which outlives an nscd flush)
+                               ;; can never poison the whole-org verdict.  nscd is still flushed on each
+                               ;; mode change as defence in depth.  This mirrors tests/integration/posix.rs
+                               ;; at the NSS layer.
+
+                               ;; Enter team-scoped mode.
+                               (marionette-eval '(call-with-output-file #$%team-scoped-flag
+                                                   (lambda (p) (display "1" p)))
+                                                marionette)
+                               (nscd-flush)
+
+                               ;; in-team user resolves (fuser is org member AND in the team).
+                               (test-assert
+                                "team-scoped: in-team user resolves"
+                                (match (guest-run #$(file-append glibc
+                                                     "/bin/getent") "passwd"
+                                                  #$%forseti-user)
+                                  ((0 . out) (string-contains out
+                                                              #$%forseti-user))
+                                  (_ #f)))
+
+                               ;; org-member-not-in-team does NOT resolve (empty + non-zero).
+                               (test-assert
+                                "team-scoped: org member not in team does not resolve"
+                                (match (pk 'team-scoped-dave
+                                           (guest-run #$(file-append glibc
+                                                         "/bin/getent")
+                                                      "passwd"
+                                                      #$%org-member-user))
+                                  ((0 . _) #f) ;a 0 exit with output would be a scope leak
+                                  (_ #t)))
+
+                               ;; getent group <team> lists the in-team members.
+                               (define team-group-line
+                                 (cdr (pk 'team-group
+                                          (guest-run #$(file-append glibc
+                                                        "/bin/getent") "group"
+                                                     #$%team-name))))
+
+                               (test-assert
+                                "team-scoped: team group lists the in-team member"
+                                (and (string-contains team-group-line
+                                                      #$%team-name)
+                                     (string-contains team-group-line
+                                                      #$%forseti-user)))
+
+                               ;; the org itself is NOT an enumerable group.
+                               (test-assert
+                                "team-scoped: org slug is not a group (empty)"
+                                (match (guest-run #$(file-append glibc
+                                                     "/bin/getent") "group"
+                                                  #$%org-slug)
+                                  ((0 . _) #f)
+                                  (_ #t)))
+
+                               ;; cross-org: a gid that exists only in another org 404s here.
+                               (test-assert
+                                "cross-org: foreign-org team gid does not resolve"
+                                (match (guest-run #$(file-append glibc
+                                                     "/bin/getent") "group"
+                                                  #$(number->string
+                                                     %foreign-team-gid))
+                                  ((0 . _) #f)
+                                  (_ #t)))
+
+                               ;; this org's own team gid DOES resolve to its roster.
+                               (define team-gid-line
+                                 (cdr (pk 'team-gid
+                                          (guest-run #$(file-append glibc
+                                                        "/bin/getent") "group"
+                                                     #$(number->string
+                                                        %team-gid)))))
+
+                               (test-assert
+                                "team-scoped: own team gid resolves to roster"
+                                (and (string-contains team-gid-line
+                                                      #$%team-name)
+                                     (string-contains team-gid-line
+                                                      #$%forseti-user)))
+
+                               ;; UPG: `id' shows the primary group by NAME, never a bare number, and
+                               ;; never the foreign-org gid (a multi-org user sees only this org's gid).
+                               (define id-fuser-line
+                                 (cdr (pk 'id-fuser
+                                          (guest-run #$(file-append coreutils
+                                                        "/bin/id")
+                                                     #$%forseti-user))))
+
+                               (test-assert
+                                "UPG: id shows the primary group by name"
+                                (string-contains id-fuser-line
+                                                 (string-append "("
+                                                                #$%forseti-user
+                                                                ")")))
+
+                               (test-assert
+                                "cross-org: id never shows the foreign-org team gid"
+                                (not (string-contains id-fuser-line
+                                                      #$(number->string
+                                                         %foreign-team-gid))))
+
+                               ;; UPG: getent group <username> resolves the single-member private group
+                               ;; for a VISIBLE account (fuser)...
+                               (define upg-fuser-line
+                                 (cdr (pk 'upg-fuser
+                                          (guest-run #$(file-append glibc
+                                                        "/bin/getent") "group"
+                                                     #$%forseti-user))))
+
+                               (test-assert
+                                "UPG: visible account's private group resolves"
+                                (and (string-contains upg-fuser-line
+                                                      (string-append
+                                                       #$%forseti-user ":"))
+                                     (string-contains upg-fuser-line
+                                                      #$(number->string
+                                                         %forseti-gid))))
+
+                               ;; ...but NOT for an out-of-scope account (dave's UPG is invisible here).
+                               (test-assert
+                                "UPG: out-of-scope account's private group does not resolve"
+                                (match (guest-run #$(file-append glibc
+                                                     "/bin/getent") "group"
+                                                  #$%org-member-user)
+                                  ((0 . _) #f)
+                                  (_ #t)))
+
+                               ;; Leave team-scoped mode -> whole-org for the remaining sections.
+                               (marionette-eval '(when (file-exists? #$%team-scoped-flag)
+                                                   (delete-file #$%team-scoped-flag))
+                                                marionette)
+                               (nscd-flush)
+
+                               ;; whole-org: an org member who is NOT in any team resolves BY NAME on a
+                               ;; whole-org host.  This uses `erin' -- a SEPARATE org-member-not-in-team
+                               ;; identity that is NEVER looked up in the team-scoped phase -- so no
+                               ;; negative cache entry (nscd OR the daemon's own, which outlives an nscd
+                               ;; flush) from that phase can poison this verdict.  `dave' carries the
+                               ;; team-scoped negative; `erin' carries the whole-org positive; the two
+                               ;; names are disjoint so no cache ever flips.  NSS deliberately does NOT
+                               ;; surface passwd ENUMERATION (libnss_forseti has no getpwent), so
+                               ;; whole-org scope is proven by-name, never via a bare `getent passwd'.
+                               (define whole-org-erin
+                                 (cdr (pk 'whole-org-erin
+                                          (guest-run #$(file-append glibc
+                                                        "/bin/getent")
+                                                     "passwd"
+                                                     #$%org-member2-user))))
+
+                               (test-assert
+                                "whole-org: org member (not in any team) resolves by name"
+                                (and (string-contains whole-org-erin
+                                                      #$%org-member2-user)
+                                     (string-contains whole-org-erin
+                                                      #$(number->string
+                                                         %org-member2-uid))))
+
+                               ;; whole-org: a different org's member still 404s (cross-org isolation).
+                               (test-assert
+                                "whole-org: a different org's member does not resolve"
+                                (match (pk 'whole-org-carol
+                                           (guest-run #$(file-append glibc
+                                                         "/bin/getent")
+                                                      "passwd"
+                                                      #$%cross-org-user))
+                                  ((0 . _) #f)
+                                  (_ #t)))
+
+                               ;; whole-org: a different org's member uid also 404s.
+                               (test-assert
+                                "whole-org: a different org's member uid does not resolve"
+                                (match (guest-run #$(file-append glibc
+                                                     "/bin/getent") "passwd"
+                                                  #$(number->string
+                                                     %cross-org-uid))
+                                  ((0 . _) #f)
+                                  (_ #t)))
 
                                ;; --- (3) key-based ssh <user>@localhost ------------------------
                                ;; Stage the Forseti user's private key for root to use.

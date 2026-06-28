@@ -1,0 +1,157 @@
+{% extends "base.html" %}
+
+{% block title %}Teams &middot; {{ org.name }} &middot; {{ chrome.brand.name }}{% endblock %}
+
+{% block nav_settings_class %}text-primary font-bold border-b-2 border-primary{% endblock %}
+
+{% block org_nav %}
+  {% include "partials/org_switcher.html" %}
+{% endblock %}
+
+{% block content %}
+  <div class="flex flex-col md:flex-row gap-stack-lg">
+    {% let active = "organization" %}
+    {% include "partials/settings_nav.html" %}
+
+    <section class="flex-1 flex flex-col gap-stack-lg">
+      <header class="mt-2 mb-stack-lg">
+        <h1 class="font-headline-lg-mobile md:font-headline-lg text-headline-lg-mobile md:text-headline-lg text-on-surface">
+          Teams &middot; {{ org.name }}
+        </h1>
+        <p class="font-body-md text-body-md text-on-surface-variant mt-1">
+          Group members into teams. Teams scope host access and drive same-team directory visibility.
+        </p>
+      </header>
+
+      <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg">
+        <h2 class="font-headline-md text-headline-md text-on-surface mb-stack-md">Create a team</h2>
+        <form method="POST"
+              action="{% if is_default %}/settings/organization/teams{% else %}/settings/organizations/{{ org.slug }}/teams{% endif %}"
+              class="flex flex-col md:flex-row gap-stack-md items-end">
+          <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+          <label class="flex flex-col gap-1 flex-1">
+            <span class="font-label-sm text-label-sm text-on-surface-variant">Name</span>
+            <input type="text"
+                   name="name"
+                   required
+                   class="border border-outline-variant rounded-lg px-3 py-2 bg-surface-container-low">
+          </label>
+          <button type="submit"
+                  class="bg-primary text-on-primary rounded-lg px-4 py-2 font-label-md text-label-md">
+            Create team
+          </button>
+        </form>
+      </div>
+
+      <div class="bg-surface-container-lowest border border-outline-variant rounded-xl overflow-hidden">
+        <table class="w-full">
+          <thead class="bg-surface-container-low text-left">
+            <tr>
+              <th class="px-stack-md py-stack-sm font-label-sm text-label-sm text-on-surface-variant">Team</th>
+              <th class="px-stack-md py-stack-sm font-label-sm text-label-sm text-on-surface-variant">Members</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for t in teams %}
+              <tr class="border-t border-outline-variant">
+                <td class="px-stack-md py-stack-sm font-body-md text-body-md">
+                  <form method="POST"
+                        action="{% if is_default %}/settings/organization/teams/{{ t.id }}/rename{% else %}/settings/organizations/{{ org.slug }}/teams/{{ t.id }}/rename{% endif %}"
+                        class="inline-flex gap-2 items-center">
+                    <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+                    <input type="text"
+                           name="name"
+                           value="{{ t.name }}"
+                           required
+                           class="border border-outline-variant rounded px-2 py-1 bg-surface-container-low">
+                    <button type="submit" class="font-label-sm text-primary">Rename</button>
+                  </form>
+                </td>
+                <td class="px-stack-md py-stack-sm font-body-md text-body-md">{{ t.member_count }}</td>
+                <td class="px-stack-md py-stack-sm text-right">
+                  <div class="inline-flex items-center gap-3">
+                    <a href="{% if is_default %}/settings/organization/teams?team={{ t.id }}{% else %}/settings/organizations/{{ org.slug }}/teams?team={{ t.id }}{% endif %}"
+                       class="font-label-sm text-primary">Manage members</a>
+                    <form method="POST"
+                          action="{% if is_default %}/settings/organization/teams/{{ t.id }}/delete{% else %}/settings/organizations/{{ org.slug }}/teams/{{ t.id }}/delete{% endif %}"
+                          onsubmit="return confirm('Delete {{ t.name }}? This removes the team and its memberships.');"
+                          class="inline">
+                      <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+                      <button type="submit" class="text-error font-label-sm">Delete</button>
+                    </form>
+                  </div>
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+
+      {% if let Some(sel) = selected_team %}
+        <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg flex flex-col gap-stack-md">
+          <h2 class="font-headline-md text-headline-md text-on-surface">Members of {{ sel.name }}</h2>
+
+          <form method="POST"
+                action="{% if is_default %}/settings/organization/teams/{{ sel.id }}/members{% else %}/settings/organizations/{{ org.slug }}/teams/{{ sel.id }}/members{% endif %}"
+                class="flex flex-col md:flex-row gap-stack-md items-end">
+            <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+            <label class="flex flex-col gap-1 flex-1">
+              <span class="font-label-sm text-label-sm text-on-surface-variant">Add member</span>
+              <select name="identity_id"
+                      required
+                      class="border border-outline-variant rounded-lg px-3 py-2 bg-surface-container-low">
+                {% for a in addable %}
+                  <option value="{{ a.identity_id }}">
+                    {% if !a.display_name.is_empty() %}
+                      {{ a.display_name }} ({{ a.email }})
+                    {% else %}
+                      {{ a.email }}
+                    {% endif %}
+                  </option>
+                {% endfor %}
+              </select>
+            </label>
+            <button type="submit"
+                    class="bg-primary text-on-primary rounded-lg px-4 py-2 font-label-md text-label-md"
+                    {% if addable.is_empty() %}disabled{% endif %}>Add</button>
+          </form>
+
+          <div class="border border-outline-variant rounded-xl overflow-hidden">
+            <table class="w-full">
+              <thead class="bg-surface-container-low text-left">
+                <tr>
+                  <th class="px-stack-md py-stack-sm font-label-sm text-label-sm text-on-surface-variant">Name</th>
+                  <th class="px-stack-md py-stack-sm font-label-sm text-label-sm text-on-surface-variant">Email</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for m in members %}
+                  <tr class="border-t border-outline-variant">
+                    <td class="px-stack-md py-stack-sm font-body-md text-body-md">
+                      {% if !m.display_name.is_empty() %}
+                        {{ m.display_name }}
+                      {% else %}
+                        <span class="text-on-surface-variant">&mdash;</span>
+                      {% endif %}
+                    </td>
+                    <td class="px-stack-md py-stack-sm font-body-md text-body-md font-mono">{{ m.email }}</td>
+                    <td class="px-stack-md py-stack-sm text-right">
+                      <form method="POST"
+                            action="{% if is_default %}/settings/organization/teams/{{ sel.id }}/members/{{ m.identity_id }}/remove{% else %}/settings/organizations/{{ org.slug }}/teams/{{ sel.id }}/members/{{ m.identity_id }}/remove{% endif %}"
+                            class="inline">
+                        <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+                        <button type="submit" class="text-error font-label-sm">Remove</button>
+                      </form>
+                    </td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      {% endif %}
+    </section>
+  </div>
+{% endblock %}

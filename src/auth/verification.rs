@@ -25,8 +25,6 @@ struct VerificationTemplate {
     has_visible_default: bool,
     state: String,
     return_to_qs: String,
-    /// `true` when the request carries a valid Kratos session — drives the
-    /// footer's "Back to dashboard" vs "Back to sign in" branch.
     is_logged_in: bool,
 }
 
@@ -39,10 +37,6 @@ pub(crate) async fn verification(
 ) -> Response {
     let cookie = cookies::cookie_header(&headers);
 
-    // Verification must work both for anonymous post-registration users
-    // and for logged-in users who already know their email. The latter
-    // case enables the auto-send short-circuit below (skip "type your
-    // email" and go straight to code entry).
     let session_opt = session.ok();
     let is_logged_in = session_opt.is_some();
 
@@ -57,14 +51,9 @@ pub(crate) async fn verification(
 
     match ory::kratos::get_flow(&state.ory, FlowKind::Verification, flow_id, &cookie).await {
         Ok(FlowFetch::Ok(flow)) => {
-            // If the user is logged in and the flow is sitting at
-            // `choose_method` (the "type your email" step), Forseti
-            // already knows the only address Kratos can legitimately
-            // verify against this identity. Auto-submit it server-side
-            // and bounce the browser to the same flow — which by then
-            // will have transitioned to `sent_email`, dropping the user
-            // straight into the code-entry screen. Any failure here
-            // falls through to render the original form unchanged.
+            // Logged-in user at `choose_method`: auto-submit the known address
+            // server-side so the browser lands straight on code entry. Any
+            // failure falls through to render the original form unchanged.
             if let Some(session) = session_opt {
                 if flow_state(&flow) == "choose_method" && session_needs_verification(session) {
                     let email = session_email(session);
@@ -129,15 +118,9 @@ fn render_verification(
     })
 }
 
-/// POST `email=<email>&method=code&csrf_token=<token>` to the flow's
-/// `ui.action` URL, server-side, forwarding the user's cookies. Used to
-/// skip the manual "type your email" step when we already know the
-/// address from the session.
-///
-/// Returns `Ok(())` only on a successful state transition; any non-2xx
-/// (CSRF mismatch, address not on identity, transport error, etc.) is
-/// surfaced as `Err` so the caller can fall through to the regular
-/// template render.
+/// Server-side submit of `method=code&email=…` to the flow's `ui.action`,
+/// skipping the manual "type your email" step. `Err` on any non-2xx so the
+/// caller can fall through to the regular template render.
 async fn submit_email_method(
     state: &AppState,
     flow: &serde_json::Value,

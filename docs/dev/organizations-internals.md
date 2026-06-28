@@ -148,9 +148,138 @@ Every org **write** path funnels through one helper, `gate_orgs_feature_or_upsel
 
 The license blob carries an optional `max_orgs` (`src/commercial/license.rs:83`): `None` = unlimited, `Some(n)` = hard cap. Enforced by `org_cap_allows(cap, current)` (`src/commercial/license.rs:67-69`) against a live `count_orgs()`. With no license the effective cap is `Some(0)` (`list_create.rs:62`), so the create path is closed and only the seeded Default org survives.
 
-### POSIX org-group mirroring
+## Teams and the POSIX surface
 
-When a Kratos identity is provisioned into a POSIX account (`/admin/posix/new`) **and** `Feature::Orgs` is `Allowed`/`GraceReadOnly`, provisioning mirrors the identity's org memberships into `org`-kind `posix_groups` rows — one group per org (keyed by `org_id`, named after the slug), shared by all its members, with the identity added to each (`posix::db::sync_org_groups`, called from `src/admin/posix.rs`). The sync is idempotent and concurrency-safe (find-or-create on a UniqueViolation re-read) and best-effort (a failure logs but never fails the provision). Unlicensed, provisioning yields only the account's `user`-kind primary group.
+Teams are an **org-domain** concept, first-class and single-copy. They are *not* `posix_groups`, and nothing is mirrored or synced into POSIX state: there is no `sync_org_groups` and no `org`-kind group rows. The POSIX resolver reads team membership directly at request time. This replaces the earlier "mirror org memberships into posix_groups" model entirely.
+
+### Data model
+
+Two tables, mirrored across `migrations/sqlite/` and `migrations/postgres/`, diesel definitions in `src/schema.rs:205-225`. CRUD lives in `src/orgs/teams.rs` (module carries `#![allow(dead_code)]` while the settings surface is wired incrementally over phases 2-4).
+
+#### `org_teams`
+
+| Column | Notes |
+|---|---|
+| `id` | TEXT PK. UUIDv4. Teams are referenced everywhere by this uuid, never by gid or name (no gid-reuse hazard on rename/delete). |
+| `org_id` | TEXT. Owning org. `(org_id, slug)` is unique, so a name collides only within one org. |
+| `name`, `slug` | human label + `slugify()`'d identifier. |
+| `gid` | NULLABLE Integer. Allocated lazily the first time the team is attached to a host scope (`find_or_create_team_gid`, `src/posix/db.rs:182`); NULL until then. |
+| `parent_id` | NULLABLE self-reference. Reserved for nested teams; unused this phase. |
+| `created_at`, `created_by` | provenance. |
+
+#### `org_team_members`
+
+| Column | Notes |
+|---|---|
+| `team_id`, `identity_id` | composite PK. `identity_id` is the Kratos identity UUID. |
+| `source` | TEXT. `"manual"` today; reserved for rule-derived membership later. |
+| `added_at` | provenance. |
+
+Cascades: `delete_team` removes the team, its members, and any `host_allowed_groups` rows referencing it in one transaction (`src/orgs/teams.rs:115`). Member-removal and identity-delete purge team rows via `remove_identity_from_org_teams` / `remove_identity_from_all_teams` (`src/orgs/teams.rs:227,250`).
+
+### Hosts and scope
+
+A host belongs to exactly one org (`host_enrollments.org_id`, `src/schema.rs:242`); that org is the outer access boundary. A host's scope is a set of team uuids in `host_allowed_groups.team_id` (`src/schema.rs:255`; the table keeps its legacy name but references team uuids, not posix_groups). Two cases, decided per request by `resolve_scope` (`src/posix/resolver.rs:107`):
+
+- **Whole-org** (empty allowed-team set) — every provisioned member of the host's org is visible. Whole-org is an **access predicate**, not an enumerable group: no org-wide Unix group is emitted, and `group` enumeration lists only those org teams that carry a gid.
+- **Team-scoped** (one or more allowed teams) — visibility and enumeration are both restricted to provisioned members of those teams (any-of-N). Each scoped team is emitted as a Unix group.
+
+The single source of truth for "is this account visible on this host" is `scope::account_visible_on_host` (`src/posix/scope.rs:21`), shared by the resolver and the device-auth path so they can't drift. The host's org is asserted `== team.org_id` inside the db helpers (`is_team_member_provisioned`, `team_by_gid_in_org`), so a cross-org team can never widen visibility.
+
+### Read-time resolution
+
+There is no provisioned-membership cache or projection. The resolver computes the provisioned subset on every request by joining team/org membership against `posix_accounts(enabled = 1)` (`accounts_in_org` / `accounts_in_team`, `src/posix/db.rs:281,246`). Disabling an account or removing a team membership takes effect on the next pull, with no reconciliation step. Group lookups also resolve user-private groups (UPG) by single lookup only; UPGs are never enumerated.
+
+### gid allocation
+
+Team gids are drawn from globally-unique, never-reused high-water-mark counters in `posix_sequences` (`src/posix/sequences.rs`). `next_in_band(band, base)` takes and advances one row per band (`"uid"`, `"user_gid"`, `"team_gid"`) inside a transaction, so a freed gid is never reclaimed: reuse would silently reassign on-disk/backup file ownership to a different team across hosts. Bands are bounded disjoint intervals configured by `[posix].group_gid_base` / `group_gid_size` (and the user uid/gid bands); `PosixConfig::validate_bands()` (`src/config.rs:261`) rejects overlapping user-gid and team-gid bands, and it runs at startup in `src/app.rs:84` so a mis-banded config fails the boot rather than colliding at provision time.
+
+### Access vs. visibility coupling
+
+Scoping a host to a team is, deliberately, also a *visibility* grant: members of a host-scoped team can see each other as members of that Unix group on the host, not just authenticate. The team-attach UI should treat "add this team to a host" as "these members can see each other here", not merely "these members can log in". The web-directory counterpart of this coupling is the `same_group` member-visibility policy described next.
+
+### Teams management UI
+
+Team CRUD + membership lives at `/settings/organization/teams` (`src/orgs/settings_page/teams.rs`), with the usual two-route twin set: the Default org under `/settings/organization/teams` and named orgs under `/settings/organizations/{slug}/teams` (`src/orgs/settings_page/mod.rs:65,118`). Both resolve through the same handlers; the `slug` (`None` for Default) is the only difference.
+
+The surface is **owner + `Feature::Orgs`**, enforced by `require_team_admin` (`src/orgs/settings_page/teams.rs:63`): it runs `require_org_owner` first (so a non-owner gets a `403`, not the upsell) and then `gate_orgs_feature_or_upsell`. The explicit license gate matters because **teams are commercial everywhere**, including the Default org. The members page uses `require_org_owner_with_license`, which short-circuits the gate for `DEFAULT_ORG_ID`; teams must not, so the gate is called directly here rather than going through that helper.
+
+Routes (all CSRF-protected Forseti-owned POSTs; each re-checks `require_team_admin`):
+
+| Route | Handler | Audit action |
+|---|---|---|
+| `GET …/teams[?team=<id>]` | `teams` → `render_teams` | — |
+| `POST …/teams` | `teams_create` | `org.team.created` |
+| `POST …/teams/{team_id}/rename` | `teams_rename` | `org.team.renamed` |
+| `POST …/teams/{team_id}/delete` | `teams_delete` | `org.team.deleted` |
+| `POST …/teams/{team_id}/members` | `teams_member_add` | `org.team.member_added` |
+| `POST …/teams/{team_id}/members/{identity_id}/remove` | `teams_member_remove` | `org.team.member_removed` |
+
+`GET …/teams?team=<id>` selects a team and drives the membership panel: `render_teams` lists all teams via `list_teams_with_counts` and, when a team is selected, splits the org roster into current members vs. addable members using `team_member_ids` (`src/orgs/teams.rs:145,162`). Adds are restricted to existing org members — `teams_member_add` rejects an `identity_id` with no `org_role` in the org (`400`). The audit actions are the `ORG_TEAM_*` constants (`src/audit/mod.rs:175-179`) targeting `target_kind::TEAM` (create/rename/delete) or `target_kind::IDENTITY` (member add/remove). The rendered page is `Cache-Control: private, no-store`.
+
+Team **gids are not allocated at create time** — `create_team` leaves `gid` NULL. A gid is drawn lazily the first time the team is attached to a host scope (`find_or_create_team_gid`), so a team that's only ever used for `same_group` web visibility never consumes a gid band slot. See [gid allocation](#gid-allocation) above.
+
+### Host enrollment and org selection
+
+Host enrollment (`src/admin/hosts.rs`) is **Forseti-tier only** (`RequireAdmin`: session + AAL2 + `admin.allowed_emails`); it does not honour the `?org=<slug>` org-scoping convention. The enroll form (`new`/`issue`) presents an org `<select>` plus every org's teams grouped under their org name (`load_orgs_and_teams`, `team_groups`); the no-JS form renders all groups at once and the POST validates the submitted `team_ids` against the chosen `org_id`, rejecting any team that doesn't belong to it.
+
+A host belongs to exactly one org, chosen at enrollment and **immutable thereafter**. The edit form (`edit`/`update`) renders the org name read-only and never reads an `org_id` off the form: `update` resolves the host's org from `host_org_id` (the source of truth) and validates the submitted teams against *that* org's teams, so a tampered form can't move the host or scope it to a foreign org's team. The team scope therefore always follows the host's own org. Both `issue` and `update` allocate gids for the chosen teams (`find_or_create_team_gid`) before writing `host_allowed_groups` via `set_host_allowed_team_ids`. Empty team set → whole-org host.
+
+## Member visibility
+
+The member directory is gated per-org, so a tenant can decide how much its members can discover about each other. Two pieces of state plus one pure predicate.
+
+### State
+
+- **`organizations.member_visibility`** (`src/schema.rs:82`) — TEXT, one of `all` / `same_group` / `admins_only`, modelled by the `MemberVisibility` enum (`src/orgs/visibility.rs`). `parse_visibility()` **fails closed to `admins_only`** on any unknown string (mirrors `is_owner_role`). The migration seeds the Default org as **`admins_only`** — the safe default for the shared OSS tenant where everyone is auto-joined.
+- **`organization_members.hidden_from_directory`** (`src/schema.rs:93`) — INTEGER 0/1, the per-member opt-out. A member can remove themselves from their org's directory regardless of policy.
+
+### The predicate
+
+`visible(policy, is_self, viewer_is_owner, viewer_is_admin, target_hidden, shares_team)` (`src/orgs/visibility.rs`) is a pure function — the single decision point, unit-tested in-module. Order of precedence:
+
+1. `is_self || viewer_is_owner || viewer_is_admin` → **visible** (these override the opt-out too — an owner/admin must always be able to see and manage every member).
+2. else `target_hidden` → **hidden** (the opt-out trumps `all`/`same_group`).
+3. else by policy: `all` → visible; `admins_only` → hidden; `same_group` → visible **iff** `shares_team`.
+
+`viewer_is_admin` MUST already fold in the AAL2 check at the call site — both call sites compute it as `admin.is_admin(email) && session_satisfies_aal2(session)`. The async wrapper `member_visible_to_in_org()` resolves the policy (`org_by_id`), viewer-owner (`org_role`), target opt-out (`find_member`), and shared-team (`teams::shared_team`) inputs, then applies `visible()`; an unknown org fails closed to not-visible.
+
+### Surface 1 — the members page
+
+`render_members` (`src/orgs/settings_page/members.rs`) is a **membership gate + server-side filter**:
+
+- **Membership gate** — a signed-in user who is neither a member of the org nor a Forseti admin-at-AAL2 gets a `404` (not 403 — an outsider can't even confirm the org exists). For NON-default orgs the `require_org_license` upsell gate fires *before* this check.
+- **Filter** — every candidate row runs through `visible(...)`; non-visible members are dropped before render. For `same_group` the co-team set is fetched once (`teams::co_team_member_ids`) and probed per row. Non-owners see a one-line policy statement matching the active policy; owners see every row plus a hidden-badge and the visibility `<select>`.
+
+### Surface 2 — `/users/{id}`
+
+`show_profile` (`src/profiles/view.rs`) gates on a **disjunction across shared orgs**: the page renders iff `is_self || admin_aal2 || the target is visible in at least one org the viewer shares` (each shared org tested via `member_visible_to_in_org`). Not visible anywhere → `404`, decided *before* the Kratos lookup so a hidden-but-existing target is indistinguishable from a nonexistent one (no status/timing oracle). The shared-org **chips** are derived from the *visible* orgs only, never the raw membership intersection, so a restrictive (`admins_only`) org the viewer happens to share doesn't leak as a chip. Unlike the members page, this surface has **no license gate**.
+
+### Profile teams/hosts
+
+Past the visibility gate, `show_profile` (`src/profiles/view.rs`) renders two further sections, each behind its own feature gate and audience rule. The audience for the two differs on purpose:
+
+| Section | Feature gate | self | AAL2 global admin | org owner (of a shared+visible org) | plain member |
+|---|---|---|---|---|---|
+| Teams | `Feature::Orgs` | all teams | all teams | teams in orgs the viewer **owns** only | hidden |
+| Reachable hosts | `Feature::LinuxAuth` | reachable hosts | reachable hosts | **hidden** | hidden |
+
+Owners deliberately do **not** see the host section, only teams. The host set is an enumeration oracle for another org's infrastructure, so it's restricted to the subject (self) and the Forseti-wide AAL2 admin. Both feature gates accept `Allowed | GraceReadOnly` (a read-only surface stays visible during the grace window).
+
+Hosts come from the read-only `hosts_reachable_by` projection (`src/posix/db.rs`): a set-based intersection of the subject's orgs + teams against per-host scopes (whole-org hosts always reach; team-scoped hosts need a team hit), gated on an *enabled* POSIX account. It's enumeration-only, never an auth decision — the resolver keeps its own O(1) `is_*_provisioned` checks. Teams come from `teams::teams_for_identity_any_org`, filtered to owned orgs for the owner audience.
+
+The AAL2 admin POSIX detail page (`/admin/posix/{id}`, `src/admin/posix.rs`) mirrors both: the same team list and the same `hosts_reachable_by` projection, so an operator's view of an account matches what the account can reach.
+
+### Owner controls and guardrails
+
+- `members_visibility` (owner-only, license-gated for named orgs) sets the policy. It refuses `same_group` with a `400` when the org has **no teams** — otherwise the policy would silently hide every peer from every non-owner (no team to share).
+- `members_hidden` (no license gate) flips the opt-out: an **owner may toggle anyone**, a non-owner may toggle **only their own** row (else `403`).
+
+Both surfaces set `Cache-Control: private, no-store` — the rendered output now varies by viewer and per-org visibility, so it must never be cached.
+
+### Tests
+
+The `visible()` predicate has exhaustive unit tests in `src/orgs/visibility.rs`. Integration coverage lives in `tests/integration/member_visibility.rs`, driven over HTTP against the surfaces that aren't license-gated in the unlicensed suite: the `/users/{id}` predicate (all / same_group / admins_only / owner-override / opt-out / chip filter) against seeded non-default orgs, the `admins_only` filter on the Default members page, and the opt-out toggle routes. Members-list behaviour on named (license-gated) orgs and the `same_group`-needs-a-team `400` are deferred to the licensed e2e bucket (the integration harness has no license-activation path); see the header comment in that file.
 
 ## Related
 

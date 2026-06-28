@@ -25,10 +25,8 @@ pub(crate) struct SettingsPasswordTemplate {
     pub(crate) referrer_banner: Option<crate::handoff::ReferrerBannerView>,
 }
 
-/// Focused-mode template rendered when the settings flow was issued by Kratos's
-/// `recovery.after.password` hook. Strips the usual chrome (no top nav, no
-/// settings sidebar) so the user can only complete the password change or
-/// sign out. A 15-minute countdown surfaces the privileged-window deadline.
+/// Focused-mode template for the `recovery.after.password` hand-off: strips
+/// chrome so the user can only finish the password change or sign out.
 #[derive(Template)]
 #[template(path = "settings_password_handoff.html")]
 pub(crate) struct SettingsPasswordHandoffTemplate {

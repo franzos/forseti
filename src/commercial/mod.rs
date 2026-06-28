@@ -33,8 +33,6 @@
 //!    but read-only for a fixed 30-day window ([`GRACE_DAYS`]) so a
 //!    forgotten renewal doesn't blow up production. After the grace
 //!    window, gated features hard-gate to the upsell page.
-//!
-//! See `TODO_LICENSING.md` for the broader scope notes.
 
 pub mod license;
 pub mod settings_page;

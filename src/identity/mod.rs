@@ -82,6 +82,12 @@ pub async fn prune_unverified(
             if let Err(e) = crate::posix::db::delete_account_rows(db, &ident.id).await {
                 tracing::error!(error = ?e, identity_id = %ident.id, "failed to purge posix rows on identity delete");
             }
+            // Org membership + org-team membership are org-domain, not POSIX, so
+            // the line above doesn't cover them — purge both (this also avoids a
+            // ghost membership row tripping the last-owner guard). Best-effort.
+            if let Err(e) = crate::orgs::db::remove_member_everywhere(db, &ident.id).await {
+                tracing::error!(error = ?e, identity_id = %ident.id, "failed to purge org membership on identity delete");
+            }
             deleted += 1;
         }
     }

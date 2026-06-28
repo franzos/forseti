@@ -94,14 +94,10 @@ pub(super) async fn branding_save(
     let logo_url = form.logo_url.trim();
     let support_email = form.support_email.trim();
 
-    // Validate logo_url: when present, must be a parseable https URL,
-    // bounded in length, and not point at a loopback / RFC1918 / cloud
-    // metadata host. Rejects `javascript:`, `data:`, `http://`, etc.;
-    // also `https://169.254.169.254/...` and similar internal targets
-    // because the browser fetches the value as `<img src>`, leaking
-    // referer / cookies to an org-owner-chosen internal endpoint.
-    // Re-uses `validate_webhook_url`'s private-IP filter so the rule
-    // set stays in lockstep with the outbound-webhook SSRF guard.
+    // logo_url renders as `<img src>`, so reject internal targets (loopback /
+    // RFC1918 / cloud metadata) that would leak referer/cookies. Reuses
+    // `validate_webhook_url`'s private-IP filter to stay in lockstep with the
+    // outbound-webhook SSRF guard.
     if !logo_url.is_empty() {
         if logo_url.len() > 2048 {
             return (
@@ -115,13 +111,9 @@ pub(super) async fn branding_save(
         }
     }
 
-    // Validate support_email: when present, basic shape check — exactly
-    // one `@` with non-empty local + domain parts, total length ≤ 254
-    // (RFC 5321 envelope cap), and no control / whitespace characters
-    // anywhere in the string. Full RFC 5322 isn't needed for a display
-    // field, but the control-char rejection closes a header-injection
-    // shape in case the value is ever embedded into a `mailto:` or
-    // email-header context.
+    // Basic shape check (one `@`, non-empty parts, <= 254). The control-char
+    // rejection closes a header-injection shape if the value ever lands in a
+    // `mailto:` or email header.
     if !support_email.is_empty() {
         let bytes = support_email.as_bytes();
         let at_count = bytes.iter().filter(|b| **b == b'@').count();

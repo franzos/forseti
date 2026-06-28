@@ -1,9 +1,8 @@
-//! `/admin/status` — system health dashboard.
+//! `/admin/status`: system health dashboard.
 //!
-//! Pulls a small snapshot from Kratos + Hydra: alive/ready health,
-//! courier message backlog (pending + failed counts), and build versions
-//! including Forseti's own. Every probe is best-effort; one upstream
-//! failure renders that row as "down" without aborting the page.
+//! Pulls a snapshot from Kratos + Hydra: alive/ready health, courier backlog,
+//! and build versions. Every probe is best-effort; one upstream failure renders
+//! that row as "down" without aborting the page.
 
 use axum::{extract::State, response::Response};
 
@@ -23,62 +22,48 @@ struct StatusTemplate {
     admin_active: AdminSection,
     /// One row per probed service.
     services: Vec<ServiceStatus>,
-    /// Courier queue snapshot. None entries collapse to "—" in the template.
+    /// Courier queue snapshot; None entries collapse to a dash in the template.
     courier_pending: Option<u64>,
     courier_failed: Option<u64>,
     /// Build versions for the three components in the stack.
     forseti_version: &'static str,
     kratos_version: String,
     hydra_version: String,
-    /// Database backend label ("sqlite" / "postgres") shown alongside the
-    /// build versions.
+    /// Database backend label ("sqlite" / "postgres").
     database_backend: &'static str,
-    /// Set when Forseti is on sqlite *and* the deployment shape looks
-    /// like production. Drives the warning banner. Can't auto-detect actual
-    /// instance count, only shape — see `db.rs` / `TODO.md` §0.
+    /// Set when on sqlite and the deployment shape looks like production; only
+    /// the shape is detectable, not the actual instance count.
     sqlite_prod_warning: bool,
-    /// Number of webhook outbox rows that exhausted retries. >0 drives a
-    /// banner linking to `/admin/webhooks`. Phase 1.
+    /// Webhook outbox rows that exhausted retries; >0 drives a banner.
     dead_webhook_count: i64,
-    /// Humanised "received N ago" string for the most recent Kratos-sourced
-    /// audit event (`actor_kind = "webhook"`). `None` when no such row
-    /// exists yet — the template renders "never" in that case, which is
-    /// itself the signal that the receiver path may be broken.
+    /// "received N ago" for the most recent Kratos-sourced audit event. `None`
+    /// renders "never", itself a signal that the receiver path may be broken.
     last_kratos_webhook_pretty: Option<String>,
-    /// Raw RFC3339 of the same timestamp, attached as a `title=` tooltip so
-    /// the precise value is one hover away from the relative label.
+    /// Raw RFC3339 of the same timestamp, attached as a `title=` tooltip.
     last_kratos_webhook_full: Option<String>,
-    /// In-process counter of audit rows that failed to land in the DB
-    /// since the last Forseti restart. >0 means the `audit_fallback`
-    /// stderr lines should be inspected — the row data is still
-    /// recoverable from logs.
+    /// Audit rows that failed to land in the DB since restart; >0 means the
+    /// `audit_fallback` stderr lines should be inspected.
     audit_write_failures: u64,
-    /// In-process count of Kratos-webhook payloads rejected since boot
-    /// (malformed body / unknown action). >0 means a Kratos hook/config
-    /// mismatch — check the `kratos audit webhook` warn logs.
+    /// Kratos-webhook payloads rejected since boot; >0 means a hook/config
+    /// mismatch (check the `kratos audit webhook` warn logs).
     audit_webhook_rejected: u64,
-    /// In-process count of Kratos-webhook rows flagged stale/future since
-    /// boot. >0 usually means a slow flow or clock skew; rows are still
-    /// recorded with a `metadata.freshness` marker.
+    /// Kratos-webhook rows flagged stale/future since boot; usually a slow flow
+    /// or clock skew.
     audit_webhook_freshness_anomalies: u64,
-    /// One-word license state: "Unlicensed" / "Active" / "Grace" /
-    /// "Expired". Drives the badge colour in the template.
+    /// One-word license state: "Unlicensed" / "Active" / "Grace" / "Expired".
     license_state: &'static str,
-    /// Tier + customer label rendered next to the license badge when a
-    /// license is present. `None` for the OSS-tier deployment.
+    /// Tier + customer label when a license is present; `None` for OSS-tier.
     license_detail: Option<String>,
-    /// OIDC issuer from Hydra's discovery doc. Empty when unknown (cold
-    /// fetch failure with no prior cache); drives the "View configuration"
-    /// teaser line.
+    /// OIDC issuer from Hydra's discovery doc; empty when unknown.
     issuer: String,
-    /// Whether the discovery fetch succeeded — gates the teaser line.
+    /// Whether the discovery fetch succeeded; gates the teaser line.
     discovery_ok: bool,
 }
 
 /// One row in the services-health table.
 pub(crate) struct ServiceStatus {
     pub name: &'static str,
-    /// `"up"` / `"down"` — drives the badge colour in the template.
+    /// `"up"` / `"down"`; drives the badge colour.
     pub state: &'static str,
     /// Free-form detail (URL, error message). Truncated at the template.
     pub detail: String,

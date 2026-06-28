@@ -1,10 +1,6 @@
-//! `/` handler: the post-login landing page.
-//!
-//! Renders the dashboard template, including the "Recent Activity" sidebar
-//! (derived from Kratos's identity session history) and the "Account health"
-//! tile (verified email, 2FA enrolment, active sessions, linked OIDC
-//! providers). Both side-panels are best-effort — upstream failures fold to
-//! safe defaults so the page itself never fails to render.
+//! `/` handler: the post-login landing page (Recent Activity sidebar +
+//! Account health tile). Both side-panels are best-effort; upstream failures
+//! fold to safe defaults so the page always renders.
 
 use askama::Template;
 use axum::{extract::State, http::HeaderMap, response::Response};
@@ -25,38 +21,27 @@ struct DashboardTemplate {
     chrome: PageChrome,
     needs_verification: bool,
     apps: Vec<AppEntry>,
-    /// Recent sign-in events, newest first. Stand-in for a full audit log;
-    /// derived from Kratos's identity session history. Empty when the admin
-    /// API call fails — the template handles the empty case gracefully.
+    /// Recent sign-in events, newest first, from Kratos's session history.
+    /// Empty when the admin API call fails.
     activity: Vec<ActivityEvent>,
-    /// At-a-glance account status (verified email, 2FA, session/provider counts).
     health: AccountHealth,
 }
 
-/// One row in the dashboard's "Recent Activity" sidebar.
 struct ActivityEvent {
     title: String,
     detail: String,
     when: String,
-    /// Full ISO timestamp surfaced on hover via `title=` so the precise
-    /// authenticated_at is preserved even when `when` is humanised.
+    /// Full ISO timestamp shown on hover, preserved when `when` is humanised.
     when_full: String,
-    /// Full user-agent string preserved on hover via `title=`; the visible
-    /// `detail` shows the parsed "Chrome on Linux" form.
+    /// Full user-agent shown on hover; `detail` shows the parsed form.
     ua_full: String,
 }
 
-/// Dashboard "Account health" tile — a 4-row at-a-glance status panel.
-///
-/// Each row reflects one signal sourced from the session/identity:
-/// email verification, 2FA enrolment, active session count, linked
-/// upstream OIDC providers. Failures upstream collapse to safe defaults
-/// (counts of 0, booleans false) so the card always renders.
 struct AccountHealth {
     email_verified: bool,
     two_factor_enabled: bool,
-    /// True when a device factor is enrolled but no recovery codes exist —
-    /// losing the device means permanent lockout. Drives a backstop notice.
+    /// Device factor enrolled but no recovery codes: losing the device means
+    /// permanent lockout. Drives a backstop notice.
     two_factor_without_recovery_codes: bool,
     active_sessions: usize,
     linked_providers: usize,
@@ -85,14 +70,8 @@ pub(crate) async fn root(
     })
 }
 
-/// Build the "Recent Activity" sidebar payload from Kratos's identity session
-/// history. Each `Session` row becomes one "Successful sign-in" event. We
-/// truncate to the most recent 5 to keep the sidebar tight.
-///
-/// Failures are non-fatal — the dashboard is the post-login landing page, and
-/// a missing audit feed shouldn't make the page itself fail. We log and
-/// return an empty list (the template renders an "no recent activity"
-/// fallback).
+/// "Recent Activity" payload from Kratos's session history (most recent 5).
+/// Failures are non-fatal: log and return empty.
 async fn build_activity_feed(state: &AppState, session: &ory::Session) -> Vec<ActivityEvent> {
     let Some(identity_id) = session.identity.as_ref().map(|id| id.id.clone()) else {
         return Vec::new();
@@ -139,12 +118,8 @@ async fn build_activity_feed(state: &AppState, session: &ory::Session) -> Vec<Ac
         .collect()
 }
 
-/// Compute the dashboard's "Account health" tile from the session + admin
-/// identity (for credentials) + the user's own sessions list.
-///
-/// Both upstream calls are best-effort: any failure folds to a neutral
-/// default (`false` / `0`) so the dashboard still renders. The function
-/// never returns `Result` for that reason.
+/// "Account health" tile from the session, admin identity (credentials), and
+/// the user's sessions. Best-effort: failures fold to `false` / `0`.
 async fn build_account_health(
     state: &AppState,
     session: &ory::Session,
@@ -154,9 +129,8 @@ async fn build_account_health(
 
     let identity_id = session.identity.as_ref().map(|id| id.id.clone());
 
-    // Pull active sessions via the public API (uses the user's cookie) and
-    // the admin "full" identity (to read credentials → which 2FA factors
-    // and which OIDC providers are linked).
+    // Public sessions (user's cookie) plus the admin "full" identity, whose
+    // credentials reveal 2FA factors and linked OIDC providers.
     let (sessions_res, identity_res) = tokio::join!(
         ory::kratos::list_my_sessions(&state.ory, (!cookie.is_empty()).then_some(cookie)),
         async {
@@ -204,7 +178,7 @@ async fn build_account_health(
 }
 
 /// True when a second factor is enrolled. Kratos seeds `webauthn.identifiers`
-/// on every password identity (NOT enrolment), so test `config.credentials`.
+/// on every password identity (not enrolment), so test `config.credentials`.
 fn creds_indicate_second_factor(
     creds: &std::collections::HashMap<String, ory_client::models::IdentityCredentials>,
 ) -> bool {
@@ -232,11 +206,10 @@ fn two_factor_without_recovery_codes(
 
 #[cfg(test)]
 mod tests {
-    //! Locks the helper that drives the dashboard "2FA enabled" badge.
-    //! See the commit that fixed the false-positive WebAuthn pre-stub —
-    //! Kratos seeds `credentials.webauthn.identifiers` with the user's
-    //! email on every password identity, and the old `identifiers.is_empty()`
-    //! check flipped the badge on for users who never actually enrolled.
+    //! Locks the "2FA enabled" badge helper against the WebAuthn pre-stub
+    //! false-positive: Kratos seeds `credentials.webauthn.identifiers` with the
+    //! user's email on every password identity, so an `identifiers.is_empty()`
+    //! check flips the badge on for users who never enrolled.
     use super::{creds_indicate_second_factor, two_factor_without_recovery_codes};
     use ory_client::models::IdentityCredentials;
     use std::collections::HashMap;
@@ -245,10 +218,8 @@ mod tests {
         IdentityCredentials::new()
     }
 
-    /// `webauthn` pre-stub: Kratos seeds the `identifiers` field with
-    /// the user's email even when no authenticator has been registered.
-    /// The `config.credentials` array is the real signal — if it's empty
-    /// (or `config` is just `{ "user_handle": "..." }`), 2FA is OFF.
+    /// Pre-stub: `identifiers` seeded but `config` carries no `credentials`
+    /// array, so 2FA is off.
     fn webauthn_pre_stub() -> IdentityCredentials {
         let mut c = IdentityCredentials::new();
         c.identifiers = Some(vec!["user@example.com".to_string()]);
@@ -256,8 +227,7 @@ mod tests {
         c
     }
 
-    /// `webauthn` with an actual attested credential — `config.credentials`
-    /// is a non-empty array.
+    /// Attested credential: non-empty `config.credentials` array.
     fn webauthn_enrolled() -> IdentityCredentials {
         let mut c = IdentityCredentials::new();
         c.config = Some(serde_json::json!({

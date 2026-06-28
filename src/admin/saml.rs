@@ -1,9 +1,8 @@
-//! `/admin/saml/*` — operator-managed SAML connections (commercial).
+//! `/admin/saml/*`: operator-managed SAML connections (commercial).
 //!
-//! IdP metadata and certificates live in Jackson; Forseti keeps the
-//! anchor row (org ↔ connection, enabled flag, display name) and drives
-//! Jackson's admin API for create/delete. Forseti-tier only — SAML
-//! connections cross org boundaries, so org-scoped owners don't see this.
+//! IdP metadata and certificates live in Jackson; Forseti keeps the anchor row
+//! (org-to-connection, enabled flag, display name) and drives Jackson's admin
+//! API for create/delete. Forseti-tier only: connections cross org boundaries.
 
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
@@ -22,8 +21,6 @@ use crate::page_chrome::PageChrome;
 use crate::render::render;
 use crate::saml::{db, flow::http_client, jackson};
 use crate::state::AppState;
-
-// --- View models -----------------------------------------------------------
 
 struct ConnectionRow {
     org_id: String,
@@ -44,8 +41,7 @@ struct OrgOption {
 struct SamlListTemplate {
     chrome: PageChrome,
     admin_active: AdminSection,
-    /// False when `[saml]` is absent from config — renders a guidance
-    /// card instead of the table.
+    /// False when `[saml]` is absent from config; shows a guidance card.
     configured: bool,
     grace: bool,
     rows: Vec<ConnectionRow>,
@@ -67,8 +63,6 @@ struct SamlNewTemplate {
     metadata_url: String,
     metadata_xml: String,
 }
-
-// --- Helpers ---------------------------------------------------------------
 
 /// Locked → upsell page; GraceReadOnly → `Ok(true)`; Allowed → `Ok(false)`.
 #[allow(clippy::result_large_err)] // house pattern for sync Response-error gates
@@ -136,8 +130,6 @@ async fn render_new_page(
     })
 }
 
-// --- Handlers --------------------------------------------------------------
-
 pub async fn list(State(state): State<AppState>, admin: RequireAdmin, csrf: Csrf) -> Response {
     let ctx = admin.ctx;
     let grace = match gate(&state, &csrf, &ctx.email) {
@@ -172,10 +164,10 @@ pub async fn list(State(state): State<AppState>, admin: RequireAdmin, csrf: Csrf
     let self_url = state.cfg.self_.url.trim_end_matches('/').to_string();
     let mut rows = Vec::with_capacity(connections.len());
     for c in connections {
-        // Small N (one connection per org) — per-row lookups are fine.
+        // Small N (one connection per org), so per-row lookups are fine.
         let (org_name, org_slug) = match orgs::db::org_by_id(&state.db, &c.org_id).await {
             Ok(Some(org)) => (org.name, org.slug),
-            // Orphaned anchor row — show the raw id so the operator can clean up.
+            // Orphaned anchor row: show the raw id so the operator can clean up.
             Ok(None) => (c.org_id.clone(), String::new()),
             Err(e) => {
                 tracing::error!(error = ?e, org_id = %c.org_id, "admin/saml: org lookup failed");
@@ -509,8 +501,8 @@ pub async fn delete(
         return Redirect::to("/admin/saml").into_response();
     };
 
-    // Jackson first — a Forseti-only delete would orphan the Jackson
-    // connection and keep the IdP round-trip alive.
+    // Jackson first: a Forseti-only delete would orphan the Jackson connection
+    // and keep the IdP round-trip alive.
     if let Err(e) = jackson::delete_connection(cfg, http_client(), &org_id).await {
         tracing::error!(error = ?e, org_id, "admin/saml: jackson delete_connection failed");
         return render_admin_error(

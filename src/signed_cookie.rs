@@ -1,14 +1,8 @@
-//! HMAC-signed cookie codec shared by every Forseti-owned signed cookie
-//! (flash banner, active-org, app-referrer).
+//! HMAC-signed cookie codec shared by every Forseti-owned signed cookie (flash, active-org, app-referrer).
 //!
-//! Cookie value format: `<unix_seconds>.<hex_payload>.<hex_mac>`.
-//! Verification recomputes the MAC and rejects on TTL miss, malformed
-//! parts, or signature mismatch.
-//!
-//! The HMAC key per cookie type is derived with HKDF-SHA256 (RFC 5869)
-//! from the one operator secret, using the per-cookie `salt` as the
-//! `info` context — independent keys per cookie type so compromising one
-//! signing key never leaks another.
+//! Value format `<unix_seconds>.<hex_payload>.<hex_mac>`; verification rejects on TTL miss, malformed parts,
+//! or signature mismatch. Per-cookie keys derive via HKDF-SHA256 from the one operator secret using the
+//! per-cookie `salt` as `info`, so compromising one signing key never leaks another.
 
 use axum::http::HeaderMap;
 use axum_extra::extract::cookie::{Cookie, SameSite};
@@ -20,9 +14,7 @@ use crate::cookies::read_cookie;
 
 type HmacSha256 = Hmac<Sha256>;
 
-/// Per-cookie shape: name, key salt, TTL, and `Secure` attribute.
-/// Construct one per cookie type and reuse for both encode/decode so the
-/// signing and verification paths can never drift.
+/// Per-cookie shape (name, key salt, TTL, `Secure`); reuse one for encode + decode so the paths can't drift.
 pub(crate) struct SignedCookie<'a> {
     pub name: &'a str,
     pub salt: &'a [u8],
@@ -32,10 +24,7 @@ pub(crate) struct SignedCookie<'a> {
 }
 
 impl<'a> SignedCookie<'a> {
-    // Per-cookie salt is HKDF `info` (context binding), not the salt input:
-    // the operator secret is the only entropy source, so a non-secret
-    // randomizing salt buys nothing while `info` is exactly the cookie-type
-    // domain separation we want.
+    // Per-cookie salt is HKDF `info` (cookie-type domain separation), not the salt input: the operator secret is the only entropy source.
     fn derive_key(&self, secret: &[u8]) -> [u8; 32] {
         let mut key = [0u8; 32];
         Hkdf::<Sha256>::new(None, secret)
@@ -44,9 +33,7 @@ impl<'a> SignedCookie<'a> {
         key
     }
 
-    /// Build the `<ts>.<hex_payload>.<hex_mac>` value (no cookie
-    /// attributes — see [`Self::set_header`] for the full `Set-Cookie`
-    /// line).
+    /// Build the `<ts>.<hex_payload>.<hex_mac>` value (no cookie attributes; see [`Self::set_header`]).
     pub(crate) fn encode(&self, secret: &[u8], payload: &[u8], now_secs: u64) -> String {
         let key = self.derive_key(secret);
         let payload_hex = hex::encode(payload);
@@ -56,9 +43,7 @@ impl<'a> SignedCookie<'a> {
         format!("{now_secs}.{payload_hex}.{}", hex::encode(tag))
     }
 
-    /// Read + verify the cookie off `headers`. Returns the decoded
-    /// payload bytes on success, `None` on any failure (missing cookie,
-    /// malformed envelope, bad hex, TTL miss, signature mismatch).
+    /// Read + verify the cookie off `headers`; payload bytes on success, `None` on any failure.
     pub(crate) fn decode(
         &self,
         secret: &[u8],
@@ -83,8 +68,7 @@ impl<'a> SignedCookie<'a> {
         Some(payload)
     }
 
-    /// Full `Set-Cookie` value carrying `encoded` (typically the output
-    /// of [`Self::encode`]).
+    /// Full `Set-Cookie` value carrying `encoded` (typically from [`Self::encode`]).
     pub(crate) fn set_header(&self, encoded: &str) -> String {
         Cookie::build((self.name.to_string(), encoded.to_string()))
             .path(self.path.to_string())
@@ -95,9 +79,7 @@ impl<'a> SignedCookie<'a> {
             .to_string()
     }
 
-    /// `Set-Cookie` line that clears the cookie on the browser. Emits an
-    /// explicit RFC 1123 `Expires=` in the past so callers don't have to
-    /// pull `time` in just for cookie-attribute construction.
+    /// `Set-Cookie` line that clears the cookie, with an explicit past `Expires=` (no `time` dependency).
     pub(crate) fn clear_header(&self) -> String {
         let mut s = Cookie::build((self.name.to_string(), String::new()))
             .path(self.path.to_string())
@@ -111,8 +93,7 @@ impl<'a> SignedCookie<'a> {
     }
 }
 
-/// Seconds since the Unix epoch. Wall-clock; clamps to 0 on a
-/// pre-epoch system clock (so the codec stays infallible).
+/// Wall-clock seconds since the Unix epoch, clamped to 0 on a pre-epoch clock so the codec stays infallible.
 pub(crate) fn unix_seconds_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

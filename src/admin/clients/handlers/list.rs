@@ -128,22 +128,15 @@ pub async fn list(
         }
     };
 
-    // Fetch Forseti-side metadata for the visible page in one round-trip,
-    // then merge into the rows in memory. Hydra owns the clients table
-    // and Forseti owns `oauth_client_metadata` — they live in
-    // separate databases for sqlite deployments and separate schemas
-    // for postgres ones, so a real SQL JOIN isn't on the table. The
-    // bulk lookup is bounded by `CLIENTS_PAGE_SIZE`, so it's a single
-    // small `IN (?, ?, ...)` query.
+    // Hydra owns the clients table, Forseti owns `oauth_client_metadata`, and
+    // they live in separate databases/schemas, so no SQL JOIN. Merge in memory
+    // via a single bulk lookup bounded by `CLIENTS_PAGE_SIZE`.
     let client_ids: Vec<String> = clients.iter().filter_map(|c| c.client_id.clone()).collect();
     let meta_rows = match oauth_client_metadata::get_many(&state.db, &client_ids).await {
         Ok(rows) => rows,
         Err(e) => {
-            // Don't fail the page on a metadata lookup miss — render
-            // the list with legacy defaults (every row "verified",
-            // none "self_registered") and log loudly. Beats taking
-            // /admin/clients down because one row in our table is
-            // corrupt.
+            // Don't take /admin/clients down on a metadata lookup miss; render
+            // with legacy defaults (every row verified, none self_registered).
             tracing::error!(error = ?e, "admin: oauth_client_metadata bulk lookup failed; rendering with legacy defaults");
             Vec::new()
         }
@@ -159,13 +152,9 @@ pub async fn list(
         })
         .collect();
 
-    // Hydra doesn't expose a next-page token in the SDK return; if we
-    // got a full page, surface the last row's ID as the continuation
-    // token (Hydra accepts client_id values there). UUID searches and
-    // empty results never advertise a next page. Compute *before* any
-    // client-side filter (org / type / verification) so subsequent
-    // pages don't skip Hydra rows that happen to be filtered out on
-    // the current page.
+    // The SDK exposes no next-page token; on a full page use the last row's ID
+    // (Hydra accepts client_id there). Compute before any client-side filter so
+    // later pages don't skip Hydra rows filtered out on this page.
     let next_page_token = if rows.len() == CLIENTS_PAGE_SIZE as usize && !looks_like_uuid(&filter_q)
     {
         rows.last().map(|r| r.id.clone()).unwrap_or_default()
@@ -173,14 +162,10 @@ pub async fn list(
         String::new()
     };
 
-    // Org-scope filter. Forseti scope sees every client; an org-scoped
-    // caller sees only clients whose `oauth_client_metadata.org_id`
-    // matches their org. Orphan rows (no metadata at all) belong to no
-    // org and stay invisible to org-scoped views — only Forseti admins
-    // can triage them. v1 shortcut: post-filtering shrinks the page
-    // below `CLIENTS_PAGE_SIZE`, so an org with sparse clients spread
-    // across Hydra's ordering may need multiple "Next page" clicks to
-    // reach all its rows. A Forseti-owned client mirror would lift this.
+    // Org-scoped callers see only clients whose `oauth_client_metadata.org_id`
+    // matches; orphan rows stay invisible (only Forseti admins triage them).
+    // Post-filtering shrinks the page below `CLIENTS_PAGE_SIZE`, so a sparse
+    // org may need several "Next page" clicks; a Forseti-owned mirror would fix it.
     if let AdminScope::Org { id: org_id, .. } = &scope {
         rows.retain(|r| {
             meta_by_id
@@ -190,10 +175,8 @@ pub async fn list(
         });
     }
     let has_prev = page_token.is_some();
-    // Client-side type filter. Hydra has no metadata search, so we filter
-    // after the fact. Cost is bounded by `CLIENTS_PAGE_SIZE`. If list
-    // sizes grow past a few hundred we'd need a Forseti-owned mirror —
-    // out of scope for now.
+    // Hydra has no metadata search, so type/verification filter after the
+    // fact. Cost bounded by `CLIENTS_PAGE_SIZE`.
     if !filter_type.is_empty() {
         rows.retain(|r| r.client_type == filter_type);
     }

@@ -20,24 +20,20 @@ use crate::render::render;
 use crate::render_error_boundary;
 use crate::state::AppState;
 
-/// Per-scope chip in the authorized-apps row. `description` is the
-/// human label (from `config.toml`'s `oauth.scope_descriptions`); `name` is
-/// the raw scope ID kept as a tooltip so power-users can still see it.
+/// Per-scope chip in the authorized-apps row. `description` is the human label
+/// (from `oauth.scope_descriptions`); `name` is the raw scope ID.
 pub(crate) struct ScopeChip {
     pub(crate) name: String,
     pub(crate) description: String,
 }
 
-/// View-model for a single authorized app row.
 pub(crate) struct AuthorizedAppView {
     pub(crate) client_id: String,
     pub(crate) client_name: String,
     pub(crate) client_uri: String,
     pub(crate) logo_uri: String,
     pub(crate) scopes: Vec<ScopeChip>,
-    /// Absolute timestamp kept for hover tooltips.
     pub(crate) granted_at: String,
-    /// Relative form ("3d ago") rendered as the primary timestamp.
     pub(crate) granted_at_pretty: String,
     pub(crate) verified: bool,
 }
@@ -104,11 +100,9 @@ pub(crate) async fn settings_authorized_apps(
     flash::attach_set_cookie(body, clear_flash)
 }
 
-/// Hydra returns one row per consent session; users that re-consent (or grant
-/// the same client across several browser sessions) will appear multiple
-/// times. The settings UI shows one row per client, so we fold sessions by
-/// `client_id`, keeping the newest `handled_at` and the union of granted
-/// scopes — that's what "Revoke access" is going to wipe anyway.
+/// Fold Hydra's per-session rows into one row per `client_id`, keeping the
+/// newest `handled_at` and the union of granted scopes (what "Revoke access"
+/// wipes anyway).
 fn collapse_sessions_to_apps(
     state: &AppState,
     sessions: Vec<ory_client::models::OAuth2ConsentSession>,
@@ -151,7 +145,6 @@ fn collapse_sessions_to_apps(
                 granted_at_pretty: humanise_timestamp(&granted_at),
                 verified,
             });
-        // Keep the newest grant timestamp.
         if !granted_at.is_empty() && granted_at.as_str() > entry.granted_at.as_str() {
             entry.granted_at_pretty = humanise_timestamp(&granted_at);
             entry.granted_at = granted_at;
@@ -176,9 +169,8 @@ fn collapse_sessions_to_apps(
     by_client.into_values().collect()
 }
 
-/// True when Hydra's stored `metadata.verified` flag is set on the client.
-/// Mirrors the same heuristic the consent page uses to decide whether to
-/// show the "Reviewed by your administrator" badge.
+/// Hydra's stored `metadata.verified` flag; mirrors the consent page's badge
+/// heuristic.
 fn client_metadata_verified(client: &ory_client::models::OAuth2Client) -> bool {
     client
         .metadata

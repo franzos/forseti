@@ -3,32 +3,19 @@
 use super::*;
 use ory_client::apis::{courier_api, frontend_api, identity_api, metadata_api, Error as OryError};
 
-/// Outcome of a `/sessions/whoami` call.
-///
-/// Kratos returns 401 ("no session at all") and 403 ("session exists but
-/// doesn't satisfy required AAL") for two very different states. The
-/// previous version of this wrapper collapsed both into `Ok(None)`, which
-/// made every protected handler bounce to `/login` with no step-up hint —
-/// /login then saw the existing session and short-circuited back to the
-/// protected route, livelocking AAL2-enrolled users. The enum keeps the
-/// two cases distinct so callers can route the AAL2-needs-step-up case to
-/// `/login?aal=aal2&return_to=...` instead.
+/// Outcome of a `/sessions/whoami` call. Keeps Kratos's 401 (no session) and 403 (session below required AAL)
+/// distinct so callers route the step-up case to `/login?aal=aal2`; collapsing both livelocks AAL2-enrolled users.
 #[derive(Clone, Debug)]
 pub enum WhoamiOutcome {
-    /// No session at all (401). Caller should send the user to /login.
+    /// No session at all (401); send to /login.
     None,
-    /// Session exists but doesn't satisfy the AAL Kratos requires.
-    /// Caller should send the user to `/login?aal=aal2&return_to=...`.
+    /// Session exists but doesn't satisfy the required AAL; send to `/login?aal=aal2&return_to=...`.
     InsufficientAal,
-    /// Session is valid and satisfies Kratos's whoami AAL requirement.
+    /// Valid session satisfying the whoami AAL requirement.
     Ok(Box<Session>),
 }
 
-/// `true` iff the session's authenticator assurance level is `aal2`.
-/// Avoids the `session.authenticator_assurance_level.map(|a|
-/// a.to_string()).unwrap_or("aal1") != "aal2"` dance every admin /
-/// step-up gate would otherwise re-derive. A missing AAL is treated as
-/// AAL1 — failing closed.
+/// `true` iff the session's AAL is `aal2`; a missing AAL is treated as AAL1 (fails closed).
 pub(crate) fn session_satisfies_aal2(session: &Session) -> bool {
     matches!(
         session.authenticator_assurance_level,
@@ -36,10 +23,8 @@ pub(crate) fn session_satisfies_aal2(session: &Session) -> bool {
     )
 }
 
-/// The session's authenticator assurance level as a string, defaulting to
-/// `"aal1"` when Kratos omits it — failing closed. Use when the raw string is
-/// needed (e.g. comparing against a requested `aal`); prefer
-/// [`session_satisfies_aal2`] for a plain AAL2 check.
+/// The session's AAL as a string, defaulting to `"aal1"` when omitted (fails closed). Use when comparing
+/// against a requested `aal`; prefer [`session_satisfies_aal2`] for a plain check.
 pub(crate) fn session_aal_string(session: &Session) -> String {
     session
         .authenticator_assurance_level
@@ -59,32 +44,19 @@ pub async fn whoami(clients: &OryClients, cookie: Option<&str>) -> Result<Whoami
             Ok(WhoamiOutcome::None)
         }
         Err(OryError::ResponseError(resp)) if resp.status == reqwest::StatusCode::FORBIDDEN => {
-            // 403 = session exists, AAL too low. Kratos's body carries
-            // `details.redirect_browser_to` with the right aal= query
-            // param but we don't need to parse it — the AAL gate above
-            // each protected route already knows what AAL it requires.
+            // 403 = session exists, AAL too low; the per-route gate already knows the required AAL, so no body parse needed.
             Ok(WhoamiOutcome::InsufficientAal)
         }
         Err(e) => Err(anyhow::anyhow!("kratos whoami failed: {e}")),
     }
 }
 
-/// Fetch an existing self-service flow by ID, forwarding the user's cookies
-/// (Kratos uses them to validate the flow's continuity cookie). Returns
-/// [`FlowFetch::Gone`] for 404/410 so the caller can restart cleanly, and
-/// [`FlowFetch::PrivilegedRequired`] for 403 responses carrying
-/// `session_refresh_required` / `session_aal2_required` (settings flows).
+/// Fetch a self-service flow by ID, forwarding the user's cookies (continuity-cookie validation). 404/410 map
+/// to [`FlowFetch::Gone`]; a settings 403 maps to [`FlowFetch::PrivilegedRequired`].
 ///
-/// We don't use `ory_client::apis::frontend_api::get_*_flow` directly here.
-/// The SDK deserializes into the typed flow models, whose `UiNodeAttributes`
-/// is `#[serde(tag = "node_type")]`. Serde consumes the discriminator
-/// before handing the remainder to the variant struct, but the inner
-/// `UiNodeInputAttributes` also declares a required `node_type` field —
-/// so deserialization always fails with `missing field 'node_type'` against
-/// every real Kratos response. Until that's fixed upstream we fetch raw
-/// JSON and let the handler project it into its own view-models.
-///
-/// See: <https://github.com/ory/sdk/issues/381>
+/// Fetches raw JSON rather than the SDK's typed `get_*_flow` because `UiNodeAttributes` is `#[serde(tag =
+/// "node_type")]` while the inner `UiNodeInputAttributes` also requires `node_type`, so every real response
+/// fails with `missing field 'node_type'`. See <https://github.com/ory/sdk/issues/381>.
 pub async fn get_flow(
     clients: &OryClients,
     kind: FlowKind,
@@ -114,10 +86,7 @@ pub async fn get_flow(
         return Ok(FlowFetch::Gone);
     }
     if status == reqwest::StatusCode::FORBIDDEN {
-        // 403 may carry `session_refresh_required` / `session_aal2_required`
-        // on settings flows; parse the `error.id` here so handlers can
-        // branch on the typed reason without touching JSON. Non-settings
-        // flows collapse to Gone (same effect as a stale flow).
+        // On settings flows, parse `error.id` into a typed reason; other flows collapse to Gone (like a stale flow).
         let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
         if matches!(kind, FlowKind::Settings) {
             let reason_id = body
@@ -127,9 +96,7 @@ pub async fn get_flow(
             let reason = if reason_id == "session_aal2_required" {
                 PrivilegedReason::Aal2Required
             } else {
-                // `session_refresh_required` is the default; an unknown
-                // id falls into the same bucket — refresh is the safer
-                // catch-all for "session no longer sufficient".
+                // Refresh is the safe catch-all for "session no longer sufficient".
                 PrivilegedReason::SessionRefresh
             };
             return Ok(FlowFetch::PrivilegedRequired(reason));
@@ -151,23 +118,13 @@ pub async fn get_flow(
     Ok(FlowFetch::Ok(Box::new(value)))
 }
 
-/// Build the URL the browser should be redirected to in order to start a new
-/// Kratos browser flow of the given `kind`. Kratos will create the flow,
-/// set its continuity cookie, and 303-redirect back to Forseti's UI URL
-/// with `?flow=<id>`.
-///
-/// `return_to` is forwarded so a successful completion lands on the
-/// originally requested page. `aal` / `refresh` are only meaningful on
-/// login flows; passing them on other kinds is harmless (Kratos ignores
-/// unknown query params) but typically not desired.
+/// Build the browser redirect URL that starts a new Kratos browser flow; Kratos creates the flow, sets its
+/// continuity cookie, and 303s back to Forseti with `?flow=<id>`. `return_to` lands the user back on the original page.
 pub fn browser_init_url(kind: FlowKind, public_url: &str, return_to: Option<&str>) -> String {
     browser_init_url_with(kind, public_url, return_to, None, None)
 }
 
-/// Like [`browser_init_url`] but with optional `aal` and `refresh` query
-/// parameters. Used by the `/login` handler to forward AAL step-up
-/// (`aal=aal2`) and privileged-session refresh (`refresh=true`) requests
-/// through to Kratos.
+/// Like [`browser_init_url`] but forwards optional `aal` step-up and `refresh` to Kratos.
 pub fn browser_init_url_with(
     kind: FlowKind,
     public_url: &str,
@@ -201,10 +158,7 @@ pub fn browser_init_url_with(
     format!("{base}/self-service/{segment}/browser?{}", qs.join("&"))
 }
 
-/// Fetch the JSON body for a Kratos self-service error (e.g. `flows.error.ui_url`
-/// redirects users to `/error?id=<error_id>`). Returns the raw JSON so the
-/// view can pull `error.code` / `error.message` without coupling to a
-/// potentially-broken SDK model.
+/// Fetch the raw JSON for a Kratos self-service error (the `/error?id=...` landing), avoiding the SDK model.
 pub async fn get_self_service_error(
     clients: &OryClients,
     error_id: &str,
@@ -239,8 +193,7 @@ pub async fn get_self_service_error(
 }
 
 /// Admin lookup by identity ID. Hits the Kratos admin API which returns
-/// the typed `Identity` model — no `ui.nodes` involved, so the SDK
-/// deserializer works fine here.
+/// the typed `Identity` model (no `ui.nodes` involved, so the SDK deserializer works fine here).
 pub async fn admin_get_identity(clients: &OryClients, id: &str) -> Result<Identity> {
     identity_api::get_identity(&clients.kratos_admin, id, None)
         .await
@@ -277,7 +230,7 @@ pub fn logout_browser_url(public_url: &str) -> String {
 
 /// List the current identity's active sessions, as seen by Kratos. Uses
 /// the public API with the user's forwarded cookie so Kratos resolves
-/// the caller from their session — no admin credentials required. The
+/// the caller from their session (no admin credentials required). The
 /// `Session` model has no `ui.nodes`, so the typed SDK call works here.
 pub async fn list_my_sessions(clients: &OryClients, cookie: Option<&str>) -> Result<Vec<Session>> {
     frontend_api::list_my_sessions(&clients.kratos_public, None, None, None, None, None, cookie)
@@ -286,8 +239,7 @@ pub async fn list_my_sessions(clients: &OryClients, cookie: Option<&str>) -> Res
 }
 
 /// Revoke a single session by ID. Kratos refuses to delete the *current*
-/// session via this endpoint (it returns 400) — callers should treat the
-/// current session row as non-revokable in the UI.
+/// session via this endpoint (it returns 400), so callers treat the current session row as non-revokable in the UI.
 pub async fn revoke_session(clients: &OryClients, id: &str, cookie: Option<&str>) -> Result<()> {
     frontend_api::disable_my_session(&clients.kratos_public, id, None, cookie)
         .await
@@ -326,11 +278,7 @@ pub async fn list_identity_sessions(
 
 // --- Admin surface ---------------------------------------------------
 
-/// Paginated identity list via the Kratos admin API. `page_size` clamps
-/// at Kratos's own ceiling (500); `page_token` comes from the previous
-/// page's `Link: <...>; rel="next"` header — we don't surface paging
-/// headers in the SDK return, so for now the admin UI paginates with
-/// `?page=N` token-style and Kratos handles ordering.
+/// Paginated identity list via the Kratos admin API. `page_token` comes from the previous page's `Link` header.
 pub async fn list_identities(
     clients: &OryClients,
     page_size: i64,
@@ -412,8 +360,7 @@ async fn admin_list_identities_by_ids_inner(
 }
 
 /// Like [`admin_get_identity`] but asks Kratos to include the identity's
-/// credentials in the response (passwords are still hashed/redacted —
-/// this surfaces which methods are configured, not the secrets).
+/// credentials in the response (passwords stay hashed/redacted; this surfaces which methods are configured, not the secrets).
 pub async fn admin_get_identity_full(clients: &OryClients, id: &str) -> Result<Identity> {
     identity_api::get_identity(
         &clients.kratos_admin,
@@ -466,8 +413,7 @@ pub async fn admin_delete_identity(clients: &OryClients, id: &str) -> Result<()>
 
 /// List the ids of every identity schema registered with Kratos. The admin
 /// configuration page surfaces these so operators can see which schemas
-/// drive registration / profile shape. Paging args are all `None` — Kratos
-/// returns the full set in one page for any realistic deployment.
+/// drive registration / profile shape. Paging args are all `None`; Kratos returns the full set in one page.
 pub async fn list_identity_schemas(clients: &OryClients) -> Result<Vec<String>> {
     let schemas =
         identity_api::list_identity_schemas(&clients.kratos_admin, None, None, None, None)
@@ -489,12 +435,8 @@ pub async fn admin_create_recovery_code(
         .map_err(|e| anyhow::anyhow!("kratos admin create_recovery_code failed: {e}"))
 }
 
-/// Mint a one-shot magic recovery link for an identity. Unlike the code
-/// variant, the link is a Kratos *public* URL — a browser GET redeems it
-/// directly: Kratos validates the token, issues a privileged session
-/// (cookie set natively), and redirects to `return_to`. This is the only
-/// OSS path from "server-side authenticated" (e.g. a validated SAML
-/// assertion) to a real browser session.
+/// Mint a one-shot magic recovery link: a Kratos public URL a browser GET redeems into a privileged session.
+/// The only OSS path from "server-side authenticated" (e.g. a validated SAML assertion) to a real browser session.
 pub async fn admin_create_recovery_link(
     clients: &OryClients,
     identity_id: &str,
@@ -515,8 +457,7 @@ pub async fn admin_create_recovery_link(
 
 /// JIT-provision an identity with a pre-verified email (SAML SSO: the
 /// corporate IdP asserted the address, so re-verification is pointless).
-/// Returns `Ok(None)` on 409 — the email already belongs to another
-/// identity — so the SSO callback can render a block page instead of a 500.
+/// Returns `Ok(None)` on 409 (the email already belongs to another identity) so the SSO callback can render a block page instead of a 500.
 pub async fn admin_create_identity_verified(
     clients: &OryClients,
     schema_id: &str,
@@ -545,11 +486,8 @@ pub async fn admin_create_identity_verified(
     }
 }
 
-/// Find an identity whose verifiable addresses include `email`, returning
-/// it together with whether that address is verified. Uses the
-/// `credentials_identifier` filter (matches password/oidc/code identifiers) —
-/// good enough for the link-on-first-SSO-login path; SAML-created
-/// identities are found via Forseti's `saml_links` table instead.
+/// Find an identity whose verifiable addresses include `email`, with that address's verified flag. Uses the
+/// `credentials_identifier` filter; SAML-created identities are found via Forseti's `saml_links` table instead.
 pub async fn admin_find_identity_by_email(
     clients: &OryClients,
     email: &str,
@@ -573,12 +511,8 @@ pub async fn admin_find_identity_by_email(
     Ok(None)
 }
 
-/// List every session across all identities (admin view). Kratos
-/// paginates with `page_token`; we surface that to the caller as
-/// best-effort pass-through. Passes `expand=identity` so each row
-/// carries the owning identity (email + id) — without this the SDK
-/// returns `session.identity = None` and the admin UI can't surface
-/// who owns each session.
+/// List every session across all identities (admin view). Passes `expand=identity` so each row carries its
+/// owner (otherwise `session.identity = None` and the admin UI can't show who owns each session).
 pub async fn admin_list_all_sessions(
     clients: &OryClients,
     page_size: i64,
@@ -598,7 +532,7 @@ pub async fn admin_list_all_sessions(
 
 /// Revoke a single session by ID via the admin API. Unlike the public
 /// `disable_my_session`, this can revoke anyone's session, including the
-/// admin's own — callers should warn before that happens.
+/// admin's own, so callers should warn before that happens.
 pub async fn admin_revoke_session(clients: &OryClients, id: &str) -> Result<()> {
     identity_api::disable_session(&clients.kratos_admin, id)
         .await
@@ -631,14 +565,12 @@ pub async fn list_courier_messages(
 }
 
 /// Hit Kratos's `/health/alive` probe (admin URL). The SDK doesn't expose
-/// a typed wrapper for this — we hit the raw endpoint and treat any
-/// 2xx as healthy. Used by the admin status page only.
+/// a typed wrapper for this, so we hit the raw endpoint and treat any 2xx as healthy. Admin status page only.
 pub async fn health_alive(clients: &OryClients) -> Result<()> {
     probe_health(&clients.kratos_admin, "/health/alive").await
 }
 
-/// Hit Kratos's `/health/ready` probe. Stricter than alive — also
-/// checks downstream dependencies (DB).
+/// Hit Kratos's `/health/ready` probe. Stricter than alive: also checks downstream dependencies (DB).
 pub async fn health_ready(clients: &OryClients) -> Result<()> {
     probe_health(&clients.kratos_admin, "/health/ready").await
 }
@@ -652,15 +584,8 @@ pub async fn version(clients: &OryClients) -> Result<String> {
     Ok(v.version)
 }
 
-/// Fire the single-use `logout_url` server-side to destroy the Kratos
-/// session without following the post-logout redirect. Used by callers
-/// (e.g. the OAuth2 RP-initiated logout flow) that need to tear down the
-/// session but route the browser to a different post-logout target than
-/// Kratos's default.
-///
-/// Errors from the transport bubble; non-success HTTP statuses are
-/// considered fire-and-forget — we don't surface them because the caller
-/// has already committed to the next redirect.
+/// Fire the single-use `logout_url` server-side to destroy the session without following the post-logout
+/// redirect (for callers routing the browser elsewhere). Transport errors bubble; non-2xx are fire-and-forget.
 pub async fn hit_logout_url(clients: &OryClients, url: &str, cookie: Option<&str>) -> Result<()> {
     let mut req = clients.kratos_public.client.get(url);
     if let Some(c) = cookie {
@@ -674,8 +599,7 @@ pub async fn hit_logout_url(clients: &OryClients, url: &str, cookie: Option<&str
 
 /// Fetch the Kratos logout flow's `logout_url` (already containing the
 /// single-use `logout_token`). Caller is expected to redirect the browser
-/// to that URL — Kratos will clear the session cookie and bounce to
-/// `/login`. Returns `Ok(None)` if no session cookie is present.
+/// to that URL; Kratos clears the session cookie and bounces to `/login`. `Ok(None)` if no session cookie is present.
 pub async fn fetch_logout_url(clients: &OryClients, cookie: &str) -> Result<Option<String>> {
     if cookie.is_empty() {
         return Ok(None);

@@ -79,6 +79,7 @@ diesel::table! {
         support_email -> Nullable<Text>,
         created_at -> Text,
         created_by -> Nullable<Text>,
+        member_visibility -> Text,
     }
 }
 
@@ -89,6 +90,7 @@ diesel::table! {
         role -> Text,
         added_at -> Text,
         added_by -> Nullable<Text>,
+        hidden_from_directory -> Integer,
     }
 }
 
@@ -197,9 +199,37 @@ diesel::table! {
     posix_groups (gid) {
         gid -> Integer,
         name -> Text,
-        org_id -> Nullable<Text>,
         kind -> Text,
         created_at -> Text,
+    }
+}
+
+diesel::table! {
+    org_teams (id) {
+        id -> Text,
+        org_id -> Text,
+        name -> Text,
+        slug -> Text,
+        gid -> Nullable<Integer>,
+        parent_id -> Nullable<Text>,
+        created_at -> Text,
+        created_by -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
+    org_team_members (team_id, identity_id) {
+        team_id -> Text,
+        identity_id -> Text,
+        source -> Text,
+        added_at -> Text,
+    }
+}
+
+diesel::table! {
+    posix_sequences (name) {
+        name -> Text,
+        next -> Integer,
     }
 }
 
@@ -216,11 +246,18 @@ diesel::table! {
         id -> Text,
         hostname -> Text,
         secret_hash -> Text,
-        allowed_gid -> Nullable<Integer>,
+        org_id -> Text,
         force_mfa -> Integer,
         created_by -> Nullable<Text>,
         created_at -> Text,
         last_seen_at -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
+    host_allowed_groups (host_id, team_id) {
+        host_id -> Text,
+        team_id -> Text,
     }
 }
 
@@ -263,3 +300,9 @@ diesel::joinable!(saml_connections -> organizations (org_id));
 diesel::allow_tables_to_appear_in_same_query!(organizations, organization_members);
 diesel::allow_tables_to_appear_in_same_query!(organizations, saml_connections);
 diesel::allow_tables_to_appear_in_same_query!(posix_group_members, posix_accounts);
+diesel::allow_tables_to_appear_in_same_query!(
+    posix_accounts,
+    organization_members,
+    org_team_members,
+    org_teams
+);

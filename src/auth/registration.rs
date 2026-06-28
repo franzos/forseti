@@ -31,9 +31,8 @@ struct RegistrationTemplate {
     groups: GroupedNodes,
     has_visible_default: bool,
     return_to_qs: String,
-    /// Same WebAuthn / passkey helper script that login + settings emit.
-    /// Required when the registration flow includes a passkey enrollment
-    /// button, otherwise `window.oryPasskeyRegistration` is undefined.
+    /// WebAuthn / passkey helper script; without it the passkey enrollment
+    /// button's `window.oryPasskeyRegistration` is undefined.
     webauthn_scripts: Vec<ScriptView>,
 }
 
@@ -46,19 +45,15 @@ pub(crate) async fn registration(
     Chrome(chrome): Chrome,
 ) -> Response {
     let cookie = cookies::cookie_header(&headers);
-    // Pre-fill source: explicit ?prefill_email= wins over the cookie
-    // dropped by /claim-email/confirm. Either way, when present we'll
-    // also emit a Set-Cookie to clear the cookie one-shot.
+    // Explicit ?prefill_email= wins over the one-shot cookie dropped by
+    // /claim-email/confirm, which we clear on render.
     let prefill_email = prefill
         .prefill_email
         .or_else(|| cookies::read_cookie(&headers, "forseti_prefill_email"));
 
-    // An existing session means "you don't need /registration". We split
-    // the two non-None outcomes apart: a fully-authenticated session goes
-    // straight to `return_to`, but an `InsufficientAal` session must be
-    // routed through `/login?aal=aal2` so the user gets an AAL2 step-up
-    // rather than landing on a protected page (e.g. `/admin/*`) with an
-    // AAL1 session.
+    // Already-authenticated sessions skip /registration. An InsufficientAal
+    // session routes through /login?aal=aal2 instead of landing on a protected
+    // page (e.g. /admin/*) with an AAL1 session.
     match session {
         OptionalSession::Ok { .. } => {
             let target = safe_return_to(&state.cfg, query.return_to.as_deref().unwrap_or("/"));
@@ -119,9 +114,7 @@ pub(crate) async fn registration(
     }
 }
 
-/// Append a `Set-Cookie: forseti_prefill_email=; Max-Age=0` directive
-/// so the one-shot prefill cookie from `/claim-email/confirm` is
-/// consumed on the next render.
+/// Clear the one-shot prefill cookie from `/claim-email/confirm`.
 fn attach_prefill_clear_cookie(resp: &mut Response, secure: bool) {
     let secure_attr = if secure { "; Secure" } else { "" };
     let header = format!(
@@ -141,10 +134,8 @@ fn render_registration(
     let (form_action, form_method) = form_target(flow);
     let mut groups = group_nodes(flow);
     mark_primary_submits(&mut groups, FlowKind::Registration);
-    // Pre-populate the `traits.email` input when the caller landed here
-    // from a flow that already proved ownership of the address (currently
-    // `/claim-email/confirm`). The value Kratos persists on flow init is
-    // empty; we overwrite it here rather than re-initialising the flow.
+    // Overwrite the empty `traits.email` Kratos persists on flow init rather
+    // than re-initialising the flow.
     if let Some(email) = prefill_email.filter(|s| !s.is_empty()) {
         for group in [
             &mut groups.profile,

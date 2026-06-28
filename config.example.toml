@@ -257,6 +257,12 @@ support_email = "support@example.com"
 [posix]
 uid_base = 1000000          # first uid handed out; allocated monotonically
 gid_base = 2000000          # first gid; disjoint from uid space so they never collide
+# uid/gid bands. The user gid band [gid_base, gid_base+user_gid_size) and the
+# team-gid band [group_gid_base, group_gid_base+group_gid_size) MUST be disjoint.
+user_uid_size = 1000000
+user_gid_size = 1000000
+group_gid_base = 3000000
+group_gid_size = 1000000
 default_shell = "/bin/sh"   # per-OS: /run/current-system/profile/bin/bash on Guix System, /bin/bash on Debian
 home_prefix = "/home"       # home dir is {home_prefix}/{username} unless overridden per account
 free_seats = 25             # free-tier seat cap when no commercial max_seats applies

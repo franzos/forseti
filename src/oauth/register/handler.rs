@@ -27,11 +27,9 @@ pub(crate) async fn register(
     actx: AuditCtx,
     body: Bytes,
 ) -> Response {
-    // Anonymous DCR is the default. An `Authorization` header is optional
-    // — but if present, it must parse to a valid IAT; a malformed or
-    // unknown bearer is rejected with 401 rather than silently falling
-    // through to the anonymous path, so an attacker can't probe IATs
-    // without leaving an audit trail.
+    // Anonymous DCR is the default; a present `Authorization` header must
+    // parse to a valid IAT or get rejected with 401 (no silent fall-through,
+    // so attackers can't probe IATs without an audit trail).
     let iat_row: Option<IatRow> = match parse_authorization(&headers) {
         AuthOutcome::None => None,
         AuthOutcome::Malformed => {
@@ -50,10 +48,8 @@ pub(crate) async fn register(
         AuthOutcome::Token(token) => match lookup_iat(&state.db, &token).await {
             IatCheck::Ok(row) => Some(row),
             IatCheck::Invalid => {
-                // Audit the no-row case at WARNING so probing for valid IATs
-                // leaves a trail. Never log the raw bearer — record only a
-                // short prefix of its SHA-256 to help an operator correlate
-                // bursts ("the same wrong token tried 200 times").
+                // Never log the raw bearer; a SHA-256 prefix lets an operator
+                // correlate bursts of the same wrong token.
                 let hash_prefix = hash_token(&token).chars().take(8).collect::<String>();
                 tracing::info!(hash_prefix = %hash_prefix, "dcr: unknown initial access token");
                 let ev = AuditEvent::new(action::OAUTH_CLIENT_DCR_REJECTED)
@@ -89,10 +85,9 @@ pub(crate) async fn register(
                 );
             }
             IatCheck::DatabaseError => {
-                // The lookup itself failed (DB blip). Don't pretend the
-                // token is invalid — return 503 so well-behaved callers
-                // back off and retry instead of rotating credentials.
-                // No audit row: we can't trust the DB to record one.
+                // Don't pretend the token is invalid on a DB blip; 503 makes
+                // callers back off instead of rotating credentials. No audit
+                // row: we can't trust the DB to record one.
                 tracing::error!("dcr: IAT lookup unavailable; returning 503");
                 return error_response(
                     StatusCode::SERVICE_UNAVAILABLE,
@@ -103,8 +98,8 @@ pub(crate) async fn register(
         },
     };
 
-    // Parse the body as JSON so we can sanitise it. Anything that isn't a
-    // JSON object is rejected with `invalid_client_metadata` per RFC 7591.
+    // Non-object bodies are rejected with `invalid_client_metadata` per
+    // RFC 7591.
     let mut payload: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(serde_json::Value::Object(m)) => serde_json::Value::Object(m),
         Ok(_) => {
@@ -123,20 +118,11 @@ pub(crate) async fn register(
         }
     };
 
-    // Strip `metadata.forseti.*` from the incoming body. Trust-boundary
-    // fields (`verification`, `source`, `dcr_iat_id`, ...) live in the
-    // Forseti-owned `oauth_client_metadata` table — we never let a DCR
-    // caller seed them onto the Hydra client, because RFC 7592 PUT
-    // (handled directly by Hydra, not Forseti) would then let the
-    // client modify its own trust state via the RAT.
     strip_forseti_metadata(&mut payload);
 
-    // Snapshot the caller-declared `audience` array before Hydra eats
-    // it. Space-joined to match how `scope` is stored — keeps the
-    // diesel column shape uniform and lets the admin UI render the
-    // list with the same splitter. Stays `None` (NULL column) when the
-    // caller didn't declare an audience; the lazy `resource_url`
-    // capture on first consent picks up that case.
+    // Snapshot the caller-declared `audience` before Hydra eats it.
+    // Space-joined to match how `scope` is stored. `None` when undeclared;
+    // the lazy `resource_url` capture on first consent covers that case.
     let posted_audience = payload
         .get("audience")
         .and_then(|v| v.as_array())
@@ -154,10 +140,8 @@ pub(crate) async fn register(
         .unwrap_or_default()
         .to_string();
 
-    // Reserved-name check applies to every path (anonymous + IAT). For
-    // the IAT path it runs after IAT validation but before the IAT use is
-    // decremented, so a bad actor can't burn through someone else's
-    // single-use IAT by probing names.
+    // Runs before the IAT is decremented so probing names can't burn through
+    // someone else's single-use IAT.
     if let Some(pattern) = reserved_name_hit(&state.cfg.oauth.dcr_reserved_names, &posted_name_raw)
     {
         tracing::info!(
@@ -184,8 +168,7 @@ pub(crate) async fn register(
             )),
         };
         let _ = audit::log(&state.db, ev).await;
-        // Note: response intentionally does not echo the matched pattern —
-        // gives an attacker less feedback for probing the denylist.
+        // Response intentionally doesn't echo the matched pattern.
         return error_response(
             StatusCode::BAD_REQUEST,
             "invalid_client_metadata",
@@ -193,11 +176,9 @@ pub(crate) async fn register(
         );
     }
 
-    // Decrement only after all validations pass to prevent name-probing
-    // draining the IAT. The daily counter + uses_remaining only exist on
-    // an IAT row, so the anonymous path skips this entirely; per-IP rate
-    // limiting (tower_governor, upstream of this handler) is the
-    // anonymous-path equivalent.
+    // Decrement only after all validations pass so name-probing can't drain
+    // the IAT. Anonymous path skips this; per-IP rate limiting upstream is
+    // its equivalent.
     if let Some(row) = iat_row.as_ref() {
         let daily_limit = state
             .cfg
@@ -234,19 +215,15 @@ pub(crate) async fn register(
                 let _ = audit::log(&state.db, ev).await;
                 return rate_limited_response(
                     "iat daily limit exceeded",
-                    // Retry-After is the time until the current window
-                    // rolls over. We don't have the exact `started_at`
-                    // here without another fetch; 1 hour is a reasonable
-                    // backoff hint without leaking the window's age.
+                    // 1h backoff hint; we don't have `started_at` here and
+                    // don't want to leak the window's age anyway.
                     Some(3600),
                 );
             }
         }
     }
 
-    // Snapshot the remaining audit bits before we hand the JSON over to
-    // Hydra (which echoes everything back, but reading from the request
-    // body is cheaper than re-parsing the response).
+    // Snapshot the remaining audit bits before handing the JSON to Hydra.
     let posted_name = posted_name_raw;
     let posted_scope = payload
         .get("scope")
@@ -266,10 +243,8 @@ pub(crate) async fn register(
     let body_bytes = match serde_json::to_vec(&payload) {
         Ok(b) => b,
         Err(e) => {
-            // Should never happen — we built `payload` from a parsed
-            // `Value`. If it does, falling through to Hydra with an empty
-            // body would write a broken audit row and produce a confusing
-            // 400 from Hydra; surface as 500 instead.
+            // Shouldn't happen (payload is a parsed `Value`); surface as 500
+            // rather than forwarding an empty body to Hydra.
             tracing::error!(error = ?e, "dcr: failed to serialise forward payload");
             return error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -305,10 +280,7 @@ pub(crate) async fn register(
     let upstream_body = resp.bytes().await.unwrap_or_default();
 
     if !status.is_success() {
-        // Hand Hydra's error body back verbatim — RFC 7591 says the AS
-        // returns a JSON error with `error` / `error_description`, and
-        // Hydra already does that. Rewriting it would only introduce
-        // drift.
+        // Hand Hydra's error body back verbatim; it already matches RFC 7591.
         return (
             status_code,
             [("content-type", "application/json")],
@@ -317,15 +289,10 @@ pub(crate) async fn register(
             .into_response();
     }
 
-    // Parse the success response so we can both pick up `client_id` for
-    // the audit row + Forseti-side insert AND normalize the body before
-    // returning it. Hydra emits zero-value strings ("") for unset URL
-    // fields (`client_uri`, `policy_uri`, `tos_uri`, `logo_uri`,
-    // `jwks_uri`) and `null` for unset arrays (`contacts`). RFC 7591
-    // §3.2.1 says optional fields can be omitted; strict client SDKs
-    // (Claude's, for one) reject empty-string-as-URL and null-as-array
-    // outright. Dropping those keys is RFC-compliant and keeps the
-    // proxy usable from those clients.
+    // Parse the success response to pick up `client_id` and normalize the
+    // body. Hydra emits "" for unset URL fields and `null` for unset arrays;
+    // strict client SDKs reject those, and RFC 7591 §3.2.1 lets optional
+    // fields be omitted, so dropping the empty keys keeps the proxy usable.
     let (normalized_body, returned_client_id) =
         match serde_json::from_slice::<serde_json::Value>(&upstream_body) {
             Ok(mut v) => {
@@ -349,26 +316,14 @@ pub(crate) async fn register(
             Err(_) => (upstream_body.clone(), String::new()),
         };
 
-    // Stamp the Forseti-owned metadata row BEFORE returning. If Hydra has
-    // already committed the registration but our INSERT fails, log
-    // loudly and still return success — undoing the Hydra-side create
-    // by hand would require a Hydra DELETE call with no idempotency
-    // guarantees, and would leave the caller's `registration_access_token`
-    // in a torn state. The audit row below captures the gap so an
-    // operator triaging "client present in Hydra, no Forseti row" can
-    // see what happened.
-    //
-    // Missing `client_id` in the response is unexpected (Hydra always
-    // returns one on 2xx), but we still log + skip rather than
-    // panicking.
+    // Stamp the Forseti metadata row before returning. If Hydra committed but
+    // the INSERT fails, log loudly and still return success: undoing the
+    // Hydra create would tear the caller's `registration_access_token`, and
+    // the audit row below captures the gap for reconciliation.
     let iat_id_for_log = iat_row.as_ref().map(|r| r.id.as_str()).unwrap_or("-");
     if !returned_client_id.is_empty() {
-        // DCR is typically un-authed (Claude / Code can't carry a Forseti
-        // session cookie). When a session *is* present — operator
-        // shelling a curl from inside the browser, scripted dev flow —
-        // we attribute the new client to the caller's active org. The
-        // common path (no cookie / unknown identity) falls through to
-        // the Default org.
+        // Attribute to the caller's active org when a session is present
+        // (operator curl, scripted dev flow); otherwise the Default org.
         let target_org = resolve_dcr_target_org(&state, &headers, &extensions).await;
         if let Err(e) = oauth_client_metadata::insert_dcr(
             &state.db,
@@ -395,12 +350,8 @@ pub(crate) async fn register(
         );
     }
 
-    // Actor is the IAT itself when one was presented, otherwise `system`
-    // — the DCR proxy is unauthenticated browser-wise. Surfacing the IAT
-    // id as the actor lets an operator triaging suspicious registrations
-    // find every event back to a single issued token; anonymous
-    // registrations are still surfaced via the `source = dcr` metadata
-    // row and the per-IP rate-limit trace.
+    // Actor is the IAT when one was presented, else `system`. Surfacing the
+    // IAT id lets an operator trace every event back to a single token.
     let mut ev = AuditEvent::new(action::OAUTH_CLIENT_DCR_REGISTERED)
         .with_ctx(&actx)
         .metadata(match iat_row.as_ref() {
@@ -434,18 +385,10 @@ pub(crate) async fn register(
         .into_response()
 }
 
-/// Remove `metadata.forseti` from the incoming registration body. Trust-
-/// boundary fields (`verification`, `source`, `dcr_iat_id`,
-/// `dcr_registered_at`, `verified_by`, ...) live in the Forseti-owned
-/// `oauth_client_metadata` table, not on the Hydra client. Letting a
-/// DCR caller seed them on the Hydra side would defeat the whole point
-/// — RFC 7592 PUT (handled directly by Hydra) replaces the full client
-/// representation including `metadata`, so any Forseti-scoped trust
-/// state on the Hydra client is mutable by the RAT-bearer.
-///
-/// Non-Forseti metadata keys (anything outside the `forseti` sub-object)
-/// are passed through untouched — operators can still attach arbitrary
-/// app-specific data to clients via DCR.
+/// Remove `metadata.forseti` from the incoming body so a DCR caller can't
+/// seed trust-boundary fields onto the Hydra client: RFC 7592 PUT (Hydra-
+/// handled) replaces the full `metadata`, so any Forseti trust state on the
+/// Hydra client would be RAT-mutable. Other metadata keys pass through.
 fn strip_forseti_metadata(payload: &mut serde_json::Value) {
     let Some(obj) = payload.as_object_mut() else {
         return;
@@ -459,20 +402,13 @@ fn strip_forseti_metadata(payload: &mut serde_json::Value) {
     metadata_obj.remove("forseti");
 }
 
-/// Realm advertised in `WWW-Authenticate: Bearer` on 401 responses.
-/// Stable string so a client implementing per-realm token storage can
-/// key off it. Per RFC 6750 §3, the realm is operator-chosen; the
-/// Forseti's identifier is fine.
+/// Realm advertised in `WWW-Authenticate: Bearer` on 401s. Stable so a client
+/// keying per-realm token storage can rely on it (RFC 6750 §3).
 const DCR_BEARER_REALM: &str = "forseti-dcr";
 
-/// RFC 7591 §3.2.2 error response shape: JSON body with `error` and
-/// optional `error_description`. The status code carries the HTTP-level
-/// failure category (401 for token problems, 400 for body problems).
-///
-/// On 401 we additionally emit `WWW-Authenticate: Bearer realm=…,
-/// error=…, error_description=…` per RFC 6750 §3 — Hydra-fronting
-/// proxies + spec-strict clients use this header to distinguish "you
-/// need a token" from "your token is bad".
+/// RFC 7591 §3.2.2 error response: JSON `error` + optional `error_description`.
+/// On 401 it also emits `WWW-Authenticate: Bearer` per RFC 6750 §3 so clients
+/// can distinguish "need a token" from "token is bad".
 fn error_response(status: StatusCode, error: &str, description: &str) -> Response {
     let body = json!({
         "error": error,
@@ -480,9 +416,7 @@ fn error_response(status: StatusCode, error: &str, description: &str) -> Respons
     });
     let bytes = serde_json::to_vec(&body).unwrap_or_default();
     if status == StatusCode::UNAUTHORIZED {
-        // Quote-escape per RFC 6750 §3 (`quoted-string`). Description
-        // is operator-trusted (we built it), but the quote on the
-        // description still gets the same treatment defensively.
+        // Quote-escape per RFC 6750 §3 (`quoted-string`).
         let escape = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
         let header_value = format!(
             r#"Bearer realm="{}", error="{}", error_description="{}""#,
@@ -503,10 +437,8 @@ fn error_response(status: StatusCode, error: &str, description: &str) -> Respons
     (status, [("content-type", "application/json")], bytes).into_response()
 }
 
-/// 429 response in the RFC 7591 shape (`temporarily_unavailable`) plus a
-/// `Retry-After: <seconds>` header. Used by both layers — per-IAT
-/// (folded into the handler) and per-IP (the `tower_governor` error
-/// handler, see [`rate_limit_error_response`]).
+/// 429 in the RFC 7591 shape (`temporarily_unavailable`) plus `Retry-After`.
+/// Used by both the per-IAT and per-IP rate-limit paths.
 fn rate_limited_response(description: &str, retry_after_seconds: Option<u64>) -> Response {
     let body = json!({
         "error": "temporarily_unavailable",
@@ -532,17 +464,13 @@ pub(crate) fn rate_limit_error_response(err: tower_governor::GovernorError) -> R
         GovernorError::TooManyRequests { wait_time, .. } => Some(*wait_time),
         _ => None,
     };
-    // Per spec: no audit event for per-IP hits — too noisy. Trace-level
-    // log only.
+    // No audit event for per-IP hits (too noisy); trace only.
     tracing::trace!(error = ?err, "dcr: per-IP rate limit triggered");
     rate_limited_response("rate limit exceeded", retry)
 }
 
-/// Best-effort resolve the org to attribute a DCR-registered client to.
-/// Returns the caller's active org when a session cookie is present and
-/// resolves to a known identity; falls back to the Default org id in
-/// every other case. Never errors — the registration has already been
-/// committed Hydra-side by the time we get here.
+/// Best-effort org to attribute a DCR-registered client to: the caller's
+/// active org when a session resolves, else the Default org. Never errors.
 async fn resolve_dcr_target_org(
     state: &AppState,
     headers: &HeaderMap,

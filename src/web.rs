@@ -1,9 +1,5 @@
-//! Cross-cutting handler utilities: the Forseti version constant, return-to
-//! validation, the shared `FlowQuery` extractor, the error-boundary template,
-//! and the CSRF-cookie attachment shorthand.
-//!
-//! Anything here is used by more than one feature module. Items specific to a
-//! single feature live alongside that feature's handler.
+//! Cross-cutting handler utilities used by more than one feature module
+//! (version constant, return-to validation, `FlowQuery`, error-boundary template, cookie helpers).
 
 use askama::Template;
 use axum::response::Response;
@@ -14,41 +10,22 @@ use crate::page_chrome::PageChrome;
 use crate::render::render;
 use crate::state::AppState;
 
-/// Package version surfaced in the footer of every layout. Resolved at
-/// compile time from `Cargo.toml`'s `version` so deployments always
-/// advertise the binary they actually run.
+/// Package version surfaced in the layout footer, resolved at compile time from `Cargo.toml`.
 pub(crate) const FORSETI_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub(crate) const AUTH_UNAVAILABLE_TITLE: &str = "Authentication unavailable";
 pub(crate) const AUTH_UNAVAILABLE_BODY: &str =
     "We couldn't reach the authentication service. Please try again in a moment.";
 
-/// Validate a `?return_to=` query parameter before short-circuiting a redirect
-/// to it. Returns `"/"` whenever `raw` looks like an open-redirect attempt
-/// (scheme-relative URL, embedded backslash, or an absolute URL whose origin
-/// doesn't match Forseti's own external URL).
-///
-/// Why we need this: the `/login` and `/registration` handlers short-circuit
-/// to `return_to` when the user already has a session. Without validation, a
-/// crafted link like `/login?return_to=https://attacker.example/phish` would
-/// hand the (authenticated) browser straight to an attacker-controlled page
-/// after a normal-looking sign-in roundtrip.
-///
-/// A `return_to` is considered safe when:
-///   * it starts with `/` and not `//` or `/\`
-///     (path-only redirect on our own host), OR
-///   * it parses as an absolute URL whose origin (scheme + host + port)
-///     matches `cfg.self_.url`.
-///
-/// Anything else falls back to `/`. The caller renders no error — the
-/// redirect just becomes a benign one. We log a `warn` so operators can see
-/// rejected attempts in their pipeline.
+/// Validate a `?return_to=` before redirecting to it, guarding the post-login short-circuit
+/// against open redirects (e.g. `/login?return_to=https://attacker.example/phish`).
+/// Safe when path-only (`/` but not `//` or `/\`) or an absolute URL whose origin matches
+/// `cfg.self_.url`; anything else falls back to `/` and logs a warn.
 pub(crate) fn safe_return_to<'a>(cfg: &AppConfig, raw: &'a str) -> &'a str {
     if raw.is_empty() {
         return "/";
     }
-    // Path-only redirects: must start with `/` but not `//` (scheme-relative)
-    // or `/\` (some browsers normalise backslash-as-slash).
+    // Path-only: `/` but not `//` (scheme-relative) or `/\` (browsers may normalise backslash as slash).
     if let Some(rest) = raw.strip_prefix('/') {
         if rest.starts_with('/') || rest.starts_with('\\') {
             tracing::warn!(return_to = raw, "rejected open-redirect return_to");
@@ -56,10 +33,7 @@ pub(crate) fn safe_return_to<'a>(cfg: &AppConfig, raw: &'a str) -> &'a str {
         }
         return raw;
     }
-    // Absolute URL: compare origins (scheme + host + port). String-prefix
-    // matching can be fooled by `https://forseti.example.com.attacker.tld`
-    // — `Url::origin` reduces the input to a canonical tuple so an
-    // attacker-controlled host can't masquerade by sharing a prefix.
+    // Compare canonical origins; string-prefix matching would be fooled by `https://forseti.example.com.attacker.tld`.
     if let (Ok(forseti), Ok(candidate)) = (url::Url::parse(&cfg.self_.url), url::Url::parse(raw)) {
         if candidate.origin() == forseti.origin() {
             return raw;
@@ -83,23 +57,17 @@ pub(crate) struct ErrorBoundaryTemplate {
 pub(crate) struct FlowQuery {
     pub(crate) flow: Option<String>,
     pub(crate) return_to: Option<String>,
-    /// `aal=aal2` requests an authentication step-up. The login handler must
-    /// NOT short-circuit on a valid `aal1` session when this is set — instead
-    /// it forwards the user into a Kratos flow that demands the second factor.
-    /// Plumbed through to Kratos's browser-init URL.
+    /// `aal=aal2` requests a step-up: login must not short-circuit on a valid `aal1` session
+    /// but forward into a Kratos flow demanding the second factor.
     pub(crate) aal: Option<String>,
-    /// `refresh=true` forces a privileged-session re-auth. Settings flows that
-    /// hit `session_refresh_required` redirect through `/login?refresh=true`;
-    /// the handler must fall through to Kratos even when `whoami` returns a
-    /// session, otherwise the user livelocks at `privileged_session_max_age`.
+    /// `refresh=true` forces privileged-session re-auth: login must fall through to Kratos even when
+    /// `whoami` returns a session, else the user livelocks at `privileged_session_max_age`.
     #[serde(default, deserialize_with = "deserialize_bool_str")]
     pub(crate) refresh: Option<bool>,
 }
 
-/// Accept `refresh=true`, `refresh=1`, etc. and coerce to `Option<bool>`. The
-/// browser sends bare query strings, so the default `bool` deserializer (which
-/// expects JSON-ish `true`/`false` tokens) fits, but being lenient here keeps
-/// the handler robust against the operator-or-user-typed variants.
+/// Coerce bare query strings (`true`/`1`/`yes`/`on`) to `Option<bool>`, since the default
+/// deserializer expects JSON-ish tokens the browser doesn't send.
 pub(crate) fn deserialize_bool_str<'de, D>(de: D) -> std::result::Result<Option<bool>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -108,11 +76,8 @@ where
     Ok(opt.map(|s| matches!(s.as_str(), "true" | "1" | "yes" | "on")))
 }
 
-/// Append an optional `Set-Cookie` header to an already-rendered response.
-/// No-op when `cookie` is `None`. Appends (never replaces) so it composes with
-/// any `Set-Cookie` the response already carries — e.g. attaching the
-/// flash-clear cookie after the CSRF cookie has already been set. A malformed
-/// cookie string is dropped silently.
+/// Append (never replace) an optional `Set-Cookie` so it composes with any cookie the response
+/// already carries. No-op on `None`; a malformed cookie string is dropped silently.
 pub(crate) fn append_set_cookie(resp: &mut Response, cookie: Option<String>) {
     if let Some(value) = cookie {
         if let Ok(hv) = axum::http::HeaderValue::from_str(&value) {
@@ -230,7 +195,7 @@ mod tests {
     fn safe_return_to_rejects_backslash_trickery() {
         let cfg = cfg_with_self_url("https://forseti.example.com");
         // Some browsers normalise `\` as `/` so `/\evil.com` could become
-        // `//evil.com` — must be rejected.
+        // `//evil.com`, must be rejected.
         assert_eq!(safe_return_to(&cfg, "/\\evil.com"), "/");
     }
 

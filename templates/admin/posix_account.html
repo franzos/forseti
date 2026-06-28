@@ -59,6 +59,9 @@
     </div>
 
     <h2 class="font-headline-md text-headline-md text-on-surface mb-stack-sm">SSH keys</h2>
+    <p class="font-body-sm text-body-sm text-on-surface-variant mb-stack-md">
+      Public keys added here are served to the device's sshd (<code>AuthorizedKeysCommand</code>) so this user can <code>ssh</code> in with their key, no per-host <code>authorized_keys</code> file needed. Requires the host's sshd hook (set up automatically by the <code>forseti-unix</code> Guix service; manual sshd config on other distros). Not used for console / PAM login.
+    </p>
 
     {% if !error_message.is_empty() %}
       <div class="bg-error-container border border-error rounded-lg p-3 mb-stack-md">
@@ -121,6 +124,38 @@
                 class="bg-primary text-on-primary font-label-md text-label-md font-bold px-4 py-2 rounded-lg hover:opacity-90 transition-opacity">Add key</button>
       </div>
     </form>
+
+    {% if !teams.is_empty() %}
+      <h2 class="font-headline-md text-headline-md text-on-surface mt-stack-lg mb-stack-sm">Teams</h2>
+      <div class="bg-surface-container-lowest border border-outline-variant rounded-xl overflow-x-auto mb-stack-md">
+        <table class="w-full text-left">
+          <tbody>
+            {% for t in teams %}
+              <tr class="border-t border-outline-variant first:border-t-0">
+                <td class="px-4 py-3 font-body-md text-body-md text-on-surface">{{ t.name }}</td>
+                <td class="px-4 py-3 text-right font-body-sm text-body-sm text-on-surface-variant font-mono">{{ t.org_id }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% endif %}
+
+    {% if !hosts.is_empty() %}
+      <h2 class="font-headline-md text-headline-md text-on-surface mt-stack-lg mb-stack-sm">Reachable hosts</h2>
+      <div class="bg-surface-container-lowest border border-outline-variant rounded-xl overflow-x-auto mb-stack-md">
+        <table class="w-full text-left">
+          <tbody>
+            {% for h in hosts %}
+              <tr class="border-t border-outline-variant first:border-t-0">
+                <td class="px-4 py-3 font-body-md text-body-md text-on-surface font-mono">{{ h.hostname }}</td>
+                <td class="px-4 py-3 text-right font-body-sm text-body-sm text-on-surface-variant font-mono">{{ h.org_id }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% endif %}
 
     <div class="mt-stack-lg">
       <a href="/admin/posix"

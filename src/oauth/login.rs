@@ -13,11 +13,9 @@ pub(crate) struct OAuthLoginQuery {
     login_challenge: String,
 }
 
-/// `/oauth/login?login_challenge=...` — Hydra's redirect target for the
-/// "who is this user?" step. We resolve the Kratos session, check whether
-/// the requested ACR is satisfied, and either accept the challenge against
-/// the current subject or bounce the user to `/login` (with a `return_to`
-/// that comes right back here).
+/// `/oauth/login?login_challenge=...` — Hydra's "who is this user?" redirect
+/// target. Resolves the Kratos session, checks the requested ACR, and either
+/// accepts the challenge or bounces to `/login` with a `return_to` back here.
 pub(crate) async fn oauth_login(
     State(state): State<AppState>,
     Query(query): Query<OAuthLoginQuery>,
@@ -40,11 +38,8 @@ pub(crate) async fn oauth_login(
 
     let session = match session {
         OptionalSession::Ok { session, .. } => *session,
-        // OIDC step-up flows: if the client demands a higher ACR than the
-        // session satisfies, we want to land on /login?aal=aal2. With an
-        // InsufficientAal session we don't yet know the client's ACR
-        // ask — but the result is the same either way (re-auth at AAL2),
-        // so route there directly.
+        // InsufficientAal: we don't know the client's ACR ask yet, but the
+        // outcome is the same either way (re-auth at AAL2), so route there.
         OptionalSession::InsufficientAal => {
             return Redirect::to(&crate::auth::aal2_step_up_url(&self_login_url)).into_response();
         }
@@ -57,9 +52,8 @@ pub(crate) async fn oauth_login(
         }
     };
 
-    // ACR / AAL step-up check. The OIDC client may pass `acr_values=aal2`
-    // (or another stronger ACR). If the current session is weaker, force
-    // a fresh login at the requested AAL before accepting.
+    // ACR / AAL step-up: if the client asks `acr_values=aal2` and the session
+    // is weaker, force a fresh login at the requested AAL before accepting.
     let requested_acrs: Vec<String> = req
         .oidc_context
         .as_ref()
@@ -84,9 +78,8 @@ pub(crate) async fn oauth_login(
         return Redirect::to("/error").into_response();
     }
 
-    // The SDK's `MethodEnum` doesn't impl `Display`; round-trip through serde
-    // to recover the wire-format string (`"password"`, `"oidc"`, …) that we
-    // want to propagate as the `amr` claim.
+    // The SDK's `MethodEnum` has no `Display`; round-trip through serde to
+    // recover the wire string (`"password"`, `"oidc"`, …) for the `amr` claim.
     let amr: Vec<String> = session
         .authentication_methods
         .as_ref()
@@ -104,13 +97,9 @@ pub(crate) async fn oauth_login(
         })
         .unwrap_or_else(|| vec!["pwd".to_string()]);
 
-    // Honour the optional `organization_id=<id>` auth-request parameter
-    // by parsing it out of Hydra's `request_url` (the original
-    // /oauth2/auth URL the client called). When the user is a member,
-    // pre-select that org via the active-org cookie so the
-    // upcoming consent step folds it into the `org` claim. Silent
-    // fallback when the user isn't a member — the cookie keeps its
-    // current value.
+    // Optional `organization_id=<id>` from Hydra's `request_url`: when the
+    // user is a member, pre-select that org via the active-org cookie so
+    // consent folds it into the `org` claim. Silent fallback otherwise.
     let pre_select_org_id = parse_organization_id_param(req.request_url.as_str())
         .filter(|org_id: &String| !org_id.is_empty());
     let mut set_org_cookie: Option<String> = None;
@@ -123,10 +112,8 @@ pub(crate) async fn oauth_login(
                 state.cfg.self_.is_https(),
             ));
         } else {
-            // TODO(M5): emit a proper audit row here once the broader
-            // audit pass lands. For now a tracing::info! is enough to
-            // catch a "wrong org_id pinned in the auth request" misuse
-            // pattern in operator logs.
+            // TODO: emit an audit row here; for now a tracing::info! catches
+            // the "wrong org_id pinned in the auth request" misuse pattern.
             tracing::info!(
                 subject = %subject,
                 organization_id = %org_id,
@@ -161,9 +148,8 @@ pub(crate) async fn oauth_login(
     }
 }
 
-/// Pull `organization_id=<id>` out of Hydra's `request_url`. Hydra
-/// surfaces the original `/oauth2/auth` URL verbatim, so a downstream
-/// app passing `?organization_id=acme` shows up in this string.
+/// Pull `organization_id=<id>` out of Hydra's `request_url` (the verbatim
+/// `/oauth2/auth` URL the downstream app called).
 fn parse_organization_id_param(request_url: &str) -> Option<String> {
     url::Url::parse(request_url)
         .ok()?
@@ -190,9 +176,7 @@ mod tests {
 
     #[test]
     fn invalid_url_returns_none() {
-        // Not a valid absolute URL — `url::Url::parse` rejects this.
         assert_eq!(parse_organization_id_param("not a url"), None);
-        // Empty string also fails to parse.
         assert_eq!(parse_organization_id_param(""), None);
     }
 

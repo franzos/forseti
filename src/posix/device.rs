@@ -1,14 +1,11 @@
-//! Host-authenticated RFC 8628 device-auth endpoints (`/posix/v1/device/*`).
-//!
-//! Mounted on the INTERNAL listener alongside the resolver; both handlers are
-//! gated by [`RequirePosixHost`]. This is the security heart of M2: the
-//! daemon initiates a device flow for a named `username`, a human approves it
-//! in the browser, and Forseti **binds** the approving identity to the named
-//! POSIX account before ever returning `approved` to the host.
+//! Host-authenticated RFC 8628 device-auth endpoints (`/posix/v1/device/*`),
+//! gated by [`RequirePosixHost`]. The daemon initiates a device flow for a
+//! named `username`, a human approves it in the browser, and Forseti binds the
+//! approving identity to the named POSIX account before returning `approved`.
 //!
 //! The binding ([`evaluate_binding`]) is re-run LIVE at the poll that observes
-//! the token — host scope and account state can change between init and
-//! approval, so the init-time check is necessary but never sufficient.
+//! the token: host scope and account state can change between init and approval,
+//! so the init-time check is necessary but never sufficient.
 //!
 //! Codes (`device_code`/`user_code`) and tokens are NEVER logged.
 
@@ -29,12 +26,9 @@ use crate::posix::scope;
 use crate::rate_limit;
 use crate::state::AppState;
 
-/// Second-factor `amr` methods that satisfy a `force_mfa` host (R11). These
-/// are Kratos's method strings as they surface in the OIDC `amr` array; a
-/// `force_mfa` host requires `acr == "aal2"` AND at least one of these
-/// present. `pwd` is deliberately absent — a password alone is never a second
-/// factor. Kept as a const allowlist (not `len(amr) > 1`) so a future Kratos
-/// method can't silently count.
+/// Second-factor `amr` methods that satisfy a `force_mfa` host (R11). `pwd` is
+/// deliberately absent: a password alone is never a second factor. A const
+/// allowlist (not `len(amr) > 1`) so a future Kratos method can't silently count.
 const SECOND_FACTOR_AMR: &[&str] = &[
     "totp",
     "webauthn",
@@ -56,8 +50,8 @@ pub struct DeviceInitRequest {
 struct DeviceInitResponse {
     user_code: String,
     verification_uri: String,
-    /// Omitted entirely for `force_mfa` hosts (R1) — forces manual code entry
-    /// and defeats one-click `verification_uri_complete` phishing.
+    /// Omitted for `force_mfa` hosts (R1): forces manual code entry and defeats
+    /// one-click `verification_uri_complete` phishing.
     #[serde(skip_serializing_if = "Option::is_none")]
     verification_uri_complete: Option<String>,
     interval: i64,
@@ -69,9 +63,9 @@ pub struct DevicePollRequest {
     pub device_code: String,
 }
 
-/// Poll outcome returned to the daemon. `interval` rides along on `pending`
-/// so Forseti owns the daemon-side backoff (R12). `reason` is a coarse,
-/// non-sensitive tag on denial — never a code or token.
+/// Poll outcome returned to the daemon. `interval` rides on `pending` so Forseti
+/// owns the daemon-side backoff (R12). `reason` is a coarse, non-sensitive
+/// denial tag, never a code or token.
 #[derive(Debug, Serialize)]
 #[serde(tag = "status", rename_all = "lowercase")]
 enum DevicePollResponse {
@@ -86,9 +80,8 @@ fn json_error(status: StatusCode) -> Response {
 }
 
 /// The configured PAM client secret, or `None` when unset/empty. An empty
-/// secret would send `client_secret_basic` with a blank password — Hydra
-/// rejects it and the daemon sees a confusing 502, so callers treat a missing
-/// secret as a hard misconfig (500) and never hit Hydra.
+/// secret sends `client_secret_basic` with a blank password (Hydra rejects it),
+/// so callers treat a missing secret as a hard misconfig and never hit Hydra.
 fn require_client_secret(cfg: &crate::config::PosixConfig) -> Option<String> {
     cfg.pam_client_secret
         .as_deref()
@@ -98,11 +91,9 @@ fn require_client_secret(cfg: &crate::config::PosixConfig) -> Option<String> {
 
 // --- rate limit ----------------------------------------------------------
 
-/// Per-IP rate limit on `device/init`. A host-keyed `KeyExtractor` would be
-/// the R12 ideal, but `rate_limit.rs` has no host-id extractor yet (M1
-/// punted). For B we apply a coarse per-IP bucket and Forseti's own
-/// Hydra-side backoff (the daemon honours the `interval` we return) is the
-/// real defense against breaching Hydra's `slow_down`.
+/// Coarse per-IP rate limit on `device/init`; hosts behind one NAT share a
+/// bucket. The real defense against breaching Hydra's `slow_down` is Forseti's
+/// own backoff (the daemon honours the `interval` we return).
 //
 // TODO(R12): replace with a host-id KeyExtractor reading the Basic-auth
 // host_id so one compromised host can't exhaust the bucket for its NAT peers.
@@ -126,10 +117,9 @@ pub fn router() -> Router<AppState> {
 
 // --- device/init ---------------------------------------------------------
 
-/// `POST /posix/v1/device/init {username}` — start a device flow for a named
-/// account on this host. Account must be `enabled` AND visible on the host
-/// under the shared scope decision; a denied/unknown account returns 404 so
-/// the host can't probe which of the two it was.
+/// `POST /posix/v1/device/init {username}`: start a device flow for a named
+/// account on this host. Account must be `enabled` AND visible on the host;
+/// denied/unknown both return 404 so the host can't probe which it was.
 async fn device_init(
     State(state): State<AppState>,
     host: RequirePosixHost,
@@ -139,8 +129,7 @@ async fn device_init(
     let cfg = &state.cfg.posix;
     let username = req.username;
 
-    // 1. Resolve the account; require enabled + visible-on-host. Deny and
-    //    unknown collapse to the same 404 (don't reveal which).
+    // Deny and unknown collapse to the same 404 (don't reveal which).
     let account = match db::account_by_username(&state.db, &username).await {
         Ok(Some(a)) => a,
         Ok(None) => return json_error(StatusCode::NOT_FOUND),
@@ -161,8 +150,6 @@ async fn device_init(
         }
     }
 
-    // 3. Drive Hydra's device-authorization endpoint as the confidential PAM
-    //    client.
     let Some(secret) = require_client_secret(cfg) else {
         tracing::error!(
             "posix device auth is enabled but [posix].pam_client_secret is unset; run posix-init-client or set it"
@@ -179,9 +166,8 @@ async fn device_init(
         }
     };
 
-    // 4. Persist the session, expiry seeded from Hydra's expires_in. A
-    //    user_code/device_code UNIQUE collision (Ok(false)) is a rare Hydra
-    //    clash — reject so the daemon restarts the flow, never 500.
+    // A code UNIQUE collision (Ok(false)) is a rare Hydra clash; reject so the
+    // daemon restarts the flow, never 500.
     let expires_at = (Utc::now() + chrono::Duration::seconds(authz.expires_in)).to_rfc3339();
     match db::insert_device_session(
         &state.db,
@@ -204,7 +190,7 @@ async fn device_init(
         }
     }
 
-    // 5. Audit — hostname + username only, never codes.
+    // Audit: hostname + username only, never codes.
     let ev = AuditEvent::new(action::POSIX_DEVICE_AUTH_INITIATED)
         .target(audit::target_kind::POSIX_ACCOUNT, username.clone())
         .with_ctx(&actx)
@@ -215,7 +201,7 @@ async fn device_init(
         ));
     let _ = audit::log(&state.db, ev).await;
 
-    // 6. Suppress verification_uri_complete for force_mfa hosts (R1).
+    // Suppress verification_uri_complete for force_mfa hosts (R1).
     let verification_uri_complete = if host.force_mfa {
         None
     } else {
@@ -234,9 +220,9 @@ async fn device_init(
 
 // --- device/poll ---------------------------------------------------------
 
-/// `POST /posix/v1/device/poll {device_code}` — poll for the flow's outcome.
+/// `POST /posix/v1/device/poll {device_code}`: poll for the flow's outcome.
 /// The session MUST belong to the authenticated host. On a Hydra token, runs
-/// THE BINDING ([`evaluate_binding`]) before approving.
+/// the binding ([`evaluate_binding`]) before approving.
 async fn device_poll(
     State(state): State<AppState>,
     host: RequirePosixHost,
@@ -246,8 +232,7 @@ async fn device_poll(
     let cfg = &state.cfg.posix;
     let now = Utc::now();
 
-    // 1. Load the session; it must belong to THIS host (else 404 — don't leak
-    //    another host's flow). Opportunistic prune as we read.
+    // Session must belong to THIS host (else 404, don't leak another host's flow).
     let _ = db::lazy_prune_expired(&state.db, &now.to_rfc3339()).await;
     let session = match db::device_session_by_code(&state.db, &req.device_code).await {
         Ok(Some(s)) if s.host_id == host.host_id => s,
@@ -258,8 +243,7 @@ async fn device_poll(
         }
     };
 
-    // Already-terminal sessions return their settled state without re-polling
-    // Hydra (single-use; a replay after approve must not re-approve).
+    // Single-use: a replay after approve returns the settled state, never re-polls.
     match session.status.as_str() {
         device_status::APPROVED => return Json(DevicePollResponse::Approved).into_response(),
         device_status::DENIED => {
@@ -268,13 +252,11 @@ async fn device_poll(
         _ => {}
     }
 
-    // Past expiry → expired (the prune above may already have removed it).
     if session_expired(&session, &now.to_rfc3339()) {
         let _ = db::deny_device_session(&state.db, &session.device_code).await;
         return Json(DevicePollResponse::Expired).into_response();
     }
 
-    // 2. Poll Hydra's token endpoint.
     let Some(secret) = require_client_secret(cfg) else {
         tracing::error!(
             "posix device auth is enabled but [posix].pam_client_secret is unset; run posix-init-client or set it"
@@ -301,8 +283,8 @@ async fn device_poll(
             interval: hydra_interval(false),
         })
         .into_response(),
-        // Forseti owns the backoff: on slow_down we hand the daemon a longer
-        // interval (R12) so it can't push Forseti to breach Hydra's rate.
+        // On slow_down, hand the daemon a longer interval (R12) so it can't
+        // push Forseti to breach Hydra's rate.
         hydra::DeviceTokenOutcome::SlowDown => Json(DevicePollResponse::Pending {
             interval: hydra_interval(true),
         })
@@ -322,9 +304,9 @@ async fn device_poll(
     }
 }
 
-/// THE BINDING entrypoint: validate the id_token, resolve the approver's
-/// account, run [`evaluate_binding`], and atomically approve/deny. Never
-/// double-approves (the atomic `WHERE status='pending'` guard).
+/// Binding entrypoint: validate the id_token, resolve the approver's account,
+/// run [`evaluate_binding`], and atomically approve/deny. The atomic
+/// `WHERE status='pending'` guard prevents a double-approve.
 async fn handle_token(
     state: &AppState,
     actx: &AuditCtx,
@@ -334,7 +316,7 @@ async fn handle_token(
 ) -> Response {
     let cfg = &state.cfg.posix;
 
-    // 1. Validate the id_token (alg-pinned, iss/aud/azp/exp/iat) — Part A.
+    // Validate the id_token: alg-pinned, iss/aud/azp/exp/iat.
     let Some(id_token) = token.id_token.as_deref() else {
         audit_denied(state, actx, host, session, "token_invalid").await;
         return deny_and_respond(state, session, "token_invalid").await;
@@ -360,7 +342,6 @@ async fn handle_token(
         }
     };
 
-    // 2. Resolve the approver's POSIX account by the token subject.
     let account = match db::account_by_identity(&state.db, &claims.sub).await {
         Ok(Some(a)) => a,
         Ok(None) => {
@@ -373,7 +354,7 @@ async fn handle_token(
         }
     };
 
-    // 3. + 4. Live binding: named-target match, enabled, scope, force_mfa.
+    // Live binding: named-target match, enabled, scope, force_mfa.
     let scope_ok = match scope::account_visible_on_host(&state.db, host, &account).await {
         Ok(v) => v,
         Err(e) => {
@@ -402,8 +383,7 @@ async fn handle_token(
         return deny_and_respond(state, session, reason).await;
     }
 
-    // 5. Atomic single-use approve. If it returns false the row was already
-    //    terminal — return its current state, never double-approve.
+    // Atomic single-use approve; false means already terminal, never double-approve.
     match db::approve_device_session(&state.db, &session.device_code, &claims.sub).await {
         Ok(true) => {
             let ev = AuditEvent::new(action::POSIX_DEVICE_AUTH_APPROVED)
@@ -418,8 +398,7 @@ async fn handle_token(
             Json(DevicePollResponse::Approved).into_response()
         }
         Ok(false) => {
-            // Lost the race to a concurrent terminal transition — re-read and
-            // report whatever settled.
+            // Lost the race to a concurrent terminal transition; report what settled.
             match db::device_session_by_code(&state.db, &session.device_code).await {
                 Ok(Some(s)) if s.status == device_status::APPROVED => {
                     Json(DevicePollResponse::Approved).into_response()
@@ -468,9 +447,8 @@ async fn audit_denied(
 
 // --- the pure binding decision -------------------------------------------
 
-/// Everything the binding decides on, pulled out so the decision is a pure,
-/// unit-testable function (no DB, no network). The DB/scope/token I/O happens
-/// in `handle_token`; this is just the rule.
+/// Inputs to the pure binding decision (no DB, no network); the I/O lives in
+/// `handle_token`.
 struct BindingInputs<'a> {
     requested_username: &'a str,
     account_username: &'a str,
@@ -483,10 +461,8 @@ struct BindingInputs<'a> {
     auth_time: Option<i64>,
 }
 
-/// THE BINDING (R4 corrected direction + R11). Returns `Ok(())` to approve or
-/// `Err(reason)` with a coarse, non-sensitive denial tag.
-///
-/// Order, all required:
+/// The binding (R4 + R11). Returns `Ok(())` to approve or `Err(reason)` with a
+/// coarse, non-sensitive denial tag. All required:
 /// 1. The approver IS the named target: `account.username == requested`.
 /// 2. The account is `enabled`.
 /// 3. The account is visible on the host (LIVE scope re-check).
@@ -534,9 +510,8 @@ fn session_expired(session: &DeviceSession, now_rfc3339: &str) -> bool {
     session.expires_at.as_str() < now_rfc3339
 }
 
-/// The interval Forseti hands the daemon. Base 5s (RFC 8628 default); +5s on a
-/// Hydra `slow_down` so the daemon backs off and Forseti's own polling stays
-/// under Hydra's rate (R12).
+/// Daemon poll interval: 5s base (RFC 8628 default), 10s on a Hydra `slow_down`
+/// so Forseti's own polling stays under Hydra's rate (R12).
 fn hydra_interval(slow_down: bool) -> i64 {
     if slow_down {
         10
@@ -609,7 +584,7 @@ mod tests {
 
     #[test]
     fn force_mfa_denies_aal2_without_second_factor() {
-        // acr says aal2 but amr carries only pwd — no real second factor.
+        // acr says aal2 but amr carries only pwd, no real second factor.
         let amr = vec!["pwd".to_string()];
         let mut inputs = base_inputs("alice", "alice", &amr);
         inputs.host_force_mfa = true;

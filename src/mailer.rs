@@ -1,11 +1,6 @@
-//! Forseti-owned SMTP transport for invite + claim-email mail.
-//!
-//! Kratos's courier handles its own self-service mail (verification,
-//! recovery, MFA enrolment). Forseti-originated mail — org invites and
-//! the hand-rolled claim-email verification — goes through this module.
-//! The split exists because Kratos v26 doesn't expose a usable one-off
-//! `POST /admin/courier/messages` endpoint (returns 405), so Forseti
-//! speaks SMTP directly under `[smtp]` config.
+//! Forseti-owned SMTP transport for org-invite + claim-email mail (Kratos's courier handles its own
+//! self-service mail). Forseti speaks SMTP directly because Kratos v26 has no usable one-off
+//! `POST /admin/courier/messages` (returns 405).
 
 use std::time::Duration;
 
@@ -18,7 +13,7 @@ use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 use crate::config::{SelfConfig, SmtpConfig, SmtpScheme};
 
 /// Send a plaintext mail. When `cfg.enabled` is false, logs the
-/// recipient/subject and returns Ok — callers proceed and the underlying
+/// recipient/subject and returns Ok; callers proceed and the underlying
 /// token/code remains accessible via the DB for dev hand-delivery.
 pub async fn send_text(
     cfg: &SmtpConfig,
@@ -75,9 +70,7 @@ pub async fn send_text(
             let tls = tls
                 .build()
                 .map_err(|e| anyhow::anyhow!("smtp tls params: {e}"))?;
-            // Both branches start from `builder_dangerous` so we can
-            // override host/port without lettre's `relay` defaulting to
-            // 25/465. The TLS variant is wired explicitly per scheme.
+            // `builder_dangerous` (not `relay`) so host/port aren't forced to lettre's 25/465 defaults; TLS wired per scheme.
             let kind = if matches!(cfg.scheme, SmtpScheme::Smtps) {
                 Tls::Wrapper(tls)
             } else {
@@ -104,10 +97,7 @@ pub async fn send_text(
         .map_err(|e| anyhow::anyhow!("smtp send failed: {e}"))
 }
 
-/// Warn once that TLS verification is disabled on a TLS scheme. Only reached
-/// for STARTTLS/SMTPS with `[smtp].skip_tls_verify = true` — plaintext is
-/// insecure by definition and doesn't warrant the warning. `Once` keeps it
-/// to a single line no matter how many mails go out.
+/// Warn once (via `Once`) that TLS verification is disabled on a TLS scheme (`skip_tls_verify = true`).
 fn warn_insecure_tls() {
     use std::sync::Once;
     static WARNED: Once = Once::new();

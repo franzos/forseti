@@ -45,14 +45,23 @@ mod bug_regressions;
 #[path = "integration/dcr.rs"]
 mod dcr;
 
+#[path = "integration/kratos_contracts.rs"]
+mod kratos_contracts;
+
 #[path = "integration/login.rs"]
 mod login;
 
 #[path = "integration/logout.rs"]
 mod logout;
 
+#[path = "integration/member_visibility.rs"]
+mod member_visibility;
+
 #[path = "integration/oauth.rs"]
 mod oauth;
+
+#[path = "integration/oidc_contracts.rs"]
+mod oidc_contracts;
 
 #[path = "integration/posix.rs"]
 mod posix;
@@ -68,6 +77,9 @@ mod registration;
 
 #[path = "integration/saml.rs"]
 mod saml;
+
+#[path = "integration/sessions.rs"]
+mod sessions;
 
 #[path = "integration/settings.rs"]
 mod settings;

@@ -1,15 +1,9 @@
-//! Signed `active_org` cookie.
+//! Signed `active_org` cookie carrying the selected org id.
 //!
-//! Carries the currently-selected org id for the signed-in identity.
-//! Delegated to the shared [`crate::signed_cookie`] codec — the salt is
-//! distinct so flash / active_org / app_referrer cookies never share
-//! signing material.
-//!
-//! The cookie is not authoritative on its own: handlers always cross-check
-//! the cookie value against the caller's `organization_members` rows, so a
-//! forged cookie that names an org the user isn't in is treated as
-//! "fall back to first membership". The signature mostly defeats casual
-//! tampering and makes the membership check the only real gate.
+//! Distinct salt so flash / active_org / app_referrer cookies never share
+//! signing material. Not authoritative: handlers cross-check the value
+//! against `organization_members`, so a forged cookie naming an org the
+//! user isn't in falls back to the first membership.
 
 use axum::http::HeaderMap;
 
@@ -28,16 +22,14 @@ fn codec<'a>(ttl_secs: u64, secure: bool) -> SignedCookie<'a> {
     }
 }
 
-/// Read + verify the active-org cookie. Returns the org id when the cookie
-/// is present, well-formed, signed, and inside TTL. Any failure → `None`
-/// (caller falls back to the first membership).
+/// Read + verify the active-org cookie. `None` on any failure (caller falls
+/// back to the first membership).
 pub fn read_active_org_cookie(headers: &HeaderMap, secret: &[u8], ttl_secs: u64) -> Option<String> {
     let payload = codec(ttl_secs, false).decode(secret, headers, unix_seconds_now())?;
     String::from_utf8(payload).ok()
 }
 
 /// Build a `Set-Cookie` header value pinning `org_id` as the active org.
-/// Path `/`, HttpOnly, SameSite=Lax, Secure when Forseti is HTTPS.
 pub fn set_active_org_cookie(secret: &[u8], ttl_secs: u64, org_id: &str, secure: bool) -> String {
     let c = codec(ttl_secs, secure);
     let encoded = c.encode(secret, org_id.as_bytes(), unix_seconds_now());

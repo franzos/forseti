@@ -200,9 +200,6 @@ pub async fn upsert_link(
                     let target = saml_links::table
                         .filter(saml_links::org_id.eq(&o))
                         .filter(saml_links::email.eq(&e));
-                    // Always repoint at the new identity; only overwrite the
-                    // subject when this login carries one, so a subjectless
-                    // relink can't NULL out a previously-stored durable key.
                     match s.as_deref() {
                         Some(subject) => diesel::update(target)
                             .set((

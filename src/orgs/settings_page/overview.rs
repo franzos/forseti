@@ -27,12 +27,9 @@ struct OverviewTemplate {
     is_owner: bool,
     is_default: bool,
     member_count: usize,
-    /// Read-only SSO status (connections are operator-managed at
-    /// `/admin/saml`). `None` when `[saml]` is unconfigured or the org
-    /// has no connection — the card is simply absent.
+    /// Read-only SSO status (operator-managed at `/admin/saml`). `None` when
+    /// `[saml]` is unconfigured or the org has no connection.
     sso: Option<SsoStatus>,
-    /// Pre-built switcher view-model so the top-nav reflects the active
-    /// org without each handler re-loading it.
     nav: orgs::nav::OrgNav,
 }
 
@@ -42,10 +39,9 @@ struct SsoStatus {
     sso_path: String,
 }
 
-/// Read-only SSO status for an org's overview (owner and member views
-/// share this). `None` when `[saml]` is unconfigured or the org has no
-/// connection. Best-effort: a lookup failure logs and yields `None` so a
-/// DB blip never breaks the overview page.
+/// SSO status shared by the owner + member overviews. `None` when `[saml]` is
+/// unconfigured or there's no connection; a lookup failure logs and yields
+/// `None` so a DB blip never breaks the page.
 async fn sso_status(state: &AppState, org: &Org) -> Option<SsoStatus> {
     state.cfg.saml.as_ref()?;
     match crate::saml::db::get_connection(&state.db, &org.id).await {
@@ -117,8 +113,7 @@ async fn render_overview_info(
     let members = orgs::list_members(&state.db, &org.id)
         .await
         .unwrap_or_default();
-    // Bulk-fetch every owner's Kratos identity in one round-trip
-    // (was N+1: one `admin_get_identity` per owner).
+    // One round-trip for all owner identities (avoids an N+1 per owner).
     let owner_ids: Vec<String> = members
         .iter()
         .filter(|m| crate::orgs::is_owner_role(&m.role))
@@ -158,11 +153,10 @@ struct OverviewInfoTemplate {
     org: Org,
     is_default: bool,
     member_count: usize,
-    /// Sorted, unique. Surfaced so members know who to contact for
-    /// management issues without exposing the full roster on this page.
+    /// Sorted, unique. Lets members know who to contact without exposing the
+    /// full roster.
     owner_emails: Vec<String>,
-    /// Same read-only SSO status the owner sees — members are the ones
-    /// who log in via `/sso/{slug}` and need the URL.
+    /// Same SSO status the owner sees; members log in via `/sso/{slug}`.
     sso: Option<SsoStatus>,
     nav: orgs::nav::OrgNav,
 }

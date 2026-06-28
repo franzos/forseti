@@ -44,12 +44,8 @@ pub struct OidcDiscovery {
     pub frontchannel_logout_supported: bool,
 }
 
-/// Fetch Hydra's discovery doc over its public base URL.
-///
-/// Written to match `probe_health` / `list_consent_sessions_by_subject` in
-/// this module: the SDK's `reqwest` is the renamed `ory_reqwest` 0.12 dep,
-/// so we capture the response and check `.status()` rather than chaining
-/// `.error_for_status()` (which would cross the 0.12/0.13 type boundary).
+/// Fetch Hydra's discovery doc. Checks `.status()` manually rather than `.error_for_status()`, which would
+/// cross the `ory_reqwest` 0.12 / reqwest 0.13 type boundary.
 pub async fn fetch(clients: &OryClients, public_url: &str) -> Result<OidcDiscovery> {
     let url = format!(
         "{}/.well-known/openid-configuration",

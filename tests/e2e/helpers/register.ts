@@ -82,16 +82,30 @@ export async function signInAal1(page: Page, email: string, password: string): P
   await page.locator('input[name="identifier"]').fill(email);
   await page.locator('input[name="password"]').fill(password);
   await page.locator('button[name="method"][value="password"]').click();
-  // AAL1 password submit can land in a few places:
-  //   - /                    (no AAL2 required, AAL1 enough)
-  //   - /login?aal=aal2&…    (Kratos asks for step-up immediately)
-  //   - /settings/2fa        (Kratos's privileged-session step-up flow)
-  // Wait for any of those — the test asserts on the resulting URL.
-  await page.waitForURL(
-    (u) =>
-      !u.pathname.startsWith('/login') ||
-      u.search.includes('aal=aal2') ||
-      u.search.includes('refresh=true'),
+  // The password submit settles in one of:
+  //   - off /login            (an AAL1 session is enough; e.g. a member on /)
+  //   - /login?aal=aal2&…     (an explicit step-up was requested)
+  //   - /settings/2fa         (privileged-session step-up flow)
+  //   - /login?flow=… showing the TOTP form: with `highest_available`
+  //     (infra/kratos/kratos.yml) the whoami right after the password submit
+  //     is AAL2-short, so the portal immediately re-inits a second login flow
+  //     for the enrolled identity. The chain never rests on / — it settles on
+  //     the second-factor form — so the visible TOTP input is the only signal
+  //     that the password step advanced.
+  // A single in-page poll covers every case; a real timeout still throws (no
+  // false-green), and there is no losing Promise.race arm left to reject.
+  await page.waitForFunction(
+    () => {
+      const path = window.location.pathname;
+      const search = window.location.search;
+      return (
+        !path.startsWith('/login') ||
+        search.includes('aal=aal2') ||
+        search.includes('refresh=true') ||
+        document.querySelector('input[name="totp_code"]') !== null
+      );
+    },
+    undefined,
     { timeout: 15_000 },
   );
 }

@@ -7,14 +7,9 @@ use unicode_normalization::char::is_combining_mark;
 use unicode_normalization::UnicodeNormalization;
 use unicode_security::skeleton;
 
-/// Default `client_name` denylist baked into the binary. Case-insensitive
-/// substring match — any pattern occurring anywhere in `client_name` causes
-/// the registration to be rejected. Covers our own brand, upstream Ory
-/// brands, common consumer IDPs, AI vendors, and obvious privilege names so
-/// a self-registered client can't pretend to be "Microsoft Login" or
-/// "Forseti Admin" on the consent screen. Operators replace the list wholesale via
-/// `oauth.dcr_reserved_names` in `config.toml`; there is intentionally no
-/// merge-with-extras toggle.
+/// Default `client_name` denylist. Case-insensitive substring match so a
+/// self-registered client can't pose as e.g. "Microsoft Login" on the consent
+/// screen. Operators replace it wholesale via `oauth.dcr_reserved_names`.
 pub const RESERVED_NAMES_DEFAULT: &[&str] = &[
     "ory",
     "hydra",
@@ -37,17 +32,11 @@ pub const RESERVED_NAMES_DEFAULT: &[&str] = &[
     "root",
 ];
 
-/// Case-insensitive substring search for any reserved-name pattern in
-/// `client_name`. Returns the matched pattern when a hit is found (for
-/// logging only — the HTTP response intentionally does not echo it). When
-/// the operator hasn't configured `oauth.dcr_reserved_names`, falls back
-/// to [`RESERVED_NAMES_DEFAULT`].
-///
-/// Inputs are normalised before matching (see [`normalise_for_reserved_check`])
-/// so spoofs like `"Goog\u{200B}le"` (zero-width split), fullwidth
-/// `"ＧＯＯＧＬＥ"`, `"Microsoft\u{00A0}Login"` (NBSP), `"Gööogle"`
-/// (combining diaereses), or `"Gооgle"` (Cyrillic `о` homoglyphs)
-/// collapse to the same skeleton the denylist already covers.
+/// Substring search for any reserved-name pattern in `client_name`, returning
+/// the match (for logging only; the response doesn't echo it). Falls back to
+/// [`RESERVED_NAMES_DEFAULT`] when unconfigured. Inputs are normalised first
+/// (see [`normalise_for_reserved_check`]) so Unicode spoofs collapse to the
+/// covered skeleton.
 pub(super) fn reserved_name_hit(
     configured: &Option<Vec<String>>,
     client_name: &str,
@@ -68,38 +57,22 @@ pub(super) fn reserved_name_hit(
     }
 }
 
-/// Fold a string into the canonical shape used for reserved-name
-/// matching:
+/// Fold a string into the canonical shape for reserved-name matching:
 ///
-/// 1. NFKD: collapses compatibility forms (fullwidth → ASCII,
-///    ligatures → letters, etc) and splits precomposed accented
-///    characters into base + combining mark.
-/// 2. Strip combining marks: `"Göogle"` decomposes to `o` + U+0308
-///    under NFKD; dropping the mark leaves `"Google"`.
-/// 3. Strip zero-width and bidi-control characters so a caller can't
-///    sneak `"Goog\u{200B}le"` past a substring check (the skeleton in
-///    step 5 does NOT strip these).
-/// 4. Collapse any whitespace run (incl. NBSP U+00A0, ideographic space
-///    U+3000, etc) to a single ASCII space.
-/// 5. Lowercase (Unicode-aware via `char::to_lowercase`): the skeleton
-///    in step 6 is case-sensitive (it maps uppercase letters onto
-///    uppercase representatives), so both sides must be lowercased first
-///    for the substring compare to line up against the lowercase denylist.
-/// 6. UTS 39 confusable skeleton (`unicode_security::skeleton`): folds
-///    cross-script homoglyphs (Cyrillic `о`, Greek `ο`, …) onto a single
-///    representative. The steps above feed it a pre-stripped, lowercased
-///    string because the skeleton leaves invisible controls and
-///    whitespace alone and does not case-fold.
+/// 1. NFKD: collapse compatibility forms (fullwidth, ligatures) and split
+///    precomposed accents into base + combining mark.
+/// 2. Strip combining marks (`"Göogle"` → `"Google"`).
+/// 3. Strip zero-width and bidi controls (the step-6 skeleton does not).
+/// 4. Collapse whitespace runs (incl. NBSP, ideographic space) to one space.
+/// 5. Lowercase: the case-sensitive skeleton needs both sides lowered to
+///    line up against the lowercase denylist.
+/// 6. UTS 39 confusable skeleton: fold cross-script homoglyphs.
 ///
-/// Pure function, no allocations beyond the intermediate + output
-/// `String`. Used by `reserved_name_hit` and exercised directly by the
-/// unit tests below.
+/// Order matters: the skeleton leaves invisible controls / whitespace alone
+/// and doesn't case-fold, so steps 3-5 must precede it.
 fn normalise_for_reserved_check(input: &str) -> String {
-    // NFKD (compatibility decomposition) folds fullwidth / ligatures
-    // into their base form AND splits precomposed accents into base +
-    // combining mark — so the combining-mark strip below catches both
-    // `"Go\u{0308}ogle"` (already-decomposed) and `"Göogle"`
-    // (precomposed, which NFKC would keep as `ö`).
+    // NFKD also splits precomposed accents, so the combining-mark strip below
+    // catches both `"Go\u{0308}ogle"` and `"Göogle"`.
     let nfkd: String = input.nfkd().collect();
     let mut stripped = String::with_capacity(nfkd.len());
     let mut last_was_space = false;
@@ -119,16 +92,11 @@ fn normalise_for_reserved_check(input: &str) -> String {
             stripped.push(lc);
         }
     }
-    // UTS 39 skeleton folds homoglyphs but is case-sensitive and leaves
-    // whitespace / invisible controls alone — hence the pre-strip above.
     skeleton(stripped.trim()).collect()
 }
 
-/// Zero-width and bidi-control characters that render as nothing (or
-/// flip rendering direction) and so let an attacker visually-spoof a
-/// reserved name past a substring check. Includes the BOM (U+FEFF), the
-/// zero-width joiner/non-joiner pair, the directional formatting set
-/// (LRE/RLE/PDF/LRO/RLO), and the isolate set (LRI/RLI/FSI/PDI).
+/// Zero-width and bidi-control characters that render as nothing (or flip
+/// direction) and so could spoof a reserved name past a substring check.
 fn is_invisible_control(c: char) -> bool {
     matches!(
         c as u32,
@@ -149,10 +117,8 @@ pub(super) fn truncate_for_audit(s: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    //! Inline tests for the pure pieces of the DCR proxy. The DB- and
-    //! HTTP-touching paths are covered by integration tests against the
-    //! playground; what we want here is fast cargo-test feedback on the
-    //! reserved-name normalisation pipeline (H2).
+    //! Fast cargo-test feedback on the reserved-name normalisation pipeline;
+    //! DB/HTTP paths are covered by the integration suite.
     use super::*;
 
     /// Self-test: a plain ASCII reserved name still trips after the
@@ -177,12 +143,8 @@ mod tests {
         assert_eq!(hit.as_deref(), Some("google"));
     }
 
-    /// NBSP-separated reserved name: U+00A0 is whitespace per Unicode.
-    /// Strict ASCII `contains("microsoft")` would miss because the input
-    /// folds to "microsoft login" (with a regular space), but it would
-    /// have missed `"Microsoft\u{00A0}Login"` end-to-end because the
-    /// substring `"microsoft"` is still present. We're really testing
-    /// that the NBSP doesn't break anything else.
+    /// NBSP-separated reserved name: U+00A0 folds to a regular space without
+    /// breaking the `"microsoft"` match.
     #[test]
     fn reserved_nbsp_separated_is_caught() {
         let hit = reserved_name_hit(&None, "Microsoft\u{00A0}Login");

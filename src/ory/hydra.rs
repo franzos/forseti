@@ -15,10 +15,8 @@ pub async fn get_login_request(
         .map_err(|e| anyhow::anyhow!("hydra get_login_request failed: {e}"))
 }
 
-/// Accept a Hydra login challenge for the given Kratos subject (identity ID).
-/// `amr` / `acr` mirror the OIDC claims downstream relying parties see;
-/// `remember` extends the Hydra login session cookie so subsequent SSO
-/// hits go through without re-prompting Kratos.
+/// Accept a Hydra login challenge for a Kratos subject. `amr`/`acr` mirror the OIDC claims RPs see;
+/// `remember` extends Hydra's login session so subsequent SSO hits skip re-prompting Kratos.
 pub async fn accept_login_request(
     clients: &OryClients,
     challenge: &str,
@@ -48,10 +46,7 @@ pub async fn get_consent_request(
         .map_err(|e| anyhow::anyhow!("hydra get_consent_request failed: {e}"))
 }
 
-/// Accept a Hydra consent challenge with the user's chosen scope grant and
-/// id_token claim payload. The `id_token_session` JSON is folded directly
-/// into Hydra's `session.id_token`; callers compose it based on which
-/// scopes were granted (e.g. `email`, `name`).
+/// Accept a Hydra consent challenge with the granted scopes and id_token claim payload (folded into Hydra's `session.id_token`).
 pub async fn accept_consent_request(
     clients: &OryClients,
     challenge: &str,
@@ -137,13 +132,8 @@ mod device_grant {
         pub interval: i64,
     }
 
-    /// Start the device grant against Hydra's public `/oauth2/device/auth`.
-    ///
-    /// The confidential client MUST authenticate this request — a leaked
-    /// `device_code` is useless without the client credential. The SDK's
-    /// `o_auth2_device_flow` sends no auth, so we POST directly with HTTP
-    /// Basic client auth (`client_secret_basic`). `client_id`/`client_secret`
-    /// are the `forseti-linux-pam` confidential client's.
+    /// Start the device grant against Hydra's public `/oauth2/device/auth`. POSTs directly with HTTP Basic
+    /// client auth because the SDK's `o_auth2_device_flow` sends none, and the confidential client must authenticate.
     pub async fn device_authorization(
         clients: &OryClients,
         client_id: &str,
@@ -210,15 +200,15 @@ mod device_grant {
     /// pattern-match instead of string-sniffing.
     #[derive(Debug, Clone)]
     pub enum DeviceTokenOutcome {
-        /// `authorization_pending` — keep polling at the current interval.
+        /// `authorization_pending`: keep polling at the current interval.
         Pending,
-        /// `slow_down` — Hydra wants a longer interval; back off (+5s per RFC).
+        /// `slow_down`: Hydra wants a longer interval; back off (+5s per RFC).
         SlowDown,
-        /// Approved — the token set is ready.
+        /// Approved: the token set is ready.
         Token(Box<TokenSet>),
-        /// `expired_token` — the device_code is dead; restart the flow.
+        /// `expired_token`: the device_code is dead; restart the flow.
         Expired,
-        /// `access_denied` — the user rejected the request.
+        /// `access_denied`: the user rejected the request.
         Denied,
     }
 
@@ -241,9 +231,8 @@ mod device_grant {
     const DEVICE_CODE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
 
     /// Poll Hydra's public token endpoint for a device_code (RFC 8628 §3.4).
-    /// Client-authenticated (`client_secret_basic`) — the whole point of the
-    /// confidential client is that this leg can't be driven without Forseti's
-    /// credential. NEVER log `device_code` or the returned tokens.
+    /// Client-authenticated (`client_secret_basic`): the confidential client means this leg can't be driven
+    /// without Forseti's credential. NEVER log `device_code` or the returned tokens.
     pub async fn poll_device_token(
         clients: &OryClients,
         client_id: &str,
@@ -304,9 +293,7 @@ mod device_grant {
 
     /// Accept a device user-code verification challenge (Part B entry point).
     /// `PUT /admin/oauth2/auth/requests/device/accept`. Forseti calls this
-    /// from the `device_verify` page after the user types a valid `user_code`;
-    /// Hydra then drives login + consent. Kept here so Part B has the wrapper
-    /// ready — the device_verify handler is Part B work.
+    /// from the `device_verify` page after the user types a valid `user_code`; Hydra then drives login + consent.
     pub async fn accept_user_code_request(
         clients: &OryClients,
         device_challenge: &str,
@@ -323,8 +310,7 @@ mod device_grant {
     // --- id_token verification -------------------------------------------
 
     /// The subset of OIDC id_token claims the device path binds against. The
-    /// token is validated then discarded — these are read once at poll time
-    /// and never persisted (R3).
+    /// token is validated then discarded; these are read once at poll time and never persisted (R3).
     #[derive(Debug, Clone)]
     pub struct IdTokenClaims {
         pub sub: String,
@@ -375,7 +361,7 @@ mod device_grant {
     ///
     /// Validate-and-discard: the returned claims carry only what the binding
     /// needs (`sub`/`acr`/`amr`/`auth_time`); the token itself is never logged
-    /// or persisted (R3 / R10 — no introspection).
+    /// or persisted (R3 / R10, no introspection).
     pub async fn verify_id_token(
         clients: &OryClients,
         id_token: &str,
@@ -409,7 +395,7 @@ mod device_grant {
         // Pin the alg from our side BEFORE trusting the header's. We still read
         // the header's `kid` to select the key, but reject anything whose
         // declared alg isn't RS256 (defeats the `alg: none` / alg-confusion
-        // family — the header can't downgrade us).
+        // family; the header can't downgrade us).
         let header =
             decode_header(id_token).map_err(|e| anyhow::anyhow!("id_token header decode: {e}"))?;
         if header.alg != Algorithm::RS256 {
@@ -459,7 +445,7 @@ mod device_grant {
         // Self-defending aud pin: the PAM client is single-audience by
         // construction, so require `aud` to be EXACTLY our client. jsonwebtoken
         // only checks membership, which would accept a token whose `aud` also
-        // names other parties — reject those here regardless of Hydra config.
+        // names other parties; reject those here regardless of Hydra config.
         match claims.aud.as_slice() {
             [only] if only == client_id => {}
             _ => {
@@ -472,7 +458,7 @@ mod device_grant {
         // azp pin: per OIDC Core §3.1.3.7, `azp` is OPTIONAL and only present
         // when `aud` has multiple values (or differs from the authorized party).
         // Hydra omits it for a single-audience token, so a missing `azp` is
-        // valid — `aud` is already pinned to our client via set_audience. When
+        // valid, since `aud` is already pinned to our client via set_audience. When
         // `azp` IS present it must be our client.
         match claims.azp.as_deref() {
             Some(azp) if azp == client_id => {}
@@ -484,7 +470,7 @@ mod device_grant {
             None => {}
         }
 
-        // Tight iat freshness on top of exp — a replay guard. jsonwebtoken
+        // Tight iat freshness on top of exp, a replay guard. jsonwebtoken
         // doesn't expose iat-max-age, so check it by hand against the claim.
         let iat = extract_iat(id_token)?;
         let now = chrono::Utc::now().timestamp();
@@ -536,9 +522,7 @@ use device_grant::{map_device_token_error, verify_id_token_with_jwks, IdTokenCla
 
 // --- Admin surface ---------------------------------------------------
 
-/// Paginated client list. `page_token` comes from the previous page's
-/// `Link: rel="next"` header. We don't surface paging metadata in the
-/// SDK return; the admin UI keeps things simple (page-size only).
+/// Paginated client list. `page_token` comes from the previous page's `Link: rel="next"` header.
 pub async fn list_clients(
     clients: &OryClients,
     page_size: i64,
@@ -568,9 +552,8 @@ pub async fn create_client(clients: &OryClients, client: OAuth2Client) -> Result
         .map_err(|e| anyhow::anyhow!("hydra create_client failed: {e}"))
 }
 
-/// Replace a client. Hydra's `set_o_auth2_client` is PUT-shaped — the
-/// provided body fully overrides the stored client, so callers should
-/// round-trip via `get_client` first to preserve unrelated fields.
+/// Replace a client. Hydra's `set_o_auth2_client` is PUT-shaped (the body fully overrides the stored client),
+/// so callers should round-trip via `get_client` first to preserve unrelated fields.
 pub async fn update_client(
     clients: &OryClients,
     id: &str,
@@ -587,10 +570,8 @@ pub async fn delete_client(clients: &OryClients, id: &str) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("hydra delete_client failed: {e}"))
 }
 
-/// Rotate a client's secret. Hydra has no dedicated rotate endpoint —
-/// we fetch the client, clear the `client_secret` field, and POST a
-/// JSON Patch that asks Hydra to regenerate it. The response carries
-/// the new plaintext secret (which the admin UI shows once).
+/// Rotate a client's secret. Hydra has no dedicated rotate endpoint, so we POST a JSON Patch asking it to
+/// regenerate `client_secret`. The response carries the new plaintext secret (the admin UI shows it once).
 pub async fn rotate_client_secret(clients: &OryClients, id: &str) -> Result<OAuth2Client> {
     let patch = vec![ory_client::models::JsonPatch {
         from: None,
@@ -603,19 +584,11 @@ pub async fn rotate_client_secret(clients: &OryClients, id: &str) -> Result<OAut
         .map_err(|e| anyhow::anyhow!("hydra rotate_client_secret failed: {e}"))
 }
 
-/// Enumerate Hydra consent sessions that have an active grant for
-/// `subject`. Forseti uses this during account self-deletion to drive
-/// the webhook fan-out; silently capping the list would leave some
-/// downstream apps unaware of the deletion. Pages via Hydra's
-/// `Link: <...>; rel="next"` header until exhausted.
-///
-/// The SDK helper throws away both the Link header and the raw response
-/// body shape, so we drive the request via the SDK's configured
-/// `reqwest::Client` directly. Bounded by [`CONSENT_LIST_MAX_PAGES`] as
-/// a runaway-loop guard — Hydra would have to lie about there being
-/// more pages for this cap to bite.
+/// Enumerate Hydra consent sessions with an active grant for `subject`, paging the `Link: rel="next"` header
+/// until exhausted (drives the account-deletion webhook fan-out, so the list must not be silently capped).
+/// Driven via the raw client because the SDK helper drops the Link header; bounded by [`CONSENT_LIST_MAX_PAGES`].
 const CONSENT_LIST_PAGE_SIZE: i64 = 250;
-const CONSENT_LIST_MAX_PAGES: usize = 50; // 12,500 grants per subject — well past any realistic case.
+const CONSENT_LIST_MAX_PAGES: usize = 50; // 12,500 grants per subject, well past any realistic case.
 
 pub async fn list_consent_sessions_by_subject(
     clients: &OryClients,
@@ -699,9 +672,8 @@ fn next_link(headers: &reqwest::header::HeaderMap) -> Option<String> {
 }
 
 /// Revoke every consent grant for `subject` and invalidate associated
-/// OAuth2 access tokens. Best-effort during account deletion — failures
-/// log and the flow proceeds (the source-of-truth Kratos identity is
-/// what really determines whether the user can sign back in).
+/// OAuth2 access tokens. Best-effort during account deletion: failures log and the flow proceeds (the
+/// source-of-truth Kratos identity determines whether the user can sign back in).
 pub async fn revoke_consent_sessions_for_subject(
     clients: &OryClients,
     subject: &str,
@@ -719,25 +691,25 @@ pub async fn revoke_consent_sessions_for_subject(
 
 /// Revoke all consent grants for a single (subject, client) pair.
 /// Powers the per-app "Revoke access" action on `/settings/authorized-apps`.
-/// Hydra has no per-scope revocation — the user would need to re-consent
-/// with a narrower scope set to reduce a grant.
+/// Hydra has no per-scope revocation; reducing a grant needs the user to re-consent with a narrower scope set.
 pub async fn revoke_consent_sessions_for_client(
     clients: &OryClients,
     subject: &str,
     client_id: &str,
 ) -> Result<()> {
+    // `client` and `all` are mutually exclusive in Hydra v2 (passing both is a 400); with a client named, leave `all` unset.
     o_auth2_api::revoke_o_auth2_consent_sessions(
         &clients.hydra_admin,
         Some(subject),
         Some(client_id),
         None,
-        Some(true),
+        None,
     )
     .await
     .map_err(|e| anyhow::anyhow!("hydra revoke_consent_sessions_for_client failed: {e}"))
 }
 
-/// Health probes — same shape as Kratos.
+/// Health probes, same shape as Kratos.
 pub async fn health_alive(clients: &OryClients) -> Result<()> {
     super::probe_health(&clients.hydra_admin, "/health/alive").await
 }
@@ -754,8 +726,7 @@ pub async fn version(clients: &OryClients) -> Result<String> {
     Ok(v.version)
 }
 
-/// One row of the configuration page's JWKS table — the public signing
-/// keys Hydra advertises at its `jwks_uri`.
+/// One row of the configuration page's JWKS table: the public signing keys Hydra advertises at its `jwks_uri`.
 pub struct JwkSummary {
     pub kid: String,
     pub alg: String,
@@ -783,8 +754,7 @@ pub async fn signing_keys(clients: &OryClients) -> Result<Vec<JwkSummary>> {
         .collect())
 }
 
-/// Generate a random client secret. 40 alphanumerics ≈ 238 bits of
-/// entropy — comfortably above the OAuth2 spec's recommendation.
+/// Generate a random client secret. 40 alphanumerics is about 238 bits of entropy, well above the OAuth2 spec's recommendation.
 fn generate_client_secret() -> String {
     use rand::distr::Alphanumeric;
     use rand::Rng;
@@ -862,8 +832,7 @@ SRZ/w8gQ2ALLGaApskC1zn5ojdqqjTvXWmW9bccCeGYJ8yOu4oWP/QLkNzM4WVKA\n\
 3SmfuVDc+5r3d6JFhgQeOMb1\n\
 -----END PRIVATE KEY-----\n";
 
-    // base64url RSA modulus/exponent for the key above — the JWKS Hydra
-    // would publish for it.
+    // base64url RSA modulus/exponent for the key above (the JWKS Hydra would publish for it).
     const TEST_N: &str = "sFagAvS9K9LidiQz5PXtmsV-2EmGH3O0sVvOYlr_V6QQx7s2fbzLJed9pEGOT0-3-BaXWUqzy9UC5vvRBYdlWAZte6mxcBQGxL78pgWfH-DTUCP8V6QkV_1-BOw4tFNyHWbMiZQKi0A_GoVFkXRtYADocHtTsnq7GkROkKB-AK3HuKGPaQLXbim4qOlWUrCLTWSVie8iEhpZ0sStJFOzNNZb511gBXzYQ6OhPUAbR7qa34gFKoqnzB3dLQ78tNbePsrUmOpfyDR1v03eCbI1knPtdACcRRmFPxq2BhfTRDZmSD8SGB-ZMbFVBDiN4Ixn6fsfXg40Y7Sf_rwJpV8dlw";
     const TEST_E: &str = "AQAB";
     const TEST_KID: &str = "test-kid";
@@ -995,8 +964,7 @@ SRZ/w8gQ2ALLGaApskC1zn5ojdqqjTvXWmW9bccCeGYJ8yOu4oWP/QLkNzM4WVKA\n\
 
     #[test]
     fn id_token_wrong_azp_rejected() {
-        // aud correct (our client) but azp points elsewhere — the
-        // authorized-party pin must still reject.
+        // aud correct (our client) but azp points elsewhere; the authorized-party pin must still reject.
         let claims = TestClaims {
             azp: "evil-client".into(),
             ..TestClaims::default()

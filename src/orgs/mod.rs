@@ -1,22 +1,11 @@
 //! Organizations — data model, membership, active-org resolution.
 //!
-//! OSS ships exactly one "Default" org seeded by the migration; commercial
-//! licenses unlock additional rows. The Default row is real (not synthetic)
-//! so every code path uses the same query shape regardless of tier.
+//! OSS seeds exactly one real "Default" org; commercial licenses unlock more
+//! rows. Every code path uses the same query shape regardless of tier.
 //!
-//! ## Submodule layout
-//!
-//! - `db` — raw diesel queries (read paths + writes).
-//! - `cookie` — signed `active_org` cookie (HMAC-derived key, separate from
-//!   the flash key so cookie reuse doesn't share signing material).
-//! - `settings_page` — `/settings/organization{,s/{slug}}/*` user-facing
-//!   pages: members, branding, create.
-//! - `invite` — invite mint / accept / claim-email flows.
-//! - `nav` — shared nav-dropdown view-model (active org + switcher entries).
-//!
-//! The cross-cutting helpers ([`resolve_admin_scope`], [`active_org`],
-//! [`org_role`]) live here at the module root so admin / oauth / settings
-//! handlers can pull them without depending on internal submodules.
+//! Cross-cutting helpers ([`resolve_admin_scope`], [`active_org`],
+//! [`org_role`]) live at the module root so admin / oauth / settings handlers
+//! can pull them without depending on internal submodules.
 
 pub mod cookie;
 pub mod db;
@@ -24,6 +13,8 @@ pub mod invite;
 pub mod middleware;
 pub mod nav;
 pub mod settings_page;
+pub mod teams;
+pub mod visibility;
 
 use std::str::FromStr;
 
@@ -32,19 +23,17 @@ use axum::http::HeaderMap;
 pub use db::{
     add_member, count_orgs, create_org, delete_org, fetch_invite, find_member, insert_invite,
     list_member_profiles, list_members, list_members_paged, list_memberships,
-    list_memberships_limited, list_org_invites, org_by_id, org_by_slug, remove_member, slugify,
-    suggest_slug, update_branding, update_role, Membership, Org, OrgInvite,
+    list_memberships_limited, list_org_invites, org_by_id, org_by_slug, remove_member,
+    set_member_hidden, set_member_visibility, slugify, suggest_slug, update_branding, update_role,
+    Membership, Org, OrgInvite,
 };
 
 /// Stable PK of the seeded "Default" org. Matches the migration's INSERT.
 pub const DEFAULT_ORG_ID: &str = "default";
 
-/// Available roles in an org. `owner` runs governance; `member` is read-only
-/// for org-scoped resources. Stored as the lowercase string in the DB.
-///
-/// Wire-format strings are the lowercase variant names, produced via
-/// [`Role::as_str`] and parsed via `FromStr` — form-input parsing, DB
-/// string round-tripping, and OIDC claim emission all share that vocabulary.
+/// Org roles. `owner` runs governance; `member` is read-only for org-scoped
+/// resources. Stored / wired as the lowercase variant name via [`Role::as_str`]
+/// and `FromStr` (forms, DB, OIDC claims all share that vocabulary).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
     Owner,
@@ -77,10 +66,8 @@ impl FromStr for Role {
     }
 }
 
-/// `true` iff the DB-row `role` string parses as [`Role::Owner`].
-/// Unknown strings — the DB `CHECK (role IN ('owner', 'member'))`
-/// constraint should make these impossible — fail closed (not owner)
-/// and log so the operator sees the constraint was bypassed.
+/// `true` iff the DB-row `role` parses as [`Role::Owner`]. Unknown strings
+/// (should be impossible given the `CHECK` constraint) fail closed and log.
 pub(crate) fn is_owner_role(s: &str) -> bool {
     match parse_role(s) {
         Some(r) => r == Role::Owner,
@@ -91,18 +78,14 @@ pub(crate) fn is_owner_role(s: &str) -> bool {
     }
 }
 
-/// Identify the admin scope a request runs in.
-///
-/// `Forseti` is the operator-tier surface gated by `admin.allowed_emails` —
-/// the same shape `/admin/*` always had. `Org(...)` is the new
-/// owner-scoped view: an org owner sees their org's clients / identities /
-/// audit rows without the global Forseti-admin privilege.
+/// Admin scope a request runs in. `Forseti` is the operator-tier surface gated
+/// by `admin.allowed_emails`; `Org` is owner-scoped to a single org without
+/// the global Forseti-admin privilege.
 #[derive(Debug, Clone)]
 pub enum AdminScope {
-    /// Forseti-wide admin — full surface.
+    /// Forseti-wide admin (full surface).
     Forseti,
-    /// Org-scoped admin — `?org=<slug>` query param resolved to an org the
-    /// caller owns.
+    /// Org-scoped admin: `?org=<slug>` resolved to an org the caller owns.
     Org { id: String, slug: String },
 }
 
@@ -122,18 +105,13 @@ impl AdminScope {
     }
 }
 
-/// Resolve the currently-active org from a pre-loaded membership list.
-/// Order of resolution:
+/// Resolve the active org from a pre-loaded membership list:
+/// 1. Signed `active_org` cookie, if valid and still a member.
+/// 2. First membership.
+/// 3. `None` when the list is empty.
 ///
-/// 1. Signed `active_org` cookie, if present + valid + the identity is
-///    still a member.
-/// 2. First membership in the list.
-/// 3. `None` when the list is empty (shouldn't happen in practice —
-///    registration auto-joins Default).
-///
-/// Caller is expected to fetch the memberships once and reuse the slice
-/// — every page that renders the nav switcher needs both this and the
-/// full list, so plumbing them through avoids a duplicate DB roundtrip.
+/// Takes a slice so callers that already loaded memberships for the nav
+/// switcher avoid a duplicate DB roundtrip.
 pub fn active_org(
     memberships: &[Membership],
     cookie_secret: &[u8],
@@ -166,25 +144,16 @@ pub async fn is_member(db: &crate::db::DbPool, identity_id: &str, org_id: &str) 
     org_role(db, identity_id, org_id).await.is_some()
 }
 
-/// Lazy "is this identity in any org?" check, called from
-/// [`crate::orgs::middleware::auto_join_default_org`] on every authenticated request.
+/// Auto-join the caller into the Default org if they're in no org yet, called
+/// per authenticated request from [`crate::orgs::middleware::auto_join_default_org`].
+/// Cheap membership probe first; otherwise the race-safe
+/// [`db::auto_join_default_txn`] (role decided inside the txn).
 ///
-/// Cheap path (the common case): one indexed `EXISTS`-shaped probe against
-/// `organization_members`. If the caller already has a row, returns
-/// immediately. Otherwise calls [`db::auto_join_default_txn`] which is
-/// race-safe (txn-wrapped, role decided inside the txn).
+/// Role: first user on a fresh install → `owner`; later registrants on
+/// `admin.allowed_emails` → `owner`; everyone else → `member`.
 ///
-/// Role assignment matches the spec:
-/// - First user on a fresh install (Default org has no members yet) →
-///   `owner` of Default.
-/// - Subsequent registrants whose email is on `admin.allowed_emails` →
-///   `owner` of Default (admin emails get governance in the Default org).
-/// - Everyone else → `member` of Default.
-///
-/// Errors are intentionally swallowed (logged at `warn!`): a transient
-/// DB hiccup on the membership probe must not break the request that
-/// triggered it. The next request retries; the cost is one extra
-/// indexed lookup until the row lands.
+/// Errors are swallowed (logged at `warn!`) so a transient DB hiccup never
+/// breaks the request; the next request retries.
 pub async fn ensure_default_membership(
     db: &crate::db::DbPool,
     cfg: &crate::config::AppConfig,
@@ -215,13 +184,10 @@ pub async fn ensure_default_membership(
     }
 }
 
-/// Decide which role a fresh registration of `email` should land with.
-///
-/// Pure helper (extracted for unit testing): admin allowlist match wins,
-/// then `is_default_empty` decides between owner (first user) and
-/// member. The live code path (`auto_join_default_txn`) calls this
-/// function *inside* a DB transaction so two concurrent first-
-/// registrations can't both observe the table as empty.
+/// Role for a fresh registration of `email`: admin allowlist match wins, then
+/// `is_default_empty` decides owner (first user) vs member. Pure helper;
+/// `auto_join_default_txn` calls it inside a txn so two concurrent first
+/// registrations can't both observe an empty table.
 pub fn pick_default_role(
     admin_cfg: &crate::config::AdminConfig,
     email: &str,
@@ -236,10 +202,8 @@ pub fn pick_default_role(
     Role::Member
 }
 
-/// Outcome of [`resolve_admin_scope`]. Distinct from a `Result<AdminScope,
-/// Response>` because handlers want to render their own error/redirect
-/// surface (the admin layout, not the dashboard error boundary), so the
-/// caller decides how to materialise the rejection.
+/// Outcome of [`resolve_admin_scope`]. Not a `Result<_, Response>` so the
+/// caller can render the rejection in the admin layout itself.
 #[derive(Debug, Clone)]
 pub enum AdminScopeOutcome {
     Resolved(AdminScope),
@@ -249,14 +213,9 @@ pub enum AdminScopeOutcome {
     NotOwner,
 }
 
-/// Resolve the admin scope for a request based on the `?org=<slug>` query
-/// parameter and the caller's identity. Doesn't touch the Forseti-admin
-/// allowlist — callers run [`crate::admin::require_admin`] in parallel
-/// when they need the Forseti-wide path.
-///
-/// Caller is the operator who has already passed `require_admin`'s checks
-/// (session + email allowlist + AAL2). `slug_query` is `?org=...` raw;
-/// `None` / empty → [`AdminScope::Forseti`].
+/// Resolve admin scope from the `?org=<slug>` param and caller identity.
+/// Doesn't touch the Forseti-admin allowlist; `None`/empty slug yields
+/// [`AdminScope::Forseti`]. Caller must already have passed `require_admin`.
 pub async fn resolve_admin_scope(
     db: &crate::db::DbPool,
     identity_id: &str,
@@ -297,7 +256,6 @@ mod tests {
     #[test]
     fn pick_default_role_admin_email_always_owner() {
         let cfg = admin_cfg(&["admin@example.com"]);
-        // Admin email wins regardless of whether the table is empty.
         assert_eq!(
             pick_default_role(&cfg, "admin@example.com", false),
             Role::Owner

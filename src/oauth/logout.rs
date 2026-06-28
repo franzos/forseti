@@ -28,9 +28,8 @@ struct OAuthLogoutConfirmTemplate {
 }
 
 /// `/oauth/logout?logout_challenge=...` — Hydra's RP-initiated logout
-/// landing. We render a confirmation page; the actual tear-down happens on
-/// POST (so a malicious link can't sign a user out without their consent —
-/// previously this GET handler destroyed the session immediately).
+/// landing. Renders a confirmation page; the tear-down happens on POST so a
+/// malicious link can't sign a user out without their consent.
 pub(crate) async fn oauth_logout(
     State(state): State<AppState>,
     Query(query): Query<OAuthLogoutQuery>,
@@ -38,8 +37,7 @@ pub(crate) async fn oauth_logout(
 ) -> Response {
     let challenge = query.logout_challenge;
 
-    // Validate the challenge exists before we render the form. If Hydra
-    // rejects it (expired/missing) bail early — there's no recovery from a
+    // Validate the challenge before rendering: there's no recovery from a
     // confirm-then-submit on a stale challenge.
     if let Err(e) = ory::hydra::get_logout_request(&state.ory, &challenge).await {
         tracing::error!(error = ?e, "hydra get_logout_request failed");
@@ -60,8 +58,7 @@ pub(crate) struct OAuthLogoutForm {
 }
 
 /// POST handler for the `/oauth/logout` confirmation page. Performs the
-/// actual Kratos session tear-down + Hydra accept-logout that the GET
-/// handler used to do.
+/// Kratos session tear-down + Hydra accept-logout.
 pub(crate) async fn oauth_logout_submit(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -72,14 +69,12 @@ pub(crate) async fn oauth_logout_submit(
     }
     let challenge = form.logout_challenge;
 
-    // Best-effort Kratos session teardown. The user might already be signed
-    // out (no cookie), in which case we just accept the Hydra challenge.
+    // Best-effort Kratos teardown; the user may already be signed out.
     let cookie = cookies::cookie_header(&headers);
     if !cookie.is_empty() {
         if let Ok(Some(url)) = ory::kratos::fetch_logout_url(&state.ory, &cookie).await {
-            // Fire-and-forget: hit the URL server-side to actually destroy
-            // the session (we don't follow Kratos's post-logout redirect —
-            // Hydra's redirect is authoritative for this flow).
+            // Hit server-side to destroy the session; we don't follow Kratos's
+            // post-logout redirect since Hydra's is authoritative here.
             let _ = ory::kratos::hit_logout_url(&state.ory, &url, Some(&cookie)).await;
         }
     }

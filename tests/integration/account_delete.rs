@@ -150,6 +150,75 @@ async fn account_delete_saga_removes_kratos_identity() {
     // No cleanup — the identity is already gone.
 }
 
+/// The deletion saga must also revoke the user's Hydra consent sessions, so a
+/// stale refresh token can't outlive the account. `account_delete_saga_*`
+/// proves the Kratos identity is gone; this proves the OAuth side
+/// (`revoke_consent_sessions_for_subject`) is wiped too.
+#[tokio::test]
+async fn account_delete_saga_revokes_hydra_consent_sessions() {
+    assert!(portal_reachable().await);
+
+    let user = register_test_user("acct-delete-consent").await;
+    let identity_id = user.identity_id.clone();
+    let email = user.email.clone();
+
+    // 1. Establish a remembered Hydra consent grant for this subject.
+    let (client_id, _secret, redirect_uri) =
+        hydra_create_test_client(&["openid", "offline", "email"]).await;
+    let auth_url = oauth_auth_url(&client_id, &redirect_uri, "openid offline email", "");
+    let (consent_challenge, csrf, _body) = drive_to_consent(&user.client, &auth_url).await;
+    let _code = consent_accept_chase_code(
+        &user.manual_client,
+        &csrf,
+        &consent_challenge,
+        &["openid", "offline", "email"],
+        true,
+    )
+    .await
+    .expect("authorization code on callback");
+    assert!(
+        hydra_consent_session_count(&identity_id).await >= 1,
+        "precondition: a remembered consent session should exist before delete"
+    );
+
+    // 2. Run the delete saga (privileged session is fresh post-registration).
+    let res = user
+        .client
+        .get(format!("{PORTAL}/settings/account/delete"))
+        .send()
+        .await
+        .expect("GET /settings/account/delete");
+    assert!(res.status().is_success());
+    let post_url = res.url().clone();
+    let body = res.text().await.expect("confirm body");
+    let csrf = extract_form_csrf(&body).expect("_csrf on confirm page");
+    let res = user
+        .client
+        .post(post_url)
+        .form(&[("_csrf", csrf.as_str()), ("confirm_email", email.as_str())])
+        .send()
+        .await
+        .expect("POST /settings/account/delete");
+    assert!(
+        res.url().to_string().contains("/login"),
+        "saga should land on /login"
+    );
+
+    // 3. Both the identity and its Hydra consent sessions must be gone.
+    assert!(
+        identity_id_by_email(&email).await.is_none(),
+        "kratos identity should be deleted"
+    );
+    assert_eq!(
+        hydra_consent_session_count(&identity_id).await,
+        0,
+        "delete saga must revoke all Hydra consent sessions for the subject"
+    );
+
+    hydra_delete_client(&client_id).await;
+    // No identity cleanup — already deleted.
+}
+
 /// Pull a `_csrf` hidden input value out of a settings page render. Settings
 /// pages name their CSRF token `_csrf` (portal-owned forms — see
 /// `src/csrf.rs`); the Kratos-driven forms use `csrf_token` and have a

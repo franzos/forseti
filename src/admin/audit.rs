@@ -1,21 +1,11 @@
-//! `/admin/audit` — append-only audit event browser.
+//! `/admin/audit`: append-only audit event browser over `audit_events`.
 //!
-//! Queries the `audit_events` table populated by `src/audit.rs`. Replaces
-//! the prior session-scrape stand-in entirely.
+//! Master/detail. List filters via query string:
 //!
-//! Master/detail: the summary table at `/admin/audit` is scan-friendly
-//! (when, severity, action, actor, target kind+id linked to its own
-//! admin page, short event id linked to detail) and
-//! `/admin/audit/{id}` carries the full metadata pretty-printed, the
-//! resolved target label (identity email / client name), and the
-//! request context (IP hash, user agent, request id).
-//!
-//! Filters supported on the list via query string:
-//!
-//! - `email` — substring match against `actor_email`
-//! - `action` — substring match against `action` (uses `LIKE %x%`)
-//! - `severity` — exact match (`info` / `warning` / `error` / `critical`)
-//! - `since` — RFC3339 / `datetime-local` shape; rows older are filtered out
+//! - `email`: substring match against `actor_email`
+//! - `action`: substring match against `action` (`LIKE %x%`)
+//! - `severity`: exact match (`info` / `warning` / `error` / `critical`)
+//! - `since`: RFC3339 / `datetime-local`; older rows filtered out
 
 use axum::{
     extract::{Path, Query, State},
@@ -32,8 +22,7 @@ use crate::page_chrome::PageChrome;
 use crate::render::render;
 use crate::state::AppState;
 
-/// One row in the audit summary table. Distilled so the template can
-/// iterate without computing links / labels per cell.
+/// One row in the audit summary table.
 pub(crate) struct AuditRow {
     pub id: String,
     pub when: String,
@@ -49,8 +38,7 @@ pub(crate) struct AuditRow {
     pub target_id: String,
     /// Eight-char prefix for display; full id in the `title` tooltip.
     pub target_id_short: String,
-    /// URL to the target's own admin page (`/admin/identities/{id}` etc.)
-    /// or empty when the target has no detail page (sessions).
+    /// URL to the target's own admin page; empty when none (e.g. sessions).
     pub target_link: String,
 }
 
@@ -67,12 +55,10 @@ pub(crate) struct AuditDetail {
     pub actor_id: String,
     pub target_kind: String,
     pub target_id: String,
-    /// Resolved human-readable label for the target (identity email,
-    /// client name) — falls back to `target_id` when unresolvable
-    /// (target deleted, or kind we don't lookup like `session`).
+    /// Resolved label (identity email / client name); falls back to `target_id`
+    /// when unresolvable (deleted, or a kind we don't look up like `session`).
     pub target_label: String,
-    /// True when the target's own admin page is still reachable. Drives
-    /// link-vs-plain-text rendering in the template.
+    /// True when the target's own admin page is still reachable.
     pub target_exists: bool,
     pub target_link: String,
     pub org_id: String,
@@ -94,21 +80,15 @@ struct AuditTemplate {
     filter_action: String,
     filter_severity: String,
     filter_since: String,
-    /// Inline parse error for `since`. Empty on success; the template
-    /// renders a banner when non-empty and the filter is ignored for
-    /// that request.
+    /// Inline parse error for `since`; when non-empty the filter is ignored.
     filter_error: String,
-    /// 1-indexed page currently rendered. Carried into prev/next link
-    /// builders below.
+    /// 1-indexed page currently rendered.
     page: i64,
-    /// Current page's offset (`(page-1) * page_size`); kept on the
-    /// view so the template can render "Showing N–M of T".
+    /// Current page's offset (`(page-1) * page_size`).
     offset: i64,
     has_prev: bool,
     has_next: bool,
-    /// Pre-rendered query strings for the prev/next links, including
-    /// every current filter. Keeps the template free of conditional
-    /// `&key=value` glue.
+    /// Pre-rendered query strings for the prev/next links, with every filter.
     prev_query: String,
     next_query: String,
 }
@@ -131,12 +111,9 @@ pub struct AuditQuery {
     severity: Option<String>,
     #[serde(default)]
     since: Option<String>,
-    /// 1-indexed page. Missing / `<1` falls back to page 1. Page size is
-    /// fixed at `AUDIT_PAGE_SIZE`; offset is derived from this so the
-    /// URL stays stable when newer rows are appended (the audit table
-    /// is sorted newest-first, so an offset-based pager will drift —
-    /// acceptable for an audit log where operators usually narrow with
-    /// filters before paging).
+    /// 1-indexed page; missing / `<1` falls back to page 1. The table is
+    /// sorted newest-first, so an offset-based pager drifts when rows are
+    /// appended; acceptable since operators usually filter before paging.
     #[serde(default)]
     page: Option<i64>,
 }
@@ -172,10 +149,8 @@ pub async fn show(
         }
     };
 
-    // `action_prefix` lets the operator type `oauth.client.` and see
-    // every client-admin event; for exact-match the operator can include
-    // the full action. `actor_email_contains` is pushed into SQL so
-    // pagination doesn't silently drop matches past `LIMIT 200`.
+    // `actor_email_contains` is pushed into SQL so pagination doesn't silently
+    // drop matches past the LIMIT.
     let filter = audit::AuditFilter {
         actor_email_contains: if filter_email.trim().is_empty() {
             None
@@ -193,9 +168,7 @@ pub async fn show(
             Some(filter_severity.clone())
         },
         since: since_dt,
-        // Org-scoped admin (`?org=<slug>`) restricts the audit view to
-        // rows tagged with that org's id; the `audit_events.org_id`
-        // column is already populated for org-scoped events.
+        // Org-scoped: restrict to rows tagged with that org's id.
         org_id: scope.org_id().map(str::to_string),
         limit: AUDIT_PAGE_SIZE,
         offset,
@@ -248,9 +221,8 @@ pub async fn show(
     })
 }
 
-/// Build the `email=&action=&...` part of the URL — everything except
-/// `page`. Empty filters are dropped so the URL stays clean when no
-/// filters are set. Used by the prev/next link builders.
+/// Build the filter part of the URL (everything except `page`). Empty filters
+/// are dropped.
 fn filter_query_string(
     email: &str,
     action: &str,
@@ -314,9 +286,8 @@ pub async fn show_one(
         }
     };
 
-    // Org-scoped: reject rows tagged to a different org (or untagged
-    // Forseti-wide rows). 404-shape so an org-scoped admin can't probe
-    // for the existence of sibling-org audit IDs.
+    // Org-scoped: 404-shape on a foreign-org row so an org-scoped admin can't
+    // probe for the existence of sibling-org audit IDs.
     if let Some(scope_org) = scope.org_id() {
         let row_org = raw.org_id.as_deref().unwrap_or("");
         if row_org != scope_org {
@@ -338,9 +309,8 @@ pub async fn show_one(
     })
 }
 
-/// Project one DB row into the summary view-model. No external lookups
-/// here — would explode into O(N) Hydra/Kratos calls for a 200-row page.
-/// The detail view does the resolution.
+/// Project one DB row into the summary view-model. No external lookups: those
+/// would be O(N) Hydra/Kratos calls per page. The detail view resolves labels.
 fn project_summary_row(r: audit::AuditRow) -> AuditRow {
     let success = r.succeeded();
     let target_kind = r.target_kind.clone().unwrap_or_default();
@@ -363,10 +333,8 @@ fn project_summary_row(r: audit::AuditRow) -> AuditRow {
     }
 }
 
-/// Detail-row projection. Resolves the target label via Hydra/Kratos so
-/// the detail page shows "e2e-test-app" instead of a bare client UUID
-/// (same idea the webhooks detail page uses). Falls back to the raw id
-/// when the target was deleted.
+/// Detail-row projection. Resolves the target label via Hydra/Kratos (e.g. a
+/// client name instead of a bare UUID), falling back to the raw id if deleted.
 async fn project_detail_row(state: &AppState, r: audit::AuditRow) -> AuditDetail {
     let target_kind = r.target_kind.clone().unwrap_or_default();
     let target_id = r.target_id.clone().unwrap_or_default();
@@ -408,9 +376,8 @@ async fn project_detail_row(state: &AppState, r: audit::AuditRow) -> AuditDetail
     }
 }
 
-/// Resolve a friendly label for the event's target. Lookups are bounded
-/// — at most one Hydra or Kratos admin call per detail page render —
-/// so latency stays predictable. Returns `(label, exists)`.
+/// Resolve a friendly label for the event's target. At most one Hydra or Kratos
+/// admin call per render. Returns `(label, exists)`.
 async fn resolve_target_label(
     state: &AppState,
     target_kind: &str,
@@ -452,15 +419,12 @@ async fn resolve_target_label(
                 Err(_) => (target_id.to_string(), false),
             }
         }
-        // Sessions don't have their own admin detail page, and webhook
-        // outbox rows are matched by id (no extra label to resolve).
-        // Falling through to the raw id is fine for both.
+        // Sessions/webhook rows have no label to resolve; raw id is fine.
         _ => (target_id.to_string(), true),
     }
 }
 
-/// Map `target_kind` → URL of the target's own admin detail page.
-/// Returns empty when no detail page exists.
+/// URL of the target's own admin detail page; empty when none exists.
 fn target_admin_link(target_kind: &str, target_id: &str) -> String {
     if target_id.is_empty() {
         return String::new();
@@ -478,12 +442,10 @@ fn short_id(id: &str) -> String {
     id.chars().take(8).collect()
 }
 
-/// Parse the various `since` shapes (`datetime-local` with/without
-/// seconds, full RFC3339) into a typed UTC timestamp. The admin filter
-/// rejects anything else with an inline banner; the audit query layer
-/// (`AuditFilter::since: Option<DateTime<Utc>>`) won't accept opaque
-/// strings, so a non-RFC3339 input can no longer reach the SQL
-/// comparison and silently return a lexicographically-wrong row set.
+/// Parse the `since` shapes (`datetime-local` with/without seconds, RFC3339)
+/// into a typed UTC timestamp. Parsing here (rather than passing a string to
+/// SQL) stops a non-RFC3339 input from reaching the comparison and silently
+/// returning a lexicographically-wrong row set.
 fn parse_since(s: &str) -> Result<chrono::DateTime<chrono::Utc>, chrono::ParseError> {
     if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
         return Ok(dt.with_timezone(&chrono::Utc));
@@ -502,8 +464,6 @@ fn parse_since(s: &str) -> Result<chrono::DateTime<chrono::Utc>, chrono::ParseEr
 mod tests {
     use super::*;
 
-    // --- parse_since -------------------------------------------------------
-
     #[test]
     fn parse_since_accepts_rfc3339() {
         let dt = parse_since("2025-01-01T12:30:00Z").unwrap();
@@ -515,14 +475,12 @@ mod tests {
 
     #[test]
     fn parse_since_pads_datetime_local_without_seconds() {
-        // `datetime-local` input shape: `YYYY-MM-DDTHH:MM` — 16 chars.
         let dt = parse_since("2025-01-01T12:30").unwrap();
         assert_eq!(dt.format("%H:%M:%S").to_string(), "12:30:00");
     }
 
     #[test]
     fn parse_since_pads_datetime_local_with_seconds() {
-        // `YYYY-MM-DDTHH:MM:SS` (19 chars, no Z) → append Z.
         let dt = parse_since("2025-01-01T12:30:45").unwrap();
         assert_eq!(dt.format("%H:%M:%S").to_string(), "12:30:45");
     }
@@ -533,8 +491,6 @@ mod tests {
         assert!(parse_since("").is_err());
         assert!(parse_since("2025-13-01T00:00:00Z").is_err());
     }
-
-    // --- target_admin_link -------------------------------------------------
 
     #[test]
     fn target_admin_link_identity() {
@@ -563,8 +519,6 @@ mod tests {
     fn target_admin_link_empty_id() {
         assert_eq!(target_admin_link(audit::target_kind::IDENTITY, ""), "");
     }
-
-    // --- short_id ----------------------------------------------------------
 
     #[test]
     fn short_id_truncates_to_eight() {

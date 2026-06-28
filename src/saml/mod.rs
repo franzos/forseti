@@ -15,8 +15,7 @@ use axum::Router;
 use crate::signed_cookie::SignedCookie;
 use crate::state::AppState;
 
-/// Mounted by `app::run` ONLY when `[saml]` is configured — no config,
-/// no routes, zero footprint.
+/// Mounted by `app::run` only when `[saml]` is configured.
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/sso/{slug}", get(flow::start))
