@@ -250,6 +250,26 @@ pub(crate) struct OAuthConsentForm {
     #[serde(default, rename = "grant_scope")]
     grant_scope: Vec<String>,
     remember: Option<String>,
+    remember_account: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ConsentSwitchForm {
+    consent_challenge: String,
+    identity_id: String,
+}
+
+/// Switch to a remembered account from the consent screen: restart the SAME
+/// OAuth flow (so the downstream app still completes) with a forced
+/// `prompt=login` and the target as `login_hint`, after tearing down the
+/// current session.
+pub(crate) async fn consent_switch(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    actx: AuditCtx,
+    CsrfForm(form): CsrfForm<ConsentSwitchForm>,
+) -> Response {
+    switch_account(&state, &headers, &actx, &form.consent_challenge, Some(&form.identity_id)).await
 }
 
 pub(crate) async fn oauth_consent_submit(
@@ -259,7 +279,7 @@ pub(crate) async fn oauth_consent_submit(
     CsrfForm(form): CsrfForm<OAuthConsentForm>,
 ) -> Response {
     if form.decision == "switch_account" {
-        return switch_account(&state, &headers, &actx, &form.consent_challenge).await;
+        return switch_account(&state, &headers, &actx, &form.consent_challenge, None).await;
     }
 
     let remember = form.remember.as_deref() == Some("true");
@@ -342,10 +362,20 @@ pub(crate) async fn oauth_consent_submit(
     )
     .await;
 
-    let redirect = match outcome {
+    let mut redirect = match outcome {
         FinalizeOutcome::Granted { redirect } => redirect,
         FinalizeOutcome::RedirectedToError { redirect } => return redirect,
     };
+
+    if form.remember_account.as_deref() == Some("true") && !subject.is_empty() {
+        let ttl = state.cfg.accounts.known_accounts_cookie_ttl_seconds;
+        let ids = crate::accounts::cookie::read_known_account_ids(&headers, &state.cookie_secret, ttl);
+        let next = crate::accounts::cookie::add_mru(ids, &subject, crate::accounts::cookie::KNOWN_ACCOUNTS_CAP);
+        let set_cookie = crate::accounts::cookie::set_known_accounts_cookie(
+            &state.cookie_secret, ttl, &next, state.cfg.self_.is_https(),
+        );
+        crate::web::append_set_cookie(&mut redirect, Some(set_cookie));
+    }
 
     let actor_email = lookup_identity_email(&state, &subject).await;
     let mut ev = AuditEvent::new(action::OAUTH_CONSENT_GRANTED)
@@ -389,6 +419,7 @@ async fn switch_account(
     headers: &axum::http::HeaderMap,
     actx: &AuditCtx,
     challenge: &str,
+    login_hint: Option<&str>,
 ) -> Response {
     let req = match ory::hydra::get_consent_request(&state.ory, challenge).await {
         Ok(r) => r,
@@ -418,7 +449,7 @@ async fn switch_account(
     }
     let _ = audit::log(&state.db, ev).await;
 
-    match with_prompt_login(&request_url, None) {
+    match with_prompt_login(&request_url, login_hint) {
         Some(target) => Redirect::to(&target).into_response(),
         None => Redirect::to("/login").into_response(),
     }
