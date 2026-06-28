@@ -24,9 +24,7 @@
 //! who land here via `?org=<slug>` get a 403 from `require_admin`.
 
 use axum::extract::{Path, State};
-use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Redirect, Response};
-use axum_extra::extract::Form;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{Duration, Utc};
 use diesel::prelude::*;
@@ -35,8 +33,9 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::admin::{render_admin_error, AdminSection, ConfirmForm, ConfirmTemplate};
-use crate::audit::{self, action, target_kind, AuditCtx, AuditEvent};
+use crate::audit::{self, action, target_kind, AuditCtx};
 use crate::audit_metadata;
+use crate::csrf::CsrfForm;
 use crate::db_interact;
 use crate::extractors::{Csrf, RequireAdmin};
 use crate::flash::{self, SecretReveal};
@@ -221,8 +220,6 @@ pub async fn new(admin: RequireAdmin, csrf: Csrf) -> Response {
 
 #[derive(Debug, Deserialize)]
 pub struct IssueForm {
-    #[serde(rename = "_csrf")]
-    csrf: Option<String>,
     #[serde(default)]
     note: String,
     /// Blank → no expiry. Otherwise parsed as i64 hours.
@@ -235,16 +232,12 @@ pub struct IssueForm {
 
 pub async fn issue(
     State(state): State<AppState>,
-    headers: HeaderMap,
     actx: AuditCtx,
     admin: RequireAdmin,
     csrf: Csrf,
-    Form(form): Form<IssueForm>,
+    CsrfForm(form): CsrfForm<IssueForm>,
 ) -> Response {
     let ctx = admin.ctx;
-    if let Some(resp) = crate::extractors::verify_csrf_or_forbid(&headers, form.csrf.as_deref()) {
-        return resp;
-    }
 
     let rerender = |error_message: String| -> Response {
         let chrome = ctx.chrome(&csrf);
@@ -319,10 +312,8 @@ pub async fn issue(
 
     let _ = audit::log(
         &state.db,
-        AuditEvent::new(action::OAUTH_CLIENT_DCR_IAT_ISSUED)
-            .actor_admin(&ctx.identity_id, &ctx.email)
+        ctx.audit_event(action::OAUTH_CLIENT_DCR_IAT_ISSUED, &actx)
             .target(target_kind::DCR_IAT, id)
-            .with_ctx(&actx)
             .metadata(audit_metadata!(
                 "expires_at" => expires_at.unwrap_or_default(),
                 "max_uses" => max_uses.map(|n| n.to_string()).unwrap_or_else(|| "unlimited".to_string()),
@@ -373,17 +364,13 @@ pub async fn revoke_confirm(Path(id): Path<String>, admin: RequireAdmin, csrf: C
 pub async fn revoke(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    headers: HeaderMap,
     actx: AuditCtx,
     admin: RequireAdmin,
-    Form(form): Form<ConfirmForm>,
+    CsrfForm(form): CsrfForm<ConfirmForm>,
 ) -> Response {
     let ctx = admin.ctx;
-    if let Some(resp) = crate::extractors::verify_csrf_or_forbid(&headers, form.csrf.as_deref()) {
-        return resp;
-    }
-    if !form.confirmed() {
-        return Redirect::to("/admin/dcr-tokens").into_response();
+    if let Some(r) = form.bounce_unless_confirmed("/admin/dcr-tokens") {
+        return r;
     }
 
     let now = Utc::now().to_rfc3339();
@@ -406,10 +393,8 @@ pub async fn revoke(
         Ok(_) => {
             let _ = audit::log(
                 &state.db,
-                AuditEvent::new(action::OAUTH_CLIENT_DCR_IAT_REVOKED)
-                    .actor_admin(&ctx.identity_id, &ctx.email)
+                ctx.audit_event(action::OAUTH_CLIENT_DCR_IAT_REVOKED, &actx)
                     .target(target_kind::DCR_IAT, id)
-                    .with_ctx(&actx)
                     .critical(),
             )
             .await;

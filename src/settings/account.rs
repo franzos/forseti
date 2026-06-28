@@ -12,7 +12,6 @@ use axum::extract::{Query, State};
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum_extra::extract::cookie::{Cookie, SameSite};
-use axum_extra::extract::Form;
 use chrono::Utc;
 use serde::Deserialize;
 use uuid::Uuid;
@@ -109,8 +108,6 @@ pub(crate) async fn settings_account_delete(
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct DeleteForm {
-    #[serde(rename = "_csrf")]
-    pub(crate) csrf: Option<String>,
     /// Typed-email confirmation so a stray click can't trigger the delete.
     #[serde(default)]
     pub(crate) confirm_email: String,
@@ -123,12 +120,8 @@ pub(crate) async fn settings_account_delete_submit(
     headers: HeaderMap,
     sess: crate::extractors::RequireSession,
     actx: AuditCtx,
-    Form(form): Form<DeleteForm>,
+    csrf::CsrfForm(form): csrf::CsrfForm<DeleteForm>,
 ) -> Response {
-    if let Some(resp) = crate::extractors::verify_csrf_or_forbid(&headers, form.csrf.as_deref()) {
-        return resp;
-    }
-
     // Re-run the privileged gate in case the window lapsed between confirm and
     // submit.
     let session =

@@ -118,6 +118,76 @@ pub async fn get_flow(
     Ok(FlowFetch::Ok(Box::new(value)))
 }
 
+/// Classified result of resolving a self-service flow from the request's
+/// `?flow=` id. Lets the four self-service handlers (login, registration,
+/// recovery, verification) and the settings sub-page gate share the
+/// fetch + 404/410/403 mapping while each keeps its own redirects: callers
+/// build the (CSRF-attaching, param-carrying, settings-specific) responses
+/// themselves, which differ enough that folding them in here would change
+/// behaviour (e.g. login attaches a CSRF cookie on `Init` but not `Reinit`).
+pub enum FlowOutcome {
+    /// No flow id present: start a fresh browser flow.
+    Init,
+    /// Flow fetched; render it.
+    Ready(Box<serde_json::Value>),
+    /// Flow unknown/expired (404/410): re-init the browser flow.
+    Reinit,
+    /// Settings-flow 403: privileged step-up required (see [`PrivilegedReason`]).
+    Privileged(PrivilegedReason),
+    /// Transport/upstream failure: render an error boundary.
+    Error(anyhow::Error),
+}
+
+/// Resolve the `?flow=` id into a [`FlowOutcome`]: `None` short-circuits to
+/// [`FlowOutcome::Init`]; otherwise [`get_flow`] runs and its [`FlowFetch`]
+/// (or transport error) is mapped to the matching variant.
+pub async fn resolve_flow(
+    clients: &OryClients,
+    kind: FlowKind,
+    flow_id: Option<&str>,
+    cookie: &str,
+) -> FlowOutcome {
+    let Some(flow_id) = flow_id else {
+        return FlowOutcome::Init;
+    };
+    match get_flow(clients, kind, flow_id, cookie).await {
+        Ok(FlowFetch::Ok(flow)) => FlowOutcome::Ready(flow),
+        Ok(FlowFetch::Gone) => FlowOutcome::Reinit,
+        Ok(FlowFetch::PrivilegedRequired(reason)) => FlowOutcome::Privileged(reason),
+        Err(e) => FlowOutcome::Error(e),
+    }
+}
+
+/// POST a self-service flow submission to its `ui.action`, forwarding the
+/// user's cookie. Used for server-side flow completion (e.g. verification's
+/// auto-submit of the already-known email). `Err` on transport failure or any
+/// non-2xx, so callers can fall through to rendering the form unchanged.
+pub async fn submit_flow(
+    clients: &OryClients,
+    action: &str,
+    body: &serde_json::Value,
+    cookie: &str,
+) -> Result<()> {
+    let resp = clients
+        .kratos_public
+        .client
+        .post(action)
+        .header(reqwest::header::ACCEPT, "application/json")
+        .header(reqwest::header::COOKIE, cookie)
+        .json(body)
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("kratos submit_flow transport error: {e}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(anyhow::anyhow!(
+            "kratos submit_flow returned {status}: {body}"
+        ));
+    }
+    Ok(())
+}
+
 /// Build the browser redirect URL that starts a new Kratos browser flow; Kratos creates the flow, sets its
 /// continuity cookie, and 303s back to Forseti with `?flow=<id>`. `return_to` lands the user back on the original page.
 pub fn browser_init_url(kind: FlowKind, public_url: &str, return_to: Option<&str>) -> String {

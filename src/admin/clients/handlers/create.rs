@@ -5,15 +5,15 @@ use axum::{
     http::HeaderMap,
     response::{IntoResponse, Redirect, Response},
 };
-use axum_extra::extract::Form;
 use serde::Deserialize;
 
 use crate::admin::with_org;
 use crate::admin::AdminSection;
-use crate::audit::{self, action, target_kind, AuditCtx, AuditEvent};
+use crate::audit::{self, action, target_kind, AuditCtx};
 use crate::audit_metadata;
+use crate::csrf::CsrfForm;
 use crate::extractors::Csrf;
-use crate::flash::{self, redirect_with_cookie, SecretReveal};
+use crate::flash::{self, SecretReveal};
 use crate::oauth_client_metadata;
 use crate::ory;
 use crate::page_chrome::PageChrome;
@@ -182,7 +182,6 @@ impl ClientFormTemplate {
 fn seed_form_from_preset(preset: Preset) -> ClientForm {
     let defaults = preset.defaults();
     ClientForm {
-        csrf: None,
         name: String::new(),
         grant_types: defaults
             .grant_types
@@ -297,13 +296,10 @@ pub async fn create(
     admin: crate::extractors::RequireAdminScoped,
     csrf: Csrf,
     actx: AuditCtx,
-    Form(form): Form<ClientForm>,
+    CsrfForm(form): CsrfForm<ClientForm>,
 ) -> Response {
     let ctx = admin.ctx;
     let scope = admin.scope;
-    if let Some(resp) = crate::extractors::verify_csrf_or_forbid(&headers, form.csrf.as_deref()) {
-        return resp;
-    }
 
     // Re-render preserving every typed field so a validation/Hydra error
     // doesn't wipe the operator's input.
@@ -385,10 +381,8 @@ pub async fn create(
             }
             let _ = audit::log(
                 &state.db,
-                AuditEvent::new(action::ADMIN_CLIENT_CREATED)
-                    .actor_admin(&ctx.identity_id, &ctx.email)
+                ctx.audit_event(action::ADMIN_CLIENT_CREATED, &actx)
                     .target(target_kind::OAUTH_CLIENT, id.clone())
-                    .with_ctx(&actx)
                     .metadata(audit_metadata!(
                         "client_name" => client_name,
                         "client_type" => client_type,
@@ -436,15 +430,11 @@ pub async fn create(
                         &format!("/admin/clients/{}", ory_client::apis::urlencode(&id)),
                         &scope,
                     );
-                    let cookie = flash::store_flash(
-                        &state.cookie_secret,
-                        state.cfg.flash.cookie_ttl_seconds,
+                    return state.flash_redirect(
                         &target,
                         "Client created, but we couldn't stage the secret for one-shot \
                          display. Rotate the secret to retrieve a fresh value.",
-                        state.cfg.self_.is_https(),
                     );
-                    return redirect_with_cookie(&target, &cookie);
                 }
             };
             let url = with_org(

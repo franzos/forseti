@@ -106,50 +106,12 @@ pub(crate) fn render_error_boundary(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{
-        AdminConfig, AppConfig, AuditConfig, BrandConfig, ClaimEmailConfig, DatabaseConfig,
-        FlashConfig, HandoffConfig, HydraConfig, IdentityConfig, InternalConfig, KratosConfig,
-        LicenseConfig, OAuthConfig, OrgsConfig, PosixConfig, ProfilesConfig, ProxyConfig,
-        SecurityConfig, SelfConfig, SmtpConfig, WebhookConfig,
-    };
+    use crate::config::AppConfig;
 
     fn cfg_with_self_url(url: &str) -> AppConfig {
-        AppConfig {
-            kratos: KratosConfig {
-                public_url: "http://kratos:4433".into(),
-                admin_url: "http://kratos:4434".into(),
-            },
-            hydra: HydraConfig {
-                public_url: "http://hydra:4444".into(),
-                admin_url: "http://hydra:4445".into(),
-            },
-            self_: SelfConfig { url: url.into() },
-            brand: BrandConfig {
-                name: "Test".into(),
-                support_email: None,
-                logo_url: None,
-                consent_intro: String::new(),
-            },
-            apps: Vec::new(),
-            oauth: OAuthConfig::default(),
-            admin: AdminConfig::default(),
-            database: DatabaseConfig::default(),
-            audit: AuditConfig::default(),
-            internal: InternalConfig::default(),
-            license: LicenseConfig::default(),
-            identity: IdentityConfig::default(),
-            smtp: SmtpConfig::default(),
-            profiles: ProfilesConfig::default(),
-            webhook: WebhookConfig::default(),
-            claim_email: ClaimEmailConfig::default(),
-            handoff: HandoffConfig::default(),
-            flash: FlashConfig::default(),
-            orgs: OrgsConfig::default(),
-            saml: None,
-            proxy: ProxyConfig::default(),
-            security: SecurityConfig::default(),
-            posix: PosixConfig::default(),
-        }
+        let mut cfg = AppConfig::test_fixture();
+        cfg.self_.url = url.into();
+        cfg
     }
 
     #[test]

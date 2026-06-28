@@ -82,6 +82,46 @@ pub fn has_visible_default_inputs(groups: &GroupedNodes) -> bool {
     groups.default.iter().any(|n| n.input_type != "hidden")
 }
 
+/// Shared view-model for the four self-service flow forms (login,
+/// registration, recovery, verification). Collapses the
+/// form_target / group_nodes / mark_primary_submits / has_visible_default /
+/// flow_messages / return_to_qs sequence each `render_*` repeated. Embedded in
+/// each template struct as `form`; templates read `form.form_action`,
+/// `form.groups.*`, etc. Bespoke per-flow extras (webauthn scripts, flow
+/// `state`, `is_logged_in`, …) stay as sibling fields on the template struct.
+pub(crate) struct FlowFormView {
+    pub(crate) form_action: String,
+    pub(crate) form_method: String,
+    pub(crate) flow_messages: Vec<MessageView>,
+    pub(crate) groups: GroupedNodes,
+    pub(crate) has_visible_default: bool,
+    pub(crate) return_to_qs: String,
+}
+
+impl FlowFormView {
+    /// Project a fetched flow into the shared form view-model. `return_to`
+    /// falls back to the flow's own `return_to` when the caller's is absent,
+    /// matching the open-coded `return_to.or_else(|| flow_return_to(flow))`.
+    pub(crate) fn from_flow(
+        flow: &serde_json::Value,
+        kind: FlowKind,
+        return_to: Option<&str>,
+    ) -> Self {
+        let (form_action, form_method) = form_target(flow);
+        let mut groups = group_nodes(flow);
+        mark_primary_submits(&mut groups, kind);
+        let has_visible_default = has_visible_default_inputs(&groups);
+        FlowFormView {
+            form_action,
+            form_method,
+            flow_messages: flow_messages(flow),
+            groups,
+            has_visible_default,
+            return_to_qs: return_to_qs(return_to.or_else(|| flow_return_to(flow))),
+        }
+    }
+}
+
 pub(crate) fn map_message(m: &serde_json::Value) -> Option<MessageView> {
     let text = m.get("text")?.as_str()?.to_string();
     let severity = match m.get("type").and_then(|t| t.as_str()).unwrap_or("info") {

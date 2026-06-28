@@ -6,13 +6,17 @@
 //! `SameSite=Lax; HttpOnly` (the token is rendered server-side, so no JS read is needed). The [`middleware`]
 //! mints/stashes the token in request extensions, read via the [`crate::extractors::Csrf`] extractor.
 
-use axum::extract::{Request, State};
-use axum::http::HeaderMap;
+use axum::body::{Body, Bytes};
+use axum::extract::{FromRequest, RawForm, Request, State};
+use axum::http::header::CONTENT_TYPE;
+use axum::http::{HeaderMap, HeaderValue, Method};
 use axum::middleware::Next;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
+use axum::RequestExt;
 use axum_extra::extract::cookie::{Cookie, SameSite};
 use rand::distr::Alphanumeric;
 use rand::Rng;
+use serde::de::DeserializeOwned;
 
 use crate::state::AppState;
 
@@ -96,12 +100,73 @@ pub fn attach_csrf(mut resp: Response, set_cookie: Option<String>) -> Response {
 #[derive(Clone, Debug)]
 pub(crate) struct CsrfToken(pub(crate) String);
 
-/// `Form<T>` body for POST handlers whose only field is the double-submit
-/// `_csrf` token. Verified via [`crate::extractors::verify_csrf_or_forbid`].
-#[derive(Debug, serde::Deserialize)]
-pub(crate) struct CsrfForm {
+/// Empty form payload for POST handlers whose body carries only the
+/// double-submit `_csrf` token. Pair with [`CsrfForm`] (`CsrfForm<NoPayload>`)
+/// to verify CSRF without any other fields.
+#[derive(Debug, Default, serde::Deserialize)]
+pub(crate) struct NoPayload {}
+
+/// Hidden `_csrf` field, deserialized out of the form body alongside the
+/// handler's real payload.
+#[derive(serde::Deserialize)]
+struct CsrfField {
     #[serde(rename = "_csrf")]
-    pub(crate) csrf: Option<String>,
+    csrf: Option<String>,
+}
+
+/// Body extractor for Forseti-owned POST forms: deserializes the inner `T`
+/// exactly like [`axum_extra::extract::Form`] (so repeated keys / `Vec` fields
+/// parse identically) and verifies the double-submit `_csrf` token as a side
+/// effect. On mismatch it returns the same 403 as
+/// [`crate::extractors::verify_csrf_or_forbid`]; handlers bind
+/// `CsrfForm(payload): CsrfForm<T>`. Sites that also need the token (re-render)
+/// keep a [`crate::extractors::Csrf`] param.
+pub(crate) struct CsrfForm<T>(pub(crate) T);
+
+impl<T, S> FromRequest<S> for CsrfForm<T>
+where
+    T: DeserializeOwned + Send,
+    S: Send + Sync,
+{
+    type Rejection = Response;
+
+    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+        let headers = req.headers().clone();
+        let RawForm(bytes) = req.extract().await.map_err(IntoResponse::into_response)?;
+
+        // Parse the real payload first so a malformed body yields the same
+        // axum_extra::Form rejection (422) it would today, before the CSRF
+        // check (403) runs, preserving the prior extractor-then-handler order.
+        let value = form_from_bytes::<T, S>(bytes.clone(), state).await?;
+        let field = form_from_bytes::<CsrfField, S>(bytes, state).await?;
+        if let Some(resp) =
+            crate::extractors::verify_csrf_or_forbid(&headers, field.csrf.as_deref())
+        {
+            return Err(resp);
+        }
+        Ok(CsrfForm(value))
+    }
+}
+
+/// Deserialize `T` from a urlencoded body via the exact [`axum_extra::extract::Form`]
+/// path (`serde_html_form`), so multi-value keys and rejections match. The
+/// rebuilt request is POST with the urlencoded content-type so `RawForm` reads
+/// the body (not the query) and surfaces the same rejection variant as today.
+async fn form_from_bytes<T, S>(bytes: Bytes, state: &S) -> Result<T, Response>
+where
+    T: DeserializeOwned,
+    S: Send + Sync,
+{
+    let mut req = Request::new(Body::from(bytes));
+    *req.method_mut() = Method::POST;
+    req.headers_mut().insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("application/x-www-form-urlencoded"),
+    );
+    axum_extra::extract::Form::<T>::from_request(req, state)
+        .await
+        .map(|axum_extra::extract::Form(value)| value)
+        .map_err(IntoResponse::into_response)
 }
 
 /// Ensure every covered request has a `forseti_csrf` cookie and a token in request extensions.

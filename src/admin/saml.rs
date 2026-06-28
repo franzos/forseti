@@ -5,16 +5,15 @@
 //! API for create/delete. Forseti-tier only: connections cross org boundaries.
 
 use axum::extract::{Path, State};
-use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Redirect, Response};
-use axum_extra::extract::Form;
 use serde::Deserialize;
 
 use crate::admin::{render_admin_error, AdminCtx, AdminSection, ConfirmForm, ConfirmTemplate};
-use crate::audit::{self, action, target_kind, AuditCtx, AuditEvent};
+use crate::audit::{self, action, target_kind, AuditCtx};
 use crate::audit_metadata;
 use crate::commercial::license::{Feature, FeatureStatus};
 use crate::commercial::upsell::render_upsell;
+use crate::csrf::CsrfForm;
 use crate::extractors::{Csrf, RequireAdmin};
 use crate::orgs;
 use crate::page_chrome::PageChrome;
@@ -216,8 +215,6 @@ pub async fn new(State(state): State<AppState>, admin: RequireAdmin, csrf: Csrf)
 
 #[derive(Debug, Deserialize)]
 pub struct CreateForm {
-    #[serde(rename = "_csrf")]
-    csrf: Option<String>,
     #[serde(default)]
     org_id: String,
     #[serde(default)]
@@ -230,16 +227,12 @@ pub struct CreateForm {
 
 pub async fn create(
     State(state): State<AppState>,
-    headers: HeaderMap,
     actx: AuditCtx,
     admin: RequireAdmin,
     csrf: Csrf,
-    Form(form): Form<CreateForm>,
+    CsrfForm(form): CsrfForm<CreateForm>,
 ) -> Response {
     let ctx = admin.ctx;
-    if let Some(resp) = crate::extractors::verify_csrf_or_forbid(&headers, form.csrf.as_deref()) {
-        return resp;
-    }
     match gate(&state, &csrf, &ctx.email) {
         Ok(false) => {}
         Ok(true) => return grace_read_only(&state),
@@ -343,10 +336,8 @@ pub async fn create(
 
     let _ = audit::log(
         &state.db,
-        AuditEvent::new(action::ADMIN_SAML_CONNECTION_CREATED)
-            .actor_admin(&ctx.identity_id, &ctx.email)
+        ctx.audit_event(action::ADMIN_SAML_CONNECTION_CREATED, &actx)
             .target(target_kind::SAML_CONNECTION, org_id.clone())
-            .with_ctx(&actx)
             .metadata(audit_metadata!(
                 "org_id" => org_id.as_str(),
                 "metadata_source" => source,
@@ -360,16 +351,12 @@ pub async fn create(
 pub async fn toggle(
     State(state): State<AppState>,
     Path(org_id): Path<String>,
-    headers: HeaderMap,
     actx: AuditCtx,
     admin: RequireAdmin,
     csrf: Csrf,
-    Form(form): Form<ConfirmForm>,
+    _: CsrfForm<ConfirmForm>,
 ) -> Response {
     let ctx = admin.ctx;
-    if let Some(resp) = crate::extractors::verify_csrf_or_forbid(&headers, form.csrf.as_deref()) {
-        return resp;
-    }
     match gate(&state, &csrf, &ctx.email) {
         Ok(false) => {}
         Ok(true) => return grace_read_only(&state),
@@ -409,10 +396,8 @@ pub async fn toggle(
 
     let _ = audit::log(
         &state.db,
-        AuditEvent::new(action::ADMIN_SAML_CONNECTION_TOGGLED)
-            .actor_admin(&ctx.identity_id, &ctx.email)
+        ctx.audit_event(action::ADMIN_SAML_CONNECTION_TOGGLED, &actx)
             .target(target_kind::SAML_CONNECTION, org_id.clone())
-            .with_ctx(&actx)
             .metadata(audit_metadata!("enabled" => enabled)),
     )
     .await;
@@ -479,18 +464,14 @@ pub async fn delete_confirm(
 pub async fn delete(
     State(state): State<AppState>,
     Path(org_id): Path<String>,
-    headers: HeaderMap,
     actx: AuditCtx,
     admin: RequireAdmin,
     csrf: Csrf,
-    Form(form): Form<ConfirmForm>,
+    CsrfForm(form): CsrfForm<ConfirmForm>,
 ) -> Response {
     let ctx = admin.ctx;
-    if let Some(resp) = crate::extractors::verify_csrf_or_forbid(&headers, form.csrf.as_deref()) {
-        return resp;
-    }
-    if !form.confirmed() {
-        return Redirect::to("/admin/saml").into_response();
+    if let Some(r) = form.bounce_unless_confirmed("/admin/saml") {
+        return r;
     }
     match gate(&state, &csrf, &ctx.email) {
         Ok(false) => {}
@@ -523,10 +504,8 @@ pub async fn delete(
 
     let _ = audit::log(
         &state.db,
-        AuditEvent::new(action::ADMIN_SAML_CONNECTION_DELETED)
-            .actor_admin(&ctx.identity_id, &ctx.email)
+        ctx.audit_event(action::ADMIN_SAML_CONNECTION_DELETED, &actx)
             .target(target_kind::SAML_CONNECTION, org_id.clone())
-            .with_ctx(&actx)
             .metadata(audit_metadata!("org_id" => org_id.as_str()))
             .critical(),
     )

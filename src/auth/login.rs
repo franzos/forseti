@@ -9,7 +9,8 @@ use crate::cookies;
 use crate::csrf;
 use crate::extractors::OptionalSession;
 use crate::flow_view::*;
-use crate::ory::{self, FlowFetch, FlowKind};
+use crate::ory::kratos::FlowOutcome;
+use crate::ory::{self, FlowKind};
 use crate::page_chrome::{Chrome, PageChrome};
 use crate::render::render;
 use crate::state::AppState;
@@ -19,12 +20,7 @@ use crate::{render_error_boundary, safe_return_to, FlowQuery};
 #[template(path = "login.html")]
 struct LoginTemplate {
     chrome: PageChrome,
-    form_action: String,
-    form_method: String,
-    flow_messages: Vec<MessageView>,
-    groups: GroupedNodes,
-    has_visible_default: bool,
-    return_to_qs: String,
+    form: FlowFormView,
     /// WebAuthn / passkey helper scripts; without the `<script>` tag the
     /// trigger buttons' `window.oryWebAuthnLogin` etc. are undefined.
     webauthn_scripts: Vec<ScriptView>,
@@ -68,35 +64,31 @@ pub(crate) async fn login(
         .as_deref()
         .map(|rt| safe_return_to(&state.cfg, rt));
 
-    let Some(flow_id) = query.flow.as_deref() else {
-        let url = ory::kratos::browser_init_url_with(
+    let flow_id = query.flow.as_deref();
+    let init_url = || {
+        ory::kratos::browser_init_url_with(
             FlowKind::Login,
             &state.cfg.kratos.public_url,
             safe_return,
             requested_aal,
             query.refresh,
-        );
-        let secure = state.cfg.self_.is_https();
-        return csrf::attach_csrf(
-            Redirect::to(&url).into_response(),
-            Some(csrf::delete_csrf_cookie(secure)),
-        );
+        )
     };
 
-    match ory::kratos::get_flow(&state.ory, FlowKind::Login, flow_id, &cookie).await {
-        Ok(FlowFetch::Ok(flow)) => render_login(chrome, &flow, query.return_to.as_deref()),
-        Ok(FlowFetch::Gone) | Ok(FlowFetch::PrivilegedRequired(_)) => {
-            let url = ory::kratos::browser_init_url_with(
-                FlowKind::Login,
-                &state.cfg.kratos.public_url,
-                safe_return,
-                requested_aal,
-                query.refresh,
-            );
-            Redirect::to(&url).into_response()
+    match ory::kratos::resolve_flow(&state.ory, FlowKind::Login, flow_id, &cookie).await {
+        FlowOutcome::Init => {
+            let secure = state.cfg.self_.is_https();
+            csrf::attach_csrf(
+                Redirect::to(&init_url()).into_response(),
+                Some(csrf::delete_csrf_cookie(secure)),
+            )
         }
-        Err(e) => {
-            tracing::error!(error = ?e, flow_id, "failed to fetch Kratos login flow");
+        FlowOutcome::Ready(flow) => render_login(chrome, &flow, query.return_to.as_deref()),
+        FlowOutcome::Reinit | FlowOutcome::Privileged(_) => {
+            Redirect::to(&init_url()).into_response()
+        }
+        FlowOutcome::Error(e) => {
+            tracing::error!(error = ?e, ?flow_id, "failed to fetch Kratos login flow");
             render_error_boundary(
                 &state,
                 "Sign-in unavailable",
@@ -110,10 +102,7 @@ pub(crate) async fn login(
 }
 
 fn render_login(chrome: PageChrome, flow: &serde_json::Value, return_to: Option<&str>) -> Response {
-    let (form_action, form_method) = form_target(flow);
-    let mut groups = group_nodes(flow);
-    mark_primary_submits(&mut groups, FlowKind::Login);
-    let has_visible_default = has_visible_default_inputs(&groups);
+    let form = FlowFormView::from_flow(flow, FlowKind::Login, return_to);
     let webauthn_scripts = collect_webauthn_scripts(flow);
 
     // AAL2 requested but no second factor available: Kratos emits the
@@ -124,10 +113,11 @@ fn render_login(chrome: PageChrome, flow: &serde_json::Value, return_to: Option<
         .and_then(|v| v.as_str())
         .map(|s| s == "aal2")
         .unwrap_or(false);
-    let any_actionable_method = !groups.oidc.is_empty()
-        || !groups.code.is_empty()
-        || !groups.password.is_empty()
-        || groups
+    let any_actionable_method = !form.groups.oidc.is_empty()
+        || !form.groups.code.is_empty()
+        || !form.groups.password.is_empty()
+        || form
+            .groups
             .other
             .iter()
             .any(|n| n.input_type != "hidden" && n.name != "method");
@@ -135,12 +125,7 @@ fn render_login(chrome: PageChrome, flow: &serde_json::Value, return_to: Option<
 
     render(&LoginTemplate {
         chrome,
-        form_action,
-        form_method,
-        flow_messages: flow_messages(flow),
-        groups,
-        has_visible_default,
-        return_to_qs: return_to_qs(return_to.or_else(|| flow_return_to(flow))),
+        form,
         webauthn_scripts,
         aal2_unavailable,
     })

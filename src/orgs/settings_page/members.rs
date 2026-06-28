@@ -1,14 +1,14 @@
 //! Members page — list + role + remove. Includes pending-invites.
 
 use askama::Template;
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
-use axum_extra::extract::Form;
 use serde::{Deserialize, Serialize};
 
 use crate::audit::{self, action, target_kind, AuditCtx, AuditEvent};
 use crate::audit_metadata;
+use crate::csrf::CsrfForm;
 use crate::extractors::{Csrf, RequireSession};
 use crate::orgs::{self, Org, Role};
 use crate::page_chrome::PageChrome;
@@ -17,7 +17,7 @@ use crate::state::AppState;
 
 use super::{
     build_nav, require_org_license, require_org_owner_with_license, resolve_org_or_404,
-    settings_ctx, SettingsCtx,
+    settings_ctx, OrgSlug, SettingsCtx,
 };
 
 #[derive(Serialize, Clone)]
@@ -68,7 +68,7 @@ struct MembersTemplate {
 
 pub(super) async fn members(
     State(state): State<AppState>,
-    slug: Option<String>,
+    OrgSlug(slug): OrgSlug,
     headers: HeaderMap,
     sess: RequireSession,
     csrf: Csrf,
@@ -197,33 +197,30 @@ async fn render_members(
 
 #[derive(Debug, Deserialize)]
 pub(super) struct RoleForm {
-    #[serde(rename = "_csrf")]
-    csrf: Option<String>,
     role: String,
 }
 
 /// Org slug (`None` for Default) + the member identity being acted on, bundled
-/// to keep the handlers under clippy's argument limit.
+/// to keep the handlers under clippy's argument limit. Deserialized from the
+/// route path; `slug` is absent on the singular Default-org route.
+#[derive(Deserialize)]
 pub(super) struct MemberTarget {
+    #[serde(default)]
     pub(super) slug: Option<String>,
     pub(super) identity_id: String,
 }
 
 pub(super) async fn members_role(
     State(state): State<AppState>,
-    MemberTarget {
+    Path(MemberTarget {
         slug,
         identity_id: target_identity,
-    }: MemberTarget,
-    headers: HeaderMap,
+    }): Path<MemberTarget>,
     sess: RequireSession,
     csrf: Csrf,
     actx: AuditCtx,
-    Form(form): Form<RoleForm>,
+    CsrfForm(form): CsrfForm<RoleForm>,
 ) -> Response {
-    if let Some(resp) = crate::extractors::verify_csrf_or_forbid(&headers, form.csrf.as_deref()) {
-        return resp;
-    }
     let target = match resolve_org_or_404(&state, slug.as_deref()).await {
         Ok(t) => t,
         Err(r) => return r,
@@ -275,23 +272,17 @@ pub(super) async fn members_role(
 
 #[derive(Debug, Deserialize)]
 pub(super) struct VisibilityForm {
-    #[serde(rename = "_csrf")]
-    csrf: Option<String>,
     visibility: String,
 }
 
 pub(super) async fn members_visibility(
     State(state): State<AppState>,
-    slug: Option<String>,
-    headers: HeaderMap,
+    OrgSlug(slug): OrgSlug,
     sess: RequireSession,
     csrf: Csrf,
     actx: AuditCtx,
-    Form(form): Form<VisibilityForm>,
+    CsrfForm(form): CsrfForm<VisibilityForm>,
 ) -> Response {
-    if let Some(resp) = crate::extractors::verify_csrf_or_forbid(&headers, form.csrf.as_deref()) {
-        return resp;
-    }
     let target = match resolve_org_or_404(&state, slug.as_deref()).await {
         Ok(t) => t,
         Err(r) => return r,
@@ -345,25 +336,19 @@ pub(super) async fn members_visibility(
 
 #[derive(Debug, Deserialize)]
 pub(super) struct HiddenForm {
-    #[serde(rename = "_csrf")]
-    csrf: Option<String>,
     hidden: String,
 }
 
 pub(super) async fn members_hidden(
     State(state): State<AppState>,
-    MemberTarget {
+    Path(MemberTarget {
         slug,
         identity_id: target_identity,
-    }: MemberTarget,
-    headers: HeaderMap,
+    }): Path<MemberTarget>,
     sess: RequireSession,
     actx: AuditCtx,
-    Form(form): Form<HiddenForm>,
+    CsrfForm(form): CsrfForm<HiddenForm>,
 ) -> Response {
-    if let Some(resp) = crate::extractors::verify_csrf_or_forbid(&headers, form.csrf.as_deref()) {
-        return resp;
-    }
     let target = match resolve_org_or_404(&state, slug.as_deref()).await {
         Ok(t) => t,
         Err(r) => return r,
@@ -402,19 +387,15 @@ pub(super) async fn members_hidden(
 
 pub(super) async fn members_remove(
     State(state): State<AppState>,
-    MemberTarget {
+    Path(MemberTarget {
         slug,
         identity_id: target_identity,
-    }: MemberTarget,
-    headers: HeaderMap,
+    }): Path<MemberTarget>,
     sess: RequireSession,
     csrf: Csrf,
     actx: AuditCtx,
-    Form(form): Form<crate::csrf::CsrfForm>,
+    _: CsrfForm<crate::csrf::NoPayload>,
 ) -> Response {
-    if let Some(resp) = crate::extractors::verify_csrf_or_forbid(&headers, form.csrf.as_deref()) {
-        return resp;
-    }
     let target = match resolve_org_or_404(&state, slug.as_deref()).await {
         Ok(t) => t,
         Err(r) => return r,

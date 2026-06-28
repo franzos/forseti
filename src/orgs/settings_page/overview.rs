@@ -5,9 +5,9 @@ use askama::Template;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
-use axum_extra::extract::Form;
 use serde::Deserialize;
 
+use crate::csrf::CsrfForm;
 use crate::extractors::{Csrf, RequireSession};
 use crate::orgs::{self, Org, Role};
 use crate::page_chrome::PageChrome;
@@ -16,7 +16,7 @@ use crate::state::AppState;
 
 use super::{
     build_nav, require_org_license, require_org_owner_with_license, resolve_org_or_404,
-    settings_ctx, SettingsCtx,
+    settings_ctx, OrgSlug, SettingsCtx,
 };
 
 #[derive(Template)]
@@ -60,7 +60,7 @@ async fn sso_status(state: &AppState, org: &Org) -> Option<SsoStatus> {
 
 pub(super) async fn overview(
     State(state): State<AppState>,
-    slug: Option<String>,
+    OrgSlug(slug): OrgSlug,
     headers: HeaderMap,
     sess: RequireSession,
     csrf: Csrf,
@@ -85,7 +85,7 @@ pub(super) async fn overview(
 
 pub(super) async fn overview_info(
     State(state): State<AppState>,
-    slug: Option<String>,
+    OrgSlug(slug): OrgSlug,
     headers: HeaderMap,
     sess: RequireSession,
     csrf: Csrf,
@@ -186,23 +186,17 @@ async fn render_overview(
 
 #[derive(Debug, Deserialize)]
 pub(super) struct OverviewForm {
-    #[serde(rename = "_csrf")]
-    csrf: Option<String>,
     name: String,
     slug: String,
 }
 
 pub(super) async fn overview_save(
     State(state): State<AppState>,
-    slug: Option<String>,
-    headers: HeaderMap,
+    OrgSlug(slug): OrgSlug,
     sess: RequireSession,
     csrf: Csrf,
-    Form(form): Form<OverviewForm>,
+    CsrfForm(form): CsrfForm<OverviewForm>,
 ) -> Response {
-    if let Some(resp) = crate::extractors::verify_csrf_or_forbid(&headers, form.csrf.as_deref()) {
-        return resp;
-    }
     let target = match resolve_org_or_404(&state, slug.as_deref()).await {
         Ok(t) => t,
         Err(r) => return r,

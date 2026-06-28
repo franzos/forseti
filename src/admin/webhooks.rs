@@ -12,12 +12,11 @@
 use std::collections::{HashMap, HashSet};
 
 use axum::extract::{Path, State};
-use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Redirect, Response};
-use axum_extra::extract::Form;
 
 use crate::admin::{render_admin_error, with_org, AdminSection, ConfirmForm};
-use crate::audit::{self, action, target_kind, AuditCtx, AuditEvent};
+use crate::audit::{self, action, target_kind, AuditCtx};
+use crate::csrf::CsrfForm;
 use crate::extractors::{Csrf, RequireAdminScoped};
 use crate::format::humanise_timestamp;
 use crate::oauth_client_metadata;
@@ -246,15 +245,11 @@ pub async fn show_one(
 pub async fn requeue(
     State(state): State<AppState>,
     Path(row_id): Path<String>,
-    headers: HeaderMap,
     actx: AuditCtx,
     admin: RequireAdminScoped,
-    Form(form): Form<ConfirmForm>,
+    _: CsrfForm<ConfirmForm>,
 ) -> Response {
     let RequireAdminScoped { ctx, scope } = admin;
-    if let Some(resp) = crate::extractors::verify_csrf_or_forbid(&headers, form.csrf.as_deref()) {
-        return resp;
-    }
     if let Err(resp) = enforce_row_scope(&state, &scope, &row_id).await {
         return resp;
     }
@@ -263,10 +258,8 @@ pub async fn requeue(
         Ok(true) => {
             let _ = audit::log(
                 &state.db,
-                AuditEvent::new(action::ADMIN_WEBHOOK_REQUEUED)
-                    .actor_admin(&ctx.identity_id, &ctx.email)
-                    .target(target_kind::WEBHOOK_OUTBOX, row_id.clone())
-                    .with_ctx(&actx),
+                ctx.audit_event(action::ADMIN_WEBHOOK_REQUEUED, &actx)
+                    .target(target_kind::WEBHOOK_OUTBOX, row_id.clone()),
             )
             .await;
         }
@@ -288,15 +281,11 @@ pub async fn requeue(
 pub async fn discard(
     State(state): State<AppState>,
     Path(row_id): Path<String>,
-    headers: HeaderMap,
     actx: AuditCtx,
     admin: RequireAdminScoped,
-    Form(form): Form<ConfirmForm>,
+    _: CsrfForm<ConfirmForm>,
 ) -> Response {
     let RequireAdminScoped { ctx, scope } = admin;
-    if let Some(resp) = crate::extractors::verify_csrf_or_forbid(&headers, form.csrf.as_deref()) {
-        return resp;
-    }
     if let Err(resp) = enforce_row_scope(&state, &scope, &row_id).await {
         return resp;
     }
@@ -305,10 +294,8 @@ pub async fn discard(
         Ok(true) => {
             let _ = audit::log(
                 &state.db,
-                AuditEvent::new(action::ADMIN_WEBHOOK_DISCARDED)
-                    .actor_admin(&ctx.identity_id, &ctx.email)
-                    .target(target_kind::WEBHOOK_OUTBOX, row_id.clone())
-                    .with_ctx(&actx),
+                ctx.audit_event(action::ADMIN_WEBHOOK_DISCARDED, &actx)
+                    .target(target_kind::WEBHOOK_OUTBOX, row_id.clone()),
             )
             .await;
         }

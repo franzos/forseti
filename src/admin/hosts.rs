@@ -12,17 +12,16 @@
 //! `[admin].allowed_emails`); does NOT honour the `?org=<slug>` convention.
 
 use axum::extract::{Path, State};
-use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Redirect, Response};
-use axum_extra::extract::Form;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use rand::Rng;
 use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::admin::{render_admin_error, AdminSection, ConfirmForm, ConfirmTemplate};
-use crate::audit::{self, action, target_kind, AuditCtx, AuditEvent, SafeMetadata};
+use crate::audit::{self, action, target_kind, AuditCtx, SafeMetadata};
 use crate::audit_metadata;
+use crate::csrf::CsrfForm;
 use crate::extractors::{Csrf, RequireAdmin};
 use crate::flash::{self, SecretReveal};
 use crate::format::humanise_timestamp;
@@ -242,8 +241,6 @@ pub async fn new(State(state): State<AppState>, admin: RequireAdmin, csrf: Csrf)
 
 #[derive(Debug, Deserialize)]
 pub struct IssueForm {
-    #[serde(rename = "_csrf")]
-    csrf: Option<String>,
     #[serde(default)]
     hostname: String,
     /// The org this host belongs to. Immutable after enrollment.
@@ -259,16 +256,12 @@ pub struct IssueForm {
 
 pub async fn issue(
     State(state): State<AppState>,
-    headers: HeaderMap,
     actx: AuditCtx,
     admin: RequireAdmin,
     csrf: Csrf,
-    Form(form): Form<IssueForm>,
+    CsrfForm(form): CsrfForm<IssueForm>,
 ) -> Response {
     let ctx = admin.ctx;
-    if let Some(resp) = crate::extractors::verify_csrf_or_forbid(&headers, form.csrf.as_deref()) {
-        return resp;
-    }
 
     let force_mfa = form.force_mfa.is_some();
     let (orgs, teams_by_org) = match load_orgs_and_teams(&state).await {
@@ -353,10 +346,8 @@ pub async fn issue(
 
     let _ = audit::log(
         &state.db,
-        AuditEvent::new(action::HOST_ENROLLED)
-            .actor_admin(&ctx.identity_id, &ctx.email)
+        ctx.audit_event(action::HOST_ENROLLED, &actx)
             .target(target_kind::HOST, host_id.clone())
-            .with_ctx(&actx)
             .metadata(host_audit_metadata(&hostname, &form.team_ids)),
     )
     .await;
@@ -424,8 +415,6 @@ pub async fn edit(
 
 #[derive(Debug, Deserialize)]
 pub struct EditForm {
-    #[serde(rename = "_csrf")]
-    csrf: Option<String>,
     #[serde(default)]
     hostname: String,
     #[serde(default)]
@@ -437,16 +426,12 @@ pub struct EditForm {
 pub async fn update(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    headers: HeaderMap,
     actx: AuditCtx,
     admin: RequireAdmin,
     csrf: Csrf,
-    Form(form): Form<EditForm>,
+    CsrfForm(form): CsrfForm<EditForm>,
 ) -> Response {
     let ctx = admin.ctx;
-    if let Some(resp) = crate::extractors::verify_csrf_or_forbid(&headers, form.csrf.as_deref()) {
-        return resp;
-    }
 
     let force_mfa = form.force_mfa.is_some();
     // Validate teams against the stored host org, never what the form claims.
@@ -530,10 +515,8 @@ pub async fn update(
 
     let _ = audit::log(
         &state.db,
-        AuditEvent::new(action::HOST_UPDATED)
-            .actor_admin(&ctx.identity_id, &ctx.email)
+        ctx.audit_event(action::HOST_UPDATED, &actx)
             .target(target_kind::HOST, id)
-            .with_ctx(&actx)
             .metadata(host_audit_metadata(&hostname, &form.team_ids)),
     )
     .await;
@@ -558,17 +541,13 @@ pub async fn revoke_confirm(Path(id): Path<String>, admin: RequireAdmin, csrf: C
 pub async fn revoke(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    headers: HeaderMap,
     actx: AuditCtx,
     admin: RequireAdmin,
-    Form(form): Form<ConfirmForm>,
+    CsrfForm(form): CsrfForm<ConfirmForm>,
 ) -> Response {
     let ctx = admin.ctx;
-    if let Some(resp) = crate::extractors::verify_csrf_or_forbid(&headers, form.csrf.as_deref()) {
-        return resp;
-    }
-    if !form.confirmed() {
-        return Redirect::to("/admin/hosts").into_response();
+    if let Some(r) = form.bounce_unless_confirmed("/admin/hosts") {
+        return r;
     }
 
     let host = match posix_db::host_by_id(&state.db, &id).await {
@@ -598,10 +577,8 @@ pub async fn revoke(
     if let Some(h) = host {
         let _ = audit::log(
             &state.db,
-            AuditEvent::new(action::HOST_REVOKED)
-                .actor_admin(&ctx.identity_id, &ctx.email)
+            ctx.audit_event(action::HOST_REVOKED, &actx)
                 .target(target_kind::HOST, id)
-                .with_ctx(&actx)
                 .metadata(host_audit_metadata(&h.hostname, &team_ids))
                 .critical(),
         )
@@ -627,17 +604,13 @@ pub async fn rotate_confirm(Path(id): Path<String>, admin: RequireAdmin, csrf: C
 pub async fn rotate(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    headers: HeaderMap,
     actx: AuditCtx,
     admin: RequireAdmin,
-    Form(form): Form<ConfirmForm>,
+    CsrfForm(form): CsrfForm<ConfirmForm>,
 ) -> Response {
     let ctx = admin.ctx;
-    if let Some(resp) = crate::extractors::verify_csrf_or_forbid(&headers, form.csrf.as_deref()) {
-        return resp;
-    }
-    if !form.confirmed() {
-        return Redirect::to("/admin/hosts").into_response();
+    if let Some(r) = form.bounce_unless_confirmed("/admin/hosts") {
+        return r;
     }
 
     let host = match posix_db::host_by_id(&state.db, &id).await {
@@ -673,10 +646,8 @@ pub async fn rotate(
         .unwrap_or_default();
     let _ = audit::log(
         &state.db,
-        AuditEvent::new(action::HOST_SECRET_ROTATED)
-            .actor_admin(&ctx.identity_id, &ctx.email)
+        ctx.audit_event(action::HOST_SECRET_ROTATED, &actx)
             .target(target_kind::HOST, id.clone())
-            .with_ctx(&actx)
             .metadata(host_audit_metadata(&host.hostname, &team_ids)),
     )
     .await;

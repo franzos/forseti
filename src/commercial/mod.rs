@@ -26,7 +26,7 @@
 //!    via `/admin/license`; deactivation is row DELETE.
 //!
 //! 3. **Lock-free reads.** The verified status sits behind an
-//!    [`arc_swap::ArcSwap`] on [`AppState`] so every handler's
+//!    [`arc_swap::ArcSwap`] on [`crate::state::AppState`] so every handler's
 //!    `feature()` check is a single atomic pointer load.
 //!
 //! 4. **Grace period.** Expired licenses keep gated features visible
@@ -42,16 +42,6 @@ pub mod verify;
 
 use license::Feature;
 pub use license::{FeatureStatus, LicenseStatus, GRACE_DAYS};
-
-use axum::Router;
-
-use crate::state::AppState;
-
-/// Merge all commercial-tier routes under one entry point. Called from
-/// `app::run` to keep the AGPL boundary visible at the composition site.
-pub fn router() -> Router<AppState> {
-    settings_page::router()
-}
 
 use std::sync::Arc;
 

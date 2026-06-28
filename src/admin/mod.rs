@@ -21,6 +21,7 @@ use axum::{
 };
 use serde::Deserialize;
 
+use crate::audit::{AuditCtx, AuditEvent};
 use crate::config::BrandConfig;
 use crate::cookies;
 use crate::ory;
@@ -148,6 +149,8 @@ pub fn router() -> Router<AppState> {
             "/admin/posix/{id}/delete",
             get(posix::delete_confirm).post(posix::delete),
         )
+        // License (commercial); handlers self-gate via RequireAdmin like the rest.
+        .merge(crate::commercial::settings_page::router())
 }
 
 /// `/admin` → `/admin/status`. Saves operators a click on the bookmark.
@@ -177,6 +180,15 @@ impl AdminCtx {
             csrf.0.clone(),
             self.is_forseti_admin,
         )
+    }
+
+    /// Open an audit event already attributed to this admin and stamped with
+    /// the request context. Callers chain `.target(...)`, optional
+    /// `.metadata(...)` / `.critical()`, then `audit::log`.
+    pub(crate) fn audit_event(&self, action: &'static str, ctx: &AuditCtx) -> AuditEvent {
+        AuditEvent::new(action)
+            .actor_admin(&self.identity_id, &self.email)
+            .with_ctx(ctx)
     }
 }
 
@@ -332,8 +344,6 @@ struct AdminForbiddenTemplate {
 /// Shared confirmation form for destructive POST actions.
 #[derive(Debug, Deserialize)]
 pub struct ConfirmForm {
-    #[serde(rename = "_csrf")]
-    pub csrf: Option<String>,
     #[serde(default)]
     pub confirm: Option<String>,
 }
@@ -341,6 +351,16 @@ pub struct ConfirmForm {
 impl ConfirmForm {
     pub fn confirmed(&self) -> bool {
         matches!(self.confirm.as_deref(), Some("yes"))
+    }
+
+    /// Bounce back to `redirect_to` when the form wasn't confirmed. Returns
+    /// `Some(redirect)` to early-return, `None` to proceed with the action.
+    pub fn bounce_unless_confirmed(&self, redirect_to: &str) -> Option<Response> {
+        if self.confirmed() {
+            None
+        } else {
+            Some(Redirect::to(redirect_to).into_response())
+        }
     }
 }
 

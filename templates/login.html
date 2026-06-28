@@ -34,9 +34,9 @@
     </div>
   {% else %}
     {# Flow-level messages (e.g. "Login failed", "Account locked"). Rendered above the form. #}
-    {% if !flow_messages.is_empty() %}
+    {% if !form.flow_messages.is_empty() %}
       <div class="flex flex-col gap-stack-sm">
-        {% for msg in flow_messages %}
+        {% for msg in form.flow_messages %}
           <p class="font-body-sm text-body-sm {% if msg.severity == "error" %}text-error{% else if msg.severity == "success" %}text-tertiary{% else %}text-on-surface-variant{% endif %}">
             {{ msg.text }}
           </p>
@@ -44,38 +44,38 @@
       </div>
     {% endif %}
 
-    <form method="{{ form_method }}"
-          action="{{ form_action }}"
+    <form method="{{ form.form_method }}"
+          action="{{ form.form_action }}"
           class="flex flex-col gap-stack-lg">
       {# `default` group — CSRF token (hidden) plus, for password/code methods,
        the shared `identifier` (e-mail / username) field. We split it: hidden
        inputs go up top before the methods, visible inputs go into the
        credential form alongside the password group. #}
-      {% for node in groups.default %}
+      {% for node in form.groups.default %}
         {% if node.input_type == "hidden" %}
           {% include "partials/flow_node.html" %}
         {% endif %}
       {% endfor %}
 
       {# OIDC upstream provider buttons. Empty when no providers are enabled. #}
-      {% if !groups.oidc.is_empty() %}
+      {% if !form.groups.oidc.is_empty() %}
         <div class="flex flex-col gap-stack-sm">
-          {% for node in groups.oidc %}
+          {% for node in form.groups.oidc %}
             {% include "partials/flow_node.html" %}
           {% endfor %}
         </div>
       {% endif %}
 
       {# Code-method shortcut. Single submit button labelled per Kratos's meta label. #}
-      {% if !groups.code.is_empty() %}
-        {% for node in groups.code %}
+      {% if !form.groups.code.is_empty() %}
+        {% for node in form.groups.code %}
           {% include "partials/flow_node.html" %}
         {% endfor %}
       {% endif %}
 
       {# OR divider — only shown when there's an alternative method above AND a
        credential form below (identifier+password). #}
-      {% if (!groups.oidc.is_empty() || !groups.code.is_empty()) && (!groups.password.is_empty() || has_visible_default) %}
+      {% if (!form.groups.oidc.is_empty() || !form.groups.code.is_empty()) && (!form.groups.password.is_empty() || form.has_visible_default) %}
         <div class="flex items-center gap-stack-md">
           <div class="flex-grow h-px bg-outline-variant"></div>
           <span class="font-label-sm text-label-sm text-outline uppercase tracking-wider">Or continue with</span>
@@ -84,10 +84,10 @@
       {% endif %}
 
       {# Credential form: identifier (from `default`) + password fields + submit. #}
-      {% if !groups.password.is_empty() || has_visible_default %}
+      {% if !form.groups.password.is_empty() || form.has_visible_default %}
         <div class="flex flex-col gap-stack-md">
           {# Visible default-group inputs (typically `identifier`). #}
-          {% for node in groups.default %}
+          {% for node in form.groups.default %}
             {% if node.input_type != "hidden" %}
               <div class="flex flex-col gap-stack-sm">
                 <label for="{{ node.name }}"
@@ -104,7 +104,7 @@
             {% endif %}
           {% endfor %}
           {# Password method nodes. #}
-          {% for node in groups.password %}
+          {% for node in form.groups.password %}
             {% if node.input_type == "submit" || node.input_type == "hidden" %}
               {% include "partials/flow_node.html" %}
             {% else %}
@@ -115,7 +115,7 @@
                            class="font-label-md text-label-md text-on-surface">
                       {% match node.label %}{% when Some with (l) %}{{ l }}{% when None %}{{ node.name }}{% endmatch %}
                     </label>
-                    <a href="/recovery{{ return_to_qs }}"
+                    <a href="/recovery{{ form.return_to_qs }}"
                        class="font-label-sm text-label-sm text-on-secondary-container hover:text-primary transition-colors underline">Forgot password?</a>
                   </div>
                 {% else %}
@@ -137,9 +137,9 @@
       {% endif %}
 
       {# Anything Kratos sent that didn't fit a known group — TOTP, lookup_secret, etc. Rendered generically. #}
-      {% if !groups.other.is_empty() %}
+      {% if !form.groups.other.is_empty() %}
         <div class="flex flex-col gap-stack-md">
-          {% for node in groups.other %}
+          {% for node in form.groups.other %}
             {% if node.input_type == "hidden" || node.input_type == "submit" || node.input_type == "button" %}
               {% include "partials/flow_node.html" %}
             {% else %}
@@ -164,7 +164,7 @@
     <div class="text-center mt-stack-sm">
       <p class="font-body-sm text-body-sm text-on-surface-variant">
         Don't have an account?
-        <a href="/registration{{ return_to_qs }}"
+        <a href="/registration{{ form.return_to_qs }}"
            class="font-label-md text-label-md text-primary hover:underline transition-colors">Create account</a>
       </p>
     </div>

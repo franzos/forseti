@@ -18,6 +18,17 @@ admin_url  = "http://localhost:4445"
 # Forseti's own externally reachable URL. Used to build `return_to` round-trips.
 url = "http://localhost:3000"
 
+# Operator-supplied secret material. `cookie_secret` seeds the HMAC keys for
+# every Forseti-signed cookie (one-shot flash, active-org switcher, handoff
+# referrer, CSRF double-submit). Supply a LONG random secret — generate with
+# `openssl rand -hex 32` (hex string) or pass raw bytes. Short secrets are a
+# hard startup error. When unset, Forseti derives a per-boot ephemeral key, so
+# every restart invalidates all Forseti-signed cookies and separate instances
+# can't share them (Kratos sessions are unaffected — those are Kratos's). SET
+# THIS IN PRODUCTION.
+# [security]
+# cookie_secret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
 [brand]
 name          = "Forseti"
 support_email = "support@example.com"
@@ -112,6 +123,14 @@ support_email = "support@example.com"
 # url = "sqlite://./forseti.db"
 # url = "postgres://forseti:forseti@localhost:5432/forseti"
 # skip_migrations = false  # set true to gate schema changes through a pipeline
+
+# Identity-management knobs. `unverified_ttl_days` is the window used by the
+# `forseti unverified-prune` CLI: a Kratos identity that still has an unverified
+# address and was created more than this many days ago is deleted. Default 7
+# keeps an unverified squatter from blocking the legitimate owner of an address;
+# dial up for slower onboarding flows.
+# [identity]
+# unverified_ttl_days = 7
 
 # Internal HTTP listener for machine-to-machine endpoints (today: the
 # Kratos audit webhook receiver). Defaults to loopback so the surface
@@ -237,6 +256,14 @@ support_email = "support@example.com"
 # [orgs]
 # active_org_cookie_ttl_seconds = 2592000   # 30 days
 # invite_ttl_days = 7
+
+# Commercial-tier knobs. The signed license blob itself is NOT set here — it is
+# pasted into `/admin/license` and stored in the `forseti_license` table. The
+# grace window is fixed in code. `purchase_url` is the "Upgrade" CTA target on
+# the upsell page and the lock badges on gated features; when empty it falls
+# back to a `mailto:` built from `[brand].support_email`.
+# [license]
+# purchase_url = "https://example.com/forseti/buy"
 
 # Enterprise SAML SSO (commercial feature — requires a license with `saml`).
 # Strictly opt-in: omit this whole section and Forseti has no SAML surface.

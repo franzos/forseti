@@ -7,13 +7,13 @@
 use axum::{
     extract::{Path, Query, State},
     http::HeaderMap,
-    response::{IntoResponse, Redirect, Response},
+    response::Response,
 };
-use axum_extra::extract::Form;
 use serde::Deserialize;
 
 use crate::admin::{render_admin_error, with_org, AdminSection, ConfirmForm, ConfirmTemplate};
-use crate::audit::{self, action, target_kind, AuditCtx, AuditEvent};
+use crate::audit::{self, action, target_kind, AuditCtx};
+use crate::csrf::CsrfForm;
 use crate::extractors::{Csrf, RequireAdminScoped};
 use crate::flash;
 use crate::format::{humanise_timestamp, humanise_user_agent};
@@ -253,14 +253,7 @@ pub async fn list(
     };
     let has_prev = page_token.is_some();
 
-    let secure = state.cfg.self_.is_https();
-    let (flash_msg, clear_flash) = flash::take_flash(
-        &headers,
-        &state.cookie_secret,
-        state.cfg.flash.cookie_ttl_seconds,
-        "/admin/sessions",
-        secure,
-    );
+    let (flash_msg, clear_flash) = state.take_flash(&headers, "/admin/sessions");
 
     tracing::info!(
         action = "admin.sessions.list",
@@ -317,18 +310,14 @@ pub async fn revoke_confirm(
 pub async fn revoke(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    headers: HeaderMap,
     actx: AuditCtx,
     admin: RequireAdminScoped,
-    Form(form): Form<ConfirmForm>,
+    CsrfForm(form): CsrfForm<ConfirmForm>,
 ) -> Response {
     let RequireAdminScoped { ctx, scope } = admin;
     let redirect_to = with_org("/admin/sessions", &scope);
-    if let Some(resp) = crate::extractors::verify_csrf_or_forbid(&headers, form.csrf.as_deref()) {
-        return resp;
-    }
-    if !form.confirmed() {
-        return Redirect::to(&redirect_to).into_response();
+    if let Some(r) = form.bounce_unless_confirmed(&redirect_to) {
+        return r;
     }
     // Re-verify scope on the write path; don't trust the round-trip, since a
     // stale tab with a swapped `?org=` could otherwise revoke a foreign session.
@@ -339,20 +328,11 @@ pub async fn revoke(
         Ok(()) => {
             let _ = audit::log(
                 &state.db,
-                AuditEvent::new(action::ADMIN_SESSION_REVOKED)
-                    .actor_admin(&ctx.identity_id, &ctx.email)
-                    .target(target_kind::SESSION, id.clone())
-                    .with_ctx(&actx),
+                ctx.audit_event(action::ADMIN_SESSION_REVOKED, &actx)
+                    .target(target_kind::SESSION, id.clone()),
             )
             .await;
-            let cookie = flash::store_flash(
-                &state.cookie_secret,
-                state.cfg.flash.cookie_ttl_seconds,
-                &redirect_to,
-                "Session revoked.",
-                state.cfg.self_.is_https(),
-            );
-            flash::redirect_with_cookie(&redirect_to, &cookie)
+            state.flash_redirect(&redirect_to, "Session revoked.")
         }
         Err(e) => {
             tracing::error!(error = ?e, id, "admin: revoke session failed");

@@ -37,12 +37,12 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::Router;
-use axum_extra::extract::Form;
 use serde::Deserialize;
 
 use crate::audit::{self, action, target_kind, AuditCtx, AuditEvent};
 use crate::audit_metadata;
 use crate::config::{HandoffConfig, ProxyConfig};
+use crate::csrf::CsrfForm;
 use crate::flash::redirect_with_cookie;
 use crate::ory;
 use crate::rate_limit;
@@ -130,8 +130,6 @@ pub(crate) struct HandoffQuery {
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct DismissForm {
-    #[serde(rename = "_csrf")]
-    csrf: Option<String>,
     /// Path to redirect back to after clearing. Defaults to the
     /// referrer-target the user was on. Path-only — `safe_return_to`
     /// rules apply.
@@ -276,12 +274,8 @@ pub(crate) async fn handoff_return(
 /// back. CSRF-protected because it has a server-side side-effect.
 pub(crate) async fn handoff_dismiss(
     State(state): State<AppState>,
-    headers: HeaderMap,
-    Form(form): Form<DismissForm>,
+    CsrfForm(form): CsrfForm<DismissForm>,
 ) -> Response {
-    if let Some(resp) = crate::extractors::verify_csrf_or_forbid(&headers, form.csrf.as_deref()) {
-        return resp;
-    }
     let secure = state.cfg.self_.is_https();
     let clear = clear_referrer_cookie(secure);
     let back = match form.return_to.as_deref() {

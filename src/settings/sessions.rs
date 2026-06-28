@@ -6,11 +6,11 @@ use askama::Template;
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
-use axum_extra::extract::Form;
 
 use crate::audit::{self, action, target_kind, AuditCtx, AuditEvent};
 use crate::audit_metadata;
 use crate::cookies;
+use crate::csrf::CsrfForm;
 use crate::extractors::Csrf;
 use crate::flash;
 use crate::flow_view::session_email;
@@ -72,14 +72,7 @@ pub(crate) async fn settings_sessions(
 
     let has_other_sessions = !other_sessions.is_empty();
 
-    let secure = state.cfg.self_.is_https();
-    let (flash_msg, clear_flash) = flash::take_flash(
-        &headers,
-        &state.cookie_secret,
-        state.cfg.flash.cookie_ttl_seconds,
-        "/settings/sessions",
-        secure,
-    );
+    let (flash_msg, clear_flash) = state.take_flash(&headers, "/settings/sessions");
     let body = render(&SettingsSessionsTemplate {
         chrome: PageChrome::from_parts(&state, session_email(&session), csrf.0),
         sessions: rows,
@@ -96,16 +89,12 @@ pub(crate) async fn settings_sessions_revoke(
     headers: HeaderMap,
     sess: crate::extractors::RequireSession,
     actx: AuditCtx,
-    Form(form): Form<crate::csrf::CsrfForm>,
+    _: CsrfForm<crate::csrf::NoPayload>,
 ) -> Response {
-    if let Some(resp) = crate::extractors::verify_csrf_or_forbid(&headers, form.csrf.as_deref()) {
-        return resp;
-    }
     let cookie = cookies::cookie_header(&headers);
     let actor_id = sess.identity_id;
     let actor_email = sess.email;
 
-    let secure = state.cfg.self_.is_https();
     let (msg, ok) = match ory::kratos::revoke_session(
         &state.ory,
         &session_id,
@@ -129,14 +118,7 @@ pub(crate) async fn settings_sessions_revoke(
         )
         .await;
     }
-    let cookie = flash::store_flash(
-        &state.cookie_secret,
-        state.cfg.flash.cookie_ttl_seconds,
-        "/settings/sessions",
-        msg,
-        secure,
-    );
-    flash::redirect_with_cookie("/settings/sessions", &cookie)
+    state.flash_redirect("/settings/sessions", msg)
 }
 
 pub(crate) async fn settings_sessions_revoke_others(
@@ -144,16 +126,12 @@ pub(crate) async fn settings_sessions_revoke_others(
     headers: HeaderMap,
     sess: crate::extractors::RequireSession,
     actx: AuditCtx,
-    Form(form): Form<crate::csrf::CsrfForm>,
+    _: CsrfForm<crate::csrf::NoPayload>,
 ) -> Response {
-    if let Some(resp) = crate::extractors::verify_csrf_or_forbid(&headers, form.csrf.as_deref()) {
-        return resp;
-    }
     let cookie = cookies::cookie_header(&headers);
     let actor_id = sess.identity_id;
     let actor_email = sess.email;
 
-    let secure = state.cfg.self_.is_https();
     let msg = match ory::kratos::revoke_other_sessions(
         &state.ory,
         (!cookie.is_empty()).then_some(cookie.as_str()),
@@ -179,12 +157,5 @@ pub(crate) async fn settings_sessions_revoke_others(
             "Could not sign out other sessions.".to_string()
         }
     };
-    let flash_cookie = flash::store_flash(
-        &state.cookie_secret,
-        state.cfg.flash.cookie_ttl_seconds,
-        "/settings/sessions",
-        &msg,
-        secure,
-    );
-    flash::redirect_with_cookie("/settings/sessions", &flash_cookie)
+    state.flash_redirect("/settings/sessions", &msg)
 }

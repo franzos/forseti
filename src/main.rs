@@ -49,12 +49,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Some("audit-prune") => {
             let cfg = config::AppConfig::load()?;
-            let db = db::DbPool::init(&cfg.database)?;
-            db.ping().await?;
-            // Migrations land the audit_events table + the sqlite trigger's `_forseti_meta` sentinel row; without them a fresh-db prune hits "no such table".
-            if !cfg.database.skip_migrations {
-                db.run_migrations().await?;
-            }
+            let db = bootstrap_db(&cfg).await?;
             let code = audit::prune_cli(&cfg, &db).await;
             std::process::exit(code);
         }
@@ -62,21 +57,13 @@ async fn main() -> anyhow::Result<()> {
             let cfg = config::AppConfig::load()?;
             // Deletes go through Kratos's admin API but cascade to the local POSIX tables, so the pool is needed.
             let ory = ory::OryClients::from_config(&cfg);
-            let db = db::DbPool::init(&cfg.database)?;
-            db.ping().await?;
-            if !cfg.database.skip_migrations {
-                db.run_migrations().await?;
-            }
+            let db = bootstrap_db(&cfg).await?;
             let code = identity::prune_unverified_cli(&cfg, &db, &ory).await;
             std::process::exit(code);
         }
         Some("posix-reconcile") => {
             let cfg = config::AppConfig::load()?;
-            let db = db::DbPool::init(&cfg.database)?;
-            db.ping().await?;
-            if !cfg.database.skip_migrations {
-                db.run_migrations().await?;
-            }
+            let db = bootstrap_db(&cfg).await?;
             let ory = ory::OryClients::from_config(&cfg);
             match posix::reconcile_orphans(&db, &ory).await {
                 Ok(n) => {
@@ -140,6 +127,17 @@ async fn main() -> anyhow::Result<()> {
         }
         _ => app::run().await,
     }
+}
+
+/// Shared DB prologue for the DB-touching subcommands: pool init + ping, then migrations unless skipped.
+/// Migrations land tables a fresh DB lacks (e.g. audit_events + the sqlite trigger's `_forseti_meta` sentinel).
+async fn bootstrap_db(cfg: &config::AppConfig) -> anyhow::Result<db::DbPool> {
+    let db = db::DbPool::init(&cfg.database)?;
+    db.ping().await?;
+    if !cfg.database.skip_migrations {
+        db.run_migrations().await?;
+    }
+    Ok(db)
 }
 
 fn print_top_help() {

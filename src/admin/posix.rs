@@ -12,13 +12,13 @@
 //! `[admin].allowed_emails`). Does NOT honour `?org=<slug>`.
 
 use axum::extract::{Path, State};
-use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Redirect, Response};
-use axum_extra::extract::Form;
 use serde::Deserialize;
 
+use crate::csrf::CsrfForm;
+
 use crate::admin::{render_admin_error, AdminSection, ConfirmForm, ConfirmTemplate};
-use crate::audit::{self, action, target_kind, AuditCtx, AuditEvent};
+use crate::audit::{self, action, target_kind, AuditCtx};
 use crate::audit_metadata;
 use crate::commercial::license::{seat_cap_allows, Feature};
 use crate::commercial::FeatureStatus;
@@ -234,8 +234,6 @@ fn suggest_username(email: &str) -> String {
 
 #[derive(Debug, Deserialize)]
 pub struct ProvisionForm {
-    #[serde(rename = "_csrf")]
-    csrf: Option<String>,
     #[serde(default)]
     identity_id: String,
     #[serde(default)]
@@ -246,16 +244,12 @@ pub struct ProvisionForm {
 
 pub async fn provision(
     State(state): State<AppState>,
-    headers: HeaderMap,
     actx: AuditCtx,
     admin: RequireAdmin,
     csrf: Csrf,
-    Form(form): Form<ProvisionForm>,
+    CsrfForm(form): CsrfForm<ProvisionForm>,
 ) -> Response {
     let ctx = admin.ctx;
-    if let Some(resp) = crate::extractors::verify_csrf_or_forbid(&headers, form.csrf.as_deref()) {
-        return resp;
-    }
 
     let submitted = form.identity_id.trim().to_string();
     let username = form.username.trim().to_string();
@@ -360,10 +354,8 @@ pub async fn provision(
 
     let _ = audit::log(
         &state.db,
-        AuditEvent::new(action::POSIX_ACCOUNT_PROVISIONED)
-            .actor_admin(&ctx.identity_id, &ctx.email)
+        ctx.audit_event(action::POSIX_ACCOUNT_PROVISIONED, &actx)
             .target(target_kind::POSIX_ACCOUNT, identity_id.clone())
-            .with_ctx(&actx)
             .metadata(audit_metadata!(
                 "username" => account.username.clone(),
                 "uid" => account.uid.to_string(),
@@ -485,8 +477,6 @@ async fn render_account(
 
 #[derive(Debug, Deserialize)]
 pub struct AddKeyForm {
-    #[serde(rename = "_csrf")]
-    csrf: Option<String>,
     #[serde(default)]
     public_key: String,
     #[serde(default)]
@@ -510,16 +500,12 @@ fn looks_like_ssh_key(s: &str) -> bool {
 pub async fn add_key(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    headers: HeaderMap,
     actx: AuditCtx,
     admin: RequireAdmin,
     csrf: Csrf,
-    Form(form): Form<AddKeyForm>,
+    CsrfForm(form): CsrfForm<AddKeyForm>,
 ) -> Response {
     let ctx = admin.ctx;
-    if let Some(resp) = crate::extractors::verify_csrf_or_forbid(&headers, form.csrf.as_deref()) {
-        return resp;
-    }
 
     let public_key = form.public_key.trim().to_string();
     let comment = form.comment.trim().to_string();
@@ -540,10 +526,8 @@ pub async fn add_key(
         Ok(key_id) => {
             let _ = audit::log(
                 &state.db,
-                AuditEvent::new(action::POSIX_SSH_KEY_ADDED)
-                    .actor_admin(&ctx.identity_id, &ctx.email)
+                ctx.audit_event(action::POSIX_SSH_KEY_ADDED, &actx)
                     .target(target_kind::POSIX_ACCOUNT, id.clone())
-                    .with_ctx(&actx)
                     .metadata(audit_metadata!("key_id" => key_id)),
             )
             .await;
@@ -562,33 +546,21 @@ pub async fn add_key(
     .into_response()
 }
 
-#[derive(Debug, Deserialize)]
-pub struct RemoveKeyForm {
-    #[serde(rename = "_csrf")]
-    csrf: Option<String>,
-}
-
 pub async fn remove_key(
     State(state): State<AppState>,
     Path((id, key_id)): Path<(String, String)>,
-    headers: HeaderMap,
     actx: AuditCtx,
     admin: RequireAdmin,
-    Form(form): Form<RemoveKeyForm>,
+    _: CsrfForm<crate::csrf::NoPayload>,
 ) -> Response {
     let ctx = admin.ctx;
-    if let Some(resp) = crate::extractors::verify_csrf_or_forbid(&headers, form.csrf.as_deref()) {
-        return resp;
-    }
     let target = format!("/admin/posix/{}", ory_client::apis::urlencode(&id));
     match posix_db::delete_ssh_key(&state.db, &key_id).await {
         Ok(()) => {
             let _ = audit::log(
                 &state.db,
-                AuditEvent::new(action::POSIX_SSH_KEY_REMOVED)
-                    .actor_admin(&ctx.identity_id, &ctx.email)
+                ctx.audit_event(action::POSIX_SSH_KEY_REMOVED, &actx)
                     .target(target_kind::POSIX_ACCOUNT, id.clone())
-                    .with_ctx(&actx)
                     .metadata(audit_metadata!("key_id" => key_id)),
             )
             .await;
@@ -608,37 +580,30 @@ pub async fn remove_key(
 pub async fn disable(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    headers: HeaderMap,
     actx: AuditCtx,
     admin: RequireAdmin,
-    Form(form): Form<crate::csrf::CsrfForm>,
+    _: CsrfForm<crate::csrf::NoPayload>,
 ) -> Response {
-    set_enabled(&state, &admin.ctx, &actx, &headers, form, &id, false).await
+    set_enabled(&state, &admin.ctx, &actx, &id, false).await
 }
 
 pub async fn enable(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    headers: HeaderMap,
     actx: AuditCtx,
     admin: RequireAdmin,
-    Form(form): Form<crate::csrf::CsrfForm>,
+    _: CsrfForm<crate::csrf::NoPayload>,
 ) -> Response {
-    set_enabled(&state, &admin.ctx, &actx, &headers, form, &id, true).await
+    set_enabled(&state, &admin.ctx, &actx, &id, true).await
 }
 
 async fn set_enabled(
     state: &AppState,
     ctx: &crate::admin::AdminCtx,
     actx: &AuditCtx,
-    headers: &HeaderMap,
-    form: crate::csrf::CsrfForm,
     id: &str,
     enabled: bool,
 ) -> Response {
-    if let Some(resp) = crate::extractors::verify_csrf_or_forbid(headers, form.csrf.as_deref()) {
-        return resp;
-    }
     let target = format!("/admin/posix/{}", ory_client::apis::urlencode(id));
     match posix_db::set_account_enabled(&state.db, id, enabled).await {
         Ok(()) => {
@@ -649,10 +614,8 @@ async fn set_enabled(
             };
             let _ = audit::log(
                 &state.db,
-                AuditEvent::new(act)
-                    .actor_admin(&ctx.identity_id, &ctx.email)
-                    .target(target_kind::POSIX_ACCOUNT, id.to_string())
-                    .with_ctx(actx),
+                ctx.audit_event(act, actx)
+                    .target(target_kind::POSIX_ACCOUNT, id.to_string()),
             )
             .await;
             Redirect::to(&target).into_response()
@@ -687,27 +650,21 @@ pub async fn delete_confirm(Path(id): Path<String>, admin: RequireAdmin, csrf: C
 pub async fn delete(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    headers: HeaderMap,
     actx: AuditCtx,
     admin: RequireAdmin,
-    Form(form): Form<ConfirmForm>,
+    CsrfForm(form): CsrfForm<ConfirmForm>,
 ) -> Response {
     let ctx = admin.ctx;
-    if let Some(resp) = crate::extractors::verify_csrf_or_forbid(&headers, form.csrf.as_deref()) {
-        return resp;
-    }
     let target = format!("/admin/posix/{}", ory_client::apis::urlencode(&id));
-    if !form.confirmed() {
-        return Redirect::to(&target).into_response();
+    if let Some(r) = form.bounce_unless_confirmed(&target) {
+        return r;
     }
     match posix_db::delete_account_rows(&state.db, &id).await {
         Ok(()) => {
             let _ = audit::log(
                 &state.db,
-                AuditEvent::new(action::POSIX_ACCOUNT_DELETED)
-                    .actor_admin(&ctx.identity_id, &ctx.email)
+                ctx.audit_event(action::POSIX_ACCOUNT_DELETED, &actx)
                     .target(target_kind::POSIX_ACCOUNT, id)
-                    .with_ctx(&actx)
                     .critical(),
             )
             .await;

@@ -11,8 +11,6 @@ use crate::ory;
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct ClientForm {
-    #[serde(rename = "_csrf")]
-    pub(super) csrf: Option<String>,
     pub(super) name: String,
     /// Each checked grant in the form posts a separate `grant_types=<value>`
     /// entry; `serde_html_form` (via `axum_extra::Form`) collects them

@@ -91,11 +91,19 @@ The authoritative schema is `src/config.rs`. The example file is `config.example
 |-------|--------|---------|--------------------------------------------------------------------------|
 | `url` | string | —       | Forseti's own externally reachable URL. Used to build `return_to` round-trips. |
 
-### Cookie signing keys
+### `[security]`
 
-There's no `[cookies]` block. The HMAC keys for Forseti's signed cookies (flash, `active_org`, `forseti_app_referrer`) are derived per-cookie via SHA-256 over `[self].url` plus a per-use domain-separation salt (see `src/flash.rs`, `src/orgs/cookie.rs`, `src/handoff/cookie.rs`). Rotating those keys means rotating `[self].url` — they're not security-critical on their own (the flash banner is short-lived, the org cookie's selection is re-validated at use, the handoff cookie's `referrer_uri` is re-checked against the Hydra client). Forseti does not own its own session cookie; that's Kratos.
+| Key             | Type   | Default            | Description                                                            |
+|-----------------|--------|--------------------|------------------------------------------------------------------------|
+| `cookie_secret` | string | ephemeral per-boot | Seeds the HMAC keys for every Forseti-signed cookie. Long random secret. |
 
-CSRF protection uses a double-submit token (`src/csrf.rs`), not a server-side signing key, so there's nothing to configure for it either.
+`cookie_secret` is the root key behind the HMAC for Forseti's signed cookies (one-shot flash, `active_org` switcher, `forseti_app_referrer` handoff, CSRF double-submit). Each cookie derives its own key from this secret plus a per-use domain-separation salt (see `src/flash.rs`, `src/orgs/cookie.rs`, `src/handoff/cookie.rs`).
+
+Generate one with `openssl rand -hex 32` (a hex string is decoded to bytes; anything that isn't valid hex is taken as raw UTF-8 bytes). The decoded key must be at least 32 bytes or Forseti hard-fails at boot. Override via `FORSETI_SECURITY__COOKIE_SECRET`.
+
+When unset, Forseti generates a 32-byte ephemeral key per process and logs a warning. That means flash, active-org, and app-referrer cookies don't survive a restart, and separate instances can't validate each other's cookies — so **set `cookie_secret` in production** and on any multi-instance deployment. None of these are Forseti's session cookie (that's Kratos), and none are catastrophic on their own (the flash banner is short-lived, the org cookie's selection is re-validated at use, the handoff cookie's `referrer_uri` is re-checked against the Hydra client), but a stable secret avoids the restart churn.
+
+CSRF protection uses a double-submit token (`src/csrf.rs`) keyed off the same secret; there's nothing extra to configure for it.
 
 ### `[brand]`
 

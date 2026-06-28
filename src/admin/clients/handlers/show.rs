@@ -5,13 +5,13 @@ use axum::{
     http::HeaderMap,
     response::{IntoResponse, Redirect, Response},
 };
-use axum_extra::extract::Form;
 use serde::Deserialize;
 
 use crate::admin::with_org;
 use crate::admin::{render_admin_error, AdminSection};
-use crate::audit::{self, action, target_kind, AuditCtx, AuditEvent};
+use crate::audit::{self, action, target_kind, AuditCtx};
 use crate::audit_metadata;
+use crate::csrf::CsrfForm;
 use crate::extractors::Csrf;
 use crate::flash::{self, attach_set_cookie, SecretReveal};
 use crate::oauth_client_metadata;
@@ -177,15 +177,8 @@ pub async fn show(
         None => None,
     };
 
-    let secure = state.cfg.self_.is_https();
     let show_path = format!("/admin/clients/{id}");
-    let (flash_msg, clear_flash) = flash::take_flash(
-        &headers,
-        &state.cookie_secret,
-        state.cfg.flash.cookie_ttl_seconds,
-        &show_path,
-        secure,
-    );
+    let (flash_msg, clear_flash) = state.take_flash(&headers, &show_path);
 
     let chrome = ctx.chrome(&csrf);
     let (disc, discovery_ok) = state.openid_configuration().await;
@@ -324,15 +317,11 @@ fn build_show_view(
 
 pub async fn update(
     State(state): State<AppState>,
-    headers: HeaderMap,
     client_in_scope: RequireClientInScope,
     actx: AuditCtx,
-    Form(form): Form<ClientForm>,
+    CsrfForm(form): CsrfForm<ClientForm>,
 ) -> Response {
     let RequireClientInScope { id, ctx, scope } = client_in_scope;
-    if let Some(resp) = crate::extractors::verify_csrf_or_forbid(&headers, form.csrf.as_deref()) {
-        return resp;
-    }
 
     if let Err(e) = crate::webhook::validate_webhook_url(&form.account_deletion_url) {
         return render_admin_error(
@@ -363,10 +352,8 @@ pub async fn update(
         Ok(_) => {
             let _ = audit::log(
                 &state.db,
-                AuditEvent::new(action::ADMIN_CLIENT_UPDATED)
-                    .actor_admin(&ctx.identity_id, &ctx.email)
+                ctx.audit_event(action::ADMIN_CLIENT_UPDATED, &actx)
                     .target(target_kind::OAUTH_CLIENT, id.clone())
-                    .with_ctx(&actx)
                     .metadata(audit_metadata!("client_type" => client_type)),
             )
             .await;

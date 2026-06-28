@@ -1,14 +1,13 @@
 //! Client verification toggle: `verify`, `unverify_confirm`, `unverify`.
 
-use axum::{extract::State, http::HeaderMap, response::Response};
-use axum_extra::extract::Form;
+use axum::{extract::State, response::Response};
 
 use crate::admin::with_org;
 use crate::admin::{render_admin_error, AdminSection, ConfirmForm, ConfirmTemplate};
 use crate::audit::{self, action, target_kind, AuditCtx, AuditEvent};
 use crate::audit_metadata;
+use crate::csrf::CsrfForm;
 use crate::extractors::Csrf;
-use crate::flash::{self, redirect_with_cookie};
 use crate::oauth_client_metadata;
 use crate::orgs::AdminScope;
 use crate::ory;
@@ -22,15 +21,11 @@ use crate::admin::clients::scope::RequireClientInScope;
 /// interstitial: verification is a non-destructive upgrade.
 pub async fn verify(
     State(state): State<AppState>,
-    headers: HeaderMap,
     client_in_scope: RequireClientInScope,
     actx: AuditCtx,
-    Form(form): Form<ConfirmForm>,
+    _: CsrfForm<ConfirmForm>,
 ) -> Response {
     let RequireClientInScope { id, ctx, scope } = client_in_scope;
-    if let Some(resp) = crate::extractors::verify_csrf_or_forbid(&headers, form.csrf.as_deref()) {
-        return resp;
-    }
     set_verification(
         &state,
         &id,
@@ -64,15 +59,11 @@ pub async fn unverify_confirm(client_in_scope: RequireClientInScope, csrf: Csrf)
 /// surfaces alongside delete / rotate-secret in `/admin/audit?severity=critical`.
 pub async fn unverify(
     State(state): State<AppState>,
-    headers: HeaderMap,
     client_in_scope: RequireClientInScope,
     actx: AuditCtx,
-    Form(form): Form<ConfirmForm>,
+    _: CsrfForm<ConfirmForm>,
 ) -> Response {
     let RequireClientInScope { id, ctx, scope } = client_in_scope;
-    if let Some(resp) = crate::extractors::verify_csrf_or_forbid(&headers, form.csrf.as_deref()) {
-        return resp;
-    }
     set_verification(
         &state,
         &id,
@@ -167,12 +158,5 @@ async fn set_verification(
     } else {
         "Client verification revoked."
     };
-    let cookie = flash::store_flash(
-        &state.cookie_secret,
-        state.cfg.flash.cookie_ttl_seconds,
-        &target,
-        msg,
-        state.cfg.self_.is_https(),
-    );
-    redirect_with_cookie(&target, &cookie)
+    state.flash_redirect(&target, msg)
 }

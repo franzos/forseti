@@ -5,7 +5,6 @@ use askama::Template;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
-use axum_extra::extract::Form;
 use serde::Deserialize;
 
 use crate::audit::{self, action, target_kind, AuditCtx, AuditEvent};
@@ -73,23 +72,17 @@ pub(super) async fn orgs_list(
 
 #[derive(Debug, Deserialize)]
 pub(super) struct CreateOrgForm {
-    #[serde(rename = "_csrf")]
-    csrf: Option<String>,
     name: String,
     slug: Option<String>,
 }
 
 pub(super) async fn orgs_create(
     State(state): State<AppState>,
-    headers: HeaderMap,
     sess: RequireSession,
     csrf: Csrf,
     actx: AuditCtx,
-    Form(form): Form<CreateOrgForm>,
+    CsrfForm(form): CsrfForm<CreateOrgForm>,
 ) -> Response {
-    if let Some(resp) = crate::extractors::verify_csrf_or_forbid(&headers, form.csrf.as_deref()) {
-        return resp;
-    }
     let identity_id = sess.identity_id;
     let email = sess.email;
     let actor_email = email.clone();
@@ -180,13 +173,9 @@ pub(super) async fn orgs_create(
 pub(super) async fn named_delete(
     State(state): State<AppState>,
     Path(slug): Path<String>,
-    headers: HeaderMap,
     sess: RequireSession,
-    Form(form): Form<CsrfForm>,
+    _: CsrfForm<crate::csrf::NoPayload>,
 ) -> Response {
-    if let Some(resp) = crate::extractors::verify_csrf_or_forbid(&headers, form.csrf.as_deref()) {
-        return resp;
-    }
     let identity_id = sess.identity_id;
     let Ok(Some(org)) = orgs::org_by_slug(&state.db, &slug).await else {
         return (StatusCode::NOT_FOUND, "unknown organization").into_response();

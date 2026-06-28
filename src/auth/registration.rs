@@ -10,7 +10,8 @@ use crate::cookies;
 use crate::csrf;
 use crate::extractors::OptionalSession;
 use crate::flow_view::*;
-use crate::ory::{self, FlowFetch, FlowKind};
+use crate::ory::kratos::FlowOutcome;
+use crate::ory::{self, FlowKind};
 use crate::page_chrome::{Chrome, PageChrome};
 use crate::render::render;
 use crate::state::AppState;
@@ -25,12 +26,7 @@ pub(crate) struct PrefillQuery {
 #[template(path = "registration.html")]
 struct RegistrationTemplate {
     chrome: PageChrome,
-    form_action: String,
-    form_method: String,
-    flow_messages: Vec<MessageView>,
-    groups: GroupedNodes,
-    has_visible_default: bool,
-    return_to_qs: String,
+    form: FlowFormView,
     /// WebAuthn / passkey helper script; without it the passkey enrollment
     /// button's `window.oryPasskeyRegistration` is undefined.
     webauthn_scripts: Vec<ScriptView>,
@@ -66,21 +62,24 @@ pub(crate) async fn registration(
         OptionalSession::None => {}
     }
 
-    let Some(flow_id) = query.flow.as_deref() else {
-        let url = ory::kratos::browser_init_url(
+    let flow_id = query.flow.as_deref();
+    let init_url = || {
+        ory::kratos::browser_init_url(
             FlowKind::Registration,
             &state.cfg.kratos.public_url,
             query.return_to.as_deref(),
-        );
-        let secure = state.cfg.self_.is_https();
-        return csrf::attach_csrf(
-            Redirect::to(&url).into_response(),
-            Some(csrf::delete_csrf_cookie(secure)),
-        );
+        )
     };
 
-    match ory::kratos::get_flow(&state.ory, FlowKind::Registration, flow_id, &cookie).await {
-        Ok(FlowFetch::Ok(flow)) => {
+    match ory::kratos::resolve_flow(&state.ory, FlowKind::Registration, flow_id, &cookie).await {
+        FlowOutcome::Init => {
+            let secure = state.cfg.self_.is_https();
+            csrf::attach_csrf(
+                Redirect::to(&init_url()).into_response(),
+                Some(csrf::delete_csrf_cookie(secure)),
+            )
+        }
+        FlowOutcome::Ready(flow) => {
             let mut resp = render_registration(
                 chrome,
                 &flow,
@@ -92,16 +91,11 @@ pub(crate) async fn registration(
             }
             resp
         }
-        Ok(FlowFetch::Gone) | Ok(FlowFetch::PrivilegedRequired(_)) => {
-            let url = ory::kratos::browser_init_url(
-                FlowKind::Registration,
-                &state.cfg.kratos.public_url,
-                query.return_to.as_deref(),
-            );
-            Redirect::to(&url).into_response()
+        FlowOutcome::Reinit | FlowOutcome::Privileged(_) => {
+            Redirect::to(&init_url()).into_response()
         }
-        Err(e) => {
-            tracing::error!(error = ?e, flow_id, "failed to fetch Kratos registration flow");
+        FlowOutcome::Error(e) => {
+            tracing::error!(error = ?e, ?flow_id, "failed to fetch Kratos registration flow");
             render_error_boundary(
                 &state,
                 "Sign-up unavailable",
@@ -131,16 +125,15 @@ fn render_registration(
     return_to: Option<&str>,
     prefill_email: Option<&str>,
 ) -> Response {
-    let (form_action, form_method) = form_target(flow);
-    let mut groups = group_nodes(flow);
-    mark_primary_submits(&mut groups, FlowKind::Registration);
+    let mut form = FlowFormView::from_flow(flow, FlowKind::Registration, return_to);
     // Overwrite the empty `traits.email` Kratos persists on flow init rather
-    // than re-initialising the flow.
+    // than re-initialising the flow. Only mutates `value`, so the already-computed
+    // `has_visible_default` (keyed on `input_type`) is unaffected.
     if let Some(email) = prefill_email.filter(|s| !s.is_empty()) {
         for group in [
-            &mut groups.profile,
-            &mut groups.password,
-            &mut groups.default,
+            &mut form.groups.profile,
+            &mut form.groups.password,
+            &mut form.groups.default,
         ] {
             for node in group.iter_mut() {
                 if node.name == "traits.email" && node.value.is_empty() {
@@ -149,17 +142,11 @@ fn render_registration(
             }
         }
     }
-    let has_visible_default = has_visible_default_inputs(&groups);
     let webauthn_scripts = collect_webauthn_scripts(flow);
 
     render(&RegistrationTemplate {
         chrome,
-        form_action,
-        form_method,
-        flow_messages: flow_messages(flow),
-        groups,
-        has_visible_default,
-        return_to_qs: return_to_qs(return_to.or_else(|| flow_return_to(flow))),
+        form,
         webauthn_scripts,
     })
 }

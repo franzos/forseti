@@ -17,6 +17,7 @@ use crate::flow_view::{
     flow_messages, flow_state, form_target, group_nodes, mark_settings_primary, session_email,
     session_needs_verification,
 };
+use crate::ory::kratos::FlowOutcome;
 use crate::ory::{self, FlowFetch, FlowKind};
 use crate::page_chrome::PageChrome;
 use crate::render::render;
@@ -299,26 +300,19 @@ pub(crate) async fn fetch_settings_subpage(
         section.path()
     );
 
-    let Some(flow_id) = query.flow.as_deref() else {
-        let url = ory::kratos::browser_init_url(
+    let flow_id = query.flow.as_deref();
+    let init_url = || {
+        ory::kratos::browser_init_url(
             FlowKind::Settings,
             &state.cfg.kratos.public_url,
             Some(&return_to_full),
-        );
-        return Err(Redirect::to(&url).into_response());
+        )
     };
 
-    match ory::kratos::get_flow(&state.ory, FlowKind::Settings, flow_id, &cookie).await {
-        Ok(FlowFetch::Ok(flow)) => Ok((sess.session.clone(), flow)),
-        Ok(FlowFetch::Gone) => {
-            let url = ory::kratos::browser_init_url(
-                FlowKind::Settings,
-                &state.cfg.kratos.public_url,
-                Some(&return_to_full),
-            );
-            Err(Redirect::to(&url).into_response())
-        }
-        Ok(FlowFetch::PrivilegedRequired(reason)) => {
+    match ory::kratos::resolve_flow(&state.ory, FlowKind::Settings, flow_id, &cookie).await {
+        FlowOutcome::Init | FlowOutcome::Reinit => Err(Redirect::to(&init_url()).into_response()),
+        FlowOutcome::Ready(flow) => Ok((sess.session.clone(), flow)),
+        FlowOutcome::Privileged(reason) => {
             // The two 403 reasons need different `/login` params: sending
             // `refresh=true` when Kratos wanted `aal=aal2` livelocks the user
             // on `/settings/*` after a recovery hand-off.
@@ -333,8 +327,8 @@ pub(crate) async fn fetch_settings_subpage(
             };
             Err(Redirect::to(&url).into_response())
         }
-        Err(e) => {
-            tracing::error!(error = ?e, flow_id, "failed to fetch Kratos settings flow");
+        FlowOutcome::Error(e) => {
+            tracing::error!(error = ?e, ?flow_id, "failed to fetch Kratos settings flow");
             Err(render_error_boundary(
                 state,
                 "Settings unavailable",

@@ -6,11 +6,10 @@ use askama::Template;
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
-use axum_extra::extract::Form;
-use serde::Deserialize;
 
 use crate::audit::{self, action, target_kind, AuditCtx, AuditEvent};
 use crate::audit_metadata;
+use crate::csrf::CsrfForm;
 use crate::extractors::Csrf;
 use crate::flash;
 use crate::format::humanise_timestamp;
@@ -83,14 +82,7 @@ pub(crate) async fn settings_authorized_apps(
 
     let apps = collapse_sessions_to_apps(&state, sessions);
 
-    let secure = state.cfg.self_.is_https();
-    let (flash_msg, clear_flash) = flash::take_flash(
-        &headers,
-        &state.cookie_secret,
-        state.cfg.flash.cookie_ttl_seconds,
-        "/settings/authorized-apps",
-        secure,
-    );
+    let (flash_msg, clear_flash) = state.take_flash(&headers, "/settings/authorized-apps");
     let body = render(&SettingsAuthorizedAppsTemplate {
         chrome: PageChrome::from_parts(&state, sess.email, csrf.0),
         apps,
@@ -180,27 +172,16 @@ fn client_metadata_verified(client: &ory_client::models::OAuth2Client) -> bool {
         .unwrap_or(false)
 }
 
-#[derive(Debug, Deserialize)]
-pub(crate) struct RevokeForm {
-    #[serde(rename = "_csrf")]
-    pub(crate) csrf: Option<String>,
-}
-
 pub(crate) async fn settings_authorized_apps_revoke(
     State(state): State<AppState>,
     axum::extract::Path(client_id): axum::extract::Path<String>,
-    headers: HeaderMap,
     sess: crate::extractors::RequireSession,
     actx: AuditCtx,
-    Form(form): Form<RevokeForm>,
+    _: CsrfForm<crate::csrf::NoPayload>,
 ) -> Response {
-    if let Some(resp) = crate::extractors::verify_csrf_or_forbid(&headers, form.csrf.as_deref()) {
-        return resp;
-    }
     let actor_id = sess.identity_id;
     let actor_email = sess.email;
 
-    let secure = state.cfg.self_.is_https();
     let (msg, ok) =
         match ory::hydra::revoke_consent_sessions_for_client(&state.ory, &actor_id, &client_id)
             .await
@@ -222,12 +203,5 @@ pub(crate) async fn settings_authorized_apps_revoke(
         )
         .await;
     }
-    let cookie = flash::store_flash(
-        &state.cookie_secret,
-        state.cfg.flash.cookie_ttl_seconds,
-        "/settings/authorized-apps",
-        msg,
-        secure,
-    );
-    flash::redirect_with_cookie("/settings/authorized-apps", &cookie)
+    state.flash_redirect("/settings/authorized-apps", msg)
 }

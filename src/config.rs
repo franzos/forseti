@@ -880,6 +880,53 @@ impl AppConfig {
 }
 
 #[cfg(test)]
+impl AppConfig {
+    /// Reusable test config: every sub-config from its `Default`, with the
+    /// four no-default sections (kratos/hydra/self/brand) stubbed. Mutate the
+    /// fields a given test cares about rather than hand-building the literal.
+    pub(crate) fn test_fixture() -> Self {
+        Self {
+            kratos: KratosConfig {
+                public_url: "http://kratos:4433".into(),
+                admin_url: "http://kratos:4434".into(),
+            },
+            hydra: HydraConfig {
+                public_url: "http://hydra:4444".into(),
+                admin_url: "http://hydra:4445".into(),
+            },
+            self_: SelfConfig {
+                url: "http://localhost:3000".into(),
+            },
+            brand: BrandConfig {
+                name: "Test".into(),
+                support_email: None,
+                logo_url: None,
+                consent_intro: String::new(),
+            },
+            apps: Vec::new(),
+            oauth: OAuthConfig::default(),
+            admin: AdminConfig::default(),
+            database: DatabaseConfig::default(),
+            audit: AuditConfig::default(),
+            internal: InternalConfig::default(),
+            license: LicenseConfig::default(),
+            identity: IdentityConfig::default(),
+            smtp: SmtpConfig::default(),
+            profiles: ProfilesConfig::default(),
+            webhook: WebhookConfig::default(),
+            claim_email: ClaimEmailConfig::default(),
+            handoff: HandoffConfig::default(),
+            flash: FlashConfig::default(),
+            orgs: OrgsConfig::default(),
+            saml: None,
+            proxy: ProxyConfig::default(),
+            security: SecurityConfig::default(),
+            posix: PosixConfig::default(),
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

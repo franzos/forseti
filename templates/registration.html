@@ -7,9 +7,9 @@
 
 {% block card_body %}
   {# Flow-level messages (e.g. "Email already in use", "Password too short"). #}
-  {% if !flow_messages.is_empty() %}
+  {% if !form.flow_messages.is_empty() %}
     <div class="flex flex-col gap-stack-sm">
-      {% for msg in flow_messages %}
+      {% for msg in form.flow_messages %}
         <p class="font-body-sm text-body-sm {% if msg.severity == "error" %}text-error{% else if msg.severity == "success" %}text-tertiary{% else %}text-on-surface-variant{% endif %}">
           {{ msg.text }}
         </p>
@@ -27,11 +27,11 @@
     </div>
   {% endif %}
 
-  <form method="{{ form_method }}"
-        action="{{ form_action }}"
+  <form method="{{ form.form_method }}"
+        action="{{ form.form_action }}"
         class="flex flex-col gap-stack-lg">
     {# Hidden inputs from `default` (CSRF token) — rendered up top, before any visible UI. #}
-    {% for node in groups.default %}
+    {% for node in form.groups.default %}
       {% if node.input_type == "hidden" %}
         {% include "partials/flow_node.html" %}
       {% endif %}
@@ -40,10 +40,10 @@
     {# Credential form: visible default-group traits (name, email, …) + password (when present) + submit.
        Kratos's progressive registration starts with just the profile group; once the user submits
        it adds the password group. Both shapes are handled by the same scaffolding. #}
-    {% if has_visible_default || !groups.password.is_empty() || !groups.profile.is_empty() %}
+    {% if form.has_visible_default || !form.groups.password.is_empty() || !form.groups.profile.is_empty() %}
       <div class="flex flex-col gap-stack-md">
         {# Visible `default` inputs — typically `traits.email`, `traits.name.first`, `traits.name.last`. #}
-        {% for node in groups.default %}
+        {% for node in form.groups.default %}
           {% if node.input_type != "hidden" %}
             <div class="flex flex-col gap-stack-sm">
               <label for="{{ node.name }}"
@@ -63,7 +63,7 @@
         {# Password method nodes (password input + submit). Only present once
            the profile step has run, or if Kratos is configured to skip the
            profile-first step. #}
-        {% for node in groups.password %}
+        {% for node in form.groups.password %}
           {% if node.input_type == "submit" || node.input_type == "hidden" %}
             {% include "partials/flow_node.html" %}
           {% else %}
@@ -84,14 +84,14 @@
 
         {# Profile method submit ("Sign up"). The profile group only carries the
            submit button — traits live in `default`. #}
-        {% for node in groups.profile %}
+        {% for node in form.groups.profile %}
           {% include "partials/flow_node.html" %}
         {% endfor %}
       </div>
     {% endif %}
 
     {# OR divider — sits between the create-account button and OIDC stack, per the design mock. #}
-    {% if !groups.oidc.is_empty() %}
+    {% if !form.groups.oidc.is_empty() %}
       <div class="flex items-center gap-stack-md">
         <div class="flex-grow h-px bg-outline-variant"></div>
         <span class="font-label-sm text-label-sm text-outline uppercase tracking-wider">Or continue with</span>
@@ -99,16 +99,16 @@
       </div>
 
       <div class="flex flex-col gap-stack-sm">
-        {% for node in groups.oidc %}
+        {% for node in form.groups.oidc %}
           {% include "partials/flow_node.html" %}
         {% endfor %}
       </div>
     {% endif %}
 
     {# Anything Kratos sent that didn't fit a known group — rendered generically. #}
-    {% if !groups.other.is_empty() %}
+    {% if !form.groups.other.is_empty() %}
       <div class="flex flex-col gap-stack-md">
-        {% for node in groups.other %}
+        {% for node in form.groups.other %}
           {% if node.input_type == "hidden" || node.input_type == "submit" || node.input_type == "button" %}
             {% include "partials/flow_node.html" %}
           {% else %}
@@ -133,7 +133,7 @@
   <div class="text-center mt-stack-sm">
     <p class="font-body-sm text-body-sm text-on-surface-variant">
       Already have an account?
-      <a href="/login{{ return_to_qs }}"
+      <a href="/login{{ form.return_to_qs }}"
          class="font-label-md text-label-md text-primary hover:underline transition-colors">Sign in</a>
     </p>
   </div>

@@ -4,8 +4,6 @@
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Redirect, Response};
-use axum_extra::extract::Form;
-use serde::Deserialize;
 
 use crate::audit::{self, action, AuditCtx, AuditEvent};
 use crate::cookies;
@@ -15,12 +13,6 @@ use crate::ory;
 use crate::state::AppState;
 use crate::web::render_error_boundary;
 
-#[derive(Debug, Deserialize)]
-pub(crate) struct LogoutForm {
-    #[serde(rename = "_csrf")]
-    csrf: Option<String>,
-}
-
 /// POST-only on purpose: link prefetchers, scanners, and pasted URLs must not
 /// be able to nuke a session.
 pub(crate) async fn logout(
@@ -28,12 +20,8 @@ pub(crate) async fn logout(
     headers: HeaderMap,
     actx: AuditCtx,
     session: OptionalSession,
-    Form(form): Form<LogoutForm>,
+    _: csrf::CsrfForm<csrf::NoPayload>,
 ) -> Response {
-    if let Some(resp) = crate::extractors::verify_csrf_or_forbid(&headers, form.csrf.as_deref()) {
-        return resp;
-    }
-
     let cookie = cookies::cookie_header(&headers);
     // Capture the actor before the redirect invalidates the session cookie:
     // this is the last window to record who logged out.

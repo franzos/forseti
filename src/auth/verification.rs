@@ -8,7 +8,8 @@ use axum::response::{IntoResponse, Redirect, Response};
 use crate::cookies;
 use crate::extractors::OptionalSession;
 use crate::flow_view::*;
-use crate::ory::{self, FlowFetch, FlowKind};
+use crate::ory::kratos::FlowOutcome;
+use crate::ory::{self, FlowKind};
 use crate::page_chrome::{Chrome, PageChrome};
 use crate::render::render;
 use crate::state::AppState;
@@ -18,13 +19,8 @@ use crate::{render_error_boundary, FlowQuery};
 #[template(path = "verification.html")]
 struct VerificationTemplate {
     chrome: PageChrome,
-    form_action: String,
-    form_method: String,
-    flow_messages: Vec<MessageView>,
-    groups: GroupedNodes,
-    has_visible_default: bool,
+    form: FlowFormView,
     state: String,
-    return_to_qs: String,
     is_logged_in: bool,
 }
 
@@ -39,18 +35,17 @@ pub(crate) async fn verification(
 
     let session_opt = session.ok();
     let is_logged_in = session_opt.is_some();
-
-    let Some(flow_id) = query.flow.as_deref() else {
-        let url = ory::kratos::browser_init_url(
+    let flow_id = query.flow.as_deref();
+    let init_url = || {
+        ory::kratos::browser_init_url(
             FlowKind::Verification,
             &state.cfg.kratos.public_url,
             query.return_to.as_deref(),
-        );
-        return Redirect::to(&url).into_response();
+        )
     };
 
-    match ory::kratos::get_flow(&state.ory, FlowKind::Verification, flow_id, &cookie).await {
-        Ok(FlowFetch::Ok(flow)) => {
+    match ory::kratos::resolve_flow(&state.ory, FlowKind::Verification, flow_id, &cookie).await {
+        FlowOutcome::Ready(flow) => {
             // Logged-in user at `choose_method`: auto-submit the known address
             // server-side so the browser lands straight on code entry. Any
             // failure falls through to render the original form unchanged.
@@ -64,7 +59,7 @@ pub(crate) async fn verification(
                     {
                         return Redirect::to(&format!(
                             "/verification?flow={}",
-                            ory_client::apis::urlencode(flow_id)
+                            ory_client::apis::urlencode(flow_id.unwrap_or_default())
                         ))
                         .into_response();
                     }
@@ -72,16 +67,11 @@ pub(crate) async fn verification(
             }
             render_verification(chrome, &flow, query.return_to.as_deref(), is_logged_in)
         }
-        Ok(FlowFetch::Gone) | Ok(FlowFetch::PrivilegedRequired(_)) => {
-            let url = ory::kratos::browser_init_url(
-                FlowKind::Verification,
-                &state.cfg.kratos.public_url,
-                query.return_to.as_deref(),
-            );
-            Redirect::to(&url).into_response()
+        FlowOutcome::Init | FlowOutcome::Reinit | FlowOutcome::Privileged(_) => {
+            Redirect::to(&init_url()).into_response()
         }
-        Err(e) => {
-            tracing::error!(error = ?e, flow_id, "failed to fetch Kratos verification flow");
+        FlowOutcome::Error(e) => {
+            tracing::error!(error = ?e, ?flow_id, "failed to fetch Kratos verification flow");
             render_error_boundary(
                 &state,
                 "Verification unavailable",
@@ -100,20 +90,10 @@ fn render_verification(
     return_to: Option<&str>,
     is_logged_in: bool,
 ) -> Response {
-    let (form_action, form_method) = form_target(flow);
-    let mut groups = group_nodes(flow);
-    mark_primary_submits(&mut groups, FlowKind::Verification);
-    let has_visible_default = has_visible_default_inputs(&groups);
-
     render(&VerificationTemplate {
         chrome,
-        form_action,
-        form_method,
-        flow_messages: flow_messages(flow),
-        groups,
-        has_visible_default,
+        form: FlowFormView::from_flow(flow, FlowKind::Verification, return_to),
         state: flow_state(flow).to_string(),
-        return_to_qs: return_to_qs(return_to.or_else(|| flow_return_to(flow))),
         is_logged_in,
     })
 }
@@ -153,24 +133,5 @@ async fn submit_email_method(
         "csrf_token": csrf,
     });
 
-    let resp = state
-        .ory
-        .kratos_public
-        .client
-        .post(action)
-        .header(reqwest::header::ACCEPT, "application/json")
-        .header(reqwest::header::COOKIE, cookie)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| anyhow::anyhow!("kratos verification submit transport error: {e}"))?;
-
-    let status = resp.status();
-    if !status.is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(anyhow::anyhow!(
-            "kratos verification submit returned {status}: {body}"
-        ));
-    }
-    Ok(())
+    ory::kratos::submit_flow(&state.ory, action, &body, cookie).await
 }

@@ -8,15 +8,13 @@ use axum::{
     http::HeaderMap,
     response::{IntoResponse, Redirect, Response},
 };
-use axum_extra::extract::Form;
 use serde::Deserialize;
 
 use crate::admin::{render_admin_error, with_org, AdminSection, ConfirmForm, ConfirmTemplate};
-use crate::audit::{self, action, target_kind, AuditCtx, AuditEvent};
+use crate::audit::{self, action, target_kind, AuditCtx};
+use crate::csrf::CsrfForm;
 use crate::extractors::{Csrf, RequireAdminScoped};
-use crate::flash::{
-    self, attach_set_cookie as attach_cookie_if_some, redirect_with_cookie, SecretReveal,
-};
+use crate::flash::{self, attach_set_cookie as attach_cookie_if_some, SecretReveal};
 use crate::format::{humanise_timestamp, looks_like_uuid};
 use crate::ory;
 use crate::page_chrome::PageChrome;
@@ -546,15 +544,8 @@ pub async fn show(
         _ => (None, None),
     };
 
-    let secure = state.cfg.self_.is_https();
     let path = format!("/admin/identities/{id}");
-    let (flash_msg, clear_flash) = flash::take_flash(
-        &headers,
-        &state.cookie_secret,
-        state.cfg.flash.cookie_ttl_seconds,
-        &path,
-        secure,
-    );
+    let (flash_msg, clear_flash) = state.take_flash(&headers, &path);
 
     tracing::info!(
         action = "admin.identities.view",
@@ -581,26 +572,20 @@ pub async fn show(
 pub async fn recovery(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    headers: HeaderMap,
     actx: AuditCtx,
     admin: RequireAdminScoped,
-    Form(form): Form<crate::csrf::CsrfForm>,
+    _: CsrfForm<crate::csrf::NoPayload>,
 ) -> Response {
     let RequireAdminScoped { ctx, scope } = admin;
     if let Err(resp) = require_identity_in_scope(&state, &id, &scope).await {
-        return resp;
-    }
-    if let Some(resp) = crate::extractors::verify_csrf_or_forbid(&headers, form.csrf.as_deref()) {
         return resp;
     }
     match ory::kratos::admin_create_recovery_code(&state.ory, &id).await {
         Ok(code) => {
             let _ = audit::log(
                 &state.db,
-                AuditEvent::new(action::ADMIN_IDENTITY_RECOVERY_CODE_MINTED)
-                    .actor_admin(&ctx.identity_id, &ctx.email)
+                ctx.audit_event(action::ADMIN_IDENTITY_RECOVERY_CODE_MINTED, &actx)
                     .target(target_kind::IDENTITY, id.clone())
-                    .with_ctx(&actx)
                     .critical(),
             )
             .await;
@@ -688,24 +673,20 @@ pub async fn disable_confirm(
 pub async fn disable(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    headers: HeaderMap,
     actx: AuditCtx,
     admin: RequireAdminScoped,
-    Form(form): Form<ConfirmForm>,
+    CsrfForm(form): CsrfForm<ConfirmForm>,
 ) -> Response {
     let RequireAdminScoped { ctx, scope } = admin;
     if let Err(resp) = require_identity_in_scope(&state, &id, &scope).await {
-        return resp;
-    }
-    if let Some(resp) = crate::extractors::verify_csrf_or_forbid(&headers, form.csrf.as_deref()) {
         return resp;
     }
     let target = with_org(
         &format!("/admin/identities/{}", ory_client::apis::urlencode(&id)),
         &scope,
     );
-    if !form.confirmed() {
-        return Redirect::to(&target).into_response();
+    if let Some(r) = form.bounce_unless_confirmed(&target) {
+        return r;
     }
     match ory::kratos::admin_update_identity_state(
         &state.ory,
@@ -717,20 +698,11 @@ pub async fn disable(
         Ok(_) => {
             let _ = audit::log(
                 &state.db,
-                AuditEvent::new(action::ADMIN_IDENTITY_DISABLED)
-                    .actor_admin(&ctx.identity_id, &ctx.email)
-                    .target(target_kind::IDENTITY, id.clone())
-                    .with_ctx(&actx),
+                ctx.audit_event(action::ADMIN_IDENTITY_DISABLED, &actx)
+                    .target(target_kind::IDENTITY, id.clone()),
             )
             .await;
-            let cookie = flash::store_flash(
-                &state.cookie_secret,
-                state.cfg.flash.cookie_ttl_seconds,
-                &target,
-                "Identity disabled.",
-                state.cfg.self_.is_https(),
-            );
-            redirect_with_cookie(&target, &cookie)
+            state.flash_redirect(&target, "Identity disabled.")
         }
         Err(e) => {
             tracing::error!(error = ?e, id, "admin: disable failed");
@@ -746,16 +718,12 @@ pub async fn disable(
 pub async fn enable(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    headers: HeaderMap,
     actx: AuditCtx,
     admin: RequireAdminScoped,
-    Form(form): Form<crate::csrf::CsrfForm>,
+    _: CsrfForm<crate::csrf::NoPayload>,
 ) -> Response {
     let RequireAdminScoped { ctx, scope } = admin;
     if let Err(resp) = require_identity_in_scope(&state, &id, &scope).await {
-        return resp;
-    }
-    if let Some(resp) = crate::extractors::verify_csrf_or_forbid(&headers, form.csrf.as_deref()) {
         return resp;
     }
     let target = with_org(
@@ -772,20 +740,11 @@ pub async fn enable(
         Ok(_) => {
             let _ = audit::log(
                 &state.db,
-                AuditEvent::new(action::ADMIN_IDENTITY_ENABLED)
-                    .actor_admin(&ctx.identity_id, &ctx.email)
-                    .target(target_kind::IDENTITY, id.clone())
-                    .with_ctx(&actx),
+                ctx.audit_event(action::ADMIN_IDENTITY_ENABLED, &actx)
+                    .target(target_kind::IDENTITY, id.clone()),
             )
             .await;
-            let cookie = flash::store_flash(
-                &state.cookie_secret,
-                state.cfg.flash.cookie_ttl_seconds,
-                &target,
-                "Identity enabled.",
-                state.cfg.self_.is_https(),
-            );
-            redirect_with_cookie(&target, &cookie)
+            state.flash_redirect(&target, "Identity enabled.")
         }
         Err(e) => {
             tracing::error!(error = ?e, id, "admin: enable failed");
@@ -834,24 +793,20 @@ pub async fn delete_confirm(
 pub async fn delete(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    headers: HeaderMap,
     actx: AuditCtx,
     admin: RequireAdminScoped,
-    Form(form): Form<ConfirmForm>,
+    CsrfForm(form): CsrfForm<ConfirmForm>,
 ) -> Response {
     let RequireAdminScoped { ctx, scope } = admin;
     if let Err(resp) = require_identity_in_scope(&state, &id, &scope).await {
-        return resp;
-    }
-    if let Some(resp) = crate::extractors::verify_csrf_or_forbid(&headers, form.csrf.as_deref()) {
         return resp;
     }
     let show_target = with_org(
         &format!("/admin/identities/{}", ory_client::apis::urlencode(&id)),
         &scope,
     );
-    if !form.confirmed() {
-        return Redirect::to(&show_target).into_response();
+    if let Some(r) = form.bounce_unless_confirmed(&show_target) {
+        return r;
     }
     let list_target = with_org("/admin/identities", &scope);
     match crate::admin::actions::delete_identity_audited(

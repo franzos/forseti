@@ -7,21 +7,21 @@
 use std::collections::HashSet;
 
 use askama::Template;
-use axum::extract::State;
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
-use axum_extra::extract::Form;
 use serde::{Deserialize, Serialize};
 
 use crate::audit::{self, action, target_kind, AuditCtx, AuditEvent};
 use crate::audit_metadata;
+use crate::csrf::CsrfForm;
 use crate::extractors::{gate_orgs_feature_or_upsell, Csrf, RequireSession};
 use crate::orgs::{self, teams, Org};
 use crate::page_chrome::PageChrome;
 use crate::render::render;
 use crate::state::AppState;
 
-use super::{build_nav, require_org_owner, resolve_org_or_404, settings_ctx, SettingsCtx};
+use super::{build_nav, require_org_owner, resolve_org_or_404, settings_ctx, OrgSlug, SettingsCtx};
 
 #[derive(Serialize, Clone)]
 struct TeamRowView {
@@ -68,10 +68,17 @@ async fn require_team_admin(
     Ok(())
 }
 
+/// Optional `?team=<id>` selection driving the membership-manager panel.
+#[derive(Deserialize)]
+pub(super) struct TeamSelect {
+    #[serde(default)]
+    team: Option<String>,
+}
+
 pub(super) async fn teams(
     State(state): State<AppState>,
-    slug: Option<String>,
-    selected: Option<String>,
+    OrgSlug(slug): OrgSlug,
+    Query(sel): Query<TeamSelect>,
     headers: HeaderMap,
     sess: RequireSession,
     csrf: Csrf,
@@ -92,7 +99,7 @@ pub(super) async fn teams(
     {
         return r;
     }
-    render_teams(&state, &headers, &ctx, target.org, selected).await
+    render_teams(&state, &headers, &ctx, target.org, sel.team).await
 }
 
 async fn render_teams(
@@ -169,13 +176,18 @@ async fn render_teams(
 // --- route-derived path bundles ------------------------------------------
 
 /// `slug` (`None` on the Default route) plus the team being acted on.
+/// Deserialized from the route path; `slug` is absent on the singular route.
+#[derive(Deserialize)]
 pub(super) struct TeamTarget {
+    #[serde(default)]
     pub(super) slug: Option<String>,
     pub(super) team_id: String,
 }
 
 /// `slug` + team + the identity being added/removed.
+#[derive(Deserialize)]
 pub(super) struct TeamMemberTarget {
+    #[serde(default)]
     pub(super) slug: Option<String>,
     pub(super) team_id: String,
     pub(super) identity_id: String,
@@ -183,23 +195,17 @@ pub(super) struct TeamMemberTarget {
 
 #[derive(Debug, Deserialize)]
 pub(super) struct CreateForm {
-    #[serde(rename = "_csrf")]
-    csrf: Option<String>,
     name: String,
 }
 
 pub(super) async fn teams_create(
     State(state): State<AppState>,
-    slug: Option<String>,
-    headers: HeaderMap,
+    OrgSlug(slug): OrgSlug,
     sess: RequireSession,
     csrf: Csrf,
     actx: AuditCtx,
-    Form(form): Form<CreateForm>,
+    CsrfForm(form): CsrfForm<CreateForm>,
 ) -> Response {
-    if let Some(resp) = crate::extractors::verify_csrf_or_forbid(&headers, form.csrf.as_deref()) {
-        return resp;
-    }
     let target = match resolve_org_or_404(&state, slug.as_deref()).await {
         Ok(t) => t,
         Err(r) => return r,
@@ -238,23 +244,17 @@ pub(super) async fn teams_create(
 
 #[derive(Debug, Deserialize)]
 pub(super) struct RenameForm {
-    #[serde(rename = "_csrf")]
-    csrf: Option<String>,
     name: String,
 }
 
 pub(super) async fn teams_rename(
     State(state): State<AppState>,
-    TeamTarget { slug, team_id }: TeamTarget,
-    headers: HeaderMap,
+    Path(TeamTarget { slug, team_id }): Path<TeamTarget>,
     sess: RequireSession,
     csrf: Csrf,
     actx: AuditCtx,
-    Form(form): Form<RenameForm>,
+    CsrfForm(form): CsrfForm<RenameForm>,
 ) -> Response {
-    if let Some(resp) = crate::extractors::verify_csrf_or_forbid(&headers, form.csrf.as_deref()) {
-        return resp;
-    }
     let target = match resolve_org_or_404(&state, slug.as_deref()).await {
         Ok(t) => t,
         Err(r) => return r,
@@ -290,16 +290,12 @@ pub(super) async fn teams_rename(
 
 pub(super) async fn teams_delete(
     State(state): State<AppState>,
-    TeamTarget { slug, team_id }: TeamTarget,
-    headers: HeaderMap,
+    Path(TeamTarget { slug, team_id }): Path<TeamTarget>,
     sess: RequireSession,
     csrf: Csrf,
     actx: AuditCtx,
-    Form(form): Form<crate::csrf::CsrfForm>,
+    _: CsrfForm<crate::csrf::NoPayload>,
 ) -> Response {
-    if let Some(resp) = crate::extractors::verify_csrf_or_forbid(&headers, form.csrf.as_deref()) {
-        return resp;
-    }
     let target = match resolve_org_or_404(&state, slug.as_deref()).await {
         Ok(t) => t,
         Err(r) => return r,
@@ -330,23 +326,17 @@ pub(super) async fn teams_delete(
 
 #[derive(Debug, Deserialize)]
 pub(super) struct MemberAddForm {
-    #[serde(rename = "_csrf")]
-    csrf: Option<String>,
     identity_id: String,
 }
 
 pub(super) async fn teams_member_add(
     State(state): State<AppState>,
-    TeamTarget { slug, team_id }: TeamTarget,
-    headers: HeaderMap,
+    Path(TeamTarget { slug, team_id }): Path<TeamTarget>,
     sess: RequireSession,
     csrf: Csrf,
     actx: AuditCtx,
-    Form(form): Form<MemberAddForm>,
+    CsrfForm(form): CsrfForm<MemberAddForm>,
 ) -> Response {
-    if let Some(resp) = crate::extractors::verify_csrf_or_forbid(&headers, form.csrf.as_deref()) {
-        return resp;
-    }
     let target = match resolve_org_or_404(&state, slug.as_deref()).await {
         Ok(t) => t,
         Err(r) => return r,
@@ -386,20 +376,16 @@ pub(super) async fn teams_member_add(
 
 pub(super) async fn teams_member_remove(
     State(state): State<AppState>,
-    TeamMemberTarget {
+    Path(TeamMemberTarget {
         slug,
         team_id,
         identity_id,
-    }: TeamMemberTarget,
-    headers: HeaderMap,
+    }): Path<TeamMemberTarget>,
     sess: RequireSession,
     csrf: Csrf,
     actx: AuditCtx,
-    Form(form): Form<crate::csrf::CsrfForm>,
+    _: CsrfForm<crate::csrf::NoPayload>,
 ) -> Response {
-    if let Some(resp) = crate::extractors::verify_csrf_or_forbid(&headers, form.csrf.as_deref()) {
-        return resp;
-    }
     let target = match resolve_org_or_404(&state, slug.as_deref()).await {
         Ok(t) => t,
         Err(r) => return r,

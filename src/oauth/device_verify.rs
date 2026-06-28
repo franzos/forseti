@@ -13,11 +13,10 @@
 
 use askama::Template;
 use axum::extract::{Query, State};
-use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Redirect, Response};
-use axum_extra::extract::Form;
 use serde::Deserialize;
 
+use crate::csrf::CsrfForm;
 use crate::ory;
 use crate::page_chrome::{Chrome, PageChrome};
 use crate::posix::db;
@@ -85,8 +84,6 @@ pub(crate) async fn device_verify(
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct DeviceVerifyForm {
-    #[serde(rename = "_csrf")]
-    csrf: Option<String>,
     device_challenge: String,
     user_code: String,
 }
@@ -95,13 +92,8 @@ pub(crate) struct DeviceVerifyForm {
 /// login + consent. On success we follow Hydra's `redirect_to`.
 pub(crate) async fn device_verify_submit(
     State(state): State<AppState>,
-    headers: HeaderMap,
-    Form(form): Form<DeviceVerifyForm>,
+    CsrfForm(form): CsrfForm<DeviceVerifyForm>,
 ) -> Response {
-    if let Some(resp) = crate::extractors::verify_csrf_or_forbid(&headers, form.csrf.as_deref()) {
-        return resp;
-    }
-
     // Re-load by user_code so a tampered POST can't accept a code with no
     // backing session.
     if load_target(&state, &form.user_code).await.is_none() {

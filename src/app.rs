@@ -133,7 +133,6 @@ pub(crate) async fn run() -> anyhow::Result<()> {
             &state.cfg.claim_email,
         ))
         .merge(profiles::router())
-        .merge(commercial::router())
         .merge(oauth::router(&state.cfg.oauth, &state.cfg.proxy))
         .merge(handoff::router(&state.cfg.proxy, &state.cfg.handoff))
         .merge(admin::router())

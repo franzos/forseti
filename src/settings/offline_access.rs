@@ -5,11 +5,11 @@
 //! written to audit metadata: only the Argon2id verifier is stored, and the
 //! audit row carries the identity id alone.
 
+use crate::csrf::CsrfForm;
 use askama::Template;
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
-use axum_extra::extract::Form;
 use serde::Deserialize;
 
 use crate::audit::{self, action, target_kind, AuditCtx, AuditEvent};
@@ -32,8 +32,6 @@ pub(crate) struct SettingsOfflineAccessTemplate {
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct OfflinePassphraseForm {
-    #[serde(rename = "_csrf")]
-    pub(crate) csrf: Option<String>,
     #[serde(default)]
     pub(crate) passphrase: String,
 }
@@ -57,14 +55,7 @@ pub(crate) async fn settings_offline_access(
         }
     };
 
-    let secure = state.cfg.self_.is_https();
-    let (flash_msg, clear_flash) = flash::take_flash(
-        &headers,
-        &state.cookie_secret,
-        state.cfg.flash.cookie_ttl_seconds,
-        "/settings/offline-access",
-        secure,
-    );
+    let (flash_msg, clear_flash) = state.take_flash(&headers, "/settings/offline-access");
     let body = render(&SettingsOfflineAccessTemplate {
         chrome: PageChrome::from_parts(&state, sess.email, csrf.0),
         has_secret,
@@ -77,19 +68,14 @@ pub(crate) async fn settings_offline_access(
 
 pub(crate) async fn settings_offline_access_save(
     State(state): State<AppState>,
-    headers: HeaderMap,
     sess: crate::extractors::RequireSession,
     actx: AuditCtx,
-    Form(form): Form<OfflinePassphraseForm>,
+    CsrfForm(form): CsrfForm<OfflinePassphraseForm>,
 ) -> Response {
     if !state.cfg.posix.offline_auth_enabled {
         return (axum::http::StatusCode::NOT_FOUND, "offline auth disabled").into_response();
     }
-    if let Some(resp) = crate::extractors::verify_csrf_or_forbid(&headers, form.csrf.as_deref()) {
-        return resp;
-    }
 
-    let secure = state.cfg.self_.is_https();
     let min_len = state
         .cfg
         .posix
@@ -132,31 +118,19 @@ pub(crate) async fn settings_offline_access_save(
         }
     };
 
-    let cookie = flash::store_flash(
-        &state.cookie_secret,
-        state.cfg.flash.cookie_ttl_seconds,
-        "/settings/offline-access",
-        &msg,
-        secure,
-    );
-    flash::redirect_with_cookie("/settings/offline-access", &cookie)
+    state.flash_redirect("/settings/offline-access", &msg)
 }
 
 pub(crate) async fn settings_offline_access_clear(
     State(state): State<AppState>,
-    headers: HeaderMap,
     sess: crate::extractors::RequireSession,
     actx: AuditCtx,
-    Form(form): Form<crate::csrf::CsrfForm>,
+    _: CsrfForm<crate::csrf::NoPayload>,
 ) -> Response {
     if !state.cfg.posix.offline_auth_enabled {
         return (axum::http::StatusCode::NOT_FOUND, "offline auth disabled").into_response();
     }
-    if let Some(resp) = crate::extractors::verify_csrf_or_forbid(&headers, form.csrf.as_deref()) {
-        return resp;
-    }
 
-    let secure = state.cfg.self_.is_https();
     let msg = match db::delete_offline_secret(&state.db, &sess.identity_id).await {
         Ok(removed) => {
             if removed {
@@ -179,12 +153,5 @@ pub(crate) async fn settings_offline_access_clear(
         }
     };
 
-    let cookie = flash::store_flash(
-        &state.cookie_secret,
-        state.cfg.flash.cookie_ttl_seconds,
-        "/settings/offline-access",
-        msg,
-        secure,
-    );
-    flash::redirect_with_cookie("/settings/offline-access", &cookie)
+    state.flash_redirect("/settings/offline-access", msg)
 }

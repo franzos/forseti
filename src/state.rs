@@ -4,6 +4,8 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use axum::http::HeaderMap;
+use axum::response::Response;
 use tokio::sync::Mutex;
 
 use crate::commercial::LicenseHandle;
@@ -78,5 +80,34 @@ impl AppState {
                 }
             }
         }
+    }
+
+    /// Read and clear the path-scoped flash cookie, deriving secret/ttl/secure from state.
+    /// Returns `(msg, clear_cookie_header)` (empty msg when absent/invalid).
+    pub fn take_flash(&self, headers: &HeaderMap, path: &str) -> (String, Option<String>) {
+        crate::flash::take_flash(
+            headers,
+            &self.cookie_secret,
+            self.cfg.flash.cookie_ttl_seconds,
+            path,
+            self.cfg.self_.is_https(),
+        )
+    }
+
+    /// Build the `Set-Cookie` header value staging `msg` for the next render at `path`.
+    pub fn store_flash(&self, path: &str, msg: &str) -> String {
+        crate::flash::store_flash(
+            &self.cookie_secret,
+            self.cfg.flash.cookie_ttl_seconds,
+            path,
+            msg,
+            self.cfg.self_.is_https(),
+        )
+    }
+
+    /// Stage `msg` for `target` then 303-redirect there carrying the flash cookie.
+    pub fn flash_redirect(&self, target: &str, msg: &str) -> Response {
+        let cookie = self.store_flash(target, msg);
+        crate::flash::redirect_with_cookie(target, &cookie)
     }
 }

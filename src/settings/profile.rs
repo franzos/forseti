@@ -2,11 +2,11 @@
 //! (via Kratos) and the Forseti-owned extended profile (bio, website,
 //! pronouns, links) when `[profiles].enabled = true`.
 
+use crate::csrf::CsrfForm;
 use askama::Template;
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
-use axum_extra::extract::Form;
 use serde::Deserialize;
 
 use crate::audit::{self, action, AuditCtx, AuditEvent};
@@ -66,8 +66,6 @@ pub(crate) async fn settings_profile(
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct ExtendedProfileForm {
-    #[serde(rename = "_csrf")]
-    pub(crate) csrf: Option<String>,
     #[serde(default)]
     pub(crate) bio: String,
     #[serde(default)]
@@ -85,16 +83,12 @@ pub(crate) struct ExtendedProfileForm {
 
 pub(crate) async fn settings_profile_extended_save(
     State(state): State<AppState>,
-    headers: HeaderMap,
     sess: crate::extractors::RequireSession,
     actx: AuditCtx,
-    Form(form): Form<ExtendedProfileForm>,
+    CsrfForm(form): CsrfForm<ExtendedProfileForm>,
 ) -> Response {
     if !state.cfg.profiles.enabled {
         return (StatusCode::NOT_FOUND, "profiles disabled").into_response();
-    }
-    if let Some(resp) = crate::extractors::verify_csrf_or_forbid(&headers, form.csrf.as_deref()) {
-        return resp;
     }
 
     // URLs are emitted as OIDC `website`/`picture` claims, so validate full

@@ -2,19 +2,17 @@
 //! after verifying the caller is a member of the target org.
 
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Redirect, Response};
-use axum_extra::extract::Form;
 use serde::Deserialize;
 
+use crate::csrf::CsrfForm;
 use crate::extractors::RequireSession;
 use crate::orgs;
 use crate::state::AppState;
 
 #[derive(Debug, Deserialize)]
 pub(super) struct SwitchForm {
-    #[serde(rename = "_csrf")]
-    csrf: Option<String>,
     org_id: String,
     #[serde(default)]
     return_to: Option<String>,
@@ -22,13 +20,9 @@ pub(super) struct SwitchForm {
 
 pub(super) async fn switch_active_org(
     State(state): State<AppState>,
-    headers: HeaderMap,
     sess: RequireSession,
-    Form(form): Form<SwitchForm>,
+    CsrfForm(form): CsrfForm<SwitchForm>,
 ) -> Response {
-    if let Some(resp) = crate::extractors::verify_csrf_or_forbid(&headers, form.csrf.as_deref()) {
-        return resp;
-    }
     let identity_id = sess.identity_id;
     if !orgs::is_member(&state.db, &identity_id, &form.org_id).await {
         return (StatusCode::FORBIDDEN, "not a member of that org").into_response();

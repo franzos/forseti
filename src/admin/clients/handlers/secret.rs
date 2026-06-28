@@ -2,14 +2,13 @@
 
 use axum::{
     extract::State,
-    http::HeaderMap,
     response::{IntoResponse, Redirect, Response},
 };
-use axum_extra::extract::Form;
 
 use crate::admin::with_org;
 use crate::admin::{render_admin_error, AdminSection, ConfirmForm, ConfirmTemplate};
-use crate::audit::{self, action, target_kind, AuditCtx, AuditEvent};
+use crate::audit::{self, action, target_kind, AuditCtx};
+use crate::csrf::CsrfForm;
 use crate::extractors::Csrf;
 use crate::flash::{self, SecretReveal};
 use crate::ory;
@@ -34,30 +33,23 @@ pub async fn rotate_confirm(client_in_scope: RequireClientInScope, csrf: Csrf) -
 
 pub async fn rotate(
     State(state): State<AppState>,
-    headers: HeaderMap,
     client_in_scope: RequireClientInScope,
     actx: AuditCtx,
-    Form(form): Form<ConfirmForm>,
+    CsrfForm(form): CsrfForm<ConfirmForm>,
 ) -> Response {
     let RequireClientInScope { id, ctx, scope } = client_in_scope;
-    if let Some(resp) = crate::extractors::verify_csrf_or_forbid(&headers, form.csrf.as_deref()) {
-        return resp;
-    }
-    if !form.confirmed() {
-        return Redirect::to(&with_org(
-            &format!("/admin/clients/{}", ory_client::apis::urlencode(&id)),
-            &scope,
-        ))
-        .into_response();
+    if let Some(r) = form.bounce_unless_confirmed(&with_org(
+        &format!("/admin/clients/{}", ory_client::apis::urlencode(&id)),
+        &scope,
+    )) {
+        return r;
     }
     match ory::hydra::rotate_client_secret(&state.ory, &id).await {
         Ok(updated) => {
             let _ = audit::log(
                 &state.db,
-                AuditEvent::new(action::ADMIN_CLIENT_SECRET_ROTATED)
-                    .actor_admin(&ctx.identity_id, &ctx.email)
+                ctx.audit_event(action::ADMIN_CLIENT_SECRET_ROTATED, &actx)
                     .target(target_kind::OAUTH_CLIENT, id.clone())
-                    .with_ctx(&actx)
                     .critical(),
             )
             .await;

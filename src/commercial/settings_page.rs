@@ -14,7 +14,6 @@ use axum::http::HeaderMap;
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::Router;
-use axum_extra::extract::Form;
 use serde::Deserialize;
 
 use crate::admin::AdminSection;
@@ -22,6 +21,7 @@ use crate::audit::{self, action, target_kind, AuditCtx, AuditEvent};
 use crate::audit_metadata;
 use crate::commercial::license::{classify, LicenseStatus};
 use crate::commercial::{store, upsell, verify};
+use crate::csrf::CsrfForm;
 use crate::extractors::Csrf;
 use crate::flash;
 use crate::page_chrome::PageChrome;
@@ -68,14 +68,7 @@ pub(crate) async fn settings_license(
     admin: crate::extractors::RequireAdmin,
     csrf: Csrf,
 ) -> Response {
-    let secure = state.cfg.self_.is_https();
-    let (flash_msg, clear_flash) = flash::take_flash(
-        &headers,
-        &state.cookie_secret,
-        state.cfg.flash.cookie_ttl_seconds,
-        "/admin/license",
-        secure,
-    );
+    let (flash_msg, clear_flash) = state.take_flash(&headers, "/admin/license");
 
     let status = state.license.status();
     let view = view_from_status(&status, &state, &flash_msg);
@@ -202,25 +195,18 @@ fn days_grace_remaining(license: &crate::commercial::license::License, grace_day
 
 #[derive(Debug, Deserialize)]
 struct ActivateForm {
-    #[serde(rename = "_csrf")]
-    csrf: Option<String>,
     blob: String,
 }
 
 async fn activate(
     State(state): State<AppState>,
-    headers: HeaderMap,
     admin: crate::extractors::RequireAdmin,
     actx: AuditCtx,
-    Form(form): Form<ActivateForm>,
+    CsrfForm(form): CsrfForm<ActivateForm>,
 ) -> Response {
-    if let Some(resp) = crate::extractors::verify_csrf_or_forbid(&headers, form.csrf.as_deref()) {
-        return resp;
-    }
     let actor_id = admin.ctx.identity_id;
     let actor_email = admin.ctx.email;
 
-    let secure = state.cfg.self_.is_https();
     let (msg, ok, license_id, tier) = match verify::decode_and_verify(&form.blob) {
         Ok(license) => {
             let next = classify(
@@ -272,32 +258,15 @@ async fn activate(
         .await;
     }
 
-    let cookie = flash::store_flash(
-        &state.cookie_secret,
-        state.cfg.flash.cookie_ttl_seconds,
-        "/admin/license",
-        msg,
-        secure,
-    );
-    flash::redirect_with_cookie("/admin/license", &cookie)
-}
-
-#[derive(Debug, Deserialize)]
-struct DeactivateForm {
-    #[serde(rename = "_csrf")]
-    csrf: Option<String>,
+    state.flash_redirect("/admin/license", msg)
 }
 
 async fn deactivate(
     State(state): State<AppState>,
-    headers: HeaderMap,
     admin: crate::extractors::RequireAdmin,
     actx: AuditCtx,
-    Form(form): Form<DeactivateForm>,
+    _: CsrfForm<crate::csrf::NoPayload>,
 ) -> Response {
-    if let Some(resp) = crate::extractors::verify_csrf_or_forbid(&headers, form.csrf.as_deref()) {
-        return resp;
-    }
     let actor_id = admin.ctx.identity_id;
     let actor_email = admin.ctx.email;
     let prior_id = state
@@ -307,7 +276,6 @@ async fn deactivate(
         .map(|l| l.license_id.clone())
         .unwrap_or_default();
 
-    let secure = state.cfg.self_.is_https();
     let (msg, ok) = match store::clear(&state.db).await {
         Ok(()) => {
             state.license.swap(LicenseStatus::Unlicensed);
@@ -330,12 +298,5 @@ async fn deactivate(
         .await;
     }
 
-    let cookie = flash::store_flash(
-        &state.cookie_secret,
-        state.cfg.flash.cookie_ttl_seconds,
-        "/admin/license",
-        msg,
-        secure,
-    );
-    flash::redirect_with_cookie("/admin/license", &cookie)
+    state.flash_redirect("/admin/license", msg)
 }

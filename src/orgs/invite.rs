@@ -10,13 +10,13 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::Router;
-use axum_extra::extract::Form;
 use rand::Rng;
 use serde::Deserialize;
 use std::str::FromStr;
 
 use crate::audit::{self, action, target_kind, AuditCtx, AuditEvent};
 use crate::audit_metadata;
+use crate::csrf::CsrfForm;
 use crate::extractors::{Csrf, OptionalSession};
 use crate::orgs::{self, Role};
 use crate::ory;
@@ -43,31 +43,27 @@ pub(crate) fn router() -> Router<AppState> {
 
 async fn post_invite_default(
     state: State<AppState>,
-    headers: HeaderMap,
     sess: crate::extractors::RequireSession,
     csrf: Csrf,
     actx: AuditCtx,
-    form: Form<InviteForm>,
+    form: CsrfForm<InviteForm>,
 ) -> Response {
-    post_invite(state, None, headers, sess, csrf, actx, form).await
+    post_invite(state, None, sess, csrf, actx, form).await
 }
 
 async fn post_invite_named(
     state: State<AppState>,
     Path(slug): Path<String>,
-    headers: HeaderMap,
     sess: crate::extractors::RequireSession,
     csrf: Csrf,
     actx: AuditCtx,
-    form: Form<InviteForm>,
+    form: CsrfForm<InviteForm>,
 ) -> Response {
-    post_invite(state, Some(slug), headers, sess, csrf, actx, form).await
+    post_invite(state, Some(slug), sess, csrf, actx, form).await
 }
 
 #[derive(Debug, Deserialize)]
 struct InviteForm {
-    #[serde(rename = "_csrf")]
-    csrf: Option<String>,
     email: String,
     role: Option<String>,
 }
@@ -75,32 +71,27 @@ struct InviteForm {
 async fn post_invite(
     State(state): State<AppState>,
     slug: Option<String>,
-    headers: HeaderMap,
     sess: crate::extractors::RequireSession,
     csrf: Csrf,
     actx: AuditCtx,
-    Form(form): Form<InviteForm>,
+    CsrfForm(form): CsrfForm<InviteForm>,
 ) -> Response {
     let target = match orgs::settings_page::resolve_org_or_404(&state, slug.as_deref()).await {
         Ok(t) => t,
         Err(r) => return r,
     };
-    post_invite_for(state, headers, csrf.0, sess, actx, target.org.id, form).await
+    post_invite_for(state, csrf.0, sess, actx, target.org.id, form).await
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn post_invite_for(
     state: AppState,
-    headers: HeaderMap,
     csrf_token: String,
     sess: crate::extractors::RequireSession,
     actx: AuditCtx,
     org_id: String,
     form: InviteForm,
 ) -> Response {
-    if let Some(resp) = crate::extractors::verify_csrf_or_forbid(&headers, form.csrf.as_deref()) {
-        return resp;
-    }
     let identity_id = sess.identity_id;
     let email_for_upsell = sess.email;
     if orgs::org_role(&state.db, &identity_id, &org_id).await != Some(Role::Owner) {
@@ -352,8 +343,6 @@ async fn invite_accept_get(
 
 #[derive(Debug, Deserialize)]
 struct InviteAcceptForm {
-    #[serde(rename = "_csrf")]
-    csrf: Option<String>,
     token: String,
 }
 
@@ -363,15 +352,11 @@ struct InviteAcceptForm {
 /// verified, then writes the membership row inside a transaction.
 async fn invite_accept_post(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Csrf(csrf_token): Csrf,
     actx: AuditCtx,
     session: OptionalSession,
-    Form(form): Form<InviteAcceptForm>,
+    CsrfForm(form): CsrfForm<InviteAcceptForm>,
 ) -> Response {
-    if let Some(resp) = crate::extractors::verify_csrf_or_forbid(&headers, form.csrf.as_deref()) {
-        return resp;
-    }
     if form.token.is_empty() {
         return (StatusCode::BAD_REQUEST, "missing token").into_response();
     }

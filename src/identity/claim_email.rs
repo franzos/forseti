@@ -18,11 +18,9 @@
 
 use askama::Template;
 use axum::extract::{Query, State};
-use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::get;
 use axum::Router;
-use axum_extra::extract::Form;
 use rand::Rng;
 use serde::Deserialize;
 use std::str::FromStr;
@@ -30,6 +28,7 @@ use std::str::FromStr;
 use crate::admin::actions::{delete_identity_audited, DeleteActor, DeleteReason};
 use crate::audit_metadata;
 use crate::config::{ClaimEmailConfig, ProxyConfig};
+use crate::csrf::CsrfForm;
 use crate::extractors::Csrf;
 use crate::flash::{self, SecretReveal};
 use crate::ory;
@@ -111,20 +110,14 @@ async fn claim_get(State(state): State<AppState>, csrf: Csrf) -> Response {
 
 #[derive(Debug, Deserialize)]
 struct ClaimForm {
-    #[serde(rename = "_csrf")]
-    csrf: Option<String>,
     email: String,
 }
 
 async fn claim_post(
     State(state): State<AppState>,
-    headers: HeaderMap,
     csrf: Csrf,
-    Form(form): Form<ClaimForm>,
+    CsrfForm(form): CsrfForm<ClaimForm>,
 ) -> Response {
-    if let Some(resp) = crate::extractors::verify_csrf_or_forbid(&headers, form.csrf.as_deref()) {
-        return resp;
-    }
     let email = form.email.trim().to_lowercase();
     if email.is_empty() || lettre::Address::from_str(&email).is_err() {
         return render_claim_error(&state, &csrf.0, "Enter a valid email address.");
@@ -274,21 +267,15 @@ async fn confirm_get(
 
 #[derive(Debug, Deserialize)]
 struct ConfirmForm {
-    #[serde(rename = "_csrf")]
-    csrf: Option<String>,
     token: String,
     code: String,
 }
 
 async fn confirm_post(
     State(state): State<AppState>,
-    headers: HeaderMap,
     csrf: Csrf,
-    Form(form): Form<ConfirmForm>,
+    CsrfForm(form): CsrfForm<ConfirmForm>,
 ) -> Response {
-    if let Some(resp) = crate::extractors::verify_csrf_or_forbid(&headers, form.csrf.as_deref()) {
-        return resp;
-    }
     // Peek (don't consume yet) so a mistyped code doesn't waste the
     // reveal — we want the user to be able to retry inside the same
     // mint. The row is bumped + auto-deleted on repeated wrong attempts

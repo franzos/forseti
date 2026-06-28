@@ -4,9 +4,9 @@ use askama::Template;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
-use axum_extra::extract::Form;
 use serde::Deserialize;
 
+use crate::csrf::CsrfForm;
 use crate::extractors::{Csrf, RequireSession};
 use crate::orgs::{self, Org};
 use crate::page_chrome::PageChrome;
@@ -15,7 +15,7 @@ use crate::state::AppState;
 
 use super::{
     build_nav, require_org_license, require_org_owner_with_license, resolve_org_or_404,
-    settings_ctx, SettingsCtx,
+    settings_ctx, OrgSlug, SettingsCtx,
 };
 
 #[derive(Template)]
@@ -29,7 +29,7 @@ struct BrandingTemplate {
 
 pub(super) async fn branding(
     State(state): State<AppState>,
-    slug: Option<String>,
+    OrgSlug(slug): OrgSlug,
     headers: HeaderMap,
     sess: RequireSession,
     csrf: Csrf,
@@ -62,23 +62,17 @@ async fn render_branding(
 
 #[derive(Debug, Deserialize)]
 pub(super) struct BrandingForm {
-    #[serde(rename = "_csrf")]
-    csrf: Option<String>,
     logo_url: String,
     support_email: String,
 }
 
 pub(super) async fn branding_save(
     State(state): State<AppState>,
-    slug: Option<String>,
-    headers: HeaderMap,
+    OrgSlug(slug): OrgSlug,
     sess: RequireSession,
     csrf: Csrf,
-    Form(form): Form<BrandingForm>,
+    CsrfForm(form): CsrfForm<BrandingForm>,
 ) -> Response {
-    if let Some(resp) = crate::extractors::verify_csrf_or_forbid(&headers, form.csrf.as_deref()) {
-        return resp;
-    }
     let target = match resolve_org_or_404(&state, slug.as_deref()).await {
         Ok(t) => t,
         Err(r) => return r,

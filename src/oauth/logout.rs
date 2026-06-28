@@ -6,8 +6,9 @@ use askama::Template;
 use axum::extract::{Query, State};
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Redirect, Response};
-use axum_extra::extract::Form;
 use serde::Deserialize;
+
+use crate::csrf::CsrfForm;
 
 use crate::cookies;
 use crate::ory;
@@ -52,8 +53,6 @@ pub(crate) async fn oauth_logout(
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct OAuthLogoutForm {
-    #[serde(rename = "_csrf")]
-    csrf: Option<String>,
     logout_challenge: String,
 }
 
@@ -62,11 +61,8 @@ pub(crate) struct OAuthLogoutForm {
 pub(crate) async fn oauth_logout_submit(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Form(form): Form<OAuthLogoutForm>,
+    CsrfForm(form): CsrfForm<OAuthLogoutForm>,
 ) -> Response {
-    if let Some(resp) = crate::extractors::verify_csrf_or_forbid(&headers, form.csrf.as_deref()) {
-        return resp;
-    }
     let challenge = form.logout_challenge;
 
     // Best-effort Kratos teardown; the user may already be signed out.

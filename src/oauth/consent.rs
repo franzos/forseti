@@ -6,11 +6,11 @@ use askama::Template;
 use axum::extract::{Query, State};
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Redirect, Response};
-use axum_extra::extract::Form;
 use serde::Deserialize;
 
 use crate::audit::{self, action, severity, target_kind, AuditCtx, AuditEvent};
 use crate::audit_metadata;
+use crate::csrf::CsrfForm;
 use crate::extractors::{Csrf, OptionalSession};
 use crate::oauth_client_metadata;
 use crate::ory;
@@ -219,8 +219,6 @@ pub(crate) async fn oauth_consent(
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct OAuthConsentForm {
-    #[serde(rename = "_csrf")]
-    csrf: Option<String>,
     consent_challenge: String,
     decision: String,
     /// `Vec` because the field repeats once per granted scope.
@@ -233,12 +231,8 @@ pub(crate) async fn oauth_consent_submit(
     State(state): State<AppState>,
     headers: HeaderMap,
     actx: AuditCtx,
-    Form(form): Form<OAuthConsentForm>,
+    CsrfForm(form): CsrfForm<OAuthConsentForm>,
 ) -> Response {
-    if let Some(resp) = crate::extractors::verify_csrf_or_forbid(&headers, form.csrf.as_deref()) {
-        return resp;
-    }
-
     let remember = form.remember.as_deref() == Some("true");
 
     if form.decision == "deny" {
