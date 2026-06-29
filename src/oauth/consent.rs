@@ -28,6 +28,12 @@ struct ConsentScopeView {
     required: bool,
 }
 
+/// One remembered account offered in the consent-screen chooser.
+struct ConsentAccountView {
+    id: String,
+    label: String,
+}
+
 #[derive(Template)]
 #[template(path = "consent.html")]
 struct ConsentTemplate {
@@ -44,6 +50,9 @@ struct ConsentTemplate {
     /// row exists (legacy clients default to verified). Drives the consent
     /// badge: verified shows a checkmark, unverified a caution banner.
     verified: bool,
+    /// Other accounts remembered on this device (current subject excluded);
+    /// each offers a one-click switch via the OAuth restart.
+    known_accounts: Vec<ConsentAccountView>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -206,6 +215,21 @@ pub(crate) async fn oauth_consent(
         }
     };
 
+    let known_ids = crate::accounts::cookie::read_known_account_ids(
+        &headers,
+        &state.cookie_secret,
+        state.cfg.accounts.known_accounts_cookie_ttl_seconds,
+    );
+    let known_accounts: Vec<ConsentAccountView> = crate::accounts::resolve(&state, &known_ids)
+        .await
+        .into_iter()
+        .filter(|a| a.id != subject)
+        .map(|a| ConsentAccountView {
+            id: a.id,
+            label: if a.email.is_empty() { a.display_name.clone() } else { a.email.clone() },
+        })
+        .collect();
+
     render(&ConsentTemplate {
         chrome: PageChrome::from_parts(&state, subject_email.clone(), csrf.0),
         consent_intro: state.cfg.brand.consent_intro.clone(),
@@ -214,6 +238,7 @@ pub(crate) async fn oauth_consent(
         challenge,
         scopes,
         verified,
+        known_accounts,
     })
 }
 
@@ -225,6 +250,23 @@ pub(crate) struct OAuthConsentForm {
     #[serde(default, rename = "grant_scope")]
     grant_scope: Vec<String>,
     remember: Option<String>,
+    remember_account: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ConsentSwitchForm {
+    consent_challenge: String,
+    identity_id: String,
+}
+
+/// Restart the same OAuth flow with prompt=login so the downstream app still completes after a session switch.
+pub(crate) async fn consent_switch(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    actx: AuditCtx,
+    CsrfForm(form): CsrfForm<ConsentSwitchForm>,
+) -> Response {
+    switch_account(&state, &headers, &actx, &form.consent_challenge, Some(&form.identity_id)).await
 }
 
 pub(crate) async fn oauth_consent_submit(
@@ -234,7 +276,7 @@ pub(crate) async fn oauth_consent_submit(
     CsrfForm(form): CsrfForm<OAuthConsentForm>,
 ) -> Response {
     if form.decision == "switch_account" {
-        return switch_account(&state, &headers, &actx, &form.consent_challenge).await;
+        return switch_account(&state, &headers, &actx, &form.consent_challenge, None).await;
     }
 
     let remember = form.remember.as_deref() == Some("true");
@@ -317,10 +359,20 @@ pub(crate) async fn oauth_consent_submit(
     )
     .await;
 
-    let redirect = match outcome {
+    let mut redirect = match outcome {
         FinalizeOutcome::Granted { redirect } => redirect,
         FinalizeOutcome::RedirectedToError { redirect } => return redirect,
     };
+
+    if form.remember_account.as_deref() == Some("true") && !subject.is_empty() {
+        let ttl = state.cfg.accounts.known_accounts_cookie_ttl_seconds;
+        let ids = crate::accounts::cookie::read_known_account_ids(&headers, &state.cookie_secret, ttl);
+        let next = crate::accounts::cookie::add_mru(ids, &subject, crate::accounts::cookie::KNOWN_ACCOUNTS_CAP);
+        let set_cookie = crate::accounts::cookie::set_known_accounts_cookie(
+            &state.cookie_secret, ttl, &next, state.cfg.self_.is_https(),
+        );
+        crate::web::append_set_cookie(&mut redirect, Some(set_cookie));
+    }
 
     let actor_email = lookup_identity_email(&state, &subject).await;
     let mut ev = AuditEvent::new(action::OAUTH_CONSENT_GRANTED)
@@ -364,6 +416,7 @@ async fn switch_account(
     headers: &axum::http::HeaderMap,
     actx: &AuditCtx,
     challenge: &str,
+    login_hint: Option<&str>,
 ) -> Response {
     let req = match ory::hydra::get_consent_request(&state.ory, challenge).await {
         Ok(r) => r,
@@ -381,11 +434,7 @@ async fn switch_account(
     let request_url = req.request_url.clone().unwrap_or_default();
 
     let cookie = crate::cookies::cookie_header(headers);
-    if !cookie.is_empty() {
-        if let Ok(Some(url)) = ory::kratos::fetch_logout_url(&state.ory, &cookie).await {
-            let _ = ory::kratos::hit_logout_url(&state.ory, &url, Some(&cookie)).await;
-        }
-    }
+    ory::kratos::tear_down_session(&state.ory, &cookie).await;
 
     let actor_email = lookup_identity_email(state, &subject).await;
     let mut ev = AuditEvent::new(action::OAUTH_ACCOUNT_SWITCH).with_ctx(actx);
@@ -397,7 +446,7 @@ async fn switch_account(
     }
     let _ = audit::log(&state.db, ev).await;
 
-    match with_prompt_login(&request_url) {
+    match with_prompt_login(&request_url, login_hint) {
         Some(target) => Redirect::to(&target).into_response(),
         None => Redirect::to("/login").into_response(),
     }
@@ -432,23 +481,38 @@ fn extract_resource_url(request_url: &str, requested_audience: &[String]) -> Opt
         .map(str::to_string)
 }
 
-/// Rebuild the original `/oauth2/auth` request URL with `prompt=login` so the
-/// restarted flow forces a fresh authentication. Any existing `prompt` value is
-/// dropped. `None` when `request_url` is empty or unparseable.
-fn with_prompt_login(request_url: &str) -> Option<String> {
+/// Rebuild the original `/oauth2/auth` URL forcing `prompt=login` (merged into
+/// any existing space-delimited `prompt`, deduped) so the restarted flow
+/// re-authenticates, optionally adding `login_hint`. `None` if `request_url` is
+/// empty or unparseable.
+fn with_prompt_login(request_url: &str, login_hint: Option<&str>) -> Option<String> {
     if request_url.is_empty() {
         return None;
     }
     let mut url = url::Url::parse(request_url).ok()?;
-    let preserved: Vec<(String, String)> = url
-        .query_pairs()
-        .filter(|(k, _)| k != "prompt")
-        .map(|(k, v)| (k.into_owned(), v.into_owned()))
-        .collect();
-    url.query_pairs_mut()
-        .clear()
-        .extend_pairs(preserved)
-        .append_pair("prompt", "login");
+
+    let mut prompts: Vec<String> = Vec::new();
+    let mut preserved: Vec<(String, String)> = Vec::new();
+    for (k, v) in url.query_pairs() {
+        match k.as_ref() {
+            "prompt" => prompts.extend(v.split(' ').filter(|s| !s.is_empty()).map(str::to_string)),
+            "login_hint" => {} // replaced below when a hint is supplied
+            _ => preserved.push((k.into_owned(), v.into_owned())),
+        }
+    }
+    if !prompts.iter().any(|p| p == "login") {
+        prompts.push("login".to_string());
+    }
+
+    {
+        let mut qp = url.query_pairs_mut();
+        qp.clear();
+        qp.extend_pairs(preserved);
+        qp.append_pair("prompt", &prompts.join(" "));
+        if let Some(hint) = login_hint.filter(|h| !h.is_empty()) {
+            qp.append_pair("login_hint", hint);
+        }
+    }
     Some(url.into())
 }
 
@@ -740,34 +804,51 @@ mod tests {
             .unwrap()
             .query_pairs()
             .filter(|(k, _)| k == "prompt")
-            .map(|(_, v)| v.into_owned())
+            .flat_map(|(_, v)| v.split(' ').map(str::to_string).collect::<Vec<_>>())
+            .filter(|s| !s.is_empty())
             .collect()
+    }
+
+    fn query_value(url: &str, key: &str) -> Option<String> {
+        url::Url::parse(url).unwrap().query_pairs().find(|(k, _)| k == key).map(|(_, v)| v.into_owned())
     }
 
     #[test]
     fn with_prompt_login_appends_when_absent() {
-        let out =
-            with_prompt_login("https://hydra.example.com/oauth2/auth?client_id=x&scope=openid")
-                .expect("should produce a url");
+        let out = with_prompt_login("https://h/oauth2/auth?client_id=x", None).unwrap();
+        assert_eq!(prompt_values(&out), vec!["login".to_string()]);
+        assert_eq!(query_value(&out, "login_hint"), None);
+    }
+
+    #[test]
+    fn with_prompt_login_preserves_other_prompts() {
+        let out = with_prompt_login("https://h/oauth2/auth?prompt=consent", None).unwrap();
+        let mut got = prompt_values(&out);
+        got.sort();
+        assert_eq!(got, vec!["consent".to_string(), "login".to_string()]);
+    }
+
+    #[test]
+    fn with_prompt_login_dedups_existing_login() {
+        let out = with_prompt_login("https://h/oauth2/auth?prompt=login", None).unwrap();
         assert_eq!(prompt_values(&out), vec!["login".to_string()]);
     }
 
     #[test]
-    fn with_prompt_login_replaces_existing_prompt() {
-        let out =
-            with_prompt_login("https://hydra.example.com/oauth2/auth?prompt=none&client_id=x")
-                .expect("should produce a url");
+    fn with_prompt_login_appends_login_hint() {
+        let out = with_prompt_login("https://h/oauth2/auth?client_id=x", Some("uuid-123")).unwrap();
+        assert_eq!(query_value(&out, "login_hint").as_deref(), Some("uuid-123"));
         assert_eq!(prompt_values(&out), vec!["login".to_string()]);
     }
 
     #[test]
     fn with_prompt_login_empty_returns_none() {
-        assert_eq!(with_prompt_login(""), None);
+        assert_eq!(with_prompt_login("", None), None);
     }
 
     #[test]
     fn with_prompt_login_unparseable_returns_none() {
-        assert_eq!(with_prompt_login("not a url"), None);
+        assert_eq!(with_prompt_login("not a url", None), None);
     }
 
     #[test]

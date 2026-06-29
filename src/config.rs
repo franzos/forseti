@@ -64,6 +64,9 @@ pub struct AppConfig {
     /// Organizations subsystem knobs (active-org cookie TTL, invite expiry).
     #[serde(default)]
     pub orgs: OrgsConfig,
+    /// Accounts subsystem knobs (known-accounts device-chooser cookie TTL).
+    #[serde(default)]
+    pub accounts: AccountsConfig,
     /// SAML SSO bridge. `None` (default) = feature fully off.
     #[serde(default)]
     pub saml: Option<SamlConfig>,
@@ -774,6 +777,28 @@ fn default_flash_reveal_ttl_seconds() -> u64 {
     60
 }
 
+/// Accounts subsystem TTLs: `known_accounts_cookie_ttl_seconds` is the validity
+/// of the signed `forseti_known_accounts` device chooser cookie.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AccountsConfig {
+    #[serde(default = "default_known_accounts_cookie_ttl_seconds")]
+    pub known_accounts_cookie_ttl_seconds: u64,
+}
+
+impl Default for AccountsConfig {
+    fn default() -> Self {
+        Self {
+            known_accounts_cookie_ttl_seconds: default_known_accounts_cookie_ttl_seconds(),
+        }
+    }
+}
+
+// 90 days: a device-convenience list, intentionally longer-lived than the
+// short active-org selection cookie.
+fn default_known_accounts_cookie_ttl_seconds() -> u64 {
+    60 * 60 * 24 * 90
+}
+
 /// Organizations subsystem TTLs: `active_org_cookie_ttl_seconds` (signed `forseti_active_org` cookie validity)
 /// and `invite_ttl_days` (how long a minted invitation stays claimable).
 #[derive(Debug, Clone, Deserialize)]
@@ -918,6 +943,7 @@ impl AppConfig {
             handoff: HandoffConfig::default(),
             flash: FlashConfig::default(),
             orgs: OrgsConfig::default(),
+            accounts: AccountsConfig::default(),
             saml: None,
             proxy: ProxyConfig::default(),
             security: SecurityConfig::default(),

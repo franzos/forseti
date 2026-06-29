@@ -38,6 +38,23 @@
     </button>
   </form>
 
+  {% if !known_accounts.is_empty() %}
+    <div class="flex flex-col gap-stack-sm">
+      <p class="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-wider">Switch account</p>
+      {% for acct in known_accounts %}
+        <form method="POST" action="/oauth/consent/switch" class="inline">
+          <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+          <input type="hidden" name="consent_challenge" value="{{ challenge }}">
+          <input type="hidden" name="identity_id" value="{{ acct.id }}">
+          <button type="submit"
+                  class="w-full text-left font-body-sm text-body-sm text-primary underline hover:text-primary-hover focus:outline-none focus:ring-2 focus:ring-primary rounded">
+            {{ acct.label }}
+          </button>
+        </form>
+      {% endfor %}
+    </div>
+  {% endif %}
+
   {% if verified %}
     <p class="flex items-center gap-1 font-label-sm text-label-sm text-on-surface-variant"
        title="Reviewed by your administrator">
@@ -133,6 +150,14 @@
         <span class="block font-label-sm text-label-sm text-on-surface-variant mt-0.5">Skip this screen next time. You can revoke access anytime from <a href="/settings/authorized-apps"
     class="underline hover:text-on-surface">Authorized apps</a>.</span>
       </span>
+    </label>
+
+    <label class="flex items-start gap-stack-sm font-body-sm text-body-sm text-on-surface">
+      <input type="checkbox"
+             name="remember_account"
+             value="true"
+             class="mt-0.5 rounded border-outline-variant text-primary focus:ring-primary">
+      <span class="flex-1">Remember this account on this device</span>
     </label>
 
     <button type="submit"
