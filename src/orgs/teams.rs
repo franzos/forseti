@@ -101,11 +101,25 @@ pub async fn rename_team(db: &DbPool, team_id: &str, name: &str) -> anyhow::Resu
         !sl.is_empty(),
         "team name must contain at least one alphanumeric"
     );
+    // slug is immutable; DB UNIQUE no longer fires on rename, so guard the collision here
     db_interact!(db, |conn| {
-        diesel::update(org_teams::table.filter(org_teams::id.eq(&id)))
-            .set((org_teams::name.eq(&nm), org_teams::slug.eq(&sl)))
-            .execute(conn)
-            .map(|_| ())
+        conn.transaction::<_, anyhow::Error, _>(|c| {
+            let org_id: String = org_teams::table
+                .filter(org_teams::id.eq(&id))
+                .select(org_teams::org_id)
+                .first(c)?;
+            let clash: i64 = org_teams::table
+                .filter(org_teams::org_id.eq(&org_id))
+                .filter(org_teams::slug.eq(&sl))
+                .filter(org_teams::id.ne(&id))
+                .count()
+                .get_result(c)?;
+            anyhow::ensure!(clash == 0, "another team in this org already uses slug `{sl}`");
+            diesel::update(org_teams::table.filter(org_teams::id.eq(&id)))
+                .set(org_teams::name.eq(&nm))
+                .execute(c)?;
+            Ok(())
+        })
     })?;
     Ok(())
 }
@@ -390,5 +404,33 @@ mod tests {
         create_team(&db, "org1", "Platform", None).await.unwrap();
         assert!(create_team(&db, "org1", "Platform", None).await.is_err());
         assert!(create_team(&db, "org2", "Platform", None).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn rename_changes_name_keeps_slug() {
+        let db = temp_pool().await;
+        let t = create_team(&db, "org1", "Platform", None).await.unwrap();
+        assert_eq!(t.slug, "platform");
+        rename_team(&db, &t.id, "Platform Team").await.unwrap();
+        let teams = list_teams(&db, "org1").await.unwrap();
+        let renamed = teams.iter().find(|x| x.id == t.id).unwrap();
+        assert_eq!(renamed.name, "Platform Team");
+        assert_eq!(renamed.slug, "platform"); // slug is immutable after creation
+    }
+
+    #[tokio::test]
+    async fn rename_rejects_slug_collision() {
+        let db = temp_pool().await;
+        let _a = create_team(&db, "org1", "Platform", None).await.unwrap(); // slug "platform"
+        let b = create_team(&db, "org1", "SRE", None).await.unwrap();       // slug "sre"
+        // Renaming B to a name that slugifies to "platform" must be rejected.
+        assert!(rename_team(&db, &b.id, "platform").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn rename_still_rejects_empty_slug_name() {
+        let db = temp_pool().await;
+        let t = create_team(&db, "org1", "Platform", None).await.unwrap();
+        assert!(rename_team(&db, &t.id, "!!!").await.is_err());
     }
 }
