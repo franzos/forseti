@@ -13,6 +13,10 @@ use crate::schema::{org_team_members, org_teams};
 
 pub const MAX_ROWS_PER_LIST: i64 = 500;
 
+/// Max team slugs emitted in the OIDC `groups` claim. A token-size safety
+/// bound; real orgs stay well under it. Exceeding it sets `groups_truncated`.
+pub const GROUPS_CLAIM_CAP: usize = 200;
+
 #[derive(Queryable, Selectable, Debug, Clone, Serialize)]
 #[diesel(table_name = org_teams)]
 pub struct Team {
@@ -101,11 +105,25 @@ pub async fn rename_team(db: &DbPool, team_id: &str, name: &str) -> anyhow::Resu
         !sl.is_empty(),
         "team name must contain at least one alphanumeric"
     );
+    // slug is immutable; DB UNIQUE no longer fires on rename, so guard the collision here
     db_interact!(db, |conn| {
-        diesel::update(org_teams::table.filter(org_teams::id.eq(&id)))
-            .set((org_teams::name.eq(&nm), org_teams::slug.eq(&sl)))
-            .execute(conn)
-            .map(|_| ())
+        conn.transaction::<_, anyhow::Error, _>(|c| {
+            let org_id: String = org_teams::table
+                .filter(org_teams::id.eq(&id))
+                .select(org_teams::org_id)
+                .first(c)?;
+            let clash: i64 = org_teams::table
+                .filter(org_teams::org_id.eq(&org_id))
+                .filter(org_teams::slug.eq(&sl))
+                .filter(org_teams::id.ne(&id))
+                .count()
+                .get_result(c)?;
+            anyhow::ensure!(clash == 0, "another team in this org already uses slug `{sl}`");
+            diesel::update(org_teams::table.filter(org_teams::id.eq(&id)))
+                .set(org_teams::name.eq(&nm))
+                .execute(c)?;
+            Ok(())
+        })
     })?;
     Ok(())
 }
@@ -205,6 +223,28 @@ pub async fn teams_for_identity_any_org(
             .load(conn)
     })?;
     Ok(rows)
+}
+
+/// Slugs of the subject's teams in one org, slug-sorted, for the OIDC `groups`
+/// claim. Fetches up to `GROUPS_CLAIM_CAP + 1` rows so the caller can detect
+/// overflow past the cap.
+pub async fn group_slugs_for_identity(
+    db: &DbPool,
+    org_id: &str,
+    identity_id: &str,
+) -> anyhow::Result<Vec<String>> {
+    let (org, id) = (org_id.to_string(), identity_id.to_string());
+    let limit = (GROUPS_CLAIM_CAP + 1) as i64;
+    Ok(db_interact!(db, |conn| {
+        org_teams::table
+            .inner_join(org_team_members::table.on(org_team_members::team_id.eq(org_teams::id)))
+            .filter(org_teams::org_id.eq(&org))
+            .filter(org_team_members::identity_id.eq(&id))
+            .order(org_teams::slug.asc())
+            .limit(limit)
+            .select(org_teams::slug)
+            .load(conn)
+    })?)
 }
 
 pub async fn add_member(db: &DbPool, team_id: &str, identity_id: &str) -> anyhow::Result<()> {
@@ -390,5 +430,50 @@ mod tests {
         create_team(&db, "org1", "Platform", None).await.unwrap();
         assert!(create_team(&db, "org1", "Platform", None).await.is_err());
         assert!(create_team(&db, "org2", "Platform", None).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn rename_changes_name_keeps_slug() {
+        let db = temp_pool().await;
+        let t = create_team(&db, "org1", "Platform", None).await.unwrap();
+        assert_eq!(t.slug, "platform");
+        rename_team(&db, &t.id, "Platform Team").await.unwrap();
+        let teams = list_teams(&db, "org1").await.unwrap();
+        let renamed = teams.iter().find(|x| x.id == t.id).unwrap();
+        assert_eq!(renamed.name, "Platform Team");
+        assert_eq!(renamed.slug, "platform"); // slug is immutable after creation
+    }
+
+    #[tokio::test]
+    async fn rename_rejects_slug_collision() {
+        let db = temp_pool().await;
+        let _a = create_team(&db, "org1", "Platform", None).await.unwrap(); // slug "platform"
+        let b = create_team(&db, "org1", "SRE", None).await.unwrap();       // slug "sre"
+        // Renaming B to a name that slugifies to "platform" must be rejected.
+        assert!(rename_team(&db, &b.id, "platform").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn rename_still_rejects_empty_slug_name() {
+        let db = temp_pool().await;
+        let t = create_team(&db, "org1", "Platform", None).await.unwrap();
+        assert!(rename_team(&db, &t.id, "!!!").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn group_slugs_scoped_to_org_and_member() {
+        let db = temp_pool().await;
+        let plat = create_team(&db, "org1", "Platform", None).await.unwrap();
+        let sre = create_team(&db, "org1", "SRE", None).await.unwrap();
+        let other = create_team(&db, "org2", "Other", None).await.unwrap();
+        add_member(&db, &plat.id, "alice").await.unwrap();
+        add_member(&db, &sre.id, "alice").await.unwrap();
+        add_member(&db, &other.id, "alice").await.unwrap();
+
+        let slugs = group_slugs_for_identity(&db, "org1", "alice").await.unwrap();
+        assert_eq!(slugs, vec!["platform".to_string(), "sre".to_string()]); // org1 only, slug-sorted
+
+        let none = group_slugs_for_identity(&db, "org1", "bob").await.unwrap();
+        assert!(none.is_empty());
     }
 }

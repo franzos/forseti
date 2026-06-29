@@ -359,8 +359,12 @@ pub(crate) async fn oauth_consent_submit(
     )
     .await;
 
-    let mut redirect = match outcome {
-        FinalizeOutcome::Granted { redirect } => redirect,
+    let (mut redirect, groups_count, groups_truncated) = match outcome {
+        FinalizeOutcome::Granted {
+            redirect,
+            groups_count,
+            groups_truncated,
+        } => (redirect, groups_count, groups_truncated),
         FinalizeOutcome::RedirectedToError { redirect } => return redirect,
     };
 
@@ -381,6 +385,8 @@ pub(crate) async fn oauth_consent_submit(
         .metadata(audit_metadata!(
             "scope" => grant_scope_for_audit.join(" "),
             "remember" => remember,
+            "groups_count" => groups_count as i64,
+            "groups_truncated" => groups_truncated,
         ));
     if !client_id.is_empty() {
         ev = ev.target(target_kind::OAUTH_CLIENT, client_id.clone());
@@ -534,14 +540,18 @@ async fn lookup_identity_email(state: &AppState, subject: &str) -> String {
 /// Tagged result of `finalize_consent`: the caller must know whether Hydra
 /// accepted before emitting `OAUTH_CONSENT_GRANTED` or capturing provenance.
 enum FinalizeOutcome {
-    Granted { redirect: Response },
+    Granted {
+        redirect: Response,
+        groups_count: usize,
+        groups_truncated: bool,
+    },
     RedirectedToError { redirect: Response },
 }
 
 impl FinalizeOutcome {
     fn into_response(self) -> Response {
         match self {
-            FinalizeOutcome::Granted { redirect } => redirect,
+            FinalizeOutcome::Granted { redirect, .. } => redirect,
             FinalizeOutcome::RedirectedToError { redirect } => redirect,
         }
     }
@@ -560,7 +570,9 @@ async fn finalize_consent(
 ) -> FinalizeOutcome {
     // Fan out identity + org memberships in parallel; the membership fetch
     // is skipped unless the grant scope consumes it.
-    let needs_org_claims = grant_scope.iter().any(|s| s == "org" || s == "orgs");
+    let needs_org_claims = grant_scope
+        .iter()
+        .any(|s| s == "org" || s == "orgs" || s == "groups");
     let identity_fut = ory::kratos::admin_get_identity(&state.ory, subject);
     let (identity_res, memberships) = if needs_org_claims {
         let memberships_fut = crate::orgs::list_memberships_limited(
@@ -604,12 +616,46 @@ async fn finalize_consent(
         None
     };
 
+    // Team slugs for the `groups` claim, scoped to the active org. Only when
+    // the scope is granted and an active org resolved; a DB error degrades to
+    // empty, consistent with the memberships fetch above.
+    let wants_groups = grant_scope.iter().any(|s| s == "groups");
+    let (group_slugs, groups_truncated) = if wants_groups {
+        match active.as_ref() {
+            Some(m) => match crate::orgs::teams::group_slugs_for_identity(
+                &state.db,
+                &m.org_id,
+                subject,
+            )
+            .await
+            {
+                Ok(raw) => project_group_slugs(&raw, crate::orgs::teams::GROUPS_CLAIM_CAP),
+                Err(e) => {
+                    tracing::warn!(error = ?e, subject, "consent: group_slugs fetch failed; groups will be empty");
+                    (Vec::new(), false)
+                }
+            },
+            None => (Vec::new(), false),
+        }
+    } else {
+        (Vec::new(), false)
+    };
+    if groups_truncated {
+        tracing::warn!(
+            subject,
+            kept = group_slugs.len(),
+            "consent: groups claim truncated to cap"
+        );
+    }
+
     let id_token_session = build_id_token_claims(
         identity.as_ref(),
         &grant_scope,
         &memberships,
         active.as_ref(),
         profile.as_ref(),
+        &group_slugs,
+        groups_truncated,
     );
 
     match ory::hydra::accept_consent_request(
@@ -624,6 +670,8 @@ async fn finalize_consent(
     {
         Ok(redirect) => FinalizeOutcome::Granted {
             redirect: Redirect::to(&redirect.redirect_to).into_response(),
+            groups_count: group_slugs.len(),
+            groups_truncated,
         },
         Err(e) => {
             tracing::error!(error = ?e, "hydra accept_consent_request failed");
@@ -634,16 +682,29 @@ async fn finalize_consent(
     }
 }
 
+/// Sort, de-dup, and cap team slugs for the `groups` claim. Returns the final
+/// slug list and whether the input exceeded `cap` (drives `groups_truncated`).
+fn project_group_slugs(raw: &[String], cap: usize) -> (Vec<String>, bool) {
+    let mut slugs: Vec<String> = raw.to_vec();
+    slugs.sort();
+    slugs.dedup();
+    let truncated = slugs.len() > cap;
+    slugs.truncate(cap);
+    (slugs, truncated)
+}
+
 /// Fold identity traits into id_token claims, scoped by granted scope.
 /// `email` adds `email`/`email_verified`; `profile` adds `name`/`picture`/`website`;
 /// `extended_profile` adds `bio`/`pronouns`/`links`; `org` adds the active-org
-/// object; `orgs` adds the (capped) membership list.
+/// object; `orgs` adds the (capped) membership list; "groups" adds the active-org team slugs.
 fn build_id_token_claims(
     identity: Option<&ory::Identity>,
     grant_scope: &[String],
     memberships: &[crate::orgs::Membership],
     active_org: Option<&crate::orgs::Membership>,
     profile: Option<&crate::profiles::Profile>,
+    group_slugs: &[String],
+    groups_truncated: bool,
 ) -> serde_json::Value {
     let scopes: std::collections::HashSet<&str> = grant_scope.iter().map(String::as_str).collect();
     let mut claims = serde_json::Map::new();
@@ -693,6 +754,25 @@ fn build_id_token_claims(
             })
             .collect();
         claims.insert("orgs".to_string(), serde_json::Value::Array(arr));
+    }
+
+    if scopes.contains("groups") {
+        claims.insert(
+            "groups".to_string(),
+            serde_json::Value::Array(
+                group_slugs
+                    .iter()
+                    .cloned()
+                    .map(serde_json::Value::String)
+                    .collect(),
+            ),
+        );
+        if groups_truncated {
+            claims.insert(
+                "groups_truncated".to_string(),
+                serde_json::Value::Bool(true),
+            );
+        }
     }
 
     let Some(identity) = identity else {
@@ -797,7 +877,7 @@ fn build_id_token_claims(
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_resource_url, with_prompt_login};
+    use super::{build_id_token_claims, extract_resource_url, project_group_slugs, with_prompt_login};
 
     fn prompt_values(url: &str) -> Vec<String> {
         url::Url::parse(url)
@@ -925,5 +1005,47 @@ mod tests {
             extract_resource_url(request_url, &[]),
             Some("https://api".to_string())
         );
+    }
+
+    #[test]
+    fn project_group_slugs_sorts_dedups_caps() {
+        let raw = vec!["sre".to_string(), "platform".to_string(), "sre".to_string()];
+        let (out, truncated) = project_group_slugs(&raw, 10);
+        assert_eq!(out, vec!["platform".to_string(), "sre".to_string()]);
+        assert!(!truncated);
+
+        let many: Vec<String> = (0..5).map(|i| format!("t{i}")).collect();
+        let (capped, was_trunc) = project_group_slugs(&many, 3);
+        assert_eq!(capped, vec!["t0".to_string(), "t1".to_string(), "t2".to_string()]);
+        assert!(was_trunc);
+    }
+
+    #[test]
+    fn groups_claim_absent_without_scope() {
+        let v = build_id_token_claims(
+            None, &["openid".to_string()], &[], None, None,
+            &["platform".to_string()], false,
+        );
+        assert!(v.get("groups").is_none());
+    }
+
+    #[test]
+    fn groups_claim_empty_array_when_granted_no_teams() {
+        let v = build_id_token_claims(
+            None, &["openid".to_string(), "groups".to_string()], &[], None, None,
+            &[], false,
+        );
+        assert_eq!(v.get("groups").unwrap(), &serde_json::json!([]));
+        assert!(v.get("groups_truncated").is_none());
+    }
+
+    #[test]
+    fn groups_claim_emits_slugs_and_truncation_flag() {
+        let slugs = vec!["platform".to_string(), "sre".to_string()];
+        let v = build_id_token_claims(
+            None, &["groups".to_string()], &[], None, None, &slugs, true,
+        );
+        assert_eq!(v.get("groups").unwrap(), &serde_json::json!(["platform", "sre"]));
+        assert_eq!(v.get("groups_truncated").unwrap(), &serde_json::Value::Bool(true));
     }
 }

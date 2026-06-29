@@ -220,6 +220,15 @@ The id_token is a JWT signed with RS256 by Hydra's signing key. The claims depen
 
 These come from the identity's `traits.*` fields as configured by the operator's identity schema. Absent fields are omitted from the token.
 
+### With `groups` scope
+
+| Claim              | Type     | Description                                                                                       |
+|--------------------|----------|---------------------------------------------------------------------------------------------------|
+| `groups`           | string[] | Slugs of the teams the user belongs to in their active org. Empty array when the user has no teams. Always present when the scope is granted. |
+| `groups_truncated` | boolean  | Present and `true` only when the user is in more than 200 teams and the list was capped.          |
+
+`groups` is scoped to the user's active org (the same org the `org` claim resolves to). It reflects state as of the user's last authorization and is not re-resolved on a refresh-token grant. See the [scope reference](#scope-reference).
+
 ### Example decoded payload
 
 ```json
@@ -420,7 +429,7 @@ Host: hydra.example.com
 Authorization: Bearer <access_token>
 ```
 
-Response is a JSON document with the same scope-gated claims as the id_token (`sub`, `email`, `email_verified`, `name`, `picture`, `org`, …). Discovery surfaces the endpoint as `userinfo_endpoint`; libraries find it automatically.
+Response is a JSON document with the same scope-gated claims as the id_token (`sub`, `email`, `email_verified`, `name`, `picture`, `org`, `groups`, …). Discovery surfaces the endpoint as `userinfo_endpoint`; libraries find it automatically.
 
 No freshness difference between the two paths. They're both the consent-time snapshot.
 
@@ -1105,6 +1114,7 @@ Forseti is not a single point of failure if your app degrades gracefully.
 | `offline_access` | Adds a `refresh_token` to the token response. Hydra also accepts the bare `offline` alias for back-compat — prefer `offline_access` (OIDC Core 1.0 §11). |
 | `org`     | Adds an `org` claim — `{ id, slug, role, name }` — for the user's currently-active organisation. Forseti resolves the active org from the user's signed `active_org` cookie (in-portal) or the `organization_id=<id>` auth-request parameter (downstream). |
 | `orgs`    | Adds an `orgs` claim — an array of `{ id, slug, role, name }` — listing every org the user belongs to. Capped at 32 entries. Apps that show a tenant picker request this. |
+| `groups`  | Adds a `groups` claim, a flat array of the user's team slugs in their active org, for apps that map group names to roles (Parseable, Grafana, Argo CD). Empty array when the user has no teams. Capped at 200 with a `groups_truncated` flag. Scoped to the active org. |
 | `profile` (extended) | When `[profiles].enabled = true` on Forseti, `profile` additionally surfaces `picture` (avatar URL) and `website` from the user's portal-owned profile. Standard OIDC slots — apps already requesting `profile` pick these up with no client-side change. Missing/empty fields are simply omitted. |
 | `extended_profile` | Portal-owned non-standard claims: `bio`, `pronouns`, and `links` (array of `{label, url}`). Only added when `[profiles].enabled` is on AND the user filled the fields. Request alongside `profile` when you want the full profile block. Revocation is whole-grant — see `/settings/authorized-apps`. |
 
@@ -1144,6 +1154,18 @@ The resulting `id_token` carries:
 ```
 
 Apps that need the full picker (e.g. "switch tenant" dropdown) request `org orgs` together.
+
+#### Group-based roles (`groups` scope)
+
+Apps that derive roles from group membership (Parseable, Grafana, Argo CD, Kubernetes) request `groups`. Forseti emits a flat array of the user's team slugs in the active org:
+
+```json
+{
+  "groups": ["platform", "sre"]
+}
+```
+
+Create teams in Forseti (Organizations, then Teams) and a matching role per slug in the downstream app. The claim is scoped to the active org, so a `groups`-only token carries no org discriminator; request `org` alongside it if the app needs to know which org the slugs belong to. Slugs are unique only within an org, not globally, so for a user in multiple orgs the same slug can map to different teams in different orgs. An app that derives roles from bare slugs should request `org` and key its role mapping on the (org, slug) pair, or restrict the client to a single org. Group changes propagate on the user's next sign-in or app authorization; they are not refreshed mid-session via the refresh-token grant.
 
 ### Custom scopes
 

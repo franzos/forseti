@@ -121,12 +121,13 @@ Surfaces that honour the org scope (each filters its listing to the scoped org):
 
 ## OIDC claim construction
 
-Two scopes surface org membership into OIDC tokens. Both are built in `build_id_token_claims()` (`src/oauth/consent.rs:569-624`), and the membership fetch is skipped entirely unless the grant actually includes one of them (`src/oauth/consent.rs:485`) — OSS deployments and plain `openid email` grants pay nothing.
+All three scopes surface org-derived data into OIDC tokens. All three are built in `build_id_token_claims()`, and the membership fetch is skipped entirely unless the grant includes one of them, so OSS deployments and plain `openid email` grants pay nothing.
 
 | Scope | Claim |
 |---|---|
 | `org` | A single object for the **active** org: `{ id, slug, role, name }`. The active org is resolved from the `forseti_active_org` cookie at consent time, falling back to the first membership. |
 | `orgs` | An array of `{ id, slug, role, name }` for **every** membership, capped at 32 entries (`ORGS_CLAIM_CAP`, `src/orgs/nav.rs`). |
+| `groups` | A flat array of the user's **team** slugs in the active org (sourced from `org_teams` via `teams::group_slugs_for_identity`), for downstream group-to-role mapping. Sorted, de-duped, capped at 200 (`GROUPS_CLAIM_CAP`) with a `groups_truncated` flag, present-but-empty when the user has no teams. |
 
 Entries with an unparseable role are dropped with a `warn!` rather than emitting a malformed claim. These claims also appear at the `userinfo` endpoint. The app-facing reference lives in the [integration guide's scope reference](../integration-guide.md#scope-reference).
 
