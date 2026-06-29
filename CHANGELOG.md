@@ -7,9 +7,11 @@
 - Edit an enrolled host after enrollment
 - Scope a host to any of several org groups, not just one
 - "Use a different account" on the OAuth consent screen, to re-authenticate as someone else
+- OIDC `groups` claim: a client granted the `groups` scope receives the user's active-org team slugs (flat array) in the ID token and userinfo, for downstream role mapping (e.g. Parseable, Grafana, ArgoCD).
 
 ### Changed
 - Grouped the admin and settings navigation into labelled sections
+- Team slugs are now immutable after creation; renaming a team changes its display name only.
 
 ### Fixed
 - Login-screen sign-out hit a CSRF 403 on the account-switch path

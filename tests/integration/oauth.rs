@@ -237,3 +237,240 @@ fn extract_input_value(html: &str, name: &str) -> Option<String> {
     }
     None
 }
+
+// --- groups claim tests ----------------------------------------------------
+
+#[tokio::test]
+async fn groups_only_emits_active_org_slugs() {
+    assert!(portal_reachable().await);
+
+    let user = register_test_user("grp-active").await;
+    let (client_id, client_secret, redirect_uri) =
+        hydra_create_test_client(&["openid", "groups"]).await;
+
+    let org_id = uuid::Uuid::new_v4().to_string();
+    let team_id = uuid::Uuid::new_v4().to_string();
+    seed_organization(&org_id, "test-grp-active", "Test Grp Active", "all");
+    seed_org_membership(&org_id, &user.identity_id, "member");
+    seed_team(&team_id, &org_id, "Platform", "platform", None);
+    add_team_member(&team_id, &user.identity_id);
+
+    let auth_url = oauth_auth_url(
+        &client_id,
+        &redirect_uri,
+        "openid groups",
+        &format!("&organization_id={org_id}"),
+    );
+    let (consent_challenge, csrf, _body) = drive_to_consent(&user.client, &auth_url).await;
+    let code = consent_accept_chase_code(
+        &user.manual_client,
+        &csrf,
+        &consent_challenge,
+        &["openid", "groups"],
+        false,
+    )
+    .await
+    .expect("code from groups consent");
+
+    let tokens = exchange_code_for_tokens(&client_id, &client_secret, &redirect_uri, &code).await;
+    let id_token = tokens["id_token"].as_str().expect("id_token present");
+    let claims = decode_jwt_claims(id_token);
+    let groups = claims["groups"].as_array().expect("groups claim is array");
+    assert_eq!(
+        groups,
+        &[serde_json::json!("platform")],
+        "groups should contain exactly the active org's team slug"
+    );
+
+    delete_team(&team_id);
+    delete_org_membership(&org_id, &user.identity_id);
+    delete_organization(&org_id);
+    hydra_delete_client(&client_id).await;
+    user.cleanup().await;
+}
+
+#[tokio::test]
+async fn groups_excludes_other_orgs() {
+    assert!(portal_reachable().await);
+
+    let user = register_test_user("grp-exclude").await;
+    let (client_id, client_secret, redirect_uri) =
+        hydra_create_test_client(&["openid", "groups"]).await;
+
+    // Pin a resolvable default-org membership at consent time. The auto-join
+    // middleware seeds it lazily on authenticated portal requests; this makes
+    // the assertion independent of that timing (INSERT OR IGNORE is idempotent).
+    seed_org_membership("default", &user.identity_id, "member");
+
+    // Seed a second org with a team the user belongs to.
+    let org2_id = uuid::Uuid::new_v4().to_string();
+    let team_id = uuid::Uuid::new_v4().to_string();
+    seed_organization(&org2_id, "test-grp-other", "Test Grp Other", "all");
+    seed_org_membership(&org2_id, &user.identity_id, "member");
+    seed_team(&team_id, &org2_id, "Infra", "infra", None);
+    add_team_member(&team_id, &user.identity_id);
+
+    // Drive consent scoped to the default org; user has no teams there.
+    let auth_url = oauth_auth_url(
+        &client_id,
+        &redirect_uri,
+        "openid groups",
+        "&organization_id=default",
+    );
+    let (consent_challenge, csrf, _body) = drive_to_consent(&user.client, &auth_url).await;
+    let code = consent_accept_chase_code(
+        &user.manual_client,
+        &csrf,
+        &consent_challenge,
+        &["openid", "groups"],
+        false,
+    )
+    .await
+    .expect("code from groups exclude consent");
+
+    let tokens = exchange_code_for_tokens(&client_id, &client_secret, &redirect_uri, &code).await;
+    let id_token = tokens["id_token"].as_str().expect("id_token present");
+    let claims = decode_jwt_claims(id_token);
+    // The user has no team in the active (default) org, so groups must be
+    // exactly empty. Asserting `== []` (not just "infra absent") pins both
+    // the exclusion AND that an empty result reflects no active-org teams
+    // rather than a broken implementation that always returns [].
+    assert_eq!(
+        claims["groups"],
+        serde_json::json!([]),
+        "active-org groups must be empty (and must exclude org2's 'infra'); got {}",
+        claims["groups"]
+    );
+
+    delete_team(&team_id);
+    delete_org_membership(&org2_id, &user.identity_id);
+    delete_organization(&org2_id);
+    hydra_delete_client(&client_id).await;
+    user.cleanup().await;
+}
+
+#[tokio::test]
+async fn groups_present_on_skip_consent() {
+    assert!(portal_reachable().await);
+
+    let user = register_test_user("grp-skip").await;
+    let (client_id, client_secret, redirect_uri) =
+        hydra_create_test_client(&["openid", "groups"]).await;
+
+    // Pin a resolvable default-org membership so active-org resolution sees the
+    // user as a member regardless of auto-join timing (INSERT OR IGNORE).
+    seed_org_membership("default", &user.identity_id, "member");
+
+    let team_id = uuid::Uuid::new_v4().to_string();
+    seed_team(&team_id, "default", "Ops", "ops", None);
+    add_team_member(&team_id, &user.identity_id);
+
+    let auth_url = oauth_auth_url(
+        &client_id,
+        &redirect_uri,
+        "openid groups",
+        "&organization_id=default",
+    );
+
+    // First pass: explicit consent with remember=true so Hydra stores the grant.
+    let (consent_challenge, csrf, _body) = drive_to_consent(&user.client, &auth_url).await;
+    let _code = consent_accept_chase_code(
+        &user.manual_client,
+        &csrf,
+        &consent_challenge,
+        &["openid", "groups"],
+        true,
+    )
+    .await
+    .expect("first-pass code");
+
+    // Second pass: Hydra sets skip=true on the challenge; portal auto-grants.
+    // Use manual_client (redirects disabled) to walk 303s until the callback.
+    let mut resp = user
+        .manual_client
+        .get(&auth_url)
+        .send()
+        .await
+        .expect("second auth pass");
+    let code = 'walk: {
+        for _ in 0..20 {
+            if resp.status().is_redirection() {
+                let loc = resp
+                    .headers()
+                    .get(reqwest::header::LOCATION)
+                    .and_then(|h| h.to_str().ok())
+                    .map(|s| s.to_string());
+                if let Some(loc) = loc {
+                    if loc.contains("/callback") {
+                        break 'walk extract_query_param(&loc, "code")
+                            .expect("code in callback");
+                    }
+                    let next = reqwest::Url::parse(&loc)
+                        .unwrap_or_else(|_| resp.url().join(&loc).unwrap());
+                    resp = user
+                        .manual_client
+                        .get(next)
+                        .send()
+                        .await
+                        .expect("follow redirect");
+                    continue;
+                }
+            }
+            panic!("auto-grant chain did not reach callback");
+        }
+        panic!("too many redirects in auto-grant chain");
+    };
+
+    let tokens = exchange_code_for_tokens(&client_id, &client_secret, &redirect_uri, &code).await;
+    let id_token = tokens["id_token"].as_str().expect("id_token present");
+    let claims = decode_jwt_claims(id_token);
+    let groups = claims["groups"].as_array().expect("groups claim is array on skip");
+    let contains_ops = groups.iter().any(|v| v.as_str() == Some("ops"));
+    assert!(
+        contains_ops,
+        "groups must contain 'ops' even on skip-consent path; got {groups:?}"
+    );
+
+    delete_team(&team_id);
+    hydra_delete_client(&client_id).await;
+    user.cleanup().await;
+}
+
+#[tokio::test]
+async fn groups_empty_array_when_no_teams() {
+    assert!(portal_reachable().await);
+
+    let user = register_test_user("grp-empty").await;
+    let (client_id, client_secret, redirect_uri) =
+        hydra_create_test_client(&["openid", "groups"]).await;
+
+    // User is in the default org but has no team memberships.
+    let auth_url = oauth_auth_url(
+        &client_id,
+        &redirect_uri,
+        "openid groups",
+        "&organization_id=default",
+    );
+    let (consent_challenge, csrf, _body) = drive_to_consent(&user.client, &auth_url).await;
+    let code = consent_accept_chase_code(
+        &user.manual_client,
+        &csrf,
+        &consent_challenge,
+        &["openid", "groups"],
+        false,
+    )
+    .await
+    .expect("code from empty-groups consent");
+
+    let tokens = exchange_code_for_tokens(&client_id, &client_secret, &redirect_uri, &code).await;
+    let id_token = tokens["id_token"].as_str().expect("id_token present");
+    let claims = decode_jwt_claims(id_token);
+    assert_eq!(
+        claims["groups"],
+        serde_json::json!([]),
+        "groups must be an empty array when user has no team memberships"
+    );
+
+    hydra_delete_client(&client_id).await;
+    user.cleanup().await;
+}
