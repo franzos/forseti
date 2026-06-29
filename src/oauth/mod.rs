@@ -17,8 +17,9 @@ pub(crate) mod login;
 pub(crate) mod logout;
 pub(crate) mod register;
 
-/// Consent-screen descriptions for the standard OIDC scopes, used when the
-/// operator hasn't supplied one in `[oauth.scope_descriptions]`.
+/// Consent-screen descriptions for built-in scopes (standard OIDC plus
+/// Forseti's `groups`), used when the operator hasn't supplied one in
+/// `[oauth.scope_descriptions]`.
 pub(crate) fn default_scope_description(scope: &str) -> Option<&'static str> {
     Some(match scope {
         "openid" => "Confirm your identity",
@@ -27,6 +28,7 @@ pub(crate) fn default_scope_description(scope: &str) -> Option<&'static str> {
         "offline_access" => "Stay signed in when you're not actively using the app",
         "address" => "Your postal address",
         "phone" => "Your phone number",
+        "groups" => "Your team memberships (used to assign roles in the connected app)",
         _ => return None,
     })
 }
@@ -102,6 +104,7 @@ mod tests {
             "offline_access",
             "address",
             "phone",
+            "groups",
         ] {
             assert!(
                 default_scope_description(scope).is_some(),
