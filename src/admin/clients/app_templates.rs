@@ -368,7 +368,7 @@ impl AppTemplate {
             note: Some("Configure Parseable with P_OIDC_ISSUER, P_OIDC_CLIENT_ID, P_OIDC_CLIENT_SECRET, and P_ORIGIN_URI; the redirect is <P_ORIGIN_URI>/api/v1/o/code. The 'groups' claim is populated by Forseti from the user's active-org team slugs; create a role in Parseable whose name matches each team slug you want to grant."),
             logout_note: None,
             post_create_note: None,
-            logo: None,
+            logo: Some("parseable.svg"),
             logo_dark: None,
         },
         AppTemplate {
@@ -1143,13 +1143,12 @@ mod tests {
     }
 
     #[test]
-    fn every_logo_field_is_an_svg() {
-        // Templates without a logo (logo: None) fall back to a letter tile; that
-        // is intentional. When a logo IS set it must be an svg.
+    fn every_template_has_an_svg_logo() {
         for t in AppTemplate::ALL {
-            if let Some(logo) = t.logo {
-                assert!(logo.ends_with(".svg"), "{} logo not an svg: {logo}", t.slug);
-            }
+            let logo = t
+                .logo
+                .unwrap_or_else(|| panic!("{} missing a logo", t.slug));
+            assert!(logo.ends_with(".svg"), "{} logo not an svg: {logo}", t.slug);
         }
     }
 
