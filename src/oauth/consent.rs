@@ -359,8 +359,12 @@ pub(crate) async fn oauth_consent_submit(
     )
     .await;
 
-    let mut redirect = match outcome {
-        FinalizeOutcome::Granted { redirect, .. } => redirect,
+    let (mut redirect, groups_count, groups_truncated) = match outcome {
+        FinalizeOutcome::Granted {
+            redirect,
+            groups_count,
+            groups_truncated,
+        } => (redirect, groups_count, groups_truncated),
         FinalizeOutcome::RedirectedToError { redirect } => return redirect,
     };
 
@@ -381,6 +385,8 @@ pub(crate) async fn oauth_consent_submit(
         .metadata(audit_metadata!(
             "scope" => grant_scope_for_audit.join(" "),
             "remember" => remember,
+            "groups_count" => groups_count as i64,
+            "groups_truncated" => groups_truncated,
         ));
     if !client_id.is_empty() {
         ev = ev.target(target_kind::OAUTH_CLIENT, client_id.clone());
