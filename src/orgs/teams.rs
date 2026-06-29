@@ -13,6 +13,10 @@ use crate::schema::{org_team_members, org_teams};
 
 pub const MAX_ROWS_PER_LIST: i64 = 500;
 
+/// Max team slugs emitted in the OIDC `groups` claim. A token-size safety
+/// bound; real orgs stay well under it. Exceeding it sets `groups_truncated`.
+pub const GROUPS_CLAIM_CAP: usize = 200;
+
 #[derive(Queryable, Selectable, Debug, Clone, Serialize)]
 #[diesel(table_name = org_teams)]
 pub struct Team {
@@ -219,6 +223,28 @@ pub async fn teams_for_identity_any_org(
             .load(conn)
     })?;
     Ok(rows)
+}
+
+/// Slugs of the subject's teams in one org, slug-sorted, for the OIDC `groups`
+/// claim. Fetches up to `GROUPS_CLAIM_CAP + 1` rows so the caller can detect
+/// overflow past the cap.
+pub async fn group_slugs_for_identity(
+    db: &DbPool,
+    org_id: &str,
+    identity_id: &str,
+) -> anyhow::Result<Vec<String>> {
+    let (org, id) = (org_id.to_string(), identity_id.to_string());
+    let limit = (GROUPS_CLAIM_CAP + 1) as i64;
+    Ok(db_interact!(db, |conn| {
+        org_teams::table
+            .inner_join(org_team_members::table.on(org_team_members::team_id.eq(org_teams::id)))
+            .filter(org_teams::org_id.eq(&org))
+            .filter(org_team_members::identity_id.eq(&id))
+            .order(org_teams::slug.asc())
+            .limit(limit)
+            .select(org_teams::slug)
+            .load(conn)
+    })?)
 }
 
 pub async fn add_member(db: &DbPool, team_id: &str, identity_id: &str) -> anyhow::Result<()> {
@@ -432,5 +458,22 @@ mod tests {
         let db = temp_pool().await;
         let t = create_team(&db, "org1", "Platform", None).await.unwrap();
         assert!(rename_team(&db, &t.id, "!!!").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn group_slugs_scoped_to_org_and_member() {
+        let db = temp_pool().await;
+        let plat = create_team(&db, "org1", "Platform", None).await.unwrap();
+        let sre = create_team(&db, "org1", "SRE", None).await.unwrap();
+        let other = create_team(&db, "org2", "Other", None).await.unwrap();
+        add_member(&db, &plat.id, "alice").await.unwrap();
+        add_member(&db, &sre.id, "alice").await.unwrap();
+        add_member(&db, &other.id, "alice").await.unwrap();
+
+        let slugs = group_slugs_for_identity(&db, "org1", "alice").await.unwrap();
+        assert_eq!(slugs, vec!["platform".to_string(), "sre".to_string()]); // org1 only, slug-sorted
+
+        let none = group_slugs_for_identity(&db, "org1", "bob").await.unwrap();
+        assert!(none.is_empty());
     }
 }
