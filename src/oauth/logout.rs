@@ -67,13 +67,7 @@ pub(crate) async fn oauth_logout_submit(
 
     // Best-effort Kratos teardown; the user may already be signed out.
     let cookie = cookies::cookie_header(&headers);
-    if !cookie.is_empty() {
-        if let Ok(Some(url)) = ory::kratos::fetch_logout_url(&state.ory, &cookie).await {
-            // Hit server-side to destroy the session; we don't follow Kratos's
-            // post-logout redirect since Hydra's is authoritative here.
-            let _ = ory::kratos::hit_logout_url(&state.ory, &url, Some(&cookie)).await;
-        }
-    }
+    ory::kratos::tear_down_session(&state.ory, &cookie).await;
 
     match ory::hydra::accept_logout_request(&state.ory, &challenge).await {
         Ok(redirect) => Redirect::to(&redirect.redirect_to).into_response(),

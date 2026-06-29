@@ -178,6 +178,7 @@ pub mod action {
     pub const ORG_TEAM_MEMBER_REMOVED: &str = "org.team.member_removed";
     // account-self (#1)
     pub const ACCOUNT_SELF_DELETED: &str = "account.self_deleted";
+    pub const ACCOUNT_SWITCHED: &str = "account.switched";
     // commercial license (`src/commercial/`)
     pub const LICENSE_ACTIVATED: &str = "license.activated";
     pub const LICENSE_DEACTIVATED: &str = "license.deactivated";

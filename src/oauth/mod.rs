@@ -43,6 +43,7 @@ pub(crate) fn router(oauth_cfg: &OAuthConfig, proxy_cfg: &ProxyConfig) -> Router
             "/oauth/consent",
             get(consent::oauth_consent).post(consent::oauth_consent_submit),
         )
+        .route("/oauth/consent/switch", post(consent::consent_switch))
         .route(
             "/oauth/logout",
             get(logout::oauth_logout).post(logout::oauth_logout_submit),
