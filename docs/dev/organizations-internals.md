@@ -121,7 +121,7 @@ Surfaces that honour the org scope (each filters its listing to the scoped org):
 
 ## OIDC claim construction
 
-Three scopes surface org-derived data into OIDC tokens. Both are built in `build_id_token_claims()` (`src/oauth/consent.rs:569-624`), and the membership fetch is skipped entirely unless the grant actually includes one of them (`src/oauth/consent.rs:485`) — OSS deployments and plain `openid email` grants pay nothing.
+All three scopes surface org-derived data into OIDC tokens. All three are built in `build_id_token_claims()`, and the membership fetch is skipped entirely unless the grant includes one of them, so OSS deployments and plain `openid email` grants pay nothing.
 
 | Scope | Claim |
 |---|---|

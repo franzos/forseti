@@ -1165,7 +1165,7 @@ Apps that derive roles from group membership (Parseable, Grafana, Argo CD, Kuber
 }
 ```
 
-Create teams in Forseti (Organizations, then Teams) and a matching role per slug in the downstream app. The claim is scoped to the active org, so a `groups`-only token carries no org discriminator; request `org` alongside it if the app needs to know which org the slugs belong to. Group changes propagate on the user's next sign-in; they are not refreshed mid-session via the refresh-token grant.
+Create teams in Forseti (Organizations, then Teams) and a matching role per slug in the downstream app. The claim is scoped to the active org, so a `groups`-only token carries no org discriminator; request `org` alongside it if the app needs to know which org the slugs belong to. Slugs are unique only within an org, not globally, so for a user in multiple orgs the same slug can map to different teams in different orgs. An app that derives roles from bare slugs should request `org` and key its role mapping on the (org, slug) pair, or restrict the client to a single org. Group changes propagate on the user's next sign-in or app authorization; they are not refreshed mid-session via the refresh-token grant.
 
 ### Custom scopes
 
