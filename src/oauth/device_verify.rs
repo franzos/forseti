@@ -17,6 +17,7 @@ use axum::response::{IntoResponse, Redirect, Response};
 use serde::Deserialize;
 
 use crate::csrf::CsrfForm;
+use crate::extractors::RequireSession;
 use crate::ory;
 use crate::page_chrome::{Chrome, PageChrome};
 use crate::posix::db;
@@ -59,9 +60,13 @@ struct DeviceDoneTemplate {
 }
 
 /// `GET /oauth/device` — render the verification screen, showing the host +
-/// target account looked up by `user_code`.
+/// target account looked up by `user_code`. Gated behind a Kratos session
+/// (RFC 8628 §3.3: the user authenticates at the verification URI) so the
+/// host-bound `(username, hostname)` target is never disclosed to an
+/// unauthenticated caller guessing user codes.
 pub(crate) async fn device_verify(
     State(state): State<AppState>,
+    _session: RequireSession,
     Query(query): Query<DeviceVerifyQuery>,
     Chrome(chrome): Chrome,
 ) -> Response {
@@ -92,6 +97,7 @@ pub(crate) struct DeviceVerifyForm {
 /// login + consent. On success we follow Hydra's `redirect_to`.
 pub(crate) async fn device_verify_submit(
     State(state): State<AppState>,
+    _session: RequireSession,
     CsrfForm(form): CsrfForm<DeviceVerifyForm>,
 ) -> Response {
     // Re-load by user_code so a tampered POST can't accept a code with no

@@ -133,7 +133,7 @@ pub async fn show(
     let filter_severity = query.severity.unwrap_or_default();
     let filter_since = query.since.unwrap_or_default();
     let page = query.page.unwrap_or(1).max(1);
-    let offset = (page - 1) * AUDIT_PAGE_SIZE;
+    let offset = page.saturating_sub(1).saturating_mul(AUDIT_PAGE_SIZE);
 
     let (since_dt, filter_error) = if filter_since.is_empty() {
         (None, String::new())

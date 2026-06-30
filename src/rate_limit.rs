@@ -41,6 +41,33 @@ where
     r.layer(GovernorLayer::new(Arc::new(cfg)).error_handler(error_handler))
 }
 
+/// Plain-text `429` for browser-facing endpoints, with `Retry-After` when the
+/// governor surfaces a wait time. `context` only labels the trace line. JSON
+/// endpoints (RFC 7591 DCR) render their own shape instead.
+pub(crate) fn plain_text_error(
+    context: &'static str,
+) -> impl Fn(tower_governor::GovernorError) -> Response + Copy {
+    move |err| {
+        use axum::http::StatusCode;
+        let retry = match &err {
+            tower_governor::GovernorError::TooManyRequests { wait_time, .. } => Some(*wait_time),
+            _ => None,
+        };
+        tracing::trace!(error = ?err, context, "per-IP rate limit triggered");
+        let mut builder = Response::builder()
+            .status(StatusCode::TOO_MANY_REQUESTS)
+            .header("content-type", "text/plain; charset=utf-8");
+        if let Some(s) = retry {
+            builder = builder.header("retry-after", s.to_string());
+        }
+        builder
+            .body(axum::body::Body::from(
+                "Too many requests. Wait a moment and try again.",
+            ))
+            .expect("static response is well-formed")
+    }
+}
+
 /// Attach paired per-minute + per-hour buckets to `r`, picking the key extractor from `trust_xff`
 /// (`cfg.proxy.trust_forwarded_for`).
 pub(crate) fn dual_window<F>(

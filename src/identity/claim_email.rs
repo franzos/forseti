@@ -59,33 +59,8 @@ pub(crate) fn router(proxy_cfg: &ProxyConfig, claim_cfg: &ClaimEmailConfig) -> R
         proxy_cfg.trust_forwarded_for,
         claim_cfg.rate_limit_per_minute,
         claim_cfg.rate_limit_per_hour,
-        rate_limit_error_response,
+        rate_limit::plain_text_error("claim-email"),
     )
-}
-
-/// 429 response in HTML shape for the per-IP `tower_governor` layer.
-/// Distinct from `oauth::register::rate_limit_error_response` (which
-/// returns RFC 7591-flavoured JSON for the DCR endpoint) because
-/// claim-email is browser-facing.
-fn rate_limit_error_response(err: tower_governor::GovernorError) -> Response {
-    use axum::http::StatusCode;
-    use tower_governor::GovernorError;
-    let retry = match &err {
-        GovernorError::TooManyRequests { wait_time, .. } => Some(*wait_time),
-        _ => None,
-    };
-    tracing::trace!(error = ?err, "claim-email: per-IP rate limit triggered");
-    let mut builder = Response::builder()
-        .status(StatusCode::TOO_MANY_REQUESTS)
-        .header("content-type", "text/plain; charset=utf-8");
-    if let Some(s) = retry {
-        builder = builder.header("retry-after", s.to_string());
-    }
-    builder
-        .body(axum::body::Body::from(
-            "Too many requests. Wait a moment and try again.",
-        ))
-        .expect("static response is well-formed")
 }
 
 #[derive(Template)]
@@ -306,11 +281,15 @@ async fn confirm_post(
             "Invalid token. Start over.",
         );
     }
-    // Constant-time compare on the OTP — same security profile as the
-    // webhook bearer / CSRF token paths.
+    // Hash both sides before ct_eq, mirroring the webhook bearer path:
+    // subtle's slice impl short-circuits on unequal lengths, which would
+    // leak a length oracle. Fixed-length digests dodge that.
+    use sha2::Digest;
+    let presented_hash = sha2::Sha256::digest(form.code.trim().as_bytes());
+    let expected_hash = sha2::Sha256::digest(expected_code.as_bytes());
     if !bool::from(subtle::ConstantTimeEq::ct_eq(
-        form.code.trim().as_bytes(),
-        expected_code.as_bytes(),
+        presented_hash.as_slice(),
+        expected_hash.as_slice(),
     )) {
         // Wrong code. Bump the per-row attempt counter; the row is
         // hard-deleted once `attempts + 1 >= MAX_CLAIM_CODE_ATTEMPTS`.

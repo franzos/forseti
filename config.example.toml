@@ -62,6 +62,12 @@ support_email = "support@example.com"
 # suspenders to `uses_remaining`: even an "unlimited" token (`uses=NULL`)
 # is capped here. Default 50. Set to 0 to disable.
 #
+# `device_verify_ip_rate_per_minute` / `device_verify_ip_rate_per_hour`
+# cap requests to `/oauth/device` (the RFC 8628 verification screen) from
+# a single IP. The screen is already session-gated; these buckets are
+# defence-in-depth against grinding low-entropy user codes. Defaults are
+# 20/min and 120/hour. Set to 0 to disable that bucket.
+#
 # Rate-limit values are clamped at config-load time to sanity ceilings
 # (per-minute: 1_000, per-hour: 10_000, per-day: 100_000) so an operator
 # typo can't silently disable protection. A clamped value emits a
@@ -80,6 +86,8 @@ support_email = "support@example.com"
 # dcr_ip_rate_per_minute = 10
 # dcr_ip_rate_per_hour   = 100
 # dcr_iat_daily_limit    = 50
+# device_verify_ip_rate_per_minute = 20
+# device_verify_ip_rate_per_hour   = 120
 # dcr_reserved_names = [
 #   # Own + upstream brands
 #   "ory", "hydra", "kratos",

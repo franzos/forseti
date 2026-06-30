@@ -87,7 +87,8 @@ pub(crate) async fn run() -> anyhow::Result<()> {
     // One Ctrl+C / SIGTERM fans out to the HTTP listeners and the webhook background tasks.
     let shutdown = CancellationToken::new();
 
-    let cookie_secret = resolve_cookie_secret(cfg.security.cookie_secret.as_deref());
+    let cookie_secret =
+        resolve_cookie_secret(cfg.security.cookie_secret.as_deref(), &cfg.self_.url);
 
     // Reconcile PENDING rows stranded by a crash between writing the rows and the Kratos delete, then drain CONFIRMED rows.
     if let Err(e) = webhook::reconcile_pending(&db, &ory).await {
@@ -253,8 +254,10 @@ fn warn_if_sqlite_in_production(db: &DbPool, self_url: &str) {
 
 /// Materialise the master cookie-signing secret. Hex string preferred (`openssl rand -hex 32`),
 /// otherwise raw UTF-8 bytes; under 32 bytes hard-fails boot. Missing config falls back to 32
-/// per-process random bytes with a warning (cookies won't survive restart).
-fn resolve_cookie_secret(configured: Option<&str>) -> Arc<[u8]> {
+/// per-process random bytes with a warning (cookies won't survive restart) on dev URLs, but
+/// hard-fails on a production-shaped URL: a per-process key silently rejects peers' cookies
+/// across an HA fleet.
+fn resolve_cookie_secret(configured: Option<&str>, self_url: &str) -> Arc<[u8]> {
     if let Some(raw) = configured.map(str::trim).filter(|s| !s.is_empty()) {
         let key: Box<[u8]> = match hex::decode(raw) {
             Ok(bytes) => bytes.into_boxed_slice(),
@@ -270,6 +273,15 @@ fn resolve_cookie_secret(configured: Option<&str>) -> Arc<[u8]> {
             std::process::exit(1);
         }
         return Arc::from(key);
+    }
+    if DatabaseConfig::looks_like_production(self_url) {
+        eprintln!(
+            "config error: [security].cookie_secret is unset on a production-looking deployment \
+             ({self_url}). A per-process ephemeral key silently rejects peers' signed cookies \
+             across a multi-instance fleet. Generate one with `openssl rand -hex 32` (or via \
+             FORSETI_SECURITY__COOKIE_SECRET) and restart."
+        );
+        std::process::exit(1);
     }
     use rand::Rng;
     let mut bytes = [0u8; 32];

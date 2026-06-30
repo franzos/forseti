@@ -474,14 +474,13 @@ mod device_grant {
         // doesn't expose iat-max-age, so check it by hand against the claim.
         let iat = extract_iat(id_token)?;
         let now = chrono::Utc::now().timestamp();
-        if iat > now + 60 {
+        if iat > now.saturating_add(60) {
             return Err(anyhow::anyhow!("id_token iat is in the future"));
         }
-        if now - iat > iat_window_secs as i64 {
+        let age = now.saturating_sub(iat);
+        if age > iat_window_secs as i64 {
             return Err(anyhow::anyhow!(
-                "id_token iat is stale ({}s > {}s window)",
-                now - iat,
-                iat_window_secs
+                "id_token iat is stale ({age}s > {iat_window_secs}s window)"
             ));
         }
 

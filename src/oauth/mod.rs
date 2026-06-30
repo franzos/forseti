@@ -50,16 +50,47 @@ pub(crate) fn router(oauth_cfg: &OAuthConfig, proxy_cfg: &ProxyConfig) -> Router
             "/oauth/logout",
             get(logout::oauth_logout).post(logout::oauth_logout_submit),
         )
-        // RFC 8628 device-verification screen (Hydra's `verification_uri`).
-        .route(
-            "/oauth/device",
-            get(device_verify::device_verify).post(device_verify::device_verify_submit),
-        )
+        // RFC 8628 device-verification screen (Hydra's `verification_uri`),
+        // session-gated and per-IP rate-limited (see `device_router`).
+        .merge(device_router(oauth_cfg, proxy_cfg))
         .route("/oauth/device/done", get(device_verify::device_done))
         // Forseti-fronted RFC 7591 DCR endpoint at the canonical
         // `/oauth2/register` path Hydra advertises in discovery. No CSRF (not
         // a browser form); rate-limited via the nested router below.
         .merge(register_router(oauth_cfg, proxy_cfg))
+}
+
+/// Per-IP rate-limit defaults for `/oauth/device`, used when
+/// `[oauth].device_verify_ip_rate_per_*` is unset. The verification screen is
+/// already session-gated; these buckets are defence-in-depth against an
+/// authenticated user grinding low-entropy RFC 8628 user codes. A legitimate
+/// approval is one GET + one POST, so the caps are generous without being open.
+const DEFAULT_DEVICE_VERIFY_RATE_PER_MINUTE: u32 = 20;
+const DEFAULT_DEVICE_VERIFY_RATE_PER_HOUR: u32 = 120;
+
+/// `/oauth/device` (GET + POST) under a paired per-IP rate limit. Split out so
+/// the throttle wraps only this route, not the unthrottled `/oauth/device/done`
+/// terminal page.
+fn device_router(oauth_cfg: &OAuthConfig, proxy_cfg: &ProxyConfig) -> Router<AppState> {
+    let r = Router::new().route(
+        "/oauth/device",
+        get(device_verify::device_verify).post(device_verify::device_verify_submit),
+    );
+
+    let per_minute = oauth_cfg
+        .device_verify_ip_rate_per_minute
+        .unwrap_or(DEFAULT_DEVICE_VERIFY_RATE_PER_MINUTE);
+    let per_hour = oauth_cfg
+        .device_verify_ip_rate_per_hour
+        .unwrap_or(DEFAULT_DEVICE_VERIFY_RATE_PER_HOUR);
+
+    rate_limit::dual_window(
+        r,
+        proxy_cfg.trust_forwarded_for,
+        per_minute,
+        per_hour,
+        rate_limit::plain_text_error("device_verify"),
+    )
 }
 
 /// Per-request body cap for the DCR proxy. A valid RFC 7591 payload is a few

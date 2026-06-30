@@ -297,6 +297,17 @@ pub struct OAuthConfig {
     /// count). `None` falls back to 50. Set to `0` to disable.
     #[serde(default)]
     pub dcr_iat_daily_limit: Option<u32>,
+    /// Per-IP rate limit on `/oauth/device` (the RFC 8628 verification screen),
+    /// max requests per minute. The screen is session-gated; this is
+    /// defence-in-depth against grinding low-entropy user codes. `None` falls
+    /// back to the code-side default (20). Set to `0` to disable the bucket.
+    #[serde(default)]
+    pub device_verify_ip_rate_per_minute: Option<u32>,
+    /// Per-IP rate limit on `/oauth/device`, max requests per hour, in parallel
+    /// with the per-minute bucket. `None` falls back to 120. Set to `0` to
+    /// disable the per-hour bucket.
+    #[serde(default)]
+    pub device_verify_ip_rate_per_hour: Option<u32>,
 }
 
 /// Admin-surface gating: emails allowed through `/admin/*`; everyone else gets 403 even with a valid session.
@@ -899,6 +910,20 @@ impl AppConfig {
                 "oauth.dcr_iat_daily_limit",
                 v,
                 RATE_LIMIT_PER_DAY_CEILING,
+            ));
+        }
+        if let Some(v) = self.oauth.device_verify_ip_rate_per_minute {
+            self.oauth.device_verify_ip_rate_per_minute = Some(clamp_rate(
+                "oauth.device_verify_ip_rate_per_minute",
+                v,
+                RATE_LIMIT_PER_MINUTE_CEILING,
+            ));
+        }
+        if let Some(v) = self.oauth.device_verify_ip_rate_per_hour {
+            self.oauth.device_verify_ip_rate_per_hour = Some(clamp_rate(
+                "oauth.device_verify_ip_rate_per_hour",
+                v,
+                RATE_LIMIT_PER_HOUR_CEILING,
             ));
         }
     }
