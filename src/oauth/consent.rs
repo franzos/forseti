@@ -578,13 +578,22 @@ async fn finalize_consent(
         let memberships_fut = crate::orgs::list_memberships_limited(
             &state.db,
             subject,
-            crate::orgs::nav::ORGS_CLAIM_CAP as i64,
+            crate::orgs::nav::ORGS_CLAIM_CAP as i64 + 1,
         );
         let (id_res, mem_res) = tokio::join!(identity_fut, memberships_fut);
         (id_res, mem_res.unwrap_or_default())
     } else {
         (identity_fut.await, Vec::new())
     };
+    let orgs_truncated = memberships.len() > crate::orgs::nav::ORGS_CLAIM_CAP;
+    let memberships = {
+        let mut m = memberships;
+        m.truncate(crate::orgs::nav::ORGS_CLAIM_CAP);
+        m
+    };
+    if orgs_truncated {
+        tracing::warn!(subject, kept = memberships.len(), "consent: orgs claim truncated to cap");
+    }
     let identity = match identity_res {
         Ok(id) => Some(id),
         Err(e) => {
@@ -656,6 +665,7 @@ async fn finalize_consent(
         profile.as_ref(),
         &group_slugs,
         groups_truncated,
+        orgs_truncated,
     );
 
     match ory::hydra::accept_consent_request(
@@ -705,6 +715,7 @@ fn build_id_token_claims(
     profile: Option<&crate::profiles::Profile>,
     group_slugs: &[String],
     groups_truncated: bool,
+    orgs_truncated: bool,
 ) -> serde_json::Value {
     let scopes: std::collections::HashSet<&str> = grant_scope.iter().map(String::as_str).collect();
     let mut claims = serde_json::Map::new();
@@ -754,6 +765,9 @@ fn build_id_token_claims(
             })
             .collect();
         claims.insert("orgs".to_string(), serde_json::Value::Array(arr));
+        if orgs_truncated {
+            claims.insert("orgs_truncated".to_string(), serde_json::Value::Bool(true));
+        }
     }
 
     if scopes.contains("groups") {
@@ -1024,7 +1038,7 @@ mod tests {
     fn groups_claim_absent_without_scope() {
         let v = build_id_token_claims(
             None, &["openid".to_string()], &[], None, None,
-            &["platform".to_string()], false,
+            &["platform".to_string()], false, false,
         );
         assert!(v.get("groups").is_none());
     }
@@ -1033,7 +1047,7 @@ mod tests {
     fn groups_claim_empty_array_when_granted_no_teams() {
         let v = build_id_token_claims(
             None, &["openid".to_string(), "groups".to_string()], &[], None, None,
-            &[], false,
+            &[], false, false,
         );
         assert_eq!(v.get("groups").unwrap(), &serde_json::json!([]));
         assert!(v.get("groups_truncated").is_none());
@@ -1043,9 +1057,34 @@ mod tests {
     fn groups_claim_emits_slugs_and_truncation_flag() {
         let slugs = vec!["platform".to_string(), "sre".to_string()];
         let v = build_id_token_claims(
-            None, &["groups".to_string()], &[], None, None, &slugs, true,
+            None, &["groups".to_string()], &[], None, None, &slugs, true, false,
         );
         assert_eq!(v.get("groups").unwrap(), &serde_json::json!(["platform", "sre"]));
         assert_eq!(v.get("groups_truncated").unwrap(), &serde_json::Value::Bool(true));
+    }
+
+    fn sample_memberships(n: usize) -> Vec<crate::orgs::Membership> {
+        (0..n)
+            .map(|i| crate::orgs::Membership {
+                org_id: format!("org-{i}"),
+                slug: format!("org-{i}"),
+                name: format!("Org {i}"),
+                role: "member".to_string(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn orgs_truncated_absent_when_under_cap() {
+        let memberships = sample_memberships(3);
+        let v = build_id_token_claims(None, &["orgs".into()], &memberships, None, None, &[], false, false);
+        assert!(v.get("orgs_truncated").is_none());
+        assert_eq!(v["orgs"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn orgs_truncated_true_when_over_cap() {
+        let v = build_id_token_claims(None, &["orgs".into()], &[], None, None, &[], false, true);
+        assert_eq!(v.get("orgs_truncated").unwrap(), &serde_json::Value::Bool(true));
     }
 }
