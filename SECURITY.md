@@ -19,7 +19,7 @@ so if you're running an older build, the fix is to upgrade.
 
 Please report privately, not through a public issue or pull request.
 
-- Email: m@f-a.nz
+- Email: mail@gofranz.com
 - If you use GitHub, you can also open a private advisory via the repository's
   Security tab ("Report a vulnerability").
 

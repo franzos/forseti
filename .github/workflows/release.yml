@@ -72,3 +72,49 @@ jobs:
           files: |
             forseti-${{ matrix.target }}.tar.gz
             forseti-${{ matrix.target }}.tar.gz.sha256
+
+      # Hand this leg's tarball digest to the provenance job. `.sha256` is already
+      # a `sha256sum`-format line, exactly what the SLSA generator's subjects want.
+      - name: Upload hash for provenance
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: provenance-hash-${{ matrix.target }}
+          path: forseti-${{ matrix.target }}.tar.gz.sha256
+          if-no-files-found: error
+
+  # Matrix jobs can't aggregate outputs, so each build leg uploads its sha256
+  # line and this job concatenates them into the base64 subjects the generator
+  # signs over.
+  provenance-subjects:
+    name: collect provenance subjects
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    outputs:
+      hashes: ${{ steps.hashes.outputs.hashes }}
+    steps:
+      - name: Download per-target hashes
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          pattern: provenance-hash-*
+          merge-multiple: true
+          path: hashes
+      - name: Base64-encode combined subjects
+        id: hashes
+        run: echo "hashes=$(cat hashes/*.sha256 | base64 -w0)" >> "$GITHUB_OUTPUT"
+
+  # Keyless (Sigstore/OIDC) SLSA build provenance covering both tarballs, attached
+  # to the release. Referenced by TAG, not a SHA: the generator verifies its own
+  # ref to establish the trusted-builder identity, so a pinned commit breaks it.
+  provenance:
+    name: SLSA provenance
+    needs: provenance-subjects
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      id-token: write # keyless Sigstore signing via OIDC
+      contents: write # attach the .intoto.jsonl to the release
+      actions: read
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
+    with:
+      base64-subjects: ${{ needs.provenance-subjects.outputs.hashes }}
+      upload-assets: true
