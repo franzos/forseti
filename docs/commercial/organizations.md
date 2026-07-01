@@ -6,6 +6,8 @@ Organizations let you run Forseti for more than one tenant: named orgs, per-org 
 
 Forseti is multi-org from the ground up. OSS ships exactly **one** org — the always-free Default org — and a commercial license unlocks the rest. There's no separate "single-tenant mode": the Default org is a real org and behaves like any other, so OSS users get a fully working single-tenant deployment with nothing stubbed out.
 
+On the app side, [Stackpit](https://github.com/franzos/stackpit) (a self-hosted, single-binary Sentry alternative) is a first-class consumer of these claims: it maps your Forseti orgs and their owner/member roles straight into its own per-org access model, so SSO users land in the right org with the right role automatically. If you want to see the org claims doing real work in a downstream app, that's the reference pairing.
+
 For app developers consuming org claims over OIDC, see the [integration guide](../integration-guide.md). For the implementation details, see [`dev/organizations-internals.md`](../dev/organizations-internals.md).
 
 ## Free vs paid
