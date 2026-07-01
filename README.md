@@ -7,6 +7,7 @@
 
   [![CI](https://github.com/franzos/forseti/actions/workflows/ci.yml/badge.svg)](https://github.com/franzos/forseti/actions/workflows/ci.yml)
   [![Release](https://github.com/franzos/forseti/actions/workflows/release.yml/badge.svg)](https://github.com/franzos/forseti/actions/workflows/release.yml)
+  [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/franzos/forseti/badge)](https://scorecard.dev/viewer/?uri=github.com/franzos/forseti)
   [![License: AGPL v3](https://img.shields.io/badge/license-AGPLv3-blue.svg)](LICENSE)
   [![Container](https://img.shields.io/badge/ghcr.io-forseti-097aba?logo=docker&logoColor=white)](https://github.com/franzos/forseti/pkgs/container/forseti)
 

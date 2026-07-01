@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # --- CSS stage: build static/styles.css with the Tailwind v4 standalone CLI.
-FROM debian:trixie-slim AS css
+FROM debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2 AS css
 WORKDIR /src
 ARG TAILWIND_VERSION=v4.1.16
 RUN apt-get update \
@@ -18,7 +18,7 @@ RUN tailwindcss -i assets/input.css -o /styles.css --minify
 # Debian (glibc), not alpine/musl: pq-sys links dynamically against libpq and
 # libsqlite3-sys compiles bundled C, both of which are painful to static-link
 # under musl. reqwest/lettre use rustls, so no OpenSSL is needed.
-FROM rust:1-trixie AS build
+FROM rust:1-trixie@sha256:1f0dbad1df66647807e6952d1db85d0b2bda7606cb2139d82517e4f009967376 AS build
 RUN apt-get update \
     && apt-get install -y --no-install-recommends libpq-dev pkg-config \
     && rm -rf /var/lib/apt/lists/*
@@ -34,7 +34,7 @@ COPY --from=css /styles.css ./static/styles.css
 RUN cargo build --release --locked
 
 # --- Runtime image.
-FROM debian:trixie-slim AS runtime
+FROM debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2 AS runtime
 RUN apt-get update \
     && apt-get install -y --no-install-recommends libpq5 ca-certificates \
     && rm -rf /var/lib/apt/lists/* \

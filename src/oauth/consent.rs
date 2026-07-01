@@ -707,6 +707,7 @@ fn project_group_slugs(raw: &[String], cap: usize) -> (Vec<String>, bool) {
 /// `email` adds `email`/`email_verified`; `profile` adds `name`/`picture`/`website`;
 /// `extended_profile` adds `bio`/`pronouns`/`links`; `org` adds the active-org
 /// object; `orgs` adds the (capped) membership list; "groups" adds the active-org team slugs.
+#[allow(clippy::too_many_arguments)]
 fn build_id_token_claims(
     identity: Option<&ory::Identity>,
     grant_scope: &[String],

@@ -9,6 +9,10 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# No job here writes to the repo; the license-issuer checkout uses its own PAT.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -17,11 +21,11 @@ jobs:
     name: check + clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       # Mirrors `make check` (cargo check + clippy -D warnings). No fmt gate —
       # the repo doesn't enforce rustfmt and the tree isn't fmt-clean; add a
       # `cargo fmt --check` step once a one-time `cargo fmt` pass has landed.
@@ -35,8 +39,8 @@ jobs:
     # tab / Dependabot drive remediation. Flip this off to make CVEs gate merges.
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v6
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe # v2
         with:
           command: check advisories
 
@@ -44,9 +48,9 @@ jobs:
     name: rust integration
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
       # The host-side test client reaches Hydra at its issuer host
       # (host.containers.internal:4444, see tests/integration/common.rs). A dev
@@ -103,9 +107,9 @@ jobs:
     # src/commercial/pubkey.bin) — nothing signed is ever committed.
     if: ${{ secrets.FORSETI_LICENSE_ISSUER_KEY != '' }}
     steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
       - name: Install sqlite3
         run: sudo apt-get update && sudo apt-get install -y sqlite3
@@ -130,7 +134,7 @@ jobs:
       # Output lands at tests/fixtures/license/active.blob, the path
       # `make e2e-licensed` expects (and which .gitignore keeps out of git).
       - name: Check out license issuer
-        uses: actions/checkout@v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           repository: ${{ secrets.FORSETI_LICENSE_ISSUER_REPO }}
           token: ${{ secrets.FORSETI_LICENSE_ISSUER_TOKEN }}
@@ -238,7 +242,7 @@ jobs:
 
       - name: Upload Playwright report
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: playwright-report-licensed
           path: tests/e2e/playwright-report/
@@ -256,9 +260,9 @@ jobs:
     name: playwright (unlicensed)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
       - name: Map Hydra issuer host to loopback
         run: echo "127.0.0.1 host.containers.internal" | sudo tee -a /etc/hosts
@@ -292,7 +296,7 @@ jobs:
 
       - name: Upload Playwright report
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: playwright-report
           path: tests/e2e/playwright-report/

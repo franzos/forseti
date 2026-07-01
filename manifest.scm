@@ -2,6 +2,7 @@
              (guix search-paths)
              (gnu packages rust)
              (gnu packages commencement)
+             (gnu packages databases)
              (gnu packages linux)
              (gnu packages tls)
              (gnu packages base))
@@ -35,4 +36,6 @@
        gcc-toolchain-with-cc
        openssl-with-dir
        ;; libpam: link target for the pam_forseti.so cdylib (-lpam).
-       linux-pam))
+       linux-pam
+       ;; libpq: link target for diesel's postgres feature (-lpq).
+       postgresql))

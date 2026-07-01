@@ -1,0 +1,5 @@
+# Don't pin apt package versions (DL3008): on a Debian base, a pinned version
+# vanishes from the repo on the next security update and breaks the build, and
+# we want those updates. Base images are digest-pinned instead.
+ignored:
+  - DL3008

@@ -85,7 +85,9 @@ argon2 = { version = "0.5", features = ["std"] }
 # JWS encode + JWKS decode for tests; the `pkcs8` / `pem` /
 # `rand_core` features on `ed25519-dalek` cover on-disk PEM I/O and
 # fresh-key generation.
-jsonwebtoken = "9"
+# v10 splits crypto into backends; `aws_lc_rs` reuses the aws-lc-rs already
+# pulled by rustls (no new dep) and avoids the `rsa` crate's RUSTSEC-2023-0071.
+jsonwebtoken = { version = "10", default-features = false, features = ["use_pem", "aws_lc_rs"] }
 # NFKC normalisation for the DCR reserved-name denylist. Tiny dep, used
 # only by `oauth::register::normalise_for_reserved_check` to fold
 # fullwidth / decomposed / wrapped-in-zero-width spoofs back into the
@@ -142,7 +144,7 @@ chrono = { version = "0.4", default-features = false, features = ["std", "clock"
 # fan-out test. Forseti signs the SET with RS256; the test fetches
 # the JWKS from `/.well-known/webhook-jwks.json` and verifies via the
 # same `jsonwebtoken` crate.
-jsonwebtoken = "9"
+jsonwebtoken = { version = "10", default-features = false, features = ["use_pem", "aws_lc_rs"] }
 # Compute fresh TOTP codes for the admin-gated integration tests.
 # Kratos rejects code reuse, so we can't pass a single `_CODE` env var
 # across the suite — the helper takes the base32 `_SECRET` instead and
