@@ -29,6 +29,8 @@ pub(crate) fn default_scope_description(scope: &str) -> Option<&'static str> {
         "address" => "Your postal address",
         "phone" => "Your phone number",
         "groups" => "Your team memberships (used to assign roles in the connected app)",
+        "org" => "Your active organization and role",
+        "orgs" => "Your organizations and your roles",
         _ => return None,
     })
 }
@@ -136,6 +138,8 @@ mod tests {
             "address",
             "phone",
             "groups",
+            "org",
+            "orgs",
         ] {
             assert!(
                 default_scope_description(scope).is_some(),

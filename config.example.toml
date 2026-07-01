@@ -111,6 +111,8 @@ support_email = "support@example.com"
 # profile          = "View your basic profile (name, avatar, website)"
 # offline          = "Stay signed in by issuing refresh tokens"
 # extended_profile = "View your bio, pronouns, and personal links"
+# "org"  = "Your active organization and role"
+# "orgs" = "Your organizations and your roles"
 #
 # MCP scope convention: `<app>:<resource>:<verb>`. Each MCP server documents
 # its own scopes; describe them here so the consent screen reads naturally.
