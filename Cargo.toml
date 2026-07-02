@@ -113,6 +113,10 @@ arc-swap = "1"
 # courier doesn't expose a one-off POST endpoint, so Forseti speaks
 # SMTP directly. `rustls-tls` keeps the dep tree native-tls-free.
 lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "tokio1", "tokio1-rustls-tls", "builder"] }
+# i18n: Fluent loader (embeds locales/*.ftl at compile time) and language
+# identifiers; Accept-Language negotiation is done in locale.rs.
+fluent-templates = "0.14"
+unic-langid = { version = "0.9", features = ["macros"] }
 [profile.release]
 strip = true
 lto = "thin"
@@ -152,7 +156,14 @@ jsonwebtoken = { version = "10", default-features = false, features = ["use_pem"
 totp-lite = "2"
 base32 = "0.5"
 
+fluent-syntax = "0.12.0"
+
 [[test]]
 name = "integration"
 path = "tests/integration.rs"
+harness = true
+
+[[test]]
+name = "i18n_harness"
+path = "tests/i18n_harness.rs"
 harness = true

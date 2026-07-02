@@ -18,6 +18,20 @@
 
    No-op when no passkey/webauthn buttons are present on the page. #}
 
+{# Translated strings for WebAuthn / passkey messages. Data attributes let
+   Askama's HTML attribute escaping handle quoting correctly; the script
+   reads them via dataset to avoid inline JS string-escaping hazards. #}
+<div id="_wa-i18n"
+     hidden
+     data-no-support="{{ chrome.t('auth-webauthn-no-support') }}"
+     data-needs-platform="{{ chrome.t('auth-passkey-needs-platform') }}"
+     data-err-not-allowed="{{ chrome.t('auth-webauthn-err-not-allowed') }}"
+     data-err-security="{{ chrome.t('auth-webauthn-err-security') }}"
+     data-err-invalid-state="{{ chrome.t('auth-webauthn-err-invalid-state') }}"
+     data-err-not-supported="{{ chrome.t('auth-webauthn-err-not-supported') }}"
+     data-err-abort="{{ chrome.t('auth-webauthn-err-abort') }}"
+     data-err-generic-prefix="{{ chrome.t('auth-webauthn-err-generic-prefix') }}"></div>
+
 <script>
 (async () => {
   // Locate the form whose buttons are passkey/webauthn triggers. If none,
@@ -30,6 +44,8 @@
     document.querySelectorAll(triggerSelectors.join(", "))
   );
   if (triggers.length === 0) return;
+
+  const _wa = document.getElementById('_wa-i18n')?.dataset ?? {};
 
   // Insert an error banner just above each form that contains a trigger.
   // One banner per form; deduped by Set.
@@ -85,11 +101,12 @@
   };
 
   if (!hasPubKey) {
-    for (const b of triggers) disable(b, "Your browser does not support WebAuthn / passkeys.");
+    for (const b of triggers) disable(b, _wa.noSupport || "Your browser does not support WebAuthn / passkeys.");
   } else {
     if (!hasPlatform) {
       for (const b of passkeyButtons) {
-        disable(b, "Passkey sign-in needs a platform credential on this device " +
+        disable(b, _wa.needsPlatform ||
+                   "Passkey sign-in needs a platform credential on this device " +
                    "(Touch ID, Windows Hello, an Android device, or a synced passkey). " +
                    "Your browser does not have one set up.");
       }
@@ -110,22 +127,22 @@
       let msg;
       switch (first.name) {
         case "NotAllowedError":
-          msg = "The credential request was cancelled, timed out, or no matching credential was available.";
+          msg = _wa.errNotAllowed || "The credential request was cancelled, timed out, or no matching credential was available.";
           break;
         case "SecurityError":
-          msg = "Your browser refused the security operation. Check that the site is loaded over a trusted origin and the registered identifier matches.";
+          msg = _wa.errSecurity || "Your browser refused the security operation. Check that the site is loaded over a trusted origin and the registered identifier matches.";
           break;
         case "InvalidStateError":
-          msg = "A credential is already registered with this device. Try signing in instead, or use a different device.";
+          msg = _wa.errInvalidState || "A credential is already registered with this device. Try signing in instead, or use a different device.";
           break;
         case "NotSupportedError":
-          msg = "Your browser does not support the requested credential parameters.";
+          msg = _wa.errNotSupported || "Your browser does not support the requested credential parameters.";
           break;
         case "AbortError":
-          msg = "The credential request was aborted before it completed.";
+          msg = _wa.errAbort || "The credential request was aborted before it completed.";
           break;
         default:
-          msg = `Authenticator error: ${first.message || first.name}.`;
+          msg = `${_wa.errGenericPrefix || "Authenticator error:"} ${first.message || first.name}.`;
       }
       // We don't know which form errored, so populate the first banner.
       const form = forms.values().next().value;

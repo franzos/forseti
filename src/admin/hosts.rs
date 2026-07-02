@@ -61,9 +61,13 @@ struct OrgTeamGroup {
     teams: Vec<TeamChoice>,
 }
 
-fn project_row(r: posix_db::HostListRow, teams: String) -> HostRow {
+fn project_row(
+    locale: &crate::locale::LanguageIdentifier,
+    r: posix_db::HostListRow,
+    teams: String,
+) -> HostRow {
     let last_seen_pretty = match r.last_seen_at.as_deref().filter(|s| !s.is_empty()) {
-        Some(ts) => humanise_timestamp(ts),
+        Some(ts) => humanise_timestamp(locale, ts),
         None => "never".to_string(),
     };
     HostRow {
@@ -71,7 +75,7 @@ fn project_row(r: posix_db::HostListRow, teams: String) -> HostRow {
         hostname: r.hostname,
         teams,
         force_mfa: r.force_mfa != 0,
-        created_at_pretty: humanise_timestamp(&r.created_at),
+        created_at_pretty: humanise_timestamp(locale, &r.created_at),
         created_at: r.created_at,
         last_seen_pretty,
     }
@@ -181,7 +185,7 @@ pub async fn list(
                 .collect::<Vec<_>>()
                 .join(", ")
         };
-        rows.push(project_row(r, teams));
+        rows.push(project_row(&ctx.locale, r, teams));
     }
 
     let revealed_credential = match query.reveal.as_deref().filter(|s| !s.is_empty()) {

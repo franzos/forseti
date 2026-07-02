@@ -5,7 +5,7 @@
 {% block admin_content %}
   <div class="mb-stack-md">
     <a href="/admin/audit"
-       class="font-label-md text-label-md text-on-surface-variant hover:text-primary transition-colors">&larr; Back to audit</a>
+       class="font-label-md text-label-md text-on-surface-variant hover:text-primary transition-colors">{{ chrome.t("admin-audit-back") }}</a>
   </div>
 
   <div class="flex items-start justify-between mb-stack-lg gap-stack-md">
@@ -15,11 +15,11 @@
     </div>
     <div class="shrink-0">
       {% if row.severity == "critical" %}
-        <span class="inline-block px-3 py-1 rounded-full bg-error-container text-on-error-container font-label-md text-label-md font-bold">critical</span>
+        <span class="inline-block px-3 py-1 rounded-full bg-error-container text-on-error-container font-label-md text-label-md font-bold">{{ chrome.t("admin-audit-badge-critical") }}</span>
       {% else if row.severity == "error" %}
-        <span class="inline-block px-3 py-1 rounded-full bg-error-container/60 text-on-error-container font-label-md text-label-md font-bold">error</span>
+        <span class="inline-block px-3 py-1 rounded-full bg-error-container/60 text-on-error-container font-label-md text-label-md font-bold">{{ chrome.t("admin-audit-badge-error") }}</span>
       {% else if row.severity == "warning" %}
-        <span class="inline-block px-3 py-1 rounded-full bg-warning-container text-on-warning-container font-label-md text-label-md font-bold">warning</span>
+        <span class="inline-block px-3 py-1 rounded-full bg-warning-container text-on-warning-container font-label-md text-label-md font-bold">{{ chrome.t("admin-audit-badge-warning") }}</span>
       {% else %}
         <span class="inline-block px-3 py-1 rounded-full bg-surface-container-high text-on-surface-variant font-label-md text-label-md">{{ row.severity }}</span>
       {% endif %}
@@ -27,22 +27,22 @@
   </div>
 
   <section class="mb-stack-lg">
-    <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest">Event</h2>
+    <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest">{{ chrome.t("admin-audit-show-section-event") }}</h2>
     <dl class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4 grid grid-cols-1 sm:grid-cols-2 gap-4">
       <div>
-        <dt class="font-label-sm text-label-sm text-on-surface-variant">When</dt>
+        <dt class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-audit-col-when") }}</dt>
         <dd class="font-body-md text-body-md text-on-surface mt-1"
             title="{{ row.when }}">
           {{ row.when_pretty }}<span class="block text-xs text-outline font-mono mt-0.5">{{ row.when }}</span>
         </dd>
       </div>
       <div>
-        <dt class="font-label-sm text-label-sm text-on-surface-variant">Outcome</dt>
+        <dt class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-audit-show-outcome") }}</dt>
         <dd class="font-body-md text-body-md mt-1">
           {% if row.success %}
-            <span class="text-on-surface">success</span>
+            <span class="text-on-surface">{{ chrome.t("admin-audit-show-success") }}</span>
           {% else %}
-            <span class="text-on-error-container font-bold">failure</span>
+            <span class="text-on-error-container font-bold">{{ chrome.t("admin-audit-show-failure") }}</span>
           {% endif %}
         </dd>
       </div>
@@ -50,16 +50,16 @@
   </section>
 
   <section class="mb-stack-lg">
-    <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest">Actor</h2>
+    <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest">{{ chrome.t("admin-audit-show-section-actor") }}</h2>
     <dl class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4 grid grid-cols-1 sm:grid-cols-2 gap-4">
       <div>
-        <dt class="font-label-sm text-label-sm text-on-surface-variant">Kind</dt>
+        <dt class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-audit-show-field-kind") }}</dt>
         <dd class="font-body-md text-body-md text-on-surface mt-1 font-mono">
           {{ row.actor_kind }}
         </dd>
       </div>
       <div>
-        <dt class="font-label-sm text-label-sm text-on-surface-variant">Email</dt>
+        <dt class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-audit-show-field-email") }}</dt>
         <dd class="font-body-md text-body-md mt-1">
           {% if !row.actor_id.is_empty() && !row.actor_email.is_empty() %}
             <a href="/admin/identities/{{ row.actor_id }}"
@@ -67,13 +67,13 @@
           {% else if !row.actor_email.is_empty() %}
             <span class="text-on-surface">{{ row.actor_email }}</span>
           {% else %}
-            <span class="text-on-surface-variant italic">none</span>
+            <span class="text-on-surface-variant italic">{{ chrome.t("admin-audit-show-none") }}</span>
           {% endif %}
         </dd>
       </div>
       {% if !row.actor_id.is_empty() %}
         <div class="sm:col-span-2">
-          <dt class="font-label-sm text-label-sm text-on-surface-variant">Identity id</dt>
+          <dt class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-audit-show-field-identity-id") }}</dt>
           <dd class="font-body-md text-body-md text-on-surface mt-1 font-mono break-all">
             {{ row.actor_id }}
           </dd>
@@ -84,16 +84,16 @@
 
   {% if !row.target_kind.is_empty() || !row.target_id.is_empty() %}
     <section class="mb-stack-lg">
-      <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest">Target</h2>
+      <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest">{{ chrome.t("admin-audit-show-section-target") }}</h2>
       <dl class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4 grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div>
-          <dt class="font-label-sm text-label-sm text-on-surface-variant">Kind</dt>
+          <dt class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-audit-show-field-kind") }}</dt>
           <dd class="font-body-md text-body-md text-on-surface mt-1 font-mono">
             {{ row.target_kind }}
           </dd>
         </div>
         <div>
-          <dt class="font-label-sm text-label-sm text-on-surface-variant">Label</dt>
+          <dt class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-audit-show-field-label") }}</dt>
           <dd class="font-body-md text-body-md mt-1">
             {% if row.target_exists && !row.target_link.is_empty() %}
               <a href="{{ row.target_link }}"
@@ -102,12 +102,12 @@
               <span class="text-on-surface">{{ row.target_label }}</span>
             {% else %}
               <span class="text-on-surface-variant italic">{{ row.target_label }}</span>
-              <span class="font-label-sm text-label-sm text-on-error-container ml-1">(deleted)</span>
+              <span class="font-label-sm text-label-sm text-on-error-container ms-1">{{ chrome.t("admin-audit-show-deleted") }}</span>
             {% endif %}
           </dd>
         </div>
         <div class="sm:col-span-2">
-          <dt class="font-label-sm text-label-sm text-on-surface-variant">Target id</dt>
+          <dt class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-audit-show-field-target-id") }}</dt>
           <dd class="font-body-md text-body-md text-on-surface mt-1 font-mono break-all">
             {{ row.target_id }}
           </dd>
@@ -118,7 +118,7 @@
 
   {% if !row.metadata_pretty.is_empty() %}
     <section class="mb-stack-lg">
-      <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest">Metadata</h2>
+      <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest">{{ chrome.t("admin-audit-show-section-metadata") }}</h2>
       <pre class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4 font-mono text-sm text-on-surface overflow-x-auto whitespace-pre-wrap break-all">{{ row.metadata_pretty }}</pre>
     </section>
   {% endif %}
@@ -126,12 +126,12 @@
   {% if !row.ip_hash.is_empty() || !row.user_agent.is_empty() || !row.request_id.is_empty() || !row.org_id.is_empty() %}
     <section>
       <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest">
-        Request context
+        {{ chrome.t("admin-audit-show-section-request-context") }}
       </h2>
       <dl class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4 grid grid-cols-1 gap-4">
         {% if !row.ip_hash.is_empty() %}
           <div>
-            <dt class="font-label-sm text-label-sm text-on-surface-variant">IP hash</dt>
+            <dt class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-audit-show-field-ip-hash") }}</dt>
             <dd class="font-body-md text-body-md text-on-surface mt-1 font-mono break-all">
               {{ row.ip_hash }}
             </dd>
@@ -139,7 +139,7 @@
         {% endif %}
         {% if !row.user_agent.is_empty() %}
           <div>
-            <dt class="font-label-sm text-label-sm text-on-surface-variant">User agent</dt>
+            <dt class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-audit-show-field-user-agent") }}</dt>
             <dd class="font-body-md text-body-md text-on-surface mt-1 break-all">
               {{ row.user_agent }}
             </dd>
@@ -147,7 +147,7 @@
         {% endif %}
         {% if !row.request_id.is_empty() %}
           <div>
-            <dt class="font-label-sm text-label-sm text-on-surface-variant">Request id</dt>
+            <dt class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-audit-show-field-request-id") }}</dt>
             <dd class="font-body-md text-body-md text-on-surface mt-1 font-mono break-all">
               {{ row.request_id }}
             </dd>
@@ -155,7 +155,7 @@
         {% endif %}
         {% if !row.org_id.is_empty() %}
           <div>
-            <dt class="font-label-sm text-label-sm text-on-surface-variant">Org id</dt>
+            <dt class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-audit-show-field-org-id") }}</dt>
             <dd class="font-body-md text-body-md text-on-surface mt-1 font-mono break-all">
               {{ row.org_id }}
             </dd>

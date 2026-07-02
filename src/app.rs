@@ -146,6 +146,12 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             crate::orgs::middleware::auto_join_default_org,
+        ))
+        // Persist a supported ?lang= query param to forseti_locale cookie so the
+        // language switcher survives navigation without relying on Accept-Language.
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::locale::persist_locale_middleware,
         ));
 
     let mut public_app = Router::new()

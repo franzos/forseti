@@ -5,12 +5,12 @@
 {% block admin_content %}
   <div class="mb-stack-md">
     <a href="/admin/webhooks"
-       class="font-label-md text-label-md text-on-surface-variant hover:text-primary transition-colors">&larr; Back to webhooks</a>
+       class="font-label-md text-label-md text-on-surface-variant hover:text-primary transition-colors">{{ chrome.t("admin-webhook-back") }}</a>
   </div>
 
   <div class="flex items-start justify-between mb-stack-lg gap-stack-md">
     <div class="min-w-0">
-      <h1 class="font-headline-lg text-headline-lg text-on-surface">Dead-lettered webhook</h1>
+      <h1 class="font-headline-lg text-headline-lg text-on-surface">{{ chrome.t("admin-webhook-heading") }}</h1>
       <p class="font-body-sm text-body-sm text-on-surface-variant mt-1 font-mono break-all">{{ row.event_id }}</p>
     </div>
     <div class="flex items-center gap-stack-sm shrink-0">
@@ -21,7 +21,7 @@
         <input type="hidden" name="confirm" value="yes">
         <button type="submit"
                 class="font-label-md text-label-md text-primary border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">
-          Requeue
+          {{ chrome.t("admin-webhook-action-requeue") }}
         </button>
       </form>
       <form method="POST"
@@ -31,17 +31,17 @@
         <input type="hidden" name="confirm" value="yes">
         <button type="submit"
                 class="font-label-md text-label-md text-error border border-error rounded-lg px-4 py-2 hover:bg-error-container hover:text-on-error-container transition-colors">
-          Discard
+          {{ chrome.t("admin-webhook-action-discard") }}
         </button>
       </form>
     </div>
   </div>
 
   <section class="mb-stack-lg">
-    <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest">Delivery</h2>
+    <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest">{{ chrome.t("admin-webhook-section-delivery") }}</h2>
     <dl class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4 grid grid-cols-1 sm:grid-cols-2 gap-4">
       <div>
-        <dt class="font-label-sm text-label-sm text-on-surface-variant">Client</dt>
+        <dt class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-webhook-field-client") }}</dt>
         <dd class="font-body-md text-body-md mt-1">
           {% if row.client_exists %}
             <a href="/admin/clients/{{ row.client_id }}"
@@ -49,37 +49,37 @@
             <p class="font-label-sm text-label-sm text-outline mt-1 font-mono">{{ row.client_id }}</p>
           {% else %}
             <span class="text-on-surface-variant italic font-mono">{{ row.client_name }}</span>
-            <span class="font-label-sm text-label-sm text-on-error-container ml-1">(deleted)</span>
+            <span class="font-label-sm text-label-sm text-on-error-container ms-1">{{ chrome.t("admin-webhook-deleted") }}</span>
           {% endif %}
         </dd>
       </div>
       <div>
-        <dt class="font-label-sm text-label-sm text-on-surface-variant">State</dt>
+        <dt class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-webhook-field-state") }}</dt>
         <dd class="font-body-md text-body-md text-on-surface mt-1 font-mono">
           {{ row.state }}
         </dd>
       </div>
       <div class="sm:col-span-2">
-        <dt class="font-label-sm text-label-sm text-on-surface-variant">URL</dt>
+        <dt class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-webhook-field-url") }}</dt>
         <dd class="font-body-md text-body-md text-on-surface mt-1 font-mono break-all">
           {{ row.url }}
         </dd>
       </div>
       <div>
-        <dt class="font-label-sm text-label-sm text-on-surface-variant">Attempts</dt>
+        <dt class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-webhook-field-attempts") }}</dt>
         <dd class="font-body-md text-body-md text-on-surface mt-1">
           {{ row.attempts }}
         </dd>
       </div>
       <div>
-        <dt class="font-label-sm text-label-sm text-on-surface-variant">Created</dt>
+        <dt class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-webhook-field-created") }}</dt>
         <dd class="font-body-md text-body-md text-on-surface mt-1"
             title="{{ row.created_at }}">
           {{ row.created_at_pretty }}
         </dd>
       </div>
       <div class="sm:col-span-2">
-        <dt class="font-label-sm text-label-sm text-on-surface-variant">Next attempt</dt>
+        <dt class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-webhook-field-next-attempt") }}</dt>
         <dd class="font-body-md text-body-md text-on-surface mt-1 font-mono">
           {{ row.next_attempt_at }}
         </dd>
@@ -89,14 +89,14 @@
 
   {% if !row.last_error.is_empty() %}
     <section class="mb-stack-lg">
-      <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest">Last error</h2>
+      <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest">{{ chrome.t("admin-webhook-section-last-error") }}</h2>
       <pre class="bg-error-container border border-error rounded-xl p-4 font-mono text-sm text-on-error-container overflow-x-auto whitespace-pre-wrap break-all">{{ row.last_error }}</pre>
     </section>
   {% endif %}
 
   <section>
     <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest">
-      Signed payload
+      {{ chrome.t("admin-webhook-section-payload") }}
     </h2>
     <pre class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4 font-mono text-sm text-on-surface overflow-x-auto whitespace-pre-wrap break-all">{{ row.payload_pretty }}</pre>
   </section>

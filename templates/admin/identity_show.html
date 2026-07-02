@@ -5,12 +5,12 @@
 {% block admin_content %}
   <div class="flex items-center justify-between mb-stack-lg">
     <div>
-      <h1 class="font-headline-lg text-headline-lg text-on-surface">{{ row.email }}</h1>
+      <h1 class="font-headline-lg text-headline-lg text-on-surface"><bdi>{{ row.email }}</bdi></h1>
       <p class="font-body-sm text-body-sm text-on-surface-variant mt-1 font-mono">{{ row.id }}</p>
     </div>
     <div>
       {% if row.state == "active" %}
-        <span class="inline-block px-2 py-0.5 rounded-full bg-tertiary-container text-on-tertiary-container font-label-sm text-label-sm">active</span>
+        <span class="inline-block px-2 py-0.5 rounded-full bg-tertiary-container text-on-tertiary-container font-label-sm text-label-sm">{{ chrome.t("admin-identity-status-active") }}</span>
       {% else %}
         <span class="inline-block px-2 py-0.5 rounded-full bg-error-container text-on-error-container font-label-sm text-label-sm">{{ row.state }}</span>
       {% endif %}
@@ -26,109 +26,109 @@
   {% match recovery_code %}
   {% when Some with (code) %}
   <div class="bg-tertiary-container border border-tertiary rounded-xl p-4 mb-stack-lg">
-    <p class="font-label-md text-label-md text-on-tertiary-container font-bold mb-stack-sm">Recovery code (shown once)</p>
+    <p class="font-label-md text-label-md text-on-tertiary-container font-bold mb-stack-sm">{{ chrome.t("admin-identity-recovery-code-heading") }}</p>
     <pre class="font-mono text-sm bg-surface-container-lowest rounded-lg p-3 break-all">{{ code }}</pre>
     {% match recovery_link %}{% when Some with (link) %}
-    <p class="font-label-md text-label-md text-on-tertiary-container font-bold mt-stack-md mb-stack-sm">Recovery link</p>
+    <p class="font-label-md text-label-md text-on-tertiary-container font-bold mt-stack-md mb-stack-sm">{{ chrome.t("admin-identity-recovery-link-heading") }}</p>
     <pre class="font-mono text-sm bg-surface-container-lowest rounded-lg p-3 break-all">{{ link }}</pre>
     {% when None %}{% endmatch %}
-    <p class="font-body-sm text-body-sm text-on-tertiary-container mt-stack-sm">
-      Share this with the user over a trusted channel. It won't be shown again.
-    </p>
-  </div>
-  {% when None %}{% endmatch %}
+  <p class="font-body-sm text-body-sm text-on-tertiary-container mt-stack-sm">
+    {{ chrome.t("admin-identity-recovery-note") }}
+  </p>
+</div>
+{% when None %}{% endmatch %}
 
-  <section class="mb-stack-lg">
-    <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest">Actions</h2>
-    <div class="flex flex-wrap gap-stack-sm">
+<section class="mb-stack-lg">
+  <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest">{{ chrome.t("admin-identity-section-actions") }}</h2>
+  <div class="flex flex-wrap gap-stack-sm">
+    <form method="POST"
+          action="/admin/identities/{{ row.id }}/recovery"
+          class="inline">
+      <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+      <button type="submit"
+              class="font-label-md text-label-md text-primary border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">
+        {{ chrome.t("admin-identity-action-generate-recovery") }}
+      </button>
+    </form>
+    {% if row.state == "active" %}
+      <a href="/admin/identities/{{ row.id }}/disable"
+         class="font-label-md text-label-md text-error border border-error rounded-lg px-4 py-2 hover:bg-error-container hover:text-on-error-container transition-colors">{{ chrome.t("admin-identity-action-disable") }}</a>
+    {% else %}
       <form method="POST"
-            action="/admin/identities/{{ row.id }}/recovery"
+            action="/admin/identities/{{ row.id }}/enable"
             class="inline">
         <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
         <button type="submit"
                 class="font-label-md text-label-md text-primary border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">
-          Generate recovery code
+          {{ chrome.t("admin-identity-action-enable") }}
         </button>
       </form>
-      {% if row.state == "active" %}
-        <a href="/admin/identities/{{ row.id }}/disable"
-           class="font-label-md text-label-md text-error border border-error rounded-lg px-4 py-2 hover:bg-error-container hover:text-on-error-container transition-colors">Disable</a>
-      {% else %}
-        <form method="POST"
-              action="/admin/identities/{{ row.id }}/enable"
-              class="inline">
-          <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
-          <button type="submit"
-                  class="font-label-md text-label-md text-primary border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">
-            Enable
-          </button>
-        </form>
-      {% endif %}
-      <a href="/admin/identities/{{ row.id }}/delete"
-         class="font-label-md text-label-md text-error border border-error rounded-lg px-4 py-2 hover:bg-error-container hover:text-on-error-container transition-colors">Delete</a>
-    </div>
-  </section>
-
-  <section class="mb-stack-lg">
-    <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest">Traits</h2>
-    <pre class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4 font-mono text-sm overflow-x-auto">{{ traits_json }}</pre>
-  </section>
-
-  <section class="mb-stack-lg">
-    <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest">
-      Verifiable addresses
-    </h2>
-    {% if addresses.is_empty() %}
-      <p class="font-body-md text-body-md text-on-surface-variant">No verifiable addresses on this identity.</p>
-    {% else %}
-      <ul class="bg-surface-container-lowest border border-outline-variant rounded-xl divide-y divide-outline-variant">
-        {% for a in addresses %}
-          <li class="px-4 py-3 flex items-center justify-between">
-            <span class="font-body-md text-body-md text-on-surface font-mono">{{ a.value }}</span>
-            {% if a.verified %}
-              <span class="inline-block px-2 py-0.5 rounded-full bg-tertiary-container text-on-tertiary-container font-label-sm text-label-sm">verified</span>
-            {% else %}
-              <span class="inline-block px-2 py-0.5 rounded-full bg-surface-container text-on-surface-variant font-label-sm text-label-sm">pending</span>
-            {% endif %}
-          </li>
-        {% endfor %}
-      </ul>
     {% endif %}
-  </section>
+    <a href="/admin/identities/{{ row.id }}/delete"
+       class="font-label-md text-label-md text-error border border-error rounded-lg px-4 py-2 hover:bg-error-container hover:text-on-error-container transition-colors">{{ chrome.t("admin-identity-action-delete") }}</a>
+  </div>
+</section>
 
-  <section class="mb-stack-lg">
-    <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest">Credentials</h2>
-    {% if credentials.is_empty() %}
-      <p class="font-body-md text-body-md text-on-surface-variant">No credentials configured.</p>
-    {% else %}
-      <ul class="bg-surface-container-lowest border border-outline-variant rounded-xl divide-y divide-outline-variant">
-        {% for c in credentials %}
-          <li class="px-4 py-3 flex items-center justify-between">
-            <span class="font-label-md text-label-md text-on-surface font-bold">{{ c.method }}</span>
-            <span class="font-body-sm text-body-sm text-on-surface-variant font-mono">{{ c.identifiers }}</span>
-          </li>
-        {% endfor %}
-      </ul>
-    {% endif %}
-  </section>
+<section class="mb-stack-lg">
+  <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest">{{ chrome.t("admin-identity-section-traits") }}</h2>
+  <pre class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4 font-mono text-sm overflow-x-auto">{{ traits_json }}</pre>
+</section>
 
-  <section>
-    <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest">
-      Recent sessions
-    </h2>
-    {% if sessions.is_empty() %}
-      <p class="font-body-md text-body-md text-on-surface-variant">No session history.</p>
-    {% else %}
-      <ul class="flex flex-col gap-stack-md">
-        {% for s in sessions %}
-          <li class="bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg flex flex-col sm:flex-row sm:items-start justify-between gap-stack-md">
-            {% let show_current = false %}
-            {% include "partials/session_meta.html" %}
-            <a href="/admin/sessions/{{ s.id }}/revoke"
-               class="font-label-md text-label-md text-error border border-error rounded-lg px-3 py-1 hover:bg-error-container hover:text-on-error-container transition-colors shrink-0">Revoke session&hellip;</a>
-          </li>
-        {% endfor %}
-      </ul>
-    {% endif %}
-  </section>
+<section class="mb-stack-lg">
+  <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest">
+    {{ chrome.t("admin-identity-section-addresses") }}
+  </h2>
+  {% if addresses.is_empty() %}
+    <p class="font-body-md text-body-md text-on-surface-variant">{{ chrome.t("admin-identity-addresses-empty") }}</p>
+  {% else %}
+    <ul class="bg-surface-container-lowest border border-outline-variant rounded-xl divide-y divide-outline-variant">
+      {% for a in addresses %}
+        <li class="px-4 py-3 flex items-center justify-between">
+          <span class="font-body-md text-body-md text-on-surface font-mono"><bdi>{{ a.value }}</bdi></span>
+          {% if a.verified %}
+            <span class="inline-block px-2 py-0.5 rounded-full bg-tertiary-container text-on-tertiary-container font-label-sm text-label-sm">{{ chrome.t("admin-identity-status-verified") }}</span>
+          {% else %}
+            <span class="inline-block px-2 py-0.5 rounded-full bg-surface-container text-on-surface-variant font-label-sm text-label-sm">{{ chrome.t("admin-identity-status-pending") }}</span>
+          {% endif %}
+        </li>
+      {% endfor %}
+    </ul>
+  {% endif %}
+</section>
+
+<section class="mb-stack-lg">
+  <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest">{{ chrome.t("admin-identity-section-credentials") }}</h2>
+  {% if credentials.is_empty() %}
+    <p class="font-body-md text-body-md text-on-surface-variant">{{ chrome.t("admin-identity-credentials-empty") }}</p>
+  {% else %}
+    <ul class="bg-surface-container-lowest border border-outline-variant rounded-xl divide-y divide-outline-variant">
+      {% for c in credentials %}
+        <li class="px-4 py-3 flex items-center justify-between">
+          <span class="font-label-md text-label-md text-on-surface font-bold">{{ c.method }}</span>
+          <span class="font-body-sm text-body-sm text-on-surface-variant font-mono"><bdi>{{ c.identifiers }}</bdi></span>
+        </li>
+      {% endfor %}
+    </ul>
+  {% endif %}
+</section>
+
+<section>
+  <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest">
+    {{ chrome.t("admin-identity-section-sessions") }}
+  </h2>
+  {% if sessions.is_empty() %}
+    <p class="font-body-md text-body-md text-on-surface-variant">{{ chrome.t("admin-identity-sessions-empty") }}</p>
+  {% else %}
+    <ul class="flex flex-col gap-stack-md">
+      {% for s in sessions %}
+        <li class="bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg flex flex-col sm:flex-row sm:items-start justify-between gap-stack-md">
+          {% let show_current = false %}
+          {% include "partials/session_meta.html" %}
+          <a href="/admin/sessions/{{ s.id }}/revoke"
+             class="font-label-md text-label-md text-error border border-error rounded-lg px-3 py-1 hover:bg-error-container hover:text-on-error-container transition-colors shrink-0">{{ chrome.t("admin-identity-action-revoke-session") }}&hellip;</a>
+        </li>
+      {% endfor %}
+    </ul>
+  {% endif %}
+</section>
 {% endblock %}

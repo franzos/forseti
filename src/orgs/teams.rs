@@ -118,7 +118,10 @@ pub async fn rename_team(db: &DbPool, team_id: &str, name: &str) -> anyhow::Resu
                 .filter(org_teams::id.ne(&id))
                 .count()
                 .get_result(c)?;
-            anyhow::ensure!(clash == 0, "another team in this org already uses slug `{sl}`");
+            anyhow::ensure!(
+                clash == 0,
+                "another team in this org already uses slug `{sl}`"
+            );
             diesel::update(org_teams::table.filter(org_teams::id.eq(&id)))
                 .set(org_teams::name.eq(&nm))
                 .execute(c)?;
@@ -448,8 +451,8 @@ mod tests {
     async fn rename_rejects_slug_collision() {
         let db = temp_pool().await;
         let _a = create_team(&db, "org1", "Platform", None).await.unwrap(); // slug "platform"
-        let b = create_team(&db, "org1", "SRE", None).await.unwrap();       // slug "sre"
-        // Renaming B to a name that slugifies to "platform" must be rejected.
+        let b = create_team(&db, "org1", "SRE", None).await.unwrap(); // slug "sre"
+                                                                      // Renaming B to a name that slugifies to "platform" must be rejected.
         assert!(rename_team(&db, &b.id, "platform").await.is_err());
     }
 
@@ -470,7 +473,9 @@ mod tests {
         add_member(&db, &sre.id, "alice").await.unwrap();
         add_member(&db, &other.id, "alice").await.unwrap();
 
-        let slugs = group_slugs_for_identity(&db, "org1", "alice").await.unwrap();
+        let slugs = group_slugs_for_identity(&db, "org1", "alice")
+            .await
+            .unwrap();
         assert_eq!(slugs, vec!["platform".to_string(), "sre".to_string()]); // org1 only, slug-sorted
 
         let none = group_slugs_for_identity(&db, "org1", "bob").await.unwrap();

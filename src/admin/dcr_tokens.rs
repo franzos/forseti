@@ -81,7 +81,7 @@ pub(crate) struct StoredIat {
     pub(crate) daily_window_started_at: Option<String>,
 }
 
-fn project_row(s: StoredIat) -> IatRow {
+fn project_row(locale: &crate::locale::LanguageIdentifier, s: StoredIat) -> IatRow {
     let now = Utc::now().to_rfc3339();
     let status = if s.revoked_at.is_some() {
         "revoked"
@@ -101,7 +101,7 @@ fn project_row(s: StoredIat) -> IatRow {
     let expires_at_pretty = if expires_at.is_empty() {
         "never".to_string()
     } else {
-        humanise_timestamp(&expires_at)
+        humanise_timestamp(locale, &expires_at)
     };
     let uses_remaining = match s.uses_remaining {
         Some(n) => n.to_string(),
@@ -110,7 +110,7 @@ fn project_row(s: StoredIat) -> IatRow {
     IatRow {
         id: s.id,
         created_by: s.created_by,
-        created_at_pretty: humanise_timestamp(&s.created_at),
+        created_at_pretty: humanise_timestamp(locale, &s.created_at),
         created_at: s.created_at,
         expires_at,
         expires_at_pretty,
@@ -171,7 +171,10 @@ pub async fn list(
     }
     .await;
     let rows = match stored {
-        Ok(s) => s.into_iter().map(project_row).collect(),
+        Ok(s) => s
+            .into_iter()
+            .map(|row| project_row(&ctx.locale, row))
+            .collect(),
         Err(e) => {
             tracing::error!(error = ?e, "admin: list dcr tokens failed");
             return render_admin_error(

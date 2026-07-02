@@ -52,15 +52,17 @@ pub(crate) async fn settings_authorized_apps(
     sess: crate::extractors::RequireSession,
     csrf: Csrf,
     banner: crate::handoff::ReferrerBanner,
+    crate::page_chrome::ReqLocale(locale): crate::page_chrome::ReqLocale,
 ) -> Response {
     let subject = sess.identity_id.clone();
     if subject.is_empty() {
         return render_error_boundary(
             &state,
-            "Authorized apps unavailable",
-            "We couldn't read your session. Please sign in again.",
+            &locale,
+            &crate::i18n::lookup(&locale, "error-boundary-authorized-apps-title"),
+            &crate::i18n::lookup(&locale, "error-boundary-authorized-apps-no-session-body"),
             "/login",
-            "Sign in",
+            crate::i18n::lookup(&locale, "error-boundary-cta-sign-in"),
         )
         .into_response();
     }
@@ -71,20 +73,21 @@ pub(crate) async fn settings_authorized_apps(
             tracing::error!(error = ?e, "list_consent_sessions failed");
             return render_error_boundary(
                 &state,
-                "Authorized apps unavailable",
-                "We couldn't reach the OAuth service. Please try again in a moment.",
+                &locale,
+                &crate::i18n::lookup(&locale, "error-boundary-authorized-apps-title"),
+                &crate::i18n::lookup(&locale, "error-boundary-authorized-apps-service-body"),
                 "/settings",
-                "Back to settings",
+                crate::i18n::lookup(&locale, "error-boundary-cta-back-to-settings"),
             )
             .into_response();
         }
     };
 
-    let apps = collapse_sessions_to_apps(&state, sessions);
+    let apps = collapse_sessions_to_apps(&state, &locale, sessions);
 
     let (flash_msg, clear_flash) = state.take_flash(&headers, "/settings/authorized-apps");
     let body = render(&SettingsAuthorizedAppsTemplate {
-        chrome: PageChrome::from_parts(&state, sess.email, csrf.0),
+        chrome: PageChrome::from_parts(&state, sess.email, csrf.0, locale),
         apps,
         flash: flash_msg,
         referrer_banner: banner.0,
@@ -97,6 +100,7 @@ pub(crate) async fn settings_authorized_apps(
 /// wipes anyway).
 fn collapse_sessions_to_apps(
     state: &AppState,
+    locale: &crate::locale::LanguageIdentifier,
     sessions: Vec<ory_client::models::OAuth2ConsentSession>,
 ) -> Vec<AuthorizedAppView> {
     use std::collections::BTreeMap;
@@ -134,11 +138,11 @@ fn collapse_sessions_to_apps(
                 logo_uri,
                 scopes: Vec::new(),
                 granted_at: granted_at.clone(),
-                granted_at_pretty: humanise_timestamp(&granted_at),
+                granted_at_pretty: humanise_timestamp(locale, &granted_at),
                 verified,
             });
         if !granted_at.is_empty() && granted_at.as_str() > entry.granted_at.as_str() {
-            entry.granted_at_pretty = humanise_timestamp(&granted_at);
+            entry.granted_at_pretty = humanise_timestamp(locale, &granted_at);
             entry.granted_at = granted_at;
         }
         for scope in granted_scopes {
@@ -177,6 +181,7 @@ pub(crate) async fn settings_authorized_apps_revoke(
     axum::extract::Path(client_id): axum::extract::Path<String>,
     sess: crate::extractors::RequireSession,
     actx: AuditCtx,
+    crate::page_chrome::ReqLocale(locale): crate::page_chrome::ReqLocale,
     _: CsrfForm<crate::csrf::NoPayload>,
 ) -> Response {
     let actor_id = sess.identity_id;
@@ -186,10 +191,16 @@ pub(crate) async fn settings_authorized_apps_revoke(
         match ory::hydra::revoke_consent_sessions_for_client(&state.ory, &actor_id, &client_id)
             .await
         {
-            Ok(()) => ("Access revoked.", true),
+            Ok(()) => (
+                crate::i18n::lookup(&locale, "flash-app-access-revoked"),
+                true,
+            ),
             Err(e) => {
                 tracing::error!(error = ?e, client_id, "revoke_consent_for_client failed");
-                ("Could not revoke access for that application.", false)
+                (
+                    crate::i18n::lookup(&locale, "flash-app-access-revoke-failed"),
+                    false,
+                )
             }
         };
     if ok {
@@ -203,5 +214,5 @@ pub(crate) async fn settings_authorized_apps_revoke(
         )
         .await;
     }
-    state.flash_redirect("/settings/authorized-apps", msg)
+    state.flash_redirect("/settings/authorized-apps", &msg)
 }

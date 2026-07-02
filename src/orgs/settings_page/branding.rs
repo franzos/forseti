@@ -33,8 +33,9 @@ pub(super) async fn branding(
     headers: HeaderMap,
     sess: RequireSession,
     csrf: Csrf,
+    crate::page_chrome::ReqLocale(locale): crate::page_chrome::ReqLocale,
 ) -> Response {
-    let ctx = settings_ctx(&sess, &csrf);
+    let ctx = settings_ctx(&sess, &csrf, locale);
     let target = match resolve_org_or_404(&state, slug.as_deref()).await {
         Ok(t) => t,
         Err(r) => return r,
@@ -53,7 +54,12 @@ async fn render_branding(
 ) -> Response {
     let nav = build_nav(state, headers, &ctx.identity_id).await;
     render(&BrandingTemplate {
-        chrome: PageChrome::from_parts(state, ctx.user_email.clone(), ctx.csrf_token.clone()),
+        chrome: PageChrome::from_parts(
+            state,
+            ctx.user_email.clone(),
+            ctx.csrf_token.clone(),
+            ctx.locale.clone(),
+        ),
         is_default: org.id == orgs::DEFAULT_ORG_ID,
         org,
         nav,

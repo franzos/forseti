@@ -42,6 +42,11 @@
             "first": { "type": "string", "title": "First Name" },
             "last":  { "type": "string", "title": "Last Name"  }
           }
+        },
+        "preferred_language": {
+          "type": "string",
+          "title": "Preferred language",
+          "enum": ["en", "de"]
         }
       },
       "required": ["email"],

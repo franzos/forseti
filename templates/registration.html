@@ -1,9 +1,9 @@
 {% extends "card.html" %}
 
-{% block title %}Create account &middot; {{ chrome.brand.name }}{% endblock %}
+{% block title %}{{ chrome.t("auth-registration-page-title") }} &middot; {{ chrome.brand.name }}{% endblock %}
 
-{% block card_title %}Create an account{% endblock %}
-{% block card_subtitle %}Sign up to manage your identity securely.{% endblock %}
+{% block card_title %}{{ chrome.t("auth-registration-card-title") }}{% endblock %}
+{% block card_subtitle %}{{ chrome.t("auth-registration-card-subtitle") }}{% endblock %}
 
 {% block card_body %}
   {# Flow-level messages (e.g. "Email already in use", "Password too short"). #}
@@ -19,8 +19,8 @@
        takes them through the hand-rolled re-claim flow. #}
         {% if msg.id == 4000007 %}
           <p class="font-body-sm text-body-sm text-on-surface-variant">
-            If this is your email and you never finished signing up,
-            <a href="/claim-email" class="text-primary hover:underline">claim it &rarr;</a>
+            {{ chrome.t("auth-registration-claim-body") }}
+            <a href="/claim-email" class="text-primary hover:underline">{{ chrome.t("auth-registration-claim-link") }} <span class="dir-flip">&rarr;</span></a>
           </p>
         {% endif %}
       {% endfor %}
@@ -49,126 +49,126 @@
               <label for="{{ node.name }}"
                      class="font-label-md text-label-md text-on-surface">
                 {% match node.label %}{% when Some with (l) %}{{ l }}{% when None %}{{ node.name }}{% endmatch %}
-              </label>
-              {% include "partials/flow_node.html" %}
-              {% for m in node.messages %}
-                <p class="font-body-sm text-body-sm {% if m.severity == "error" %}text-error{% else %}text-on-surface-variant{% endif %}">
-                  {{ m.text }}
-                </p>
-              {% endfor %}
-            </div>
-          {% endif %}
-        {% endfor %}
+            </label>
+            {% include "partials/flow_node.html" %}
+            {% for m in node.messages %}
+              <p class="font-body-sm text-body-sm {% if m.severity == "error" %}text-error{% else %}text-on-surface-variant{% endif %}">
+                {{ m.text }}
+              </p>
+            {% endfor %}
+          </div>
+        {% endif %}
+      {% endfor %}
 
-        {# Password method nodes (password input + submit). Only present once
+      {# Password method nodes (password input + submit). Only present once
            the profile step has run, or if Kratos is configured to skip the
            profile-first step. #}
-        {% for node in form.groups.password %}
-          {% if node.input_type == "submit" || node.input_type == "hidden" %}
-            {% include "partials/flow_node.html" %}
-          {% else %}
-            <div class="flex flex-col gap-stack-sm">
-              <label for="{{ node.name }}"
-                     class="font-label-md text-label-md text-on-surface">
-                {% match node.label %}{% when Some with (l) %}{{ l }}{% when None %}{{ node.name }}{% endmatch %}
-              </label>
-              {% include "partials/flow_node.html" %}
-              {% for m in node.messages %}
-                <p class="font-body-sm text-body-sm {% if m.severity == "error" %}text-error{% else %}text-on-surface-variant{% endif %}">
-                  {{ m.text }}
-                </p>
-              {% endfor %}
-            </div>
-          {% endif %}
-        {% endfor %}
+      {% for node in form.groups.password %}
+        {% if node.input_type == "submit" || node.input_type == "hidden" %}
+          {% include "partials/flow_node.html" %}
+        {% else %}
+          <div class="flex flex-col gap-stack-sm">
+            <label for="{{ node.name }}"
+                   class="font-label-md text-label-md text-on-surface">
+              {% match node.label %}{% when Some with (l) %}{{ l }}{% when None %}{{ node.name }}{% endmatch %}
+          </label>
+          {% include "partials/flow_node.html" %}
+          {% for m in node.messages %}
+            <p class="font-body-sm text-body-sm {% if m.severity == "error" %}text-error{% else %}text-on-surface-variant{% endif %}">
+              {{ m.text }}
+            </p>
+          {% endfor %}
+        </div>
+      {% endif %}
+    {% endfor %}
 
-        {# Profile method submit ("Sign up"). The profile group only carries the
+    {# Profile method submit ("Sign up"). The profile group only carries the
            submit button — traits live in `default`. #}
-        {% for node in form.groups.profile %}
-          {% include "partials/flow_node.html" %}
-        {% endfor %}
-      </div>
-    {% endif %}
+    {% for node in form.groups.profile %}
+      {% include "partials/flow_node.html" %}
+    {% endfor %}
+  </div>
+{% endif %}
 
-    {# OR divider — sits between the create-account button and OIDC stack, per the design mock. #}
-    {% if !form.groups.oidc.is_empty() %}
-      <div class="flex items-center gap-stack-md">
-        <div class="flex-grow h-px bg-outline-variant"></div>
-        <span class="font-label-sm text-label-sm text-outline uppercase tracking-wider">Or continue with</span>
-        <div class="flex-grow h-px bg-outline-variant"></div>
-      </div>
-
-      <div class="flex flex-col gap-stack-sm">
-        {% for node in form.groups.oidc %}
-          {% include "partials/flow_node.html" %}
-        {% endfor %}
-      </div>
-    {% endif %}
-
-    {# Anything Kratos sent that didn't fit a known group — rendered generically. #}
-    {% if !form.groups.other.is_empty() %}
-      <div class="flex flex-col gap-stack-md">
-        {% for node in form.groups.other %}
-          {% if node.input_type == "hidden" || node.input_type == "submit" || node.input_type == "button" %}
-            {% include "partials/flow_node.html" %}
-          {% else %}
-            <div class="flex flex-col gap-stack-sm">
-              {% match node.label %}{% when Some with (l) %}
-              <label for="{{ node.name }}"
-                     class="font-label-md text-label-md text-on-surface">{{ l }}</label>
-              {% when None %}{% endmatch %}
-              {% include "partials/flow_node.html" %}
-              {% for m in node.messages %}
-                <p class="font-body-sm text-body-sm {% if m.severity == "error" %}text-error{% else %}text-on-surface-variant{% endif %}">
-                  {{ m.text }}
-                </p>
-              {% endfor %}
-            </div>
-          {% endif %}
-        {% endfor %}
-      </div>
-    {% endif %}
-  </form>
-
-  <div class="text-center mt-stack-sm">
-    <p class="font-body-sm text-body-sm text-on-surface-variant">
-      Already have an account?
-      <a href="/login{{ form.return_to_qs }}"
-         class="font-label-md text-label-md text-primary hover:underline transition-colors">Sign in</a>
-    </p>
+{# OR divider — sits between the create-account button and OIDC stack, per the design mock. #}
+{% if !form.groups.oidc.is_empty() %}
+  <div class="flex items-center gap-stack-md">
+    <div class="flex-grow h-px bg-outline-variant"></div>
+    <span class="font-label-sm text-label-sm text-outline uppercase tracking-wider">{{ chrome.t("auth-or-continue-with") }}</span>
+    <div class="flex-grow h-px bg-outline-variant"></div>
   </div>
 
-  {# WebAuthn / passkey helper — required when the registration flow includes
+  <div class="flex flex-col gap-stack-sm">
+    {% for node in form.groups.oidc %}
+      {% include "partials/flow_node.html" %}
+    {% endfor %}
+  </div>
+{% endif %}
+
+{# Anything Kratos sent that didn't fit a known group — rendered generically. #}
+{% if !form.groups.other.is_empty() %}
+  <div class="flex flex-col gap-stack-md">
+    {% for node in form.groups.other %}
+      {% if node.input_type == "hidden" || node.input_type == "submit" || node.input_type == "button" %}
+        {% include "partials/flow_node.html" %}
+      {% else %}
+        <div class="flex flex-col gap-stack-sm">
+          {% match node.label %}{% when Some with (l) %}
+          <label for="{{ node.name }}"
+                 class="font-label-md text-label-md text-on-surface">{{ l }}</label>
+          {% when None %}{% endmatch %}
+        {% include "partials/flow_node.html" %}
+        {% for m in node.messages %}
+          <p class="font-body-sm text-body-sm {% if m.severity == "error" %}text-error{% else %}text-on-surface-variant{% endif %}">
+            {{ m.text }}
+          </p>
+        {% endfor %}
+      </div>
+    {% endif %}
+  {% endfor %}
+</div>
+{% endif %}
+</form>
+
+<div class="text-center mt-stack-sm">
+  <p class="font-body-sm text-body-sm text-on-surface-variant">
+    {{ chrome.t("auth-registration-have-account") }}
+    <a href="/login{{ form.return_to_qs }}"
+       class="font-label-md text-label-md text-primary hover:underline transition-colors">{{ chrome.t("auth-registration-sign-in-link") }}</a>
+  </p>
+</div>
+
+{# WebAuthn / passkey helper — required when the registration flow includes
    a passkey enrollment button, otherwise window.oryPasskeyRegistration is
    undefined. #}
-  {% for s in webauthn_scripts %}
-    <script src="{{ s.src }}"
-            {% match s.integrity %}
-            {% when Some with (v) %}
-            integrity="{{ v }}"
-            {% when None %}
-            {% endmatch %}
-            {% match s.crossorigin %}
-            {% when Some with (v) %}
-            crossorigin="{{ v }}"
-            {% when None %}
-            {% endmatch %}
-            {% match s.referrerpolicy %}
-            {% when Some with (v) %}
-            referrerpolicy="{{ v }}"
-            {% when None %}
-            {% endmatch %}
-            {% match s.id %}
-            {% when Some with (v) %}
-            id="{{ v }}"
-            {% when None %}
-            {% endmatch %}
-            {% match s.nonce %}
-            {% when Some with (v) %}
-            nonce="{{ v }}"
-            {% when None %}
-            {% endmatch %}
-            {% if s.is_async %}async{% endif %}></script>
-  {% endfor %}
-  {% include "partials/webauthn_helper.html" %}
+{% for s in webauthn_scripts %}
+  <script src="{{ s.src }}"
+          {% match s.integrity %}
+          {% when Some with (v) %}
+          integrity="{{ v }}"
+          {% when None %}
+          {% endmatch %}
+          {% match s.crossorigin %}
+          {% when Some with (v) %}
+          crossorigin="{{ v }}"
+          {% when None %}
+          {% endmatch %}
+          {% match s.referrerpolicy %}
+          {% when Some with (v) %}
+          referrerpolicy="{{ v }}"
+          {% when None %}
+          {% endmatch %}
+          {% match s.id %}
+          {% when Some with (v) %}
+          id="{{ v }}"
+          {% when None %}
+          {% endmatch %}
+          {% match s.nonce %}
+          {% when Some with (v) %}
+          nonce="{{ v }}"
+          {% when None %}
+          {% endmatch %}
+          {% if s.is_async %}async{% endif %}></script>
+{% endfor %}
+{% include "partials/webauthn_helper.html" %}
 {% endblock %}

@@ -12,6 +12,7 @@ use crate::audit::{self, action, severity, target_kind, AuditCtx, AuditEvent};
 use crate::audit_metadata;
 use crate::csrf::CsrfForm;
 use crate::extractors::{Csrf, OptionalSession};
+use crate::locale::LanguageIdentifier;
 use crate::oauth_client_metadata;
 use crate::ory;
 use crate::page_chrome::PageChrome;
@@ -63,6 +64,7 @@ pub(crate) struct OAuthConsentQuery {
 pub(crate) async fn oauth_consent(
     State(state): State<AppState>,
     Query(query): Query<OAuthConsentQuery>,
+    uri: axum::http::Uri,
     headers: HeaderMap,
     csrf: Csrf,
     session: OptionalSession,
@@ -75,6 +77,18 @@ pub(crate) async fn oauth_consent(
             tracing::error!(error = ?e, "hydra get_consent_request failed");
             return Redirect::to("/error").into_response();
         }
+    };
+
+    // Compute display locale honoring ui_locales (D1): ?lang= > ui_locales > cookie > trait > Accept-Language > en.
+    let ui_locales: Option<Vec<String>> = req
+        .oidc_context
+        .as_ref()
+        .and_then(|ctx| ctx.ui_locales.clone());
+    let locale = {
+        let (mut p, _) = axum::http::Request::new(()).into_parts();
+        p.uri = uri;
+        p.headers = headers.clone();
+        crate::page_chrome::resolve_locale_for_flow(&p, &session, ui_locales.as_deref())
     };
 
     let requested_scope = req.requested_scope.clone().unwrap_or_default();
@@ -170,6 +184,7 @@ pub(crate) async fn oauth_consent(
             requested_audience,
             false,
             &headers,
+            locale,
         )
         .await
         .into_response();
@@ -192,7 +207,13 @@ pub(crate) async fn oauth_consent(
                 .scope_descriptions
                 .get(s)
                 .cloned()
-                .or_else(|| super::default_scope_description(s).map(str::to_string))
+                .or_else(|| {
+                    // Built-in scope: look up the locale-aware description.
+                    // Unknown scopes (no default_scope_description entry) fall through to the raw name.
+                    // Operator-supplied scope_descriptions (above) stay English per spec decision D3.
+                    super::default_scope_description(s)
+                        .map(|_| crate::i18n::lookup(&locale, &format!("consent-scope-{s}")))
+                })
                 .unwrap_or_else(|| s.clone()),
             // `openid` is mandatory: Hydra rejects the accept if it's missing
             // from `grant_scope`, so the template disables the checkbox and
@@ -226,12 +247,16 @@ pub(crate) async fn oauth_consent(
         .filter(|a| a.id != subject)
         .map(|a| ConsentAccountView {
             id: a.id,
-            label: if a.email.is_empty() { a.display_name.clone() } else { a.email.clone() },
+            label: if a.email.is_empty() {
+                a.display_name.clone()
+            } else {
+                a.email.clone()
+            },
         })
         .collect();
 
     render(&ConsentTemplate {
-        chrome: PageChrome::from_parts(&state, subject_email.clone(), csrf.0),
+        chrome: PageChrome::from_parts(&state, subject_email.clone(), csrf.0, locale),
         consent_intro: state.cfg.brand.consent_intro.clone(),
         client_name,
         subject_email,
@@ -266,12 +291,21 @@ pub(crate) async fn consent_switch(
     actx: AuditCtx,
     CsrfForm(form): CsrfForm<ConsentSwitchForm>,
 ) -> Response {
-    switch_account(&state, &headers, &actx, &form.consent_challenge, Some(&form.identity_id)).await
+    switch_account(
+        &state,
+        &headers,
+        &actx,
+        &form.consent_challenge,
+        Some(&form.identity_id),
+    )
+    .await
 }
 
 pub(crate) async fn oauth_consent_submit(
     State(state): State<AppState>,
+    uri: axum::http::Uri,
     headers: HeaderMap,
+    session: OptionalSession,
     actx: AuditCtx,
     CsrfForm(form): CsrfForm<OAuthConsentForm>,
 ) -> Response {
@@ -348,6 +382,19 @@ pub(crate) async fn oauth_consent_submit(
     let captured_audience = requested_audience.clone();
     let grant_scope_for_audit = form.grant_scope.clone();
 
+    // Re-compute the consent locale from the same inputs the GET handler used
+    // so the locale claim fallback is consistent between both code paths.
+    let consent_locale = {
+        let ui_locales: Option<Vec<String>> = req
+            .oidc_context
+            .as_ref()
+            .and_then(|ctx| ctx.ui_locales.clone());
+        let (mut p, _) = axum::http::Request::new(()).into_parts();
+        p.uri = uri;
+        p.headers = headers.clone();
+        crate::page_chrome::resolve_locale_for_flow(&p, &session, ui_locales.as_deref())
+    };
+
     let outcome = finalize_consent(
         &state,
         &form.consent_challenge,
@@ -356,6 +403,7 @@ pub(crate) async fn oauth_consent_submit(
         requested_audience,
         remember,
         &headers,
+        consent_locale,
     )
     .await;
 
@@ -370,10 +418,18 @@ pub(crate) async fn oauth_consent_submit(
 
     if form.remember_account.as_deref() == Some("true") && !subject.is_empty() {
         let ttl = state.cfg.accounts.known_accounts_cookie_ttl_seconds;
-        let ids = crate::accounts::cookie::read_known_account_ids(&headers, &state.cookie_secret, ttl);
-        let next = crate::accounts::cookie::add_mru(ids, &subject, crate::accounts::cookie::KNOWN_ACCOUNTS_CAP);
+        let ids =
+            crate::accounts::cookie::read_known_account_ids(&headers, &state.cookie_secret, ttl);
+        let next = crate::accounts::cookie::add_mru(
+            ids,
+            &subject,
+            crate::accounts::cookie::KNOWN_ACCOUNTS_CAP,
+        );
         let set_cookie = crate::accounts::cookie::set_known_accounts_cookie(
-            &state.cookie_secret, ttl, &next, state.cfg.self_.is_https(),
+            &state.cookie_secret,
+            ttl,
+            &next,
+            state.cfg.self_.is_https(),
         );
         crate::web::append_set_cookie(&mut redirect, Some(set_cookie));
     }
@@ -545,7 +601,9 @@ enum FinalizeOutcome {
         groups_count: usize,
         groups_truncated: bool,
     },
-    RedirectedToError { redirect: Response },
+    RedirectedToError {
+        redirect: Response,
+    },
 }
 
 impl FinalizeOutcome {
@@ -567,6 +625,7 @@ async fn finalize_consent(
     grant_audience: Vec<String>,
     remember: bool,
     headers: &axum::http::HeaderMap,
+    consent_locale: LanguageIdentifier,
 ) -> FinalizeOutcome {
     // Fan out identity + org memberships in parallel; the membership fetch
     // is skipped unless the grant scope consumes it.
@@ -592,7 +651,11 @@ async fn finalize_consent(
         m
     };
     if orgs_truncated {
-        tracing::warn!(subject, kept = memberships.len(), "consent: orgs claim truncated to cap");
+        tracing::warn!(
+            subject,
+            kept = memberships.len(),
+            "consent: orgs claim truncated to cap"
+        );
     }
     let identity = match identity_res {
         Ok(id) => Some(id),
@@ -631,19 +694,17 @@ async fn finalize_consent(
     let wants_groups = grant_scope.iter().any(|s| s == "groups");
     let (group_slugs, groups_truncated) = if wants_groups {
         match active.as_ref() {
-            Some(m) => match crate::orgs::teams::group_slugs_for_identity(
-                &state.db,
-                &m.org_id,
-                subject,
-            )
-            .await
-            {
-                Ok(raw) => project_group_slugs(&raw, crate::orgs::teams::GROUPS_CLAIM_CAP),
-                Err(e) => {
-                    tracing::warn!(error = ?e, subject, "consent: group_slugs fetch failed; groups will be empty");
-                    (Vec::new(), false)
+            Some(m) => {
+                match crate::orgs::teams::group_slugs_for_identity(&state.db, &m.org_id, subject)
+                    .await
+                {
+                    Ok(raw) => project_group_slugs(&raw, crate::orgs::teams::GROUPS_CLAIM_CAP),
+                    Err(e) => {
+                        tracing::warn!(error = ?e, subject, "consent: group_slugs fetch failed; groups will be empty");
+                        (Vec::new(), false)
+                    }
                 }
-            },
+            }
             None => (Vec::new(), false),
         }
     } else {
@@ -666,6 +727,7 @@ async fn finalize_consent(
         &group_slugs,
         groups_truncated,
         orgs_truncated,
+        &consent_locale,
     );
 
     match ory::hydra::accept_consent_request(
@@ -704,7 +766,7 @@ fn project_group_slugs(raw: &[String], cap: usize) -> (Vec<String>, bool) {
 }
 
 /// Fold identity traits into id_token claims, scoped by granted scope.
-/// `email` adds `email`/`email_verified`; `profile` adds `name`/`picture`/`website`;
+/// `email` adds `email`/`email_verified`; `profile` adds `name`/`picture`/`website`/`locale`;
 /// `extended_profile` adds `bio`/`pronouns`/`links`; `org` adds the active-org
 /// object; `orgs` adds the (capped) membership list; "groups" adds the active-org team slugs.
 #[allow(clippy::too_many_arguments)]
@@ -717,6 +779,7 @@ fn build_id_token_claims(
     group_slugs: &[String],
     groups_truncated: bool,
     orgs_truncated: bool,
+    consent_locale: &LanguageIdentifier,
 ) -> serde_json::Value {
     let scopes: std::collections::HashSet<&str> = grant_scope.iter().map(String::as_str).collect();
     let mut claims = serde_json::Map::new();
@@ -860,6 +923,16 @@ fn build_id_token_claims(
                 );
             }
         }
+        // locale claim (D2): preferred_language trait if supported, else the
+        // negotiated consent locale. Emitted deliberately here; not forwarded
+        // by the Kratos->Hydra mapper.
+        let locale_val = traits
+            .and_then(|t| t.get("preferred_language"))
+            .and_then(|v| v.as_str())
+            .and_then(crate::locale::from_query_or_cookie)
+            .map(|l| l.to_string())
+            .unwrap_or_else(|| consent_locale.to_string());
+        claims.insert("locale".to_string(), serde_json::Value::String(locale_val));
     }
 
     if scopes.contains("extended_profile") {
@@ -892,7 +965,18 @@ fn build_id_token_claims(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_id_token_claims, extract_resource_url, project_group_slugs, with_prompt_login};
+    use super::{
+        build_id_token_claims, extract_resource_url, project_group_slugs, with_prompt_login,
+    };
+    use crate::ory;
+
+    fn en() -> crate::locale::LanguageIdentifier {
+        crate::locale::default_locale()
+    }
+
+    fn de() -> crate::locale::LanguageIdentifier {
+        "de".parse().unwrap()
+    }
 
     fn prompt_values(url: &str) -> Vec<String> {
         url::Url::parse(url)
@@ -905,7 +989,11 @@ mod tests {
     }
 
     fn query_value(url: &str, key: &str) -> Option<String> {
-        url::Url::parse(url).unwrap().query_pairs().find(|(k, _)| k == key).map(|(_, v)| v.into_owned())
+        url::Url::parse(url)
+            .unwrap()
+            .query_pairs()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.into_owned())
     }
 
     #[test]
@@ -1031,15 +1119,25 @@ mod tests {
 
         let many: Vec<String> = (0..5).map(|i| format!("t{i}")).collect();
         let (capped, was_trunc) = project_group_slugs(&many, 3);
-        assert_eq!(capped, vec!["t0".to_string(), "t1".to_string(), "t2".to_string()]);
+        assert_eq!(
+            capped,
+            vec!["t0".to_string(), "t1".to_string(), "t2".to_string()]
+        );
         assert!(was_trunc);
     }
 
     #[test]
     fn groups_claim_absent_without_scope() {
         let v = build_id_token_claims(
-            None, &["openid".to_string()], &[], None, None,
-            &["platform".to_string()], false, false,
+            None,
+            &["openid".to_string()],
+            &[],
+            None,
+            None,
+            &["platform".to_string()],
+            false,
+            false,
+            &en(),
         );
         assert!(v.get("groups").is_none());
     }
@@ -1047,8 +1145,15 @@ mod tests {
     #[test]
     fn groups_claim_empty_array_when_granted_no_teams() {
         let v = build_id_token_claims(
-            None, &["openid".to_string(), "groups".to_string()], &[], None, None,
-            &[], false, false,
+            None,
+            &["openid".to_string(), "groups".to_string()],
+            &[],
+            None,
+            None,
+            &[],
+            false,
+            false,
+            &en(),
         );
         assert_eq!(v.get("groups").unwrap(), &serde_json::json!([]));
         assert!(v.get("groups_truncated").is_none());
@@ -1058,10 +1163,24 @@ mod tests {
     fn groups_claim_emits_slugs_and_truncation_flag() {
         let slugs = vec!["platform".to_string(), "sre".to_string()];
         let v = build_id_token_claims(
-            None, &["groups".to_string()], &[], None, None, &slugs, true, false,
+            None,
+            &["groups".to_string()],
+            &[],
+            None,
+            None,
+            &slugs,
+            true,
+            false,
+            &en(),
         );
-        assert_eq!(v.get("groups").unwrap(), &serde_json::json!(["platform", "sre"]));
-        assert_eq!(v.get("groups_truncated").unwrap(), &serde_json::Value::Bool(true));
+        assert_eq!(
+            v.get("groups").unwrap(),
+            &serde_json::json!(["platform", "sre"])
+        );
+        assert_eq!(
+            v.get("groups_truncated").unwrap(),
+            &serde_json::Value::Bool(true)
+        );
     }
 
     fn sample_memberships(n: usize) -> Vec<crate::orgs::Membership> {
@@ -1078,14 +1197,154 @@ mod tests {
     #[test]
     fn orgs_truncated_absent_when_under_cap() {
         let memberships = sample_memberships(3);
-        let v = build_id_token_claims(None, &["orgs".into()], &memberships, None, None, &[], false, false);
+        let v = build_id_token_claims(
+            None,
+            &["orgs".into()],
+            &memberships,
+            None,
+            None,
+            &[],
+            false,
+            false,
+            &en(),
+        );
         assert!(v.get("orgs_truncated").is_none());
         assert_eq!(v["orgs"].as_array().unwrap().len(), 3);
     }
 
     #[test]
     fn orgs_truncated_true_when_over_cap() {
-        let v = build_id_token_claims(None, &["orgs".into()], &[], None, None, &[], false, true);
-        assert_eq!(v.get("orgs_truncated").unwrap(), &serde_json::Value::Bool(true));
+        let v = build_id_token_claims(
+            None,
+            &["orgs".into()],
+            &[],
+            None,
+            None,
+            &[],
+            false,
+            true,
+            &en(),
+        );
+        assert_eq!(
+            v.get("orgs_truncated").unwrap(),
+            &serde_json::Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn locale_claim_absent_without_profile_scope() {
+        // identity with preferred_language set, but profile not granted
+        let mut traits = serde_json::Map::new();
+        traits.insert("preferred_language".to_string(), serde_json::json!("de"));
+        let identity = ory::Identity {
+            id: "id".to_string(),
+            traits: Some(serde_json::Value::Object(traits)),
+            ..ory::Identity::new(
+                "id".to_string(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+            )
+        };
+        let v = build_id_token_claims(
+            Some(&identity),
+            &["openid".to_string(), "email".to_string()],
+            &[],
+            None,
+            None,
+            &[],
+            false,
+            false,
+            &en(),
+        );
+        assert!(v.get("locale").is_none());
+    }
+
+    #[test]
+    fn locale_claim_from_preferred_language_trait() {
+        // preferred_language="de" wins over consent_locale="en"
+        let mut traits = serde_json::Map::new();
+        traits.insert("email".to_string(), serde_json::json!("x@example.com"));
+        traits.insert("preferred_language".to_string(), serde_json::json!("de"));
+        let identity = ory::Identity {
+            id: "id".to_string(),
+            traits: Some(serde_json::Value::Object(traits)),
+            ..ory::Identity::new(
+                "id".to_string(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+            )
+        };
+        let v = build_id_token_claims(
+            Some(&identity),
+            &["openid".to_string(), "profile".to_string()],
+            &[],
+            None,
+            None,
+            &[],
+            false,
+            false,
+            &en(),
+        );
+        assert_eq!(v.get("locale").unwrap().as_str().unwrap(), "de");
+    }
+
+    #[test]
+    fn locale_claim_falls_back_to_consent_locale() {
+        // no preferred_language trait; consent_locale="de" is used
+        let mut traits = serde_json::Map::new();
+        traits.insert("email".to_string(), serde_json::json!("x@example.com"));
+        let identity = ory::Identity {
+            id: "id".to_string(),
+            traits: Some(serde_json::Value::Object(traits)),
+            ..ory::Identity::new(
+                "id".to_string(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+            )
+        };
+        let v = build_id_token_claims(
+            Some(&identity),
+            &["openid".to_string(), "profile".to_string()],
+            &[],
+            None,
+            None,
+            &[],
+            false,
+            false,
+            &de(),
+        );
+        assert_eq!(v.get("locale").unwrap().as_str().unwrap(), "de");
+    }
+
+    #[test]
+    fn locale_claim_unsupported_trait_falls_back_to_consent_locale() {
+        // preferred_language="fr" is not supported; consent_locale="de" is used
+        let mut traits = serde_json::Map::new();
+        traits.insert("preferred_language".to_string(), serde_json::json!("fr"));
+        let identity = ory::Identity {
+            id: "id".to_string(),
+            traits: Some(serde_json::Value::Object(traits)),
+            ..ory::Identity::new(
+                "id".to_string(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+            )
+        };
+        let v = build_id_token_claims(
+            Some(&identity),
+            &["profile".to_string()],
+            &[],
+            None,
+            None,
+            &[],
+            false,
+            false,
+            &de(),
+        );
+        assert_eq!(v.get("locale").unwrap().as_str().unwrap(), "de");
     }
 }

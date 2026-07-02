@@ -75,7 +75,7 @@ pub async fn show(State(state): State<AppState>, admin: RequireAdmin) -> Respons
     );
 
     render(&ConfigurationTemplate {
-        chrome: PageChrome::from_parts(&state, ctx.email, String::new()),
+        chrome: PageChrome::from_parts(&state, ctx.email, String::new(), ctx.locale.clone()),
         admin_active: AdminSection::Configuration,
         disc,
         discovery_ok,

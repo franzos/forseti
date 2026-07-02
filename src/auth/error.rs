@@ -34,32 +34,33 @@ pub(crate) async fn error_page(
     Chrome(chrome): Chrome,
 ) -> Response {
     let error_id = query.id.unwrap_or_default();
+    let locale = &chrome.locale;
     let (title, message, reason) = if error_id.is_empty() {
         (
-            "Something went wrong".to_string(),
-            "We couldn't load the requested page. The link may have expired or been used already."
-                .to_string(),
+            crate::i18n::lookup(locale, "error-page-generic-title"),
+            crate::i18n::lookup(locale, "error-page-generic-body"),
             String::new(),
         )
     } else {
         match ory::kratos::get_self_service_error(&state.ory, &error_id).await {
-            Ok(Some(body)) => extract_error_strings(&body),
+            Ok(Some(body)) => extract_error_strings(&body, locale),
             Ok(None) => (
-                "Link expired".to_string(),
-                "This link is no longer valid. Please start again from sign-in.".to_string(),
+                crate::i18n::lookup(locale, "error-page-link-expired-title"),
+                crate::i18n::lookup(locale, "error-page-link-expired-body"),
                 String::new(),
             ),
             Err(e) => {
                 tracing::error!(error = ?e, error_id, "failed to fetch Kratos self-service error");
                 (
-                    "Something went wrong".to_string(),
-                    crate::web::AUTH_UNAVAILABLE_BODY.to_string(),
+                    crate::i18n::lookup(locale, "error-page-generic-title"),
+                    crate::i18n::lookup(locale, "error-boundary-auth-unavailable-body"),
                     String::new(),
                 )
             }
         }
     };
 
+    let cta_label = chrome.t("error-cta-back-to-sign-in");
     render(&ErrorTemplate {
         chrome,
         error_title: title,
@@ -67,30 +68,35 @@ pub(crate) async fn error_page(
         error_reason: reason,
         error_id,
         cta_href: "/login".to_string(),
-        cta_label: "Back to sign in".to_string(),
+        cta_label,
     })
 }
 
 /// Older Kratos versions put the error at the top level, newer ones wrap it
 /// under `error.{id,message,reason,...}`. Handle both.
-fn extract_error_strings(body: &serde_json::Value) -> (String, String, String) {
+fn extract_error_strings(
+    body: &serde_json::Value,
+    locale: &crate::locale::LanguageIdentifier,
+) -> (String, String, String) {
     let inner = body.get("error").unwrap_or(body);
-    let title = inner
+    let title_key = inner
         .get("id")
         .and_then(|v| v.as_str())
         .map(|s| match s {
-            "self_service_flow_expired" => "Link expired",
-            "security_csrf_violation" => "Security check failed",
-            "session_already_available" => "Already signed in",
-            _ => "Something went wrong",
+            "self_service_flow_expired" => "error-page-link-expired-title",
+            "security_csrf_violation" => "error-page-security-title",
+            "session_already_available" => "error-page-already-signed-in-title",
+            _ => "error-page-generic-title",
         })
-        .unwrap_or("Something went wrong")
-        .to_string();
+        .unwrap_or("error-page-generic-title");
+    let title = crate::i18n::lookup(locale, title_key);
+    // `message` is Kratos's own localized error text; only the absent case
+    // falls back to a Forseti string.
     let message = inner
         .get("message")
         .and_then(|v| v.as_str())
-        .unwrap_or("We couldn't complete that request.")
-        .to_string();
+        .map(str::to_string)
+        .unwrap_or_else(|| crate::i18n::lookup(locale, "error-page-default-message"));
     let reason = inner
         .get("reason")
         .and_then(|v| v.as_str())

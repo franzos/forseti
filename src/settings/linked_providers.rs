@@ -7,7 +7,7 @@ use axum::response::Response;
 
 use crate::flow_view::{
     collect_default_hidden, collect_input_nodes, flow_messages, form_target, session_email,
-    InputView, MessageView,
+    translate_inputs, translate_messages, InputView, MessageView,
 };
 use crate::ory;
 use crate::page_chrome::PageChrome;
@@ -37,6 +37,7 @@ pub(crate) async fn settings_linked_providers(
     sess: crate::extractors::RequireSession,
     csrf: crate::extractors::Csrf,
     banner: crate::handoff::ReferrerBanner,
+    crate::page_chrome::ReqLocale(locale): crate::page_chrome::ReqLocale,
 ) -> Response {
     match fetch_settings_subpage(
         &state,
@@ -44,10 +45,13 @@ pub(crate) async fn settings_linked_providers(
         &query,
         SettingsSection::LinkedProviders,
         &sess,
+        &locale,
     )
     .await
     {
-        Ok((session, flow)) => render_linked_providers(&state, &csrf.0, &session, &flow, banner.0),
+        Ok((session, flow)) => {
+            render_linked_providers(&state, &csrf.0, &session, &flow, banner.0, locale)
+        }
         Err(resp) => resp,
     }
 }
@@ -58,20 +62,30 @@ fn render_linked_providers(
     session: &ory::Session,
     flow: &serde_json::Value,
     referrer_banner: Option<crate::handoff::ReferrerBannerView>,
+    locale: crate::locale::LanguageIdentifier,
 ) -> Response {
     let (form_action, form_method) = form_target(flow);
-    let hidden_defaults = collect_default_hidden(flow);
+    let mut hidden_defaults = collect_default_hidden(flow);
     let mut oidc_nodes = collect_input_nodes(flow, "oidc");
+    translate_inputs(&mut hidden_defaults, &locale);
+    translate_inputs(&mut oidc_nodes, &locale);
+    let mut msgs = flow_messages(flow);
+    translate_messages(&mut msgs, &locale);
     // Render every provider button as secondary; none is promoted to primary.
     for n in oidc_nodes.iter_mut() {
         n.is_primary = false;
     }
 
     render(&SettingsLinkedProvidersTemplate {
-        chrome: PageChrome::from_parts(state, session_email(session), csrf_token.to_string()),
+        chrome: PageChrome::from_parts(
+            state,
+            session_email(session),
+            csrf_token.to_string(),
+            locale,
+        ),
         form_action,
         form_method,
-        flow_messages: flow_messages(flow),
+        flow_messages: msgs,
         hidden_defaults,
         oidc_nodes,
         referrer_banner,

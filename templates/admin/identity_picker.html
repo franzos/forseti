@@ -1,18 +1,18 @@
 {% extends "admin/admin_shell.html" %}
 
-{% block admin_title %}Select user{% endblock %}
+{% block admin_title %}{{ chrome.t("admin-identity-picker-page-title") }}{% endblock %}
 
 {% block admin_content %}
   <header class="mt-2 mb-stack-lg">
     <h1 class="font-headline-lg-mobile md:font-headline-lg text-headline-lg-mobile md:text-headline-lg text-on-surface">
-      Select user
+      {{ chrome.t("admin-identity-picker-page-title") }}
     </h1>
-    <p class="font-body-md text-body-md text-on-surface-variant mt-1">Pick an identity to continue.</p>
+    <p class="font-body-md text-body-md text-on-surface-variant mt-1">{{ chrome.t("admin-identity-picker-subtitle") }}</p>
   </header>
 
   {% if invalid_return %}
     <div class="bg-error-container text-on-error-container border border-outline-variant rounded-xl px-4 py-3 font-body-md text-body-md">
-      Invalid return target.
+      {{ chrome.t("admin-identity-picker-invalid-return") }}
     </div>
   {% else %}
     <form method="GET"
@@ -25,21 +25,21 @@
       <input type="text"
              name="q"
              value="{{ filter_q }}"
-             placeholder="Search by ID or email"
+             placeholder="{{ chrome.t('admin-identity-picker-search-placeholder') }}"
              class="font-body-md text-body-md bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2 flex-1">
       <button type="submit"
               class="font-label-md text-label-md text-primary border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">
-        Search
+        {{ chrome.t("admin-identity-picker-search-button") }}
       </button>
     </form>
 
     <div class="bg-surface-container-lowest border border-outline-variant rounded-xl overflow-x-auto">
-      <table class="w-full text-left">
+      <table class="w-full text-start">
         <thead class="bg-surface-container-low">
           <tr>
-            <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Email</th>
-            <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">State</th>
-            <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Created</th>
+            <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">{{ chrome.t("admin-identity-picker-col-email") }}</th>
+            <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">{{ chrome.t("admin-identity-picker-col-state") }}</th>
+            <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">{{ chrome.t("admin-identity-picker-col-created") }}</th>
             <th class="px-4 py-3"></th>
           </tr>
         </thead>
@@ -48,14 +48,14 @@
             <tr>
               <td colspan="4"
                   class="px-4 py-6 text-center font-body-md text-body-md text-on-surface-variant">
-                No identities found.
+                {{ chrome.t("admin-identity-picker-empty") }}
               </td>
             </tr>
           {% else %}
             {% for r in rows %}
               <tr class="border-t border-outline-variant hover:bg-surface-container-low">
                 <td class="px-4 py-3 font-body-md text-body-md text-on-surface"
-                    title="{{ r.id }}">{{ r.email }}</td>
+                    title="{{ r.id }}"><bdi>{{ r.email }}</bdi></td>
                 <td class="px-4 py-3">
                   {% if r.state == "active" %}
                     <span class="inline-block px-2.5 py-0.5 rounded-full bg-success-container text-on-success-container font-label-sm text-label-sm font-semibold">{{ r.state }}</span>
@@ -65,9 +65,9 @@
                 </td>
                 <td class="px-4 py-3 font-body-sm text-body-sm text-on-surface-variant"
                     title="{{ r.created_at }}">{{ r.created_at_pretty }}</td>
-                <td class="px-4 py-3 text-right">
+                <td class="px-4 py-3 text-end">
                   <a href="{{ r.select_url }}"
-                     class="font-label-md text-label-md text-primary border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">Select</a>
+                     class="font-label-md text-label-md text-primary border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">{{ chrome.t("admin-identity-picker-action-select") }}</a>
                 </td>
               </tr>
             {% endfor %}
@@ -80,13 +80,13 @@
       <div class="mt-stack-md flex justify-between items-center">
         {% if !prev_url.is_empty() %}
           <a href="{{ prev_url }}"
-             class="font-label-md text-label-md text-on-surface-variant border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">&larr; Back to start</a>
+             class="font-label-md text-label-md text-on-surface-variant border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors"><span class="dir-flip">&larr;</span> {{ chrome.t("admin-identity-picker-prev") }}</a>
         {% else %}
           <span></span>
         {% endif %}
         {% if !next_page_url.is_empty() %}
           <a href="{{ next_page_url }}"
-             class="font-label-md text-label-md text-primary border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">Next page &rarr;</a>
+             class="font-label-md text-label-md text-primary border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">{{ chrome.t("admin-identity-picker-next") }} <span class="dir-flip">&rarr;</span></a>
         {% endif %}
       </div>
     {% endif %}

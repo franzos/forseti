@@ -19,7 +19,7 @@ use serde::Deserialize;
 use crate::csrf::CsrfForm;
 use crate::extractors::RequireSession;
 use crate::ory;
-use crate::page_chrome::{Chrome, PageChrome};
+use crate::page_chrome::{Chrome, PageChrome, ReqLocale};
 use crate::posix::db;
 use crate::render::render;
 use crate::state::AppState;
@@ -98,13 +98,14 @@ pub(crate) struct DeviceVerifyForm {
 pub(crate) async fn device_verify_submit(
     State(state): State<AppState>,
     _session: RequireSession,
+    ReqLocale(locale): ReqLocale,
     CsrfForm(form): CsrfForm<DeviceVerifyForm>,
 ) -> Response {
     // Re-load by user_code so a tampered POST can't accept a code with no
     // backing session.
     if load_target(&state, &form.user_code).await.is_none() {
         return render(&DeviceDoneTemplate {
-            chrome: anon_chrome(&state),
+            chrome: anon_chrome(&state, locale),
             error: true,
         });
     }
@@ -119,7 +120,7 @@ pub(crate) async fn device_verify_submit(
         Err(e) => {
             tracing::warn!(error = %e, "device_verify: accept_user_code_request failed");
             render(&DeviceDoneTemplate {
-                chrome: anon_chrome(&state),
+                chrome: anon_chrome(&state, locale),
                 error: true,
             })
         }
@@ -170,6 +171,6 @@ async fn load_target(state: &AppState, user_code: &str) -> Option<VerifyTarget> 
 
 /// Anonymous chrome for the POST error path (the `Chrome` extractor isn't
 /// available once the request body is consumed).
-fn anon_chrome(state: &AppState) -> PageChrome {
-    PageChrome::from_parts(state, String::new(), String::new())
+fn anon_chrome(state: &AppState, locale: crate::locale::LanguageIdentifier) -> PageChrome {
+    PageChrome::from_parts(state, String::new(), String::new(), locale)
 }

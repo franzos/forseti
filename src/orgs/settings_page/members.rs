@@ -72,8 +72,9 @@ pub(super) async fn members(
     headers: HeaderMap,
     sess: RequireSession,
     csrf: Csrf,
+    crate::page_chrome::ReqLocale(locale): crate::page_chrome::ReqLocale,
 ) -> Response {
-    let ctx = settings_ctx(&sess, &csrf);
+    let ctx = settings_ctx(&sess, &csrf, locale);
     let target = match resolve_org_or_404(&state, slug.as_deref()).await {
         Ok(t) => t,
         Err(r) => return r,
@@ -152,7 +153,7 @@ async fn render_members(
             email,
             display_name,
             role: m.role,
-            added_at: crate::format::humanise_timestamp(&m.added_at),
+            added_at: crate::format::humanise_timestamp(&ctx.locale, &m.added_at),
             avatar_url,
             identicon_svg,
             hidden,
@@ -168,8 +169,8 @@ async fn render_members(
                 token: i.token,
                 email: i.email,
                 role: i.role,
-                expires_at: crate::format::humanise_timestamp(&i.expires_at),
-                invited_at: crate::format::humanise_timestamp(&i.created_at),
+                expires_at: crate::format::humanise_timestamp(&ctx.locale, &i.expires_at),
+                invited_at: crate::format::humanise_timestamp(&ctx.locale, &i.created_at),
             })
             .collect()
     } else {
@@ -178,7 +179,12 @@ async fn render_members(
     let nav = build_nav(state, headers, &ctx.identity_id).await;
     let visibility = policy.as_str().to_string();
     let mut resp = render(&MembersTemplate {
-        chrome: PageChrome::from_parts(state, ctx.user_email.clone(), ctx.csrf_token.clone()),
+        chrome: PageChrome::from_parts(
+            state,
+            ctx.user_email.clone(),
+            ctx.csrf_token.clone(),
+            ctx.locale.clone(),
+        ),
         is_default: org.id == orgs::DEFAULT_ORG_ID,
         org,
         members,

@@ -1,14 +1,12 @@
 {% extends "admin/admin_shell.html" %}
 
-{% block admin_title %}License{% endblock %}
+{% block admin_title %}{{ chrome.t("license-page-title") }}{% endblock %}
 
 {% block admin_content %}
   <section class="flex-1 flex flex-col gap-stack-lg">
     <div>
-      <h1 class="font-headline-lg text-headline-lg text-on-surface">License</h1>
-      <p class="font-body-md text-body-md text-on-surface-variant mt-1">
-        Activate a commercial-tier license to unlock organizations, SAML connectors, SCIM provisioning, and more. The open-source build runs everything else.
-      </p>
+      <h1 class="font-headline-lg text-headline-lg text-on-surface">{{ chrome.t("license-page-title") }}</h1>
+      <p class="font-body-md text-body-md text-on-surface-variant mt-1">{{ chrome.t("license-intro") }}</p>
     </div>
 
     {% if !flash.is_empty() %}
@@ -55,7 +53,7 @@
     <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg flex flex-col gap-stack-md">
       <div class="flex items-center justify-between flex-wrap gap-stack-md">
         <div class="flex items-center gap-3">
-          <h2 class="font-headline-sm text-headline-sm text-on-surface">Status</h2>
+          <h2 class="font-headline-sm text-headline-sm text-on-surface">{{ chrome.t("license-status") }}</h2>
           {% if state_label == "Active" %}
             <span class="inline-flex items-center font-label-sm text-label-sm bg-tertiary-fixed text-on-tertiary-fixed rounded-full px-3 py-0.5">{{ state_label }}</span>
           {% else if state_label == "Grace" %}
@@ -72,7 +70,7 @@
             <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
             <button type="submit"
                     class="font-label-md text-label-md text-error border border-error rounded-lg px-4 py-2 hover:bg-error-container hover:text-on-error-container transition-colors focus:outline-none focus:ring-2 focus:ring-error focus:ring-offset-2">
-              Deactivate
+              {{ chrome.t("license-deactivate") }}
             </button>
           </form>
         {% endif %}
@@ -81,50 +79,50 @@
       {% if has_license %}
         <dl class="grid grid-cols-1 sm:grid-cols-2 gap-stack-md">
           <div>
-            <dt class="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-wide">Customer</dt>
+            <dt class="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-wide">{{ chrome.t("license-customer") }}</dt>
             <dd class="font-body-md text-body-md text-on-surface">
-              {{ customer }}
+              <bdi>{{ customer }}</bdi>
             </dd>
           </div>
           <div>
-            <dt class="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-wide">Contact</dt>
+            <dt class="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-wide">{{ chrome.t("license-contact") }}</dt>
             <dd class="font-body-md text-body-md text-on-surface">
-              {{ email }}
+              <bdi>{{ email }}</bdi>
             </dd>
           </div>
           <div>
-            <dt class="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-wide">Tier</dt>
+            <dt class="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-wide">{{ chrome.t("license-tier") }}</dt>
             <dd class="font-body-md text-body-md text-on-surface">
               {{ tier_label }}
             </dd>
           </div>
           <div>
-            <dt class="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-wide">Issued</dt>
+            <dt class="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-wide">{{ chrome.t("license-issued") }}</dt>
             <dd class="font-body-md text-body-md text-on-surface">
               {{ issued_at }}
             </dd>
           </div>
           <div>
-            <dt class="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-wide">Expires</dt>
+            <dt class="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-wide">{{ chrome.t("license-expires") }}</dt>
             <dd class="font-body-md text-body-md text-on-surface">
               {% if is_lifetime %}
-                Lifetime
+                {{ chrome.t("license-lifetime") }}
               {% else %}
                 {{ expires_at }}
               {% endif %}
             </dd>
           </div>
           <div>
-            <dt class="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-wide">Max organizations</dt>
+            <dt class="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-wide">{{ chrome.t("license-max-orgs") }}</dt>
             <dd class="font-body-md text-body-md text-on-surface">
               {{ max_orgs_label }}
             </dd>
           </div>
           <div class="sm:col-span-2">
-            <dt class="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-wide">Unlocked features</dt>
+            <dt class="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-wide">{{ chrome.t("license-unlocked-features") }}</dt>
             <dd class="flex flex-wrap gap-1.5 mt-1">
               {% if features.is_empty() %}
-                <span class="font-body-sm text-body-sm text-on-surface-variant">None</span>
+                <span class="font-body-sm text-body-sm text-on-surface-variant">{{ chrome.t("license-none") }}</span>
               {% else %}
                 {% for f in features %}
                   <span class="font-label-sm text-label-sm bg-surface-container border border-outline-variant rounded-full px-2.5 py-0.5 text-on-surface-variant">{{ f }}</span>
@@ -134,47 +132,43 @@
           </div>
         </dl>
       {% else %}
-        <p class="font-body-md text-body-md text-on-surface-variant">
-          No commercial license is active. Premium features are gated until a valid license is activated below.
-        </p>
+        <p class="font-body-md text-body-md text-on-surface-variant">{{ chrome.t("license-no-license") }}</p>
       {% endif %}
     </div>
 
     <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg flex flex-col gap-stack-md">
       <h2 class="font-headline-sm text-headline-sm text-on-surface">
         {% if has_license %}
-          Replace license
+          {{ chrome.t("license-replace") }}
         {% else %}
-          Activate license
+          {{ chrome.t("license-activate-heading") }}
         {% endif %}
       </h2>
-      <p class="font-body-sm text-body-sm text-on-surface-variant">
-        Paste the license blob you received from sales. Activation runs locally — the signature is verified against this binary's baked-in public key. Nothing is sent over the network.
-      </p>
+      <p class="font-body-sm text-body-sm text-on-surface-variant">{{ chrome.t("license-activate-intro") }}</p>
       <form method="POST"
             action="/admin/license/activate"
             class="flex flex-col gap-stack-md">
         <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
         <label class="flex flex-col gap-stack-sm">
-          <span class="font-label-sm text-label-sm text-on-surface-variant">License key</span>
+          <span class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("license-key-label") }}</span>
           <textarea name="blob"
                     rows="6"
                     required
                     spellcheck="false"
                     autocomplete="off"
-                    placeholder="Paste your base64 license key here..."
+                    placeholder="{{ chrome.t("license-key-placeholder") }}"
                     class="font-mono text-body-sm bg-surface-container border border-outline-variant rounded-lg p-stack-md focus:outline-none focus:ring-2 focus:ring-primary"></textarea>
         </label>
         <div class="flex items-center gap-stack-md">
           <button type="submit"
                   class="font-label-md text-label-md bg-primary text-on-primary rounded-lg px-4 py-2 hover:opacity-90 transition-opacity focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2">
-            Activate
+            {{ chrome.t("license-activate") }}
           </button>
           {% if !purchase_url.is_empty() && purchase_url != "#" %}
             <a href="{{ purchase_url }}"
                target="_blank"
                rel="noopener noreferrer"
-               class="font-label-md text-label-md text-primary hover:underline">Get a license &rarr;</a>
+               class="font-label-md text-label-md text-primary hover:underline">{{ chrome.t("license-get") }} <span class="dir-flip">&rarr;</span></a>
           {% endif %}
         </div>
       </form>
@@ -182,7 +176,7 @@
 
     <div>
       <a href="/admin/status"
-         class="font-label-md text-label-md text-on-surface-variant hover:text-primary transition-colors">&larr; Back to admin</a>
+         class="font-label-md text-label-md text-on-surface-variant hover:text-primary transition-colors"><span class="dir-flip">&larr;</span> {{ chrome.t("license-back") }}</a>
     </div>
   </section>
 {% endblock %}

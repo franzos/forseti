@@ -149,7 +149,9 @@ pub async fn show(State(state): State<AppState>, admin: RequireAdmin) -> Respons
             .map(|ts| ts.to_rfc3339())
             .unwrap_or_else(|| format!("epoch:{secs}"))
     });
-    let last_kratos_webhook_pretty = last_kratos_webhook_full.as_deref().map(humanise_timestamp);
+    let last_kratos_webhook_pretty = last_kratos_webhook_full
+        .as_deref()
+        .map(|ts| humanise_timestamp(&ctx.locale, ts));
 
     let audit_write_failures = crate::audit::audit_write_failures_total();
     let audit_webhook_rejected = crate::audit::kratos_webhook_rejected_total();
@@ -171,7 +173,7 @@ pub async fn show(State(state): State<AppState>, admin: RequireAdmin) -> Respons
     };
 
     render(&StatusTemplate {
-        chrome: PageChrome::from_parts(&state, ctx.email, String::new()),
+        chrome: PageChrome::from_parts(&state, ctx.email, String::new(), ctx.locale.clone()),
         admin_active: AdminSection::Status,
         services,
         courier_pending,

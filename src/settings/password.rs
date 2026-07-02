@@ -48,6 +48,7 @@ pub(crate) async fn settings_password(
     sess: crate::extractors::RequireSession,
     csrf: crate::extractors::Csrf,
     banner: crate::handoff::ReferrerBanner,
+    crate::page_chrome::ReqLocale(locale): crate::page_chrome::ReqLocale,
 ) -> Response {
     // SSO arrivals get dumped here by the recovery redemption; the
     // breadcrumb marks them for a bounce to the dashboard instead.
@@ -75,6 +76,7 @@ pub(crate) async fn settings_password(
         &sess,
         banner,
         false,
+        locale,
     )
     .await
 }

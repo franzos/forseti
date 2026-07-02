@@ -1,10 +1,10 @@
 {% extends "admin/admin_shell.html" %}
 
-{% block admin_title %}Provision POSIX account{% endblock %}
+{% block admin_title %}{{ chrome.t("admin-posix-new-page-title") }}{% endblock %}
 
 {% block admin_content %}
   <div class="max-w-2xl">
-    <h1 class="font-headline-lg text-headline-lg text-on-surface mb-stack-sm">Provision a POSIX account</h1>
+    <h1 class="font-headline-lg text-headline-lg text-on-surface mb-stack-sm">{{ chrome.t("admin-posix-new-heading") }}</h1>
 
     {% if !error_message.is_empty() %}
       <div class="bg-error-container border border-error rounded-lg p-3 mb-stack-md">
@@ -13,29 +13,29 @@
     {% endif %}
 
     {% if identity_id.is_empty() %}
-      <p class="font-body-md text-body-md text-on-surface-variant mb-stack-lg">Choose the identity to provision.</p>
+      <p class="font-body-md text-body-md text-on-surface-variant mb-stack-lg">{{ chrome.t("admin-posix-new-choose-identity") }}</p>
 
       <div class="flex flex-col gap-stack-md">
         <a href="/admin/identity-picker?return_to=/admin/posix/new"
-           class="bg-primary text-on-primary font-label-md text-label-md font-bold px-4 py-2 rounded-lg hover:opacity-90 transition-opacity self-start">Select user</a>
+           class="bg-primary text-on-primary font-label-md text-label-md font-bold px-4 py-2 rounded-lg hover:opacity-90 transition-opacity self-start">{{ chrome.t("admin-posix-new-action-select-user") }}</a>
 
         <form method="GET"
               action="/admin/posix/new"
               class="flex items-end gap-stack-sm">
           <label class="flex flex-col gap-stack-xs">
-            <span class="font-label-md text-label-md text-on-surface">Or enter directly</span>
+            <span class="font-label-md text-label-md text-on-surface">{{ chrome.t("admin-posix-new-or-enter-directly") }}</span>
             <input type="text"
                    name="identity_id"
-                   placeholder="UUID or email"
+                   placeholder="{{ chrome.t('admin-posix-new-placeholder-id') }}"
                    class="font-mono text-body-sm bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2 w-80">
           </label>
           <button type="submit"
-                  class="font-label-md text-label-md text-on-surface-variant border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">Continue</button>
+                  class="font-label-md text-label-md text-on-surface-variant border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">{{ chrome.t("admin-posix-new-action-continue") }}</button>
         </form>
       </div>
     {% else %}
       <p class="font-body-md text-body-md text-on-surface-variant mb-stack-lg">
-        Materialise a Kratos identity into a Linux account. A uid/gid is allocated automatically and a primary group created.
+        {{ chrome.t("admin-posix-new-provision-intro") }}
       </p>
 
       <form method="POST"
@@ -45,37 +45,37 @@
         <input type="hidden" name="identity_id" value="{{ identity_id }}">
 
         <div class="flex items-center gap-stack-sm">
-          <span class="font-body-md text-body-md text-on-surface">Selected: <span class="font-medium">{{ identity_email }}</span></span>
+          <span class="font-body-md text-body-md text-on-surface">{{ chrome.t("admin-posix-new-selected-prefix") }} <span class="font-medium"><bdi>{{ identity_email }}</bdi></span></span>
           <a href="/admin/posix/new"
-             class="font-label-sm text-label-sm text-primary hover:underline">Change</a>
+             class="font-label-sm text-label-sm text-primary hover:underline">{{ chrome.t("admin-posix-new-action-change") }}</a>
         </div>
 
         <label class="flex flex-col gap-stack-xs">
-          <span class="font-label-md text-label-md text-on-surface">Username</span>
+          <span class="font-label-md text-label-md text-on-surface">{{ chrome.t("admin-posix-new-field-username") }}</span>
           <input type="text"
                  name="username"
                  value="{{ username }}"
                  required
                  class="font-body-md text-body-md bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2 w-64">
-          <span class="font-label-sm text-label-sm text-on-surface-variant">Suggested from the email; edit if you like. 1–32 chars, lowercase, starting with a letter or underscore. This becomes the POSIX login name.</span>
+          <span class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-posix-new-username-hint") }}</span>
         </label>
 
         <label class="flex flex-col gap-stack-xs">
-          <span class="font-label-md text-label-md text-on-surface">Login shell</span>
+          <span class="font-label-md text-label-md text-on-surface">{{ chrome.t("admin-posix-new-field-shell") }}</span>
           <input type="text"
                  name="shell"
                  value="{{ shell }}"
                  class="font-body-md text-body-md bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2 w-64">
-          <span class="font-label-sm text-label-sm text-on-surface-variant">Must exist on the device(s) that serve this account; <code>/bin/sh</code> is the safe cross-distro default (Guix has no <code>/bin/bash</code>). Home dir is derived from the home prefix + username.</span>
+          <span class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-posix-new-shell-hint-part1") }} <code>/bin/sh</code> {{ chrome.t("admin-posix-new-shell-hint-part2") }} <code>/bin/bash</code>{{ chrome.t("admin-posix-new-shell-hint-part3") }}</span>
         </label>
 
         <div class="flex items-center gap-stack-md mt-stack-sm">
           <button type="submit"
                   class="bg-primary text-on-primary font-label-md text-label-md font-bold px-4 py-2 rounded-lg hover:opacity-90 transition-opacity">
-            Provision account
+            {{ chrome.t("admin-posix-action-provision") }}
           </button>
           <a href="/admin/posix"
-             class="font-label-md text-label-md text-on-surface-variant border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">Cancel</a>
+             class="font-label-md text-label-md text-on-surface-variant border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">{{ chrome.t("admin-posix-new-action-cancel") }}</a>
         </div>
       </form>
     {% endif %}

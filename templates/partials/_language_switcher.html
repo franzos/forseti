@@ -1,0 +1,13 @@
+{# Language switcher: GET form to the current path with ?lang=<code>. resolve_locale
+   picks up the param and writes the forseti_locale cookie. Existing query params on
+   the current URL are dropped on submit (acceptable). #}
+<form method="get" class="inline-flex items-center">
+  <label for="lang-select" class="sr-only">{{ chrome.t("nav-language-label") }}</label>
+  <select id="lang-select"
+          name="lang"
+          onchange="this.form.submit()"
+          class="font-label-sm text-label-sm text-on-surface-variant bg-transparent border border-outline-variant rounded-md px-2 py-1 cursor-pointer hover:border-outline focus:outline-none focus:ring-2 focus:ring-primary">
+    <option value="en"{% if chrome.is_locale("en") %} selected{% endif %}>{{ chrome.t("nav-language-en") }}</option>
+    <option value="de"{% if chrome.is_locale("de") %} selected{% endif %}>{{ chrome.t("nav-language-de") }}</option>
+  </select>
+</form>

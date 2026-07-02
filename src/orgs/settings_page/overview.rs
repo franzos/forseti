@@ -64,8 +64,9 @@ pub(super) async fn overview(
     headers: HeaderMap,
     sess: RequireSession,
     csrf: Csrf,
+    crate::page_chrome::ReqLocale(locale): crate::page_chrome::ReqLocale,
 ) -> Response {
-    let ctx = settings_ctx(&sess, &csrf);
+    let ctx = settings_ctx(&sess, &csrf, locale);
     let target = match resolve_org_or_404(&state, slug.as_deref()).await {
         Ok(t) => t,
         Err(r) => return r,
@@ -89,8 +90,9 @@ pub(super) async fn overview_info(
     headers: HeaderMap,
     sess: RequireSession,
     csrf: Csrf,
+    crate::page_chrome::ReqLocale(locale): crate::page_chrome::ReqLocale,
 ) -> Response {
-    let ctx = settings_ctx(&sess, &csrf);
+    let ctx = settings_ctx(&sess, &csrf, locale);
     let target = match resolve_org_or_404(&state, slug.as_deref()).await {
         Ok(t) => t,
         Err(r) => return r,
@@ -136,7 +138,12 @@ async fn render_overview_info(
     let sso = sso_status(state, &org).await;
     let nav = build_nav(state, headers, &ctx.identity_id).await;
     render(&OverviewInfoTemplate {
-        chrome: PageChrome::from_parts(state, ctx.user_email.clone(), ctx.csrf_token.clone()),
+        chrome: PageChrome::from_parts(
+            state,
+            ctx.user_email.clone(),
+            ctx.csrf_token.clone(),
+            ctx.locale.clone(),
+        ),
         is_default: org.id == orgs::DEFAULT_ORG_ID,
         org,
         member_count: members.len(),
@@ -174,7 +181,12 @@ async fn render_overview(
     let sso = sso_status(state, org).await;
     let nav = build_nav(state, headers, &ctx.identity_id).await;
     render(&OverviewTemplate {
-        chrome: PageChrome::from_parts(state, ctx.user_email.clone(), ctx.csrf_token.clone()),
+        chrome: PageChrome::from_parts(
+            state,
+            ctx.user_email.clone(),
+            ctx.csrf_token.clone(),
+            ctx.locale.clone(),
+        ),
         is_default: org.id == orgs::DEFAULT_ORG_ID,
         org: org.clone(),
         is_owner,

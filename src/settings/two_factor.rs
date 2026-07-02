@@ -10,8 +10,8 @@ use axum::response::Response;
 
 use crate::flow_view::{
     collect_default_hidden, collect_input_nodes, collect_webauthn_scripts, flow_messages,
-    form_target, group_has_node, lookup_codes, session_email, totp_qr_and_secret, InputView,
-    MessageView, ScriptView,
+    form_target, group_has_node, lookup_codes, session_email, totp_qr_and_secret, translate_inputs,
+    translate_messages, InputView, MessageView, ScriptView,
 };
 use crate::ory;
 use crate::page_chrome::PageChrome;
@@ -61,10 +61,19 @@ pub(crate) async fn settings_2fa(
     sess: crate::extractors::RequireSession,
     csrf: crate::extractors::Csrf,
     banner: crate::handoff::ReferrerBanner,
+    crate::page_chrome::ReqLocale(locale): crate::page_chrome::ReqLocale,
 ) -> Response {
-    match fetch_settings_subpage(&state, &headers, &query, SettingsSection::TwoFactor, &sess).await
+    match fetch_settings_subpage(
+        &state,
+        &headers,
+        &query,
+        SettingsSection::TwoFactor,
+        &sess,
+        &locale,
+    )
+    .await
     {
-        Ok((session, flow)) => render_2fa(&state, &csrf.0, &session, &flow, banner.0),
+        Ok((session, flow)) => render_2fa(&state, &csrf.0, &session, &flow, banner.0, locale),
         Err(resp) => resp,
     }
 }
@@ -75,13 +84,20 @@ fn render_2fa(
     session: &ory::Session,
     flow: &serde_json::Value,
     referrer_banner: Option<crate::handoff::ReferrerBannerView>,
+    locale: crate::locale::LanguageIdentifier,
 ) -> Response {
     let (form_action, form_method) = form_target(flow);
-    let hidden_defaults = collect_default_hidden(flow);
+    let mut hidden_defaults = collect_default_hidden(flow);
     let mut totp_nodes = collect_input_nodes(flow, "totp");
     let mut lookup_nodes = collect_input_nodes(flow, "lookup_secret");
     let mut webauthn_nodes = collect_input_nodes(flow, "webauthn");
-    webauthn_nodes.extend(collect_input_nodes(flow, "passkey"));
+    let mut passkey_nodes = collect_input_nodes(flow, "passkey");
+    translate_inputs(&mut hidden_defaults, &locale);
+    translate_inputs(&mut totp_nodes, &locale);
+    translate_inputs(&mut lookup_nodes, &locale);
+    translate_inputs(&mut webauthn_nodes, &locale);
+    translate_inputs(&mut passkey_nodes, &locale);
+    webauthn_nodes.extend(passkey_nodes);
 
     // Promote the non-destructive CTA in each section (Verify / Generate / Add
     // key); unlink/disable/regenerate stay secondary.
@@ -109,11 +125,18 @@ fn render_2fa(
     let needs_recovery_codes = (totp_enrolled || webauthn_enrolled) && !lookup_enrolled;
     let webauthn_scripts = collect_webauthn_scripts(flow);
 
+    let mut msgs = flow_messages(flow);
+    translate_messages(&mut msgs, &locale);
     render(&Settings2faTemplate {
-        chrome: PageChrome::from_parts(state, session_email(session), csrf_token.to_string()),
+        chrome: PageChrome::from_parts(
+            state,
+            session_email(session),
+            csrf_token.to_string(),
+            locale,
+        ),
         form_action,
         form_method,
-        flow_messages: flow_messages(flow),
+        flow_messages: msgs,
         hidden_defaults,
         totp_nodes,
         totp_qr,

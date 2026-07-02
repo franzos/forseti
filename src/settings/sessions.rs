@@ -38,6 +38,7 @@ pub(crate) async fn settings_sessions(
     sess: crate::extractors::RequireSession,
     csrf: Csrf,
     banner: crate::handoff::ReferrerBanner,
+    crate::page_chrome::ReqLocale(locale): crate::page_chrome::ReqLocale,
 ) -> Response {
     let cookie = cookies::cookie_header(&headers);
     let session = sess.session;
@@ -53,10 +54,11 @@ pub(crate) async fn settings_sessions(
             tracing::error!(error = ?e, "list_my_sessions failed");
             return render_error_boundary(
                 &state,
-                "Sessions unavailable",
-                "We couldn't list your active sessions. Please try again in a moment.",
+                &locale,
+                &crate::i18n::lookup(&locale, "error-boundary-sessions-title"),
+                &crate::i18n::lookup(&locale, "error-boundary-sessions-body"),
                 "/settings",
-                "Back to settings",
+                crate::i18n::lookup(&locale, "error-boundary-cta-back-to-settings"),
             )
             .into_response();
         }
@@ -65,16 +67,16 @@ pub(crate) async fn settings_sessions(
     let mut rows: Vec<SessionView> = Vec::with_capacity(other_sessions.len() + 1);
     // Kratos's `/sessions` returns other sessions only; synthesize the current
     // one from `whoami` so the UI shows a complete picture.
-    rows.push(SessionView::from_kratos(&session, true));
+    rows.push(SessionView::from_kratos(&locale, &session, true));
     for s in &other_sessions {
-        rows.push(SessionView::from_kratos(s, false));
+        rows.push(SessionView::from_kratos(&locale, s, false));
     }
 
     let has_other_sessions = !other_sessions.is_empty();
 
     let (flash_msg, clear_flash) = state.take_flash(&headers, "/settings/sessions");
     let body = render(&SettingsSessionsTemplate {
-        chrome: PageChrome::from_parts(&state, session_email(&session), csrf.0),
+        chrome: PageChrome::from_parts(&state, session_email(&session), csrf.0, locale),
         sessions: rows,
         has_other_sessions,
         flash: flash_msg,
@@ -89,6 +91,7 @@ pub(crate) async fn settings_sessions_revoke(
     headers: HeaderMap,
     sess: crate::extractors::RequireSession,
     actx: AuditCtx,
+    crate::page_chrome::ReqLocale(locale): crate::page_chrome::ReqLocale,
     _: CsrfForm<crate::csrf::NoPayload>,
 ) -> Response {
     let cookie = cookies::cookie_header(&headers);
@@ -102,10 +105,16 @@ pub(crate) async fn settings_sessions_revoke(
     )
     .await
     {
-        Ok(()) => ("Session signed out.", true),
+        Ok(()) => (
+            crate::i18n::lookup(&locale, "flash-session-signed-out"),
+            true,
+        ),
         Err(e) => {
             tracing::error!(error = ?e, session_id, "revoke_session failed");
-            ("Could not sign out that session.", false)
+            (
+                crate::i18n::lookup(&locale, "flash-session-signout-failed"),
+                false,
+            )
         }
     };
     if ok {
@@ -118,7 +127,7 @@ pub(crate) async fn settings_sessions_revoke(
         )
         .await;
     }
-    state.flash_redirect("/settings/sessions", msg)
+    state.flash_redirect("/settings/sessions", &msg)
 }
 
 pub(crate) async fn settings_sessions_revoke_others(
@@ -126,6 +135,7 @@ pub(crate) async fn settings_sessions_revoke_others(
     headers: HeaderMap,
     sess: crate::extractors::RequireSession,
     actx: AuditCtx,
+    crate::page_chrome::ReqLocale(locale): crate::page_chrome::ReqLocale,
     _: CsrfForm<crate::csrf::NoPayload>,
 ) -> Response {
     let cookie = cookies::cookie_header(&headers);
@@ -147,14 +157,16 @@ pub(crate) async fn settings_sessions_revoke_others(
                     .metadata(audit_metadata!("count" => n)),
             )
             .await;
-            format!(
-                "Signed out {n} other session{}.",
-                if n == 1 { "" } else { "s" }
-            )
+            let mut args: std::collections::HashMap<
+                std::borrow::Cow<'static, str>,
+                fluent_templates::fluent_bundle::FluentValue,
+            > = std::collections::HashMap::new();
+            args.insert(std::borrow::Cow::Borrowed("count"), (n as i64).into());
+            crate::i18n::lookup_args(&locale, "flash-sessions-signed-out-others", &args)
         }
         Err(e) => {
             tracing::error!(error = ?e, "revoke_other_sessions failed");
-            "Could not sign out other sessions.".to_string()
+            crate::i18n::lookup(&locale, "flash-sessions-signout-others-failed")
         }
     };
     state.flash_redirect("/settings/sessions", &msg)

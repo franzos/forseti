@@ -42,8 +42,9 @@ pub(super) async fn orgs_list(
     headers: HeaderMap,
     sess: RequireSession,
     csrf: Csrf,
+    crate::page_chrome::ReqLocale(locale): crate::page_chrome::ReqLocale,
 ) -> Response {
-    let ctx = settings_ctx(&sess, &csrf);
+    let ctx = settings_ctx(&sess, &csrf, locale);
     let memberships = orgs::list_memberships(&state.db, &ctx.identity_id)
         .await
         .unwrap_or_default();
@@ -60,7 +61,7 @@ pub(super) async fn orgs_list(
         && crate::commercial::license::org_cap_allows(max_orgs, current);
     let nav = build_nav(&state, &headers, &ctx.identity_id).await;
     render(&OrgsListTemplate {
-        chrome: PageChrome::from_parts(&state, ctx.user_email, ctx.csrf_token),
+        chrome: PageChrome::from_parts(&state, ctx.user_email, ctx.csrf_token, ctx.locale),
         memberships,
         can_create,
         required_tier_label: "Business".to_string(),
@@ -81,6 +82,7 @@ pub(super) async fn orgs_create(
     sess: RequireSession,
     csrf: Csrf,
     actx: AuditCtx,
+    crate::page_chrome::ReqLocale(locale): crate::page_chrome::ReqLocale,
     CsrfForm(form): CsrfForm<CreateOrgForm>,
 ) -> Response {
     let identity_id = sess.identity_id;
@@ -94,7 +96,7 @@ pub(super) async fn orgs_create(
         Err(resp) => return resp,
     };
     if !matches!(feat_status, crate::commercial::FeatureStatus::Allowed) {
-        return render_upsell(&state, &csrf.0, &email, Feature::Orgs);
+        return render_upsell(&state, &csrf.0, &email, Feature::Orgs, locale.clone());
     }
     let max_orgs = state
         .license
@@ -103,7 +105,7 @@ pub(super) async fn orgs_create(
         .map_or(Some(0), |l| l.max_orgs);
     let current = orgs::count_orgs(&state.db).await.unwrap_or(0);
     if !crate::commercial::license::org_cap_allows(max_orgs, current) {
-        return render_upsell(&state, &csrf.0, &email, Feature::Orgs);
+        return render_upsell(&state, &csrf.0, &email, Feature::Orgs, locale);
     }
 
     let name = form.name.trim();

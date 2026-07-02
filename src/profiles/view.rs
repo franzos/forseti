@@ -60,6 +60,7 @@ pub(crate) async fn show_profile(
     Path(identity_id): Path<String>,
     sess: RequireSession,
     csrf: Csrf,
+    crate::page_chrome::ReqLocale(locale): crate::page_chrome::ReqLocale,
 ) -> Response {
     if !state.cfg.profiles.enabled {
         return (StatusCode::NOT_FOUND, "profiles disabled").into_response();
@@ -207,12 +208,12 @@ pub(crate) async fn show_profile(
         .await
         .unwrap_or_default();
     let identicon = profiles::identicon::render(&identity_id);
-    let updated_humanised = crate::format::humanise_timestamp(&profile.updated_at);
+    let updated_humanised = crate::format::humanise_timestamp(&locale, &profile.updated_at);
     let token = csrf.0;
     let nav = crate::orgs::nav::OrgNav::from(None, viewer_memberships);
 
     let mut resp = render(&ProfileViewTemplate {
-        chrome: PageChrome::from_parts(&state, sess.email, token),
+        chrome: PageChrome::from_parts(&state, sess.email, token, locale),
         identicon,
         display_name,
         email,

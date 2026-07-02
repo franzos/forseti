@@ -35,10 +35,7 @@ async fn accounts_forget_requires_csrf() {
     let client = browser_client();
     let res = client
         .post(format!("{PORTAL}/accounts/forget"))
-        .form(&[
-            ("_csrf", "wrong-token"),
-            ("identity_id", "some-uuid"),
-        ])
+        .form(&[("_csrf", "wrong-token"), ("identity_id", "some-uuid")])
         .send()
         .await
         .expect("POST /accounts/forget (bad csrf)");
@@ -135,11 +132,18 @@ async fn accounts_switch_tears_down_and_redirects() {
     );
 
     // At least one Set-Cookie should clear forseti_active_org.
-    let clears_active_org = res.headers().get_all(reqwest::header::SET_COOKIE).iter().any(|v| {
-        v.to_str()
-            .map(|s| s.contains("forseti_active_org") && (s.contains("Max-Age=0") || s.to_ascii_lowercase().contains("expires")))
-            .unwrap_or(false)
-    });
+    let clears_active_org = res
+        .headers()
+        .get_all(reqwest::header::SET_COOKIE)
+        .iter()
+        .any(|v| {
+            v.to_str()
+                .map(|s| {
+                    s.contains("forseti_active_org")
+                        && (s.contains("Max-Age=0") || s.to_ascii_lowercase().contains("expires"))
+                })
+                .unwrap_or(false)
+        });
     assert!(
         clears_active_org,
         "switch should emit a Set-Cookie clearing forseti_active_org"
@@ -168,8 +172,7 @@ async fn consent_remember_appends_known_account() {
     );
 
     let user = register_test_user("acct-consent-remember").await;
-    let (client_id, _secret, redirect_uri) =
-        hydra_create_test_client(&["openid", "profile"]).await;
+    let (client_id, _secret, redirect_uri) = hydra_create_test_client(&["openid", "profile"]).await;
 
     let auth_url = oauth_auth_url(&client_id, &redirect_uri, "openid profile", "");
     let (consent_challenge, csrf, _body) = drive_to_consent(&user.client, &auth_url).await;

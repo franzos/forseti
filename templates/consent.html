@@ -1,6 +1,6 @@
 {% extends "card.html" %}
 
-{% block title %}Authorize {{ client_name }} &middot; {{ chrome.brand.name }}{% endblock %}
+{% block title %}{{ chrome.tv1("consent-card-title", "app", &client_name) }} &middot; {{ chrome.brand.name }}{% endblock %}
 
 {% block card_icon %}
   <div class="w-12 h-12 bg-primary rounded-lg flex items-center justify-center mb-stack-sm"
@@ -19,12 +19,12 @@
   </div>
 {% endblock %}
 
-{% block card_title %}Authorize {{ client_name }}{% endblock %}
+{% block card_title %}{{ chrome.tv1("consent-card-title", "app", &client_name) }}{% endblock %}
 {% block card_subtitle %}{{ consent_intro }}{% endblock %}
 
 {% block card_body %}
   <p class="font-body-sm text-body-sm text-on-surface-variant">
-    Signed in as <strong class="text-on-surface">{{ subject_email }}</strong>.
+    {{ chrome.t("consent-signed-in-as-prefix") }} <strong class="text-on-surface"><bdi>{{ subject_email }}</bdi></strong>.
   </p>
 
   <form method="POST" action="/oauth/consent">
@@ -34,20 +34,20 @@
             name="decision"
             value="switch_account"
             class="font-label-sm text-label-sm text-primary underline hover:text-primary-hover focus:outline-none focus:ring-2 focus:ring-primary rounded">
-      Not you? Use a different account
+      {{ chrome.t("consent-switch-account") }}
     </button>
   </form>
 
   {% if !known_accounts.is_empty() %}
     <div class="flex flex-col gap-stack-sm">
-      <p class="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-wider">Switch account</p>
+      <p class="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-wider">{{ chrome.t("consent-account-switcher-heading") }}</p>
       {% for acct in known_accounts %}
         <form method="POST" action="/oauth/consent/switch" class="inline">
           <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
           <input type="hidden" name="consent_challenge" value="{{ challenge }}">
           <input type="hidden" name="identity_id" value="{{ acct.id }}">
           <button type="submit"
-                  class="w-full text-left font-body-sm text-body-sm text-primary underline hover:text-primary-hover focus:outline-none focus:ring-2 focus:ring-primary rounded">
+                  class="w-full text-start font-body-sm text-body-sm text-primary underline hover:text-primary-hover focus:outline-none focus:ring-2 focus:ring-primary rounded">
             {{ acct.label }}
           </button>
         </form>
@@ -57,7 +57,7 @@
 
   {% if verified %}
     <p class="flex items-center gap-1 font-label-sm text-label-sm text-on-surface-variant"
-       title="Reviewed by your administrator">
+       title="{{ chrome.t('consent-verified-by-admin') }}">
       <svg xmlns="http://www.w3.org/2000/svg"
            width="16"
            height="16"
@@ -72,7 +72,7 @@
         <path d="M9 12l2 2 4-4" />
         <circle cx="12" cy="12" r="10" />
       </svg>
-      Reviewed by your administrator
+      {{ chrome.t("consent-verified-by-admin") }}
     </p>
   {% else %}
     <div class="bg-error-container border border-error rounded-lg p-3 flex items-start gap-stack-sm">
@@ -92,7 +92,7 @@
         <line x1="12" y1="17" x2="12.01" y2="17" />
       </svg>
       <p class="font-body-sm text-body-sm text-on-error-container">
-        <strong>This application has not been reviewed by an administrator.</strong> Only proceed if you trust it.
+        <strong>{{ chrome.t("consent-unverified-warning-title") }}</strong> {{ chrome.t("consent-unverified-warning-body") }}
       </p>
     </div>
   {% endif %}
@@ -104,7 +104,7 @@
     <input type="hidden" name="consent_challenge" value="{{ challenge }}">
 
     <div class="bg-surface-container-low border border-outline-variant rounded-lg p-stack-md flex flex-col gap-stack-sm">
-      <p class="font-label-sm text-label-sm text-on-surface uppercase tracking-wider">This app is requesting</p>
+      <p class="font-label-sm text-label-sm text-on-surface uppercase tracking-wider">{{ chrome.t("consent-requesting-heading") }}</p>
       <ul class="flex flex-col gap-stack-sm">
         {% for scope in scopes %}
           <li class="flex items-start gap-stack-sm">
@@ -123,7 +123,7 @@
                      class="flex-1 font-body-sm text-body-sm text-on-surface">
                 {{ scope.description }}
                 <span class="block font-label-sm text-label-sm text-on-surface-variant"
-                      title="Required for sign-in">Required for sign-in</span>
+                      title="{{ chrome.t('consent-required-for-signin') }}">{{ chrome.t("consent-required-for-signin") }}</span>
               </label>
             {% else %}
               <input type="checkbox"
@@ -146,9 +146,9 @@
              value="true"
              class="mt-0.5 rounded border-outline-variant text-primary focus:ring-primary">
       <span class="flex-1">
-        Remember my decision for this application
-        <span class="block font-label-sm text-label-sm text-on-surface-variant mt-0.5">Skip this screen next time. You can revoke access anytime from <a href="/settings/authorized-apps"
-    class="underline hover:text-on-surface">Authorized apps</a>.</span>
+        {{ chrome.t("consent-remember-decision") }}
+        <span class="block font-label-sm text-label-sm text-on-surface-variant mt-0.5">{{ chrome.t("consent-remember-decision-hint") }} <a href="/settings/authorized-apps"
+    class="underline hover:text-on-surface">{{ chrome.t("consent-remember-decision-hint-link") }}</a>.</span>
       </span>
     </label>
 
@@ -157,20 +157,20 @@
              name="remember_account"
              value="true"
              class="mt-0.5 rounded border-outline-variant text-primary focus:ring-primary">
-      <span class="flex-1">Remember this account on this device</span>
+      <span class="flex-1">{{ chrome.t("consent-remember-account") }}</span>
     </label>
 
     <button type="submit"
             name="decision"
             value="accept"
             class="w-full bg-primary text-on-primary font-label-md text-label-md py-stack-md px-stack-lg rounded-lg hover:bg-primary-hover focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2 transition-colors">
-      Allow
+      {{ chrome.t("consent-allow") }}
     </button>
     <button type="submit"
             name="decision"
             value="deny"
             class="w-full bg-surface-container-lowest border border-outline-variant text-on-surface font-label-md text-label-md py-stack-md px-stack-lg rounded-lg hover:bg-surface-container-low focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2 transition-colors">
-      Deny
+      {{ chrome.t("consent-deny") }}
     </button>
   </form>
 {% endblock %}

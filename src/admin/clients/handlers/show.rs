@@ -220,7 +220,7 @@ fn build_show_view(
         ),
         None => (String::new(), String::new()),
     };
-    let row = project_row(&client, meta.as_ref());
+    let row = project_row(&chrome.locale, &client, meta.as_ref());
     let scope_str = client.scope.clone().unwrap_or_default();
     let response_types = client.response_types.clone().unwrap_or_default().join(", ");
     let post_logout_redirect_uris = client

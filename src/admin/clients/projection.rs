@@ -70,6 +70,7 @@ pub(super) fn read_require_pkce(c: &ory::OAuth2Client) -> bool {
 /// Forseti-side metadata row when present. A missing Forseti row produces
 /// the legacy defaults (`verified = true`, `self_registered = false`).
 pub(super) fn project_row(
+    locale: &crate::locale::LanguageIdentifier,
     c: &ory::OAuth2Client,
     meta: Option<&oauth_client_metadata::Row>,
 ) -> ClientRow {
@@ -100,7 +101,7 @@ pub(super) fn project_row(
         name: c.client_name.clone().unwrap_or_default(),
         grant_types: c.grant_types.clone().unwrap_or_default().join(", "),
         redirect_uris: c.redirect_uris.clone().unwrap_or_default().join(", "),
-        created_at_pretty: humanise_timestamp(&created_at),
+        created_at_pretty: humanise_timestamp(locale, &created_at),
         created_at,
         client_type,
         client_type_label,

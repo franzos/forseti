@@ -143,7 +143,7 @@ pub async fn show(
             let (client_name, client_exists) = client_label(&client_names, &r.client_id);
             DeadRow {
                 event_id_short: short_id(&r.event_id),
-                created_at_pretty: humanise_timestamp(&r.created_at),
+                created_at_pretty: humanise_timestamp(&ctx.locale, &r.created_at),
                 id: r.id,
                 event_id: r.event_id,
                 client_id: r.client_id,
@@ -219,7 +219,7 @@ pub async fn show_one(
     };
 
     let row = DeadDetail {
-        created_at_pretty: humanise_timestamp(&outbox.created_at),
+        created_at_pretty: humanise_timestamp(&ctx.locale, &outbox.created_at),
         id: outbox.id,
         event_id: outbox.event_id,
         client_id: outbox.client_id,

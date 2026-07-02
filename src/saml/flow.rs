@@ -32,10 +32,11 @@ use crate::signed_cookie::unix_seconds_now;
 use crate::state::AppState;
 use crate::web::{append_set_cookie, render_error_boundary};
 
-const VALIDATION_FAILED_BODY: &str =
-    "This sign-on attempt couldn't be validated. Start again from your organization's SSO link.";
-const UPSTREAM_FAILED_BODY: &str =
-    "The sign-on service is temporarily unavailable. Please try again.";
+// SAML keys, not literals: the ACS callback carries no request locale
+// (`start` has no headers at all), so these are looked up under
+// `default_locale()` at render time. See `neutral_unavailable`/`error_page`.
+const VALIDATION_FAILED_KEY: &str = "error-boundary-sso-validation-failed-body";
+const UPSTREAM_FAILED_KEY: &str = "error-boundary-sso-upstream-failed-body";
 
 /// Jackson speaks the workspace reqwest (0.13); the Ory SDK's shared client
 /// is the renamed reqwest-0.12 type, so it can't be reused here.
@@ -54,18 +55,28 @@ pub(crate) fn http_client() -> &'static reqwest::Client {
 /// disabled connection, and locked license, so responses don't leak
 /// which orgs have SSO.
 fn neutral_unavailable(state: &AppState) -> Response {
+    let locale = crate::locale::default_locale();
     render_error_boundary(
         state,
-        "Single sign-on unavailable",
-        "Single sign-on isn't available for this address. Check the link your \
-         administrator gave you, or sign in with your usual method.",
+        &locale,
+        &crate::i18n::lookup(&locale, "error-boundary-sso-unavailable-title"),
+        &crate::i18n::lookup(&locale, "error-boundary-sso-unavailable-body"),
         "/login",
-        "Sign in",
+        crate::i18n::lookup(&locale, "error-boundary-cta-sign-in"),
     )
 }
 
-fn error_page(state: &AppState, body: &str) -> Response {
-    render_error_boundary(state, "Single sign-on failed", body, "/login", "Sign in")
+/// `body_key` is a Fluent key (see `VALIDATION_FAILED_KEY`/`UPSTREAM_FAILED_KEY`).
+fn error_page(state: &AppState, body_key: &str) -> Response {
+    let locale = crate::locale::default_locale();
+    render_error_boundary(
+        state,
+        &locale,
+        &crate::i18n::lookup(&locale, "error-boundary-sso-failed-title"),
+        &crate::i18n::lookup(&locale, body_key),
+        "/login",
+        crate::i18n::lookup(&locale, "error-boundary-cta-sign-in"),
+    )
 }
 
 /// Why a sign-on was refused; drives the copy on `saml_blocked.html`.
@@ -89,7 +100,13 @@ struct BlockedTemplate {
 
 fn render_blocked(state: &AppState, email: &str, reason: BlockedReason) -> Response {
     render(&BlockedTemplate {
-        chrome: PageChrome::from_parts(state, String::new(), String::new()),
+        // SAML callback path; no request Parts available, locale is inert
+        chrome: PageChrome::from_parts(
+            state,
+            String::new(),
+            String::new(),
+            crate::locale::default_locale(),
+        ),
         email: email.to_string(),
         reason,
     })
@@ -133,7 +150,7 @@ pub async fn start(
         Ok(None) => return neutral_unavailable(&state),
         Err(e) => {
             tracing::error!(error = ?e, "saml start: org lookup failed");
-            return error_page(&state, UPSTREAM_FAILED_BODY);
+            return error_page(&state, UPSTREAM_FAILED_KEY);
         }
     };
     match db::get_connection(&state.db, &org.id).await {
@@ -141,7 +158,7 @@ pub async fn start(
         Ok(_) => return neutral_unavailable(&state),
         Err(e) => {
             tracing::error!(error = ?e, "saml start: connection lookup failed");
-            return error_page(&state, UPSTREAM_FAILED_BODY);
+            return error_page(&state, UPSTREAM_FAILED_KEY);
         }
     }
 
@@ -153,7 +170,7 @@ pub async fn start(
         Ok(p) => p,
         Err(e) => {
             tracing::error!(error = ?e, "saml start: state payload encode failed");
-            return error_page(&state, UPSTREAM_FAILED_BODY);
+            return error_page(&state, UPSTREAM_FAILED_KEY);
         }
     };
     let codec = state_cookie(state.cfg.self_.is_https());
@@ -202,7 +219,7 @@ pub async fn callback(
                 .metadata(audit_metadata!("reason" => "state_mismatch")),
         )
         .await;
-        let mut resp = error_page(&state, VALIDATION_FAILED_BODY);
+        let mut resp = error_page(&state, VALIDATION_FAILED_KEY);
         *resp.status_mut() = StatusCode::BAD_REQUEST;
         append_set_cookie(&mut resp, Some(clear));
         return resp;
@@ -245,11 +262,7 @@ pub async fn callback(
                 )),
         )
         .await;
-        let mut resp = error_page(
-            &state,
-            "The identity provider didn't supply an email address. Ask your \
-             administrator to map the email attribute on the SAML connection.",
-        );
+        let mut resp = error_page(&state, "error-boundary-sso-no-email-body");
         append_set_cookie(&mut resp, Some(clear));
         return resp;
     }
@@ -363,7 +376,7 @@ async fn fail_upstream(
             )),
     )
     .await;
-    let mut resp = error_page(state, UPSTREAM_FAILED_BODY);
+    let mut resp = error_page(state, UPSTREAM_FAILED_KEY);
     append_set_cookie(&mut resp, Some(clear));
     resp
 }

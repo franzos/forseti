@@ -1,30 +1,30 @@
 {% extends "admin/admin_shell.html" %}
 
-{% block admin_title %}POSIX accounts{% endblock %}
+{% block admin_title %}{{ chrome.t("admin-posix-page-title") }}{% endblock %}
 
 {% block admin_content %}
   <div class="flex items-center justify-between mt-2 mb-stack-lg">
     <div>
       <h1 class="font-headline-lg-mobile md:font-headline-lg text-headline-lg-mobile md:text-headline-lg text-on-surface">
-        POSIX accounts
+        {{ chrome.t("admin-posix-page-title") }}
       </h1>
       <p class="font-body-md text-body-md text-on-surface-variant mt-1">
-        Kratos identities materialised into Linux accounts (uid/gid + SSH keys) for the NSS resolver. Seats in use: <span class="font-mono font-bold">{{ current }} / {{ cap }}</span>. A commercial Linux-authentication license raises the cap.
+        {{ chrome.t("admin-posix-subtitle") }} {{ chrome.t("admin-posix-seats-label") }} <span class="font-mono font-bold">{{ current }} / {{ cap }}</span>. {{ chrome.t("admin-posix-license-note") }}
       </p>
     </div>
     <a href="/admin/posix/new"
-       class="bg-primary text-on-primary font-label-md text-label-md font-bold px-4 py-2 rounded-lg hover:opacity-90 transition-opacity whitespace-nowrap">Provision account</a>
+       class="bg-primary text-on-primary font-label-md text-label-md font-bold px-4 py-2 rounded-lg hover:opacity-90 transition-opacity whitespace-nowrap">{{ chrome.t("admin-posix-action-provision") }}</a>
   </div>
 
   <div class="bg-surface-container-lowest border border-outline-variant rounded-xl overflow-x-auto">
-    <table class="w-full text-left">
+    <table class="w-full text-start">
       <thead class="bg-surface-container-low">
         <tr>
-          <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Username</th>
-          <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">UID</th>
-          <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">GID</th>
-          <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Status</th>
-          <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Created</th>
+          <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">{{ chrome.t("admin-posix-col-username") }}</th>
+          <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">{{ chrome.t("admin-posix-col-uid") }}</th>
+          <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">{{ chrome.t("admin-posix-col-gid") }}</th>
+          <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">{{ chrome.t("admin-posix-col-status") }}</th>
+          <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">{{ chrome.t("admin-posix-col-created") }}</th>
           <th class="px-4 py-3"></th>
         </tr>
       </thead>
@@ -33,7 +33,7 @@
           <tr>
             <td colspan="6"
                 class="px-4 py-6 text-center font-body-md text-body-md text-on-surface-variant">
-              No enabled POSIX accounts. <a href="/admin/posix/new" class="text-primary hover:underline">Provision one</a> from a Kratos identity.
+              {{ chrome.t("admin-posix-empty-prefix") }} <a href="/admin/posix/new" class="text-primary hover:underline">{{ chrome.t("admin-posix-empty-link") }}</a> {{ chrome.t("admin-posix-empty-suffix") }}
             </td>
           </tr>
         {% else %}
@@ -45,16 +45,16 @@
               <td class="px-4 py-3 font-body-sm text-body-sm text-on-surface-variant font-mono">{{ r.gid }}</td>
               <td class="px-4 py-3 font-body-sm text-body-sm">
                 {% if r.enabled %}
-                  <span class="font-label-sm text-label-sm bg-secondary-container text-on-secondary-container px-2 py-0.5 rounded-full font-semibold">enabled</span>
+                  <span class="font-label-sm text-label-sm bg-secondary-container text-on-secondary-container px-2 py-0.5 rounded-full font-semibold">{{ chrome.t("admin-posix-status-enabled") }}</span>
                 {% else %}
-                  <span class="font-label-sm text-label-sm bg-surface-container-high text-on-surface-variant px-2 py-0.5 rounded-full font-semibold">disabled</span>
+                  <span class="font-label-sm text-label-sm bg-surface-container-high text-on-surface-variant px-2 py-0.5 rounded-full font-semibold">{{ chrome.t("admin-posix-status-disabled") }}</span>
                 {% endif %}
               </td>
               <td class="px-4 py-3 font-body-sm text-body-sm text-on-surface-variant"
                   title="{{ r.created_at }}">{{ r.created_at_pretty }}</td>
-              <td class="px-4 py-3 text-right whitespace-nowrap">
+              <td class="px-4 py-3 text-end whitespace-nowrap">
                 <a href="/admin/posix/{{ r.identity_id }}"
-                   class="font-label-sm text-label-sm text-on-surface-variant border border-outline-variant rounded-lg px-3 py-1 hover:bg-surface-container-high transition-colors">Manage</a>
+                   class="font-label-sm text-label-sm text-on-surface-variant border border-outline-variant rounded-lg px-3 py-1 hover:bg-surface-container-high transition-colors">{{ chrome.t("admin-posix-action-manage") }}</a>
               </td>
             </tr>
           {% endfor %}

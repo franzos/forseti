@@ -402,8 +402,7 @@ async fn groups_present_on_skip_consent() {
                     .map(|s| s.to_string());
                 if let Some(loc) = loc {
                     if loc.contains("/callback") {
-                        break 'walk extract_query_param(&loc, "code")
-                            .expect("code in callback");
+                        break 'walk extract_query_param(&loc, "code").expect("code in callback");
                     }
                     let next = reqwest::Url::parse(&loc)
                         .unwrap_or_else(|_| resp.url().join(&loc).unwrap());
@@ -424,7 +423,9 @@ async fn groups_present_on_skip_consent() {
     let tokens = exchange_code_for_tokens(&client_id, &client_secret, &redirect_uri, &code).await;
     let id_token = tokens["id_token"].as_str().expect("id_token present");
     let claims = decode_jwt_claims(id_token);
-    let groups = claims["groups"].as_array().expect("groups claim is array on skip");
+    let groups = claims["groups"]
+        .as_array()
+        .expect("groups claim is array on skip");
     let contains_ops = groups.iter().any(|v| v.as_str() == Some("ops"));
     assert!(
         contains_ops,

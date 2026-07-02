@@ -91,10 +91,11 @@ pub(crate) async fn login(
             tracing::error!(error = ?e, ?flow_id, "failed to fetch Kratos login flow");
             render_error_boundary(
                 &state,
-                "Sign-in unavailable",
-                crate::web::AUTH_UNAVAILABLE_BODY,
+                &chrome.locale,
+                &crate::i18n::lookup(&chrome.locale, "error-boundary-signin-title"),
+                &crate::i18n::lookup(&chrome.locale, "error-boundary-auth-unavailable-body"),
                 "/login",
-                "Try again",
+                crate::i18n::lookup(&chrome.locale, "error-boundary-cta-try-again"),
             )
             .into_response()
         }
@@ -102,7 +103,7 @@ pub(crate) async fn login(
 }
 
 fn render_login(chrome: PageChrome, flow: &serde_json::Value, return_to: Option<&str>) -> Response {
-    let form = FlowFormView::from_flow(flow, FlowKind::Login, return_to);
+    let form = FlowFormView::from_flow(flow, FlowKind::Login, return_to, &chrome.locale);
     let webauthn_scripts = collect_webauthn_scripts(flow);
 
     // AAL2 requested but no second factor available: Kratos emits the

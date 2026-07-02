@@ -1,3 +1,4 @@
+mod accounts;
 mod admin;
 mod app;
 mod audit;
@@ -15,11 +16,12 @@ mod flash;
 mod flow_view;
 mod format;
 mod handoff;
+mod i18n;
 mod identity;
+mod locale;
 mod mailer;
 mod oauth;
 mod oauth_client_metadata;
-mod accounts;
 mod orgs;
 mod ory;
 mod page_chrome;

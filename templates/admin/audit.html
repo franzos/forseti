@@ -1,27 +1,25 @@
 {% extends "admin/admin_shell.html" %}
 
-{% block admin_title %}Audit{% endblock %}
+{% block admin_title %}{{ chrome.t("admin-audit-page-title") }}{% endblock %}
 
 {% block admin_content %}
   <div class="mb-stack-lg">
-    <h1 class="font-display-lg text-display-lg text-on-surface">Audit</h1>
-    <p class="font-body-lg text-body-lg text-on-surface-variant mt-2">
-      Append-only event log. Records Forseti-side admin actions, OAuth grants, session changes, and Kratos-flow completions delivered via webhook. Retention is operator-configured (`[audit].audit_retention_days`); pruning is a CLI subcommand, not automated.
-    </p>
+    <h1 class="font-display-lg text-display-lg text-on-surface">{{ chrome.t("admin-audit-page-title") }}</h1>
+    <p class="font-body-lg text-body-lg text-on-surface-variant mt-2">{{ chrome.t("admin-audit-subtitle") }}</p>
   </div>
 
   <form method="GET"
         action="/admin/audit"
         class="mb-stack-md flex flex-wrap items-end gap-stack-sm">
     <label class="flex flex-col gap-1">
-      <span class="font-label-md text-label-md text-on-surface">Email contains</span>
+      <span class="font-label-md text-label-md text-on-surface">{{ chrome.t("admin-audit-filter-email") }}</span>
       <input type="text"
              name="email"
              value="{{ filter_email }}"
              class="font-body-md text-body-md bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2">
     </label>
     <label class="flex flex-col gap-1">
-      <span class="font-label-md text-label-md text-on-surface">Action prefix</span>
+      <span class="font-label-md text-label-md text-on-surface">{{ chrome.t("admin-audit-filter-action") }}</span>
       <input type="text"
              name="action"
              value="{{ filter_action }}"
@@ -29,20 +27,20 @@
              class="font-body-md text-body-md bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2 font-mono">
     </label>
     <label class="flex flex-col gap-1">
-      <span class="font-label-md text-label-md text-on-surface">Severity</span>
+      <span class="font-label-md text-label-md text-on-surface">{{ chrome.t("admin-audit-filter-severity") }}</span>
       <select name="severity"
               class="font-body-md text-body-md bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2">
-        <option value=""{% if filter_severity == "" %} selected{% endif %}>Any</option>
-        <option value="info"{% if filter_severity == "info" %} selected{% endif %}>Info</option>
+        <option value=""{% if filter_severity == "" %} selected{% endif %}>{{ chrome.t("admin-audit-severity-any") }}</option>
+        <option value="info"{% if filter_severity == "info" %} selected{% endif %}>{{ chrome.t("admin-audit-severity-info") }}</option>
         <option value="warning"
-                {% if filter_severity == "warning" %}selected{% endif %}>Warning</option>
-        <option value="error"{% if filter_severity == "error" %} selected{% endif %}>Error</option>
+                {% if filter_severity == "warning" %}selected{% endif %}>{{ chrome.t("admin-audit-severity-warning") }}</option>
+        <option value="error"{% if filter_severity == "error" %} selected{% endif %}>{{ chrome.t("admin-audit-severity-error") }}</option>
         <option value="critical"
-                {% if filter_severity == "critical" %}selected{% endif %}>Critical</option>
+                {% if filter_severity == "critical" %}selected{% endif %}>{{ chrome.t("admin-audit-severity-critical") }}</option>
       </select>
     </label>
     <label class="flex flex-col gap-1">
-      <span class="font-label-md text-label-md text-on-surface">Since</span>
+      <span class="font-label-md text-label-md text-on-surface">{{ chrome.t("admin-audit-filter-since") }}</span>
       <input type="datetime-local"
              name="since"
              value="{{ filter_since }}"
@@ -50,7 +48,7 @@
     </label>
     <button type="submit"
             class="font-label-md text-label-md text-primary border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">
-      Filter
+      {{ chrome.t("admin-audit-filter-button") }}
     </button>
   </form>
 
@@ -61,16 +59,16 @@
   {% endif %}
 
   <div class="bg-surface-container-lowest border border-outline-variant rounded-xl overflow-x-auto">
-    <table class="w-full text-left">
+    <table class="w-full text-start">
       <thead class="bg-surface-container-low">
         <tr>
-          <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Target</th>
-          <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Severity</th>
-          <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">When</th>
-          <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Actor</th>
-          <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Action</th>
-          <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest text-right">
-            Actions
+          <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">{{ chrome.t("admin-audit-col-target") }}</th>
+          <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">{{ chrome.t("admin-audit-col-severity") }}</th>
+          <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">{{ chrome.t("admin-audit-col-when") }}</th>
+          <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">{{ chrome.t("admin-audit-col-actor") }}</th>
+          <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">{{ chrome.t("admin-audit-col-action") }}</th>
+          <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest text-end">
+            {{ chrome.t("admin-audit-col-actions") }}
           </th>
         </tr>
       </thead>
@@ -79,7 +77,7 @@
           <tr>
             <td colspan="6"
                 class="px-4 py-6 text-center font-body-md text-body-md text-on-surface-variant">
-              No events match the current filters.
+              {{ chrome.t("admin-audit-empty") }}
             </td>
           </tr>
         {% else %}
@@ -90,10 +88,10 @@
                   <span class="font-label-sm text-label-sm text-on-surface-variant">{{ r.target_kind }}</span>
                   {% if !r.target_link.is_empty() %}
                     <a href="{{ r.target_link }}"
-                       class="ml-1 font-mono text-xs text-primary hover:underline"
+                       class="ms-1 font-mono text-xs text-primary hover:underline"
                        title="{{ r.target_id }}">{{ r.target_id_short }}&hellip;</a>
                   {% else if !r.target_id.is_empty() %}
-                    <span class="ml-1 font-mono text-xs text-on-surface-variant"
+                    <span class="ms-1 font-mono text-xs text-on-surface-variant"
                           title="{{ r.target_id }}">{{ r.target_id_short }}&hellip;</span>
                   {% endif %}
                 {% else %}
@@ -102,11 +100,11 @@
               </td>
               <td class="px-4 py-3 font-label-sm text-label-sm">
                 {% if r.severity == "critical" %}
-                  <span class="inline-block px-2 py-0.5 rounded-full bg-error-container text-on-error-container">critical</span>
+                  <span class="inline-block px-2 py-0.5 rounded-full bg-error-container text-on-error-container">{{ chrome.t("admin-audit-badge-critical") }}</span>
                 {% else if r.severity == "error" %}
-                  <span class="inline-block px-2 py-0.5 rounded-full bg-error-container/60 text-on-error-container">error</span>
+                  <span class="inline-block px-2 py-0.5 rounded-full bg-error-container/60 text-on-error-container">{{ chrome.t("admin-audit-badge-error") }}</span>
                 {% else if r.severity == "warning" %}
-                  <span class="inline-block px-2 py-0.5 rounded-full bg-warning-container text-on-warning-container">warning</span>
+                  <span class="inline-block px-2 py-0.5 rounded-full bg-warning-container text-on-warning-container">{{ chrome.t("admin-audit-badge-warning") }}</span>
                 {% else %}
                   <span class="text-on-surface-variant">{{ r.severity }}</span>
                 {% endif %}
@@ -117,19 +115,19 @@
                 {% if !r.actor_id.is_empty() %}
                   <a href="/admin/identities/{{ r.actor_id }}"
                      class="text-primary font-bold hover:underline inline-block max-w-[16rem] truncate align-bottom"
-                     title="{{ r.actor_email }}">{{ r.actor_email }}</a>
+                     title="{{ r.actor_email }}"><bdi>{{ r.actor_email }}</bdi></a>
                 {% else if !r.actor_email.is_empty() %}
                   <span class="inline-block max-w-[16rem] truncate align-bottom"
-                        title="{{ r.actor_email }}">{{ r.actor_email }}</span>
+                        title="{{ r.actor_email }}"><bdi>{{ r.actor_email }}</bdi></span>
                 {% else %}
                   <span class="text-on-surface-variant">—</span>
                 {% endif %}
               </td>
               <td class="px-4 py-3 font-body-sm text-body-sm text-on-surface font-mono">{{ r.action }}</td>
-              <td class="px-4 py-3 text-right whitespace-nowrap">
+              <td class="px-4 py-3 text-end whitespace-nowrap">
                 <a href="/admin/audit/{{ r.id }}"
                    class="font-label-sm text-label-sm text-primary border border-outline-variant rounded-lg px-3 py-1 hover:bg-surface-container-high transition-colors"
-                   title="{{ r.id }}">View</a>
+                   title="{{ r.id }}">{{ chrome.t("admin-audit-action-view") }}</a>
               </td>
             </tr>
           {% endfor %}
@@ -139,7 +137,7 @@
   </div>
   {% if total > 0 %}
     <p class="font-body-sm text-body-sm text-on-surface-variant mt-stack-sm">
-      Showing {{ offset + 1 }}–{{ offset + rows.len() as i64 }} of {{ total }} rows.
+      {{ chrome.tv3("admin-audit-range", "from", &(offset + 1).to_string(), "to", &(offset + rows.len() as i64).to_string(), "total", &total.to_string()) }}
     </p>
   {% endif %}
 
@@ -147,14 +145,14 @@
     <div class="mt-stack-md flex justify-between items-center">
       {% if has_prev %}
         <a href="/admin/audit{{ prev_query }}"
-           class="font-label-md text-label-md text-on-surface-variant border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">&lsaquo; Prev</a>
+           class="font-label-md text-label-md text-on-surface-variant border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">{{ chrome.t("admin-audit-prev") }}</a>
       {% else %}
         <span></span>
       {% endif %}
-      <span class="font-body-sm text-body-sm text-on-surface-variant">Page {{ page }}</span>
+      <span class="font-body-sm text-body-sm text-on-surface-variant">{{ chrome.tv1("admin-audit-page", "page", &page.to_string() ) }}</span>
       {% if has_next %}
         <a href="/admin/audit{{ next_query }}"
-           class="font-label-md text-label-md text-primary border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">Next &rsaquo;</a>
+           class="font-label-md text-label-md text-primary border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">{{ chrome.t("admin-audit-next") }}</a>
       {% else %}
         <span></span>
       {% endif %}

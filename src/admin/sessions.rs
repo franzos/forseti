@@ -222,11 +222,11 @@ pub async fn list(
                 id: s.id.clone(),
                 identity_id,
                 identity_email,
-                authenticated_at_pretty: humanise_timestamp(&authenticated_at),
+                authenticated_at_pretty: humanise_timestamp(&ctx.locale, &authenticated_at),
                 authenticated_at,
-                expires_at_pretty: humanise_timestamp(&expires_at),
+                expires_at_pretty: humanise_timestamp(&ctx.locale, &expires_at),
                 expires_at,
-                user_agent_pretty: humanise_user_agent(&user_agent),
+                user_agent_pretty: humanise_user_agent(&ctx.locale, &user_agent),
                 user_agent,
                 ip_address: device.and_then(|d| d.ip_address).unwrap_or_default(),
             }
@@ -332,13 +332,16 @@ pub async fn revoke(
                     .target(target_kind::SESSION, id.clone()),
             )
             .await;
-            state.flash_redirect(&redirect_to, "Session revoked.")
+            state.flash_redirect(
+                &redirect_to,
+                &crate::i18n::lookup(&ctx.locale, "flash-session-revoked"),
+            )
         }
         Err(e) => {
             tracing::error!(error = ?e, id, "admin: revoke session failed");
             render_admin_error(
                 &state,
-                "Revoke failed",
+                &crate::i18n::lookup(&ctx.locale, "dialog-revoke-failed-title"),
                 &format!("Could not revoke session: {e}"),
             )
         }

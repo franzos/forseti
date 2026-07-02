@@ -20,7 +20,7 @@ use crate::csrf::CsrfForm;
 use crate::extractors::{Csrf, OptionalSession};
 use crate::orgs::{self, Role};
 use crate::ory;
-use crate::page_chrome::PageChrome;
+use crate::page_chrome::{PageChrome, ReqLocale};
 use crate::render::render;
 use crate::state::AppState;
 
@@ -241,19 +241,27 @@ async fn invite_accept_get(
     Query(q): Query<InviteAcceptQuery>,
     Csrf(csrf_token): Csrf,
     session: OptionalSession,
+    crate::page_chrome::ReqLocale(locale): crate::page_chrome::ReqLocale,
 ) -> Response {
     let Some(token) = q.token.filter(|t| !t.is_empty()) else {
         return (StatusCode::BAD_REQUEST, "missing token").into_response();
     };
     let Ok(Some(invite)) = orgs::fetch_invite(&state.db, &token).await else {
-        return render_invalid_invite(&state, &csrf_token, "Invite not found").into_response();
+        return render_invalid_invite(&state, &csrf_token, locale, "Invite not found")
+            .into_response();
     };
     if invite.is_accepted() {
-        return render_invalid_invite(&state, &csrf_token, "Invite already accepted")
-            .into_response();
+        return render_invalid_invite(
+            &state,
+            &csrf_token,
+            locale.clone(),
+            "Invite already accepted",
+        )
+        .into_response();
     }
     if invite.is_expired(chrono::Utc::now()) {
-        return render_invalid_invite(&state, &csrf_token, "Invite expired").into_response();
+        return render_invalid_invite(&state, &csrf_token, locale.clone(), "Invite expired")
+            .into_response();
     }
 
     let session = match session {
@@ -281,7 +289,12 @@ async fn invite_accept_get(
             Some(&return_to),
         );
         return render(&InviteAcceptTemplate {
-            chrome: PageChrome::from_parts(&state, String::new(), csrf_token.clone()),
+            chrome: PageChrome::from_parts(
+                &state,
+                String::new(),
+                csrf_token.clone(),
+                locale.clone(),
+            ),
             org_name,
             invited_email: invite.email.clone(),
             role: invite.role.clone(),
@@ -309,12 +322,18 @@ async fn invite_accept_get(
             return render_invalid_invite(
                 &state,
                 &csrf_token,
+                locale.clone(),
                 "Please verify your email before accepting the invite",
             )
             .into_response();
         }
         return render(&InviteAcceptTemplate {
-            chrome: PageChrome::from_parts(&state, session_email, csrf_token.clone()),
+            chrome: PageChrome::from_parts(
+                &state,
+                session_email,
+                csrf_token.clone(),
+                locale.clone(),
+            ),
             org_name,
             invited_email: invite.email.clone(),
             role: invite.role.clone(),
@@ -327,7 +346,7 @@ async fn invite_accept_get(
 
     // A different account is signed in: CTA signs out then re-routes to accept.
     render(&InviteAcceptTemplate {
-        chrome: PageChrome::from_parts(&state, session_email, csrf_token),
+        chrome: PageChrome::from_parts(&state, session_email, csrf_token, locale),
         org_name,
         invited_email: invite.email.clone(),
         role: invite.role.clone(),
@@ -355,20 +374,23 @@ async fn invite_accept_post(
     Csrf(csrf_token): Csrf,
     actx: AuditCtx,
     session: OptionalSession,
+    ReqLocale(locale): ReqLocale,
     CsrfForm(form): CsrfForm<InviteAcceptForm>,
 ) -> Response {
     if form.token.is_empty() {
         return (StatusCode::BAD_REQUEST, "missing token").into_response();
     }
     let Ok(Some(invite)) = orgs::fetch_invite(&state.db, &form.token).await else {
-        return render_invalid_invite(&state, &csrf_token, "Invite not found").into_response();
+        return render_invalid_invite(&state, &csrf_token, locale, "Invite not found")
+            .into_response();
     };
     if invite.is_accepted() {
-        return render_invalid_invite(&state, &csrf_token, "Invite already accepted")
+        return render_invalid_invite(&state, &csrf_token, locale, "Invite already accepted")
             .into_response();
     }
     if invite.is_expired(chrono::Utc::now()) {
-        return render_invalid_invite(&state, &csrf_token, "Invite expired").into_response();
+        return render_invalid_invite(&state, &csrf_token, locale, "Invite expired")
+            .into_response();
     }
     let session = match session {
         OptionalSession::Ok { session, .. } => *session,
@@ -385,6 +407,7 @@ async fn invite_accept_post(
         return render_invalid_invite(
             &state,
             &csrf_token,
+            locale,
             "Sign in as the invited address to accept this invite",
         )
         .into_response();
@@ -403,6 +426,7 @@ async fn invite_accept_post(
         return render_invalid_invite(
             &state,
             &csrf_token,
+            locale,
             "Please verify your email before accepting the invite",
         )
         .into_response();
@@ -415,6 +439,7 @@ async fn invite_accept_post(
     finalize_membership(
         &state,
         &csrf_token,
+        locale,
         &invite,
         &identity_id,
         &session_email,
@@ -449,6 +474,7 @@ async fn invite_finalize_get(
 async fn finalize_membership(
     state: &AppState,
     csrf_token: &str,
+    locale: crate::locale::LanguageIdentifier,
     invite: &orgs::OrgInvite,
     identity_id: &str,
     session_email: &str,
@@ -464,7 +490,7 @@ async fn finalize_membership(
             );
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "Invitation is corrupt. Contact your administrator.",
+                crate::i18n::lookup(&locale, "invite-error-corrupt"),
             )
                 .into_response();
         }
@@ -511,11 +537,13 @@ async fn finalize_membership(
             Redirect::to("/").into_response()
         }
         Ok(crate::orgs::db::InviteFinalizeOutcome::AlreadyAccepted) => {
-            render_invalid_invite(state, csrf_token, "Invite already accepted").into_response()
+            render_invalid_invite(state, csrf_token, locale, "Invite already accepted")
+                .into_response()
         }
         Err(e) => {
             tracing::error!(error = ?e, "finalize_membership: txn failed");
-            render_invalid_invite(state, csrf_token, "Could not accept invite").into_response()
+            render_invalid_invite(state, csrf_token, locale, "Could not accept invite")
+                .into_response()
         }
     }
 }
@@ -532,9 +560,14 @@ struct InvalidInviteTemplate {
     message: String,
 }
 
-fn render_invalid_invite(state: &AppState, csrf_token: &str, message: &str) -> Response {
+fn render_invalid_invite(
+    state: &AppState,
+    csrf_token: &str,
+    locale: crate::locale::LanguageIdentifier,
+    message: &str,
+) -> Response {
     render(&InvalidInviteTemplate {
-        chrome: PageChrome::from_parts(state, String::new(), csrf_token.to_string()),
+        chrome: PageChrome::from_parts(state, String::new(), csrf_token.to_string(), locale),
         message: message.to_string(),
     })
 }

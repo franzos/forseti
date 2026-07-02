@@ -13,10 +13,6 @@ use crate::state::AppState;
 /// Package version surfaced in the layout footer, resolved at compile time from `Cargo.toml`.
 pub(crate) const FORSETI_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-pub(crate) const AUTH_UNAVAILABLE_TITLE: &str = "Authentication unavailable";
-pub(crate) const AUTH_UNAVAILABLE_BODY: &str =
-    "We couldn't reach the authentication service. Please try again in a moment.";
-
 /// Validate a `?return_to=` before redirecting to it, guarding the post-login short-circuit
 /// against open redirects (e.g. `/login?return_to=https://attacker.example/phish`).
 /// Safe when path-only (`/` but not `//` or `/\`) or an absolute URL whose origin matches
@@ -89,13 +85,14 @@ pub(crate) fn append_set_cookie(resp: &mut Response, cookie: Option<String>) {
 
 pub(crate) fn render_error_boundary(
     state: &AppState,
+    locale: &crate::locale::LanguageIdentifier,
     title: &str,
     body: &str,
     cta_href: impl Into<String>,
     cta_label: impl Into<String>,
 ) -> Response {
     render(&ErrorBoundaryTemplate {
-        chrome: PageChrome::from_parts(state, String::new(), String::new()),
+        chrome: PageChrome::from_parts(state, String::new(), String::new(), locale.clone()),
         error_title: title.to_string(),
         error_body: body.to_string(),
         cta_href: cta_href.into(),

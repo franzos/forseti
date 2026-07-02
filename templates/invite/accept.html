@@ -1,13 +1,13 @@
 {% extends "base.html" %}
 
-{% block title %}Accept invite &middot; {{ chrome.brand.name }}{% endblock %}
+{% block title %}{{ chrome.t("invite-accept-page-title") }} &middot; {{ chrome.brand.name }}{% endblock %}
 
 {% block content %}
   <div class="max-w-2xl mx-auto flex flex-col gap-stack-lg py-margin-desktop">
     <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg flex flex-col gap-stack-md">
-      <h1 class="font-headline-lg text-headline-lg text-on-surface">Join {{ org_name }}</h1>
+      <h1 class="font-headline-lg text-headline-lg text-on-surface">{{ chrome.tv1("invite-accept-heading", "org", &org_name) }}</h1>
       <p class="font-body-md text-on-surface-variant">
-        You've been invited to join <strong>{{ org_name }}</strong> as <strong>{{ role }}</strong>. The invite was sent to <strong>{{ invited_email }}</strong>.
+        {{ chrome.tv3("invite-accept-body", "org", &org_name, "role", &role, "email", &invited_email) }}
       </p>
       {% if can_accept_now %}
         <form method="POST"

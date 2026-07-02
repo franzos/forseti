@@ -1,14 +1,12 @@
 {% extends "admin/admin_shell.html" %}
 {% import "admin/_app_logo.html" as logo_macro %}
 
-{% block admin_title %}New client{% endblock %}
+{% block admin_title %}{{ chrome.t("admin-client-type-page-title") }}{% endblock %}
 
 {% block admin_content %}
   <div class="mb-stack-lg">
-    <h1 class="font-headline-lg text-headline-lg text-on-surface">New OAuth2 client</h1>
-    <p class="font-body-md text-body-md text-on-surface-variant mt-1">
-      Pick the application type. The next page is the same form, with the right defaults already filled in — so you can't accidentally land on a broken combination.
-    </p>
+    <h1 class="font-headline-lg text-headline-lg text-on-surface">{{ chrome.t("admin-client-type-heading") }}</h1>
+    <p class="font-body-md text-body-md text-on-surface-variant mt-1">{{ chrome.t("admin-client-type-subtitle") }}</p>
   </div>
 
   <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-stack-md">
@@ -23,9 +21,9 @@
 
   {% if !app_cards.is_empty() %}
     <div class="mt-stack-xl">
-      <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest">Popular apps</h2>
+      <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest">{{ chrome.t("admin-client-type-popular-heading") }}</h2>
       <p class="font-body-sm text-body-sm text-on-surface-variant mb-stack-md">
-        Pre-filled for a known app. URLs use <code class="font-mono">YOUR_DOMAIN</code> (and sometimes <code class="font-mono">PROVIDER_NAME</code>) placeholders — replace them with your app's values after landing on the form.
+        {{ chrome.t("admin-client-type-popular-desc-part1") }} <code class="font-mono">YOUR_DOMAIN</code> {{ chrome.t("admin-client-type-popular-desc-part2") }} <code class="font-mono">PROVIDER_NAME</code>{{ chrome.t("admin-client-type-popular-desc-part3") }}
       </p>
       <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-stack-md">
         {% for app in app_cards %}
@@ -45,6 +43,6 @@
 
   <div class="mt-stack-lg">
     <a href="/admin/clients"
-       class="font-label-md text-label-md text-on-surface-variant border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">Cancel</a>
+       class="font-label-md text-label-md text-on-surface-variant border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">{{ chrome.t("admin-client-type-action-cancel") }}</a>
   </div>
 {% endblock %}

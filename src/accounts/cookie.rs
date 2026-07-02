@@ -47,7 +47,11 @@ pub(crate) fn read_known_account_ids(
         return Vec::new();
     };
     match String::from_utf8(payload) {
-        Ok(s) => s.lines().filter(|l| !l.is_empty()).map(str::to_string).collect(),
+        Ok(s) => s
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+            .collect(),
         Err(_) => Vec::new(),
     }
 }
@@ -120,18 +124,31 @@ mod tests {
     }
 
     fn cookie_value(set_cookie: &str) -> String {
-        set_cookie.split_once('=').unwrap().1.split(';').next().unwrap().to_string()
+        set_cookie
+            .split_once('=')
+            .unwrap()
+            .1
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string()
     }
 
     fn headers_with(value: &str) -> HeaderMap {
         let mut h = HeaderMap::new();
-        h.insert(COOKIE, format!("{KNOWN_ACCOUNTS_COOKIE}={value}").parse().unwrap());
+        h.insert(
+            COOKIE,
+            format!("{KNOWN_ACCOUNTS_COOKIE}={value}").parse().unwrap(),
+        );
         h
     }
 
     #[test]
     fn round_trip_returns_ids_in_order() {
-        let ids = vec!["11111111-1111-1111-1111-111111111111".to_string(), "22222222-2222-2222-2222-222222222222".to_string()];
+        let ids = vec![
+            "11111111-1111-1111-1111-111111111111".to_string(),
+            "22222222-2222-2222-2222-222222222222".to_string(),
+        ];
         let sc = set_known_accounts_cookie(SECRET, TTL, &ids, false);
         let headers = headers_with(&cookie_value(&sc));
         assert_eq!(read_known_account_ids(&headers, SECRET, TTL), ids);

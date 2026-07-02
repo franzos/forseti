@@ -74,10 +74,11 @@ pub(crate) async fn verification(
             tracing::error!(error = ?e, ?flow_id, "failed to fetch Kratos verification flow");
             render_error_boundary(
                 &state,
-                "Verification unavailable",
-                crate::web::AUTH_UNAVAILABLE_BODY,
+                &chrome.locale,
+                &crate::i18n::lookup(&chrome.locale, "error-boundary-verification-title"),
+                &crate::i18n::lookup(&chrome.locale, "error-boundary-auth-unavailable-body"),
                 "/login",
-                "Sign in",
+                crate::i18n::lookup(&chrome.locale, "error-boundary-cta-sign-in"),
             )
             .into_response()
         }
@@ -90,9 +91,10 @@ fn render_verification(
     return_to: Option<&str>,
     is_logged_in: bool,
 ) -> Response {
+    let form = FlowFormView::from_flow(flow, FlowKind::Verification, return_to, &chrome.locale);
     render(&VerificationTemplate {
         chrome,
-        form: FlowFormView::from_flow(flow, FlowKind::Verification, return_to),
+        form,
         state: flow_state(flow).to_string(),
         is_logged_in,
     })

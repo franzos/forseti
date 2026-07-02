@@ -1,46 +1,42 @@
 {% extends "admin/admin_shell.html" %}
 
-{% block admin_title %}SAML SSO{% endblock %}
+{% block admin_title %}{{ chrome.t("admin-saml-page-title") }}{% endblock %}
 
 {% block admin_content %}
   <div class="flex items-center justify-between mt-2 mb-stack-lg">
     <div>
       <h1 class="font-headline-lg-mobile md:font-headline-lg text-headline-lg-mobile md:text-headline-lg text-on-surface">
-        SAML SSO
+        {{ chrome.t("admin-saml-page-title") }}
       </h1>
-      <p class="font-body-md text-body-md text-on-surface-variant mt-1">
-        Enterprise SAML connections, one per organization. IdP metadata and certificates live in Jackson; Forseti keeps the anchor row and the enable switch.
-      </p>
+      <p class="font-body-md text-body-md text-on-surface-variant mt-1">{{ chrome.t("admin-saml-subtitle") }}</p>
     </div>
     {% if configured %}
       <a href="/admin/saml/new"
-         class="bg-primary text-on-primary font-label-md text-label-md font-bold px-4 py-2 rounded-lg hover:opacity-90 transition-opacity">New connection</a>
+         class="bg-primary text-on-primary font-label-md text-label-md font-bold px-4 py-2 rounded-lg hover:opacity-90 transition-opacity">{{ chrome.t("admin-saml-action-new") }}</a>
     {% endif %}
   </div>
 
   {% if grace %}
     <div class="bg-error-container border border-error rounded-lg p-3 mb-stack-md">
-      <p class="font-body-sm text-body-sm text-on-error-container">
-        License in grace period &mdash; SAML connections are read-only until the license is renewed. SSO logins keep working.
-      </p>
+      <p class="font-body-sm text-body-sm text-on-error-container">{{ chrome.t("admin-saml-grace-notice") }}</p>
     </div>
   {% endif %}
 
   {% if !configured %}
     <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-6">
       <p class="font-body-md text-body-md text-on-surface-variant">
-        <code class="font-mono">[saml]</code> isn't configured &mdash; add the Jackson bridge settings to <code class="font-mono">config.toml</code> to enable SAML SSO. See <code class="font-mono">docs/operator-guide.md</code>.
+        <code class="font-mono">[saml]</code> {{ chrome.t("admin-saml-not-configured-part1") }} &mdash; {{ chrome.t("admin-saml-not-configured-part2") }} <code class="font-mono">config.toml</code> {{ chrome.t("admin-saml-not-configured-part3") }} <code class="font-mono">docs/operator-guide.md</code>{{ chrome.t("admin-saml-not-configured-part4") }}
       </p>
     </div>
   {% else %}
     <div class="bg-surface-container-lowest border border-outline-variant rounded-xl overflow-x-auto">
-      <table class="w-full text-left">
+      <table class="w-full text-start">
         <thead class="bg-surface-container-low">
           <tr>
-            <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Org</th>
-            <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Connection</th>
-            <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">SSO URL</th>
-            <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Enabled</th>
+            <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">{{ chrome.t("admin-saml-col-org") }}</th>
+            <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">{{ chrome.t("admin-saml-col-connection") }}</th>
+            <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">{{ chrome.t("admin-saml-col-sso-url") }}</th>
+            <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">{{ chrome.t("admin-saml-col-enabled") }}</th>
             <th class="px-4 py-3"></th>
           </tr>
         </thead>
@@ -49,7 +45,7 @@
             <tr>
               <td colspan="5"
                   class="px-4 py-6 text-center font-body-md text-body-md text-on-surface-variant">
-                No SAML connections yet. <a href="/admin/saml/new" class="text-primary hover:underline">Create one</a> to enable SSO for an organization.
+                {{ chrome.t("admin-saml-empty-prefix") }} <a href="/admin/saml/new" class="text-primary hover:underline">{{ chrome.t("admin-saml-empty-link") }}</a> {{ chrome.t("admin-saml-empty-suffix") }}
               </td>
             </tr>
           {% else %}
@@ -67,12 +63,12 @@
                 </td>
                 <td class="px-4 py-3">
                   {% if r.enabled %}
-                    <span class="font-label-sm text-label-sm bg-success-container text-on-success-container px-2 py-0.5 rounded-full font-semibold">Enabled</span>
+                    <span class="font-label-sm text-label-sm bg-success-container text-on-success-container px-2 py-0.5 rounded-full font-semibold">{{ chrome.t("admin-saml-status-enabled") }}</span>
                   {% else %}
-                    <span class="font-label-sm text-label-sm bg-surface-container-high text-on-surface-variant px-2 py-0.5 rounded-full font-semibold">Disabled</span>
+                    <span class="font-label-sm text-label-sm bg-surface-container-high text-on-surface-variant px-2 py-0.5 rounded-full font-semibold">{{ chrome.t("admin-saml-status-disabled") }}</span>
                   {% endif %}
                 </td>
-                <td class="px-4 py-3 text-right whitespace-nowrap">
+                <td class="px-4 py-3 text-end whitespace-nowrap">
                   <form method="POST"
                         action="/admin/saml/{{ r.org_id }}/toggle"
                         class="inline">
@@ -80,14 +76,14 @@
                     <button type="submit"
                             class="font-label-sm text-label-sm text-primary border border-outline-variant rounded-lg px-3 py-1 hover:bg-surface-container-high transition-colors">
                       {% if r.enabled %}
-                        Disable
+                        {{ chrome.t("admin-saml-action-disable") }}
                       {% else %}
-                        Enable
+                        {{ chrome.t("admin-saml-action-enable") }}
                       {% endif %}
                     </button>
                   </form>
                   <a href="/admin/saml/{{ r.org_id }}/delete"
-                     class="font-label-sm text-label-sm text-error border border-error rounded-lg px-3 py-1 ml-2 hover:bg-error-container hover:text-on-error-container transition-colors">Delete</a>
+                     class="font-label-sm text-label-sm text-error border border-error rounded-lg px-3 py-1 ms-2 hover:bg-error-container hover:text-on-error-container transition-colors">{{ chrome.t("admin-saml-action-delete") }}</a>
                 </td>
               </tr>
             {% endfor %}
@@ -97,26 +93,26 @@
     </div>
 
     <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-6 mt-stack-lg">
-      <h2 class="font-headline-sm text-headline-sm text-on-surface mb-stack-sm">Values for the customer's IdP admin</h2>
+      <h2 class="font-headline-sm text-headline-sm text-on-surface mb-stack-sm">{{ chrome.t("admin-saml-idp-values-heading") }}</h2>
       <p class="font-body-sm text-body-sm text-on-surface-variant mb-stack-md">
-        Hand these to whoever configures the SAML app on the identity-provider side. They're the same for every connection.
+        {{ chrome.t("admin-saml-idp-values-intro") }}
       </p>
       <dl class="flex flex-col gap-stack-sm">
         <div>
-          <dt class="font-label-md text-label-md text-on-surface">ACS URL</dt>
+          <dt class="font-label-md text-label-md text-on-surface">{{ chrome.t("admin-saml-idp-acs-url") }}</dt>
           <dd>
             <code class="font-mono text-xs select-all">{{ acs_url }}</code>
           </dd>
         </div>
         <div>
-          <dt class="font-label-md text-label-md text-on-surface">SP entity ID</dt>
+          <dt class="font-label-md text-label-md text-on-surface">{{ chrome.t("admin-saml-idp-entity-id") }}</dt>
           <dd>
             <code class="font-mono text-xs select-all">{{ entity_id }}</code>
           </dd>
         </div>
       </dl>
       <p class="font-body-sm text-body-sm text-on-surface-variant mt-stack-md">
-        The entity ID follows Jackson's <code class="font-mono">samlAudience</code> setting; change it there if you override the default.
+        {{ chrome.t("admin-saml-entity-id-note-prefix") }} <code class="font-mono">samlAudience</code>{{ chrome.t("admin-saml-entity-id-note-suffix") }}
       </p>
     </div>
   {% endif %}

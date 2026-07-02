@@ -167,13 +167,19 @@ pub(super) struct SettingsCtx {
     pub(super) identity_id: String,
     pub(super) user_email: String,
     pub(super) csrf_token: String,
+    pub(super) locale: crate::locale::LanguageIdentifier,
 }
 
-pub(super) fn settings_ctx(sess: &RequireSession, csrf: &Csrf) -> SettingsCtx {
+pub(super) fn settings_ctx(
+    sess: &RequireSession,
+    csrf: &Csrf,
+    locale: crate::locale::LanguageIdentifier,
+) -> SettingsCtx {
     SettingsCtx {
         identity_id: sess.identity_id.clone(),
         user_email: sess.email.clone(),
         csrf_token: csrf.0.clone(),
+        locale,
     }
 }
 

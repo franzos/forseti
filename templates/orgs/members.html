@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}Members &middot; {{ org.name }} &middot; {{ chrome.brand.name }}{% endblock %}
+{% block title %}{{ chrome.t("orgs-members-page-heading") }} &middot; {{ org.name }} &middot; {{ chrome.brand.name }}{% endblock %}
 
 {% block nav_settings_class %}text-primary font-bold border-b-2 border-primary{% endblock %}
 
@@ -16,47 +16,45 @@
     <section class="flex-1 flex flex-col gap-stack-lg">
       <header class="mt-2 mb-stack-lg">
         <h1 class="font-headline-lg-mobile md:font-headline-lg text-headline-lg-mobile md:text-headline-lg text-on-surface">
-          Members &middot; {{ org.name }}
+          {{ chrome.t("orgs-members-page-heading") }} &middot; <bdi>{{ org.name }}</bdi>
         </h1>
-        <p class="font-body-md text-body-md text-on-surface-variant mt-1">
-          Owners can promote / demote members and remove anyone except the last owner.
-        </p>
+        <p class="font-body-md text-body-md text-on-surface-variant mt-1">{{ chrome.t("orgs-members-subtitle") }}</p>
         {% if !is_owner %}
           {% if visibility == "admins_only" %}
-            <p class="font-body-sm text-on-surface-variant mt-1">Only administrators can see the full member list.</p>
+            <p class="font-body-sm text-on-surface-variant mt-1">{{ chrome.t("orgs-members-visibility-note-admins-only") }}</p>
           {% else if visibility == "same_group" %}
-            <p class="font-body-sm text-on-surface-variant mt-1">You see members who share a team with you.</p>
+            <p class="font-body-sm text-on-surface-variant mt-1">{{ chrome.t("orgs-members-visibility-note-same-group") }}</p>
           {% else %}
-            <p class="font-body-sm text-on-surface-variant mt-1">All members are visible.</p>
+            <p class="font-body-sm text-on-surface-variant mt-1">{{ chrome.t("orgs-members-visibility-note-all") }}</p>
           {% endif %}
         {% endif %}
       </header>
 
       {% if is_owner %}
         <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg">
-          <h2 class="font-headline-md text-headline-md text-on-surface mb-stack-md">Invite by email</h2>
+          <h2 class="font-headline-md text-headline-md text-on-surface mb-stack-md">{{ chrome.t("orgs-members-invite-heading") }}</h2>
           <form method="POST"
                 action="{% if is_default %}/settings/organization/members/invite{% else %}/settings/organizations/{{ org.slug }}/members/invite{% endif %}"
                 class="flex flex-col md:flex-row gap-stack-md items-end">
             <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
             <label class="flex flex-col gap-1 flex-1">
-              <span class="font-label-sm text-label-sm text-on-surface-variant">Email</span>
+              <span class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("orgs-field-email") }}</span>
               <input type="email"
                      name="email"
                      required
                      class="border border-outline-variant rounded-lg px-3 py-2 bg-surface-container-low">
             </label>
             <label class="flex flex-col gap-1">
-              <span class="font-label-sm text-label-sm text-on-surface-variant">Role</span>
+              <span class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("orgs-field-role") }}</span>
               <select name="role"
                       class="border border-outline-variant rounded-lg px-3 py-2 bg-surface-container-low">
-                <option value="member">Member</option>
-                <option value="owner">Owner</option>
+                <option value="member">{{ chrome.t("orgs-members-role-member") }}</option>
+                <option value="owner">{{ chrome.t("orgs-members-role-owner") }}</option>
               </select>
             </label>
             <button type="submit"
                     class="bg-primary text-on-primary rounded-lg px-4 py-2 font-label-md text-label-md">
-              Send invite
+              {{ chrome.t("orgs-members-action-invite") }}
             </button>
           </form>
         </div>
@@ -64,37 +62,37 @@
 
       {% if is_owner %}
         <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg">
-          <h2 class="font-headline-md text-headline-md text-on-surface mb-stack-md">Directory visibility</h2>
+          <h2 class="font-headline-md text-headline-md text-on-surface mb-stack-md">{{ chrome.t("orgs-members-visibility-heading") }}</h2>
           <form method="POST"
                 action="{% if is_default %}/settings/organization/members/visibility{% else %}/settings/organizations/{{ org.slug }}/members/visibility{% endif %}"
                 class="flex flex-col md:flex-row gap-stack-md items-end">
             <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
             <label class="flex flex-col gap-1 flex-1">
-              <span class="font-label-sm text-label-sm text-on-surface-variant">Who can see the member list</span>
+              <span class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("orgs-members-visibility-label") }}</span>
               <select name="visibility"
                       class="border border-outline-variant rounded-lg px-3 py-2 bg-surface-container-low">
-                <option value="all" {% if visibility == "all" %}selected{% endif %}>All members</option>
+                <option value="all" {% if visibility == "all" %}selected{% endif %}>{{ chrome.t("orgs-members-visibility-opt-all") }}</option>
                 <option value="same_group"
-                        {% if visibility == "same_group" %}selected{% endif %}>Same team only</option>
+                        {% if visibility == "same_group" %}selected{% endif %}>{{ chrome.t("orgs-members-visibility-opt-same-group") }}</option>
                 <option value="admins_only"
-                        {% if visibility == "admins_only" %}selected{% endif %}>Administrators only</option>
+                        {% if visibility == "admins_only" %}selected{% endif %}>{{ chrome.t("orgs-members-visibility-opt-admins-only") }}</option>
               </select>
             </label>
             <button type="submit"
-                    class="bg-primary text-on-primary rounded-lg px-4 py-2 font-label-md text-label-md">Save</button>
+                    class="bg-primary text-on-primary rounded-lg px-4 py-2 font-label-md text-label-md">{{ chrome.t("common-action-save") }}</button>
           </form>
-          <p class="font-body-sm text-on-surface-variant mt-stack-sm">Same team only requires at least one team to exist first.</p>
+          <p class="font-body-sm text-on-surface-variant mt-stack-sm">{{ chrome.t("orgs-members-visibility-hint") }}</p>
         </div>
       {% endif %}
 
       <div class="bg-surface-container-lowest border border-outline-variant rounded-xl overflow-hidden">
         <table class="w-full">
-          <thead class="bg-surface-container-low text-left">
+          <thead class="bg-surface-container-low text-start">
             <tr>
-              <th class="px-stack-md py-stack-sm font-label-sm text-label-sm text-on-surface-variant">Name</th>
-              <th class="px-stack-md py-stack-sm font-label-sm text-label-sm text-on-surface-variant">Email</th>
-              <th class="px-stack-md py-stack-sm font-label-sm text-label-sm text-on-surface-variant">Role</th>
-              <th class="px-stack-md py-stack-sm font-label-sm text-label-sm text-on-surface-variant">Joined</th>
+              <th class="px-stack-md py-stack-sm font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("orgs-field-name") }}</th>
+              <th class="px-stack-md py-stack-sm font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("orgs-field-email") }}</th>
+              <th class="px-stack-md py-stack-sm font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("orgs-field-role") }}</th>
+              <th class="px-stack-md py-stack-sm font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("orgs-members-col-joined") }}</th>
               <th></th>
             </tr>
           </thead>
@@ -115,22 +113,22 @@
                         <a href="/users/{{ m.identity_id }}"
                            class="text-primary hover:underline">
                           {% if !m.display_name.is_empty() %}
-                            {{ m.display_name }}
+                            <bdi>{{ m.display_name }}</bdi>
                           {% else %}
-                            {{ m.email }}
+                            <bdi>{{ m.email }}</bdi>
                           {% endif %}
                         </a>
                       {% else if !m.display_name.is_empty() %}
-                        {{ m.display_name }}
+                        <bdi>{{ m.display_name }}</bdi>
                       {% else %}
                         <span class="text-on-surface-variant">&mdash;</span>
                       {% endif %}
-                      {% if m.is_self %}<span class="text-on-surface-variant">(you)</span>{% endif %}
-                      {% if m.hidden %}<span class="ml-1 px-1.5 py-0.5 rounded bg-surface-container text-on-surface-variant font-label-sm text-label-sm">Hidden</span>{% endif %}
+                      {% if m.is_self %}<span class="text-on-surface-variant">({{ chrome.t("orgs-members-badge-you") }})</span>{% endif %}
+                      {% if m.hidden %}<span class="ms-1 px-1.5 py-0.5 rounded bg-surface-container text-on-surface-variant font-label-sm text-label-sm">{{ chrome.t("orgs-members-badge-hidden") }}</span>{% endif %}
                     </span>
                   </div>
                 </td>
-                <td class="px-stack-md py-stack-sm font-body-md text-body-md font-mono">{{ m.email }}</td>
+                <td class="px-stack-md py-stack-sm font-body-md text-body-md font-mono"><bdi>{{ m.email }}</bdi></td>
                 <td class="px-stack-md py-stack-sm">
                   {% if is_owner %}
                     <form method="POST"
@@ -139,17 +137,17 @@
                       <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
                       <select name="role"
                               class="border border-outline-variant rounded px-2 py-1 bg-surface-container-low">
-                        <option value="member" {% if m.role == "member" %}selected{% endif %}>Member</option>
-                        <option value="owner" {% if m.role == "owner" %}selected{% endif %}>Owner</option>
+                        <option value="member" {% if m.role == "member" %}selected{% endif %}>{{ chrome.t("orgs-members-role-member") }}</option>
+                        <option value="owner" {% if m.role == "owner" %}selected{% endif %}>{{ chrome.t("orgs-members-role-owner") }}</option>
                       </select>
-                      <button type="submit" class="font-label-sm text-primary">Update</button>
+                      <button type="submit" class="font-label-sm text-primary">{{ chrome.t("orgs-members-action-update") }}</button>
                     </form>
                   {% else %}
                     {{ m.role }}
                   {% endif %}
                 </td>
                 <td class="px-stack-md py-stack-sm font-body-sm text-on-surface-variant">{{ m.added_at }}</td>
-                <td class="px-stack-md py-stack-sm text-right">
+                <td class="px-stack-md py-stack-sm text-end">
                   <div class="inline-flex items-center gap-3">
                     {% if is_owner || m.is_self %}
                       <form method="POST"
@@ -161,9 +159,9 @@
                                value="{% if m.hidden %}false{% else %}true{% endif %}">
                         <button type="submit" class="font-label-sm text-primary">
                           {% if m.hidden %}
-                            Show
+                            {{ chrome.t("orgs-members-action-show") }}
                           {% else %}
-                            Hide
+                            {{ chrome.t("orgs-members-action-hide") }}
                           {% endif %}
                         </button>
                       </form>
@@ -171,10 +169,10 @@
                     {% if is_owner && !m.is_self %}
                       <form method="POST"
                             action="{% if is_default %}/settings/organization/members/{{ m.identity_id }}/remove{% else %}/settings/organizations/{{ org.slug }}/members/{{ m.identity_id }}/remove{% endif %}"
-                            onsubmit="return confirm('Remove {{ m.email }}?');"
+                            onsubmit="return confirm('{{ chrome.tv1('orgs-confirm-remove-member', 'email', &m.email) }}');"
                             class="inline">
                         <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
-                        <button type="submit" class="text-error font-label-sm">Remove</button>
+                        <button type="submit" class="text-error font-label-sm">{{ chrome.t("orgs-members-action-remove") }}</button>
                       </form>
                     {% endif %}
                   </div>
@@ -187,20 +185,20 @@
 
       {% if invites.len() > 0 %}
         <div class="bg-surface-container-lowest border border-outline-variant rounded-xl overflow-hidden">
-          <h2 class="px-stack-md pt-stack-md font-headline-md text-headline-md text-on-surface">Pending invites</h2>
+          <h2 class="px-stack-md pt-stack-md font-headline-md text-headline-md text-on-surface">{{ chrome.t("orgs-members-invites-heading") }}</h2>
           <table class="w-full mt-stack-md">
-            <thead class="bg-surface-container-low text-left">
+            <thead class="bg-surface-container-low text-start">
               <tr>
-                <th class="px-stack-md py-stack-sm font-label-sm text-label-sm text-on-surface-variant">Email</th>
-                <th class="px-stack-md py-stack-sm font-label-sm text-label-sm text-on-surface-variant">Role</th>
-                <th class="px-stack-md py-stack-sm font-label-sm text-label-sm text-on-surface-variant">Sent</th>
-                <th class="px-stack-md py-stack-sm font-label-sm text-label-sm text-on-surface-variant">Expires</th>
+                <th class="px-stack-md py-stack-sm font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("orgs-field-email") }}</th>
+                <th class="px-stack-md py-stack-sm font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("orgs-field-role") }}</th>
+                <th class="px-stack-md py-stack-sm font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("orgs-members-invites-col-sent") }}</th>
+                <th class="px-stack-md py-stack-sm font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("orgs-members-invites-col-expires") }}</th>
               </tr>
             </thead>
             <tbody>
               {% for inv in invites %}
                 <tr class="border-t border-outline-variant">
-                  <td class="px-stack-md py-stack-sm font-body-md">{{ inv.email }}</td>
+                  <td class="px-stack-md py-stack-sm font-body-md"><bdi>{{ inv.email }}</bdi></td>
                   <td class="px-stack-md py-stack-sm font-body-md">{{ inv.role }}</td>
                   <td class="px-stack-md py-stack-sm font-body-sm text-on-surface-variant">{{ inv.invited_at }}</td>
                   <td class="px-stack-md py-stack-sm font-body-sm text-on-surface-variant">{{ inv.expires_at }}</td>

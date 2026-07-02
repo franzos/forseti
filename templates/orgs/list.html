@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}Organizations &middot; {{ chrome.brand.name }}{% endblock %}
+{% block title %}{{ chrome.t("orgs-list-title") }} &middot; {{ chrome.brand.name }}{% endblock %}
 
 {% block nav_settings_class %}text-primary font-bold border-b-2 border-primary{% endblock %}
 
@@ -16,7 +16,7 @@
     <section class="flex-1 flex flex-col gap-stack-lg">
       <header class="mt-2 mb-stack-lg">
         <h1 class="font-headline-lg-mobile md:font-headline-lg text-headline-lg-mobile md:text-headline-lg text-on-surface">
-          Your organizations
+          {{ chrome.t("orgs-list-heading") }}
         </h1>
       </header>
 
@@ -25,7 +25,7 @@
           <li class="bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-md flex justify-between items-center">
             <div>
               <a href="/settings/organizations/{{ m.slug }}"
-                 class="font-headline-md text-headline-md text-primary">{{ m.name }}</a>
+                 class="font-headline-md text-headline-md text-primary"><bdi>{{ m.name }}</bdi></a>
               <p class="font-body-sm text-on-surface-variant">{{ m.role }}</p>
             </div>
             <span class="font-mono text-body-sm text-on-surface-variant">{{ m.slug }}</span>
@@ -35,51 +35,51 @@
 
       {% if can_create %}
         <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg">
-          <h2 class="font-headline-md text-headline-md text-on-surface mb-stack-md">Create a new organization</h2>
+          <h2 class="font-headline-md text-headline-md text-on-surface mb-stack-md">{{ chrome.t("orgs-list-create-heading") }}</h2>
           <form method="POST"
                 action="/settings/organizations/create"
                 class="flex flex-col md:flex-row gap-stack-md items-end">
             <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
             <label class="flex flex-col gap-1 flex-1">
-              <span class="font-label-sm text-label-sm text-on-surface-variant">Name</span>
+              <span class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("orgs-field-name") }}</span>
               <input type="text"
                      name="name"
                      required
                      class="border border-outline-variant rounded-lg px-3 py-2 bg-surface-container-low">
             </label>
             <label class="flex flex-col gap-1 flex-1">
-              <span class="font-label-sm text-label-sm text-on-surface-variant">Slug (optional)</span>
+              <span class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("orgs-list-field-slug-optional") }}</span>
               <input type="text"
                      name="slug"
                      pattern="[a-z0-9-]*"
                      class="border border-outline-variant rounded-lg px-3 py-2 bg-surface-container-low font-mono">
             </label>
             <button type="submit"
-                    class="bg-primary text-on-primary rounded-lg px-4 py-2 font-label-md text-label-md">Create</button>
+                    class="bg-primary text-on-primary rounded-lg px-4 py-2 font-label-md text-label-md">{{ chrome.t("orgs-list-action-create") }}</button>
           </form>
         </div>
       {% else %}
         <div class="bg-secondary-container/30 border border-outline-variant rounded-xl p-stack-lg flex flex-col gap-stack-md">
           <h2 class="font-headline-md text-headline-md text-on-surface">
-            Multiple organizations is a {{ required_tier_label }} feature
+            {{ chrome.tv1("orgs-list-tier-gate-heading", "tier", &required_tier_label) }}
           </h2>
           <p class="font-body-md text-on-surface-variant">
             {% if has_license %}
-              Your current license doesn't include the Organizations feature.
+              {{ chrome.t("orgs-list-license-missing") }}
             {% else %}
-              This {{ chrome.brand.name }} install is running unlicensed, so additional organizations beyond the default are gated.
+              {{ chrome.tv1("orgs-list-unlicensed", "brand", &chrome.brand.name) }}
             {% endif %}
-            Activate or upgrade a license to create more.
+            {{ chrome.t("orgs-list-license-upgrade") }}
           </p>
           <div class="flex gap-stack-md">
             {% if purchase_url != "#" %}
               <a href="{{ purchase_url }}"
                  target="_blank"
                  rel="noopener noreferrer"
-                 class="bg-primary text-on-primary rounded-lg px-4 py-2 font-label-md text-label-md">Get a license &rarr;</a>
+                 class="bg-primary text-on-primary rounded-lg px-4 py-2 font-label-md text-label-md">{{ chrome.t("orgs-list-link-get-license") }} <span class="dir-flip">&rarr;</span></a>
             {% endif %}
             <a href="/admin/license"
-               class="border border-outline-variant rounded-lg px-4 py-2 font-label-md text-label-md">Activate an existing license</a>
+               class="border border-outline-variant rounded-lg px-4 py-2 font-label-md text-label-md">{{ chrome.t("orgs-list-link-activate-license") }}</a>
           </div>
         </div>
       {% endif %}

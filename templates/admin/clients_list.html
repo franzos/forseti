@@ -1,18 +1,18 @@
 {% extends "admin/admin_shell.html" %}
 {% import "admin/_app_logo.html" as logo_macro %}
 
-{% block admin_title %}OAuth2 clients{% endblock %}
+{% block admin_title %}{{ chrome.t("admin-clients-page-title") }}{% endblock %}
 
 {% block admin_content %}
   <div class="flex items-center justify-between mt-2 mb-stack-lg">
     <div>
       <h1 class="font-headline-lg-mobile md:font-headline-lg text-headline-lg-mobile md:text-headline-lg text-on-surface">
-        OAuth2 clients
+        {{ chrome.t("admin-clients-page-title") }}
       </h1>
-      <p class="font-body-md text-body-md text-on-surface-variant mt-1">Hydra-registered relying parties.</p>
+      <p class="font-body-md text-body-md text-on-surface-variant mt-1">{{ chrome.t("admin-clients-subtitle") }}</p>
     </div>
     <a href="/admin/clients/new"
-       class="bg-primary text-on-primary font-label-md text-label-md font-bold px-4 py-2 rounded-lg hover:opacity-90 transition-opacity">New client</a>
+       class="bg-primary text-on-primary font-label-md text-label-md font-bold px-4 py-2 rounded-lg hover:opacity-90 transition-opacity">{{ chrome.t("admin-clients-action-new") }}</a>
   </div>
 
   <form method="GET"
@@ -21,37 +21,37 @@
     <input type="text"
            name="q"
            value="{{ filter_q }}"
-           placeholder="Search by client name or ID"
+           placeholder="{{ chrome.t('admin-clients-search-placeholder') }}"
            class="font-body-md text-body-md bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2 flex-1 min-w-[16rem]">
     <select name="type"
             class="font-body-md text-body-md bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2">
-      <option value="" {% if filter_type.is_empty() %}selected{% endif %}>All types</option>
+      <option value="" {% if filter_type.is_empty() %}selected{% endif %}>{{ chrome.t("admin-clients-filter-all-types") }}</option>
       {% for opt in type_options %}
         <option value="{{ opt.0 }}" {% if filter_type == opt.0 %}selected{% endif %}>{{ opt.1 }}</option>
       {% endfor %}
     </select>
     <select name="verification"
             class="font-body-md text-body-md bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2">
-      <option value="" {% if filter_verification.is_empty() %}selected{% endif %}>All verifications</option>
+      <option value="" {% if filter_verification.is_empty() %}selected{% endif %}>{{ chrome.t("admin-clients-filter-all-verifications") }}</option>
       <option value="verified"
-              {% if filter_verification == "verified" %}selected{% endif %}>Verified</option>
+              {% if filter_verification == "verified" %}selected{% endif %}>{{ chrome.t("admin-clients-filter-verified") }}</option>
       <option value="unverified"
-              {% if filter_verification == "unverified" %}selected{% endif %}>Unverified</option>
+              {% if filter_verification == "unverified" %}selected{% endif %}>{{ chrome.t("admin-clients-filter-unverified") }}</option>
     </select>
     <button type="submit"
             class="font-label-md text-label-md text-primary border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">
-      Search
+      {{ chrome.t("admin-clients-search-button") }}
     </button>
   </form>
 
   <div class="bg-surface-container-lowest border border-outline-variant rounded-xl overflow-x-auto">
-    <table class="w-full text-left">
+    <table class="w-full text-start">
       <thead class="bg-surface-container-low">
         <tr>
-          <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Name</th>
-          <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Type</th>
-          <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Grants</th>
-          <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Created</th>
+          <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">{{ chrome.t("admin-clients-col-name") }}</th>
+          <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">{{ chrome.t("admin-clients-col-type") }}</th>
+          <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">{{ chrome.t("admin-clients-col-grants") }}</th>
+          <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">{{ chrome.t("admin-clients-col-created") }}</th>
         </tr>
       </thead>
       <tbody>
@@ -59,7 +59,7 @@
           <tr>
             <td colspan="4"
                 class="px-4 py-6 text-center font-body-md text-body-md text-on-surface-variant">
-              No clients registered.
+              {{ chrome.t("admin-clients-empty") }}
             </td>
           </tr>
         {% else %}
@@ -70,21 +70,21 @@
                   {% if r.logo.is_some() %}<span class="flex items-center justify-center w-8 h-8 rounded-lg bg-surface-container-high shrink-0">{{ logo_macro::app_logo(r.logo, r.logo_dark) }}</span>{% endif %}
                   <a href="/admin/clients/{{ r.id }}"
                      class="text-primary font-bold hover:underline"
-                     title="{{ r.id }}">{{ r.name }}</a>
+                     title="{{ r.id }}"><bdi>{{ r.name }}</bdi></a>
                   {% if r.verified %}
                     <span class="font-label-sm text-label-sm bg-success-container text-on-success-container px-2 py-0.5 rounded-full font-semibold"
                           {% if !r.verified_by.is_empty() %}title="Verified by {{ r.verified_by }}{% if !r.verified_at.is_empty() %} at {{ r.verified_at }}{% endif %}
                           "
                           {% else %}
-                          title="Verified"
-                          {% endif %}>Verified</span>
+                          title="{{ chrome.t('admin-client-badge-verified') }}"
+                          {% endif %}>{{ chrome.t("admin-client-badge-verified") }}</span>
                   {% else %}
                     <span class="font-label-sm text-label-sm bg-error-container text-on-error-container px-2 py-0.5 rounded-full font-semibold"
-                          title="Not vetted by an administrator">Unverified</span>
+                          title="{{ chrome.t('admin-clients-badge-unverified-title') }}">{{ chrome.t("admin-client-badge-unverified") }}</span>
                   {% endif %}
                   {% if r.self_registered %}
                     <span class="font-label-sm text-label-sm bg-surface-container-high text-on-surface-variant px-2 py-0.5 rounded-full font-semibold"
-                          title="Registered via /oauth2/register (RFC 7591)">Self-registered</span>
+                          title="{{ chrome.t('admin-clients-badge-self-registered-title') }}">{{ chrome.t("admin-clients-badge-self-registered") }}</span>
                   {% endif %}
                 </div>
               </td>
@@ -109,13 +109,13 @@
     <div class="mt-stack-md flex justify-between items-center">
       {% if has_prev %}
         <a href="/admin/clients{% if !filter_q.is_empty() %}?q={{ filter_q }}{% endif %}{% if !filter_type.is_empty() %}{% if filter_q.is_empty() %}?{% else %}&{% endif %}type={{ filter_type }}{% endif %}{% if !filter_verification.is_empty() %}{% if filter_q.is_empty() && filter_type.is_empty() %}?{% else %}&{% endif %}verification={{ filter_verification }}{% endif %}"
-           class="font-label-md text-label-md text-on-surface-variant border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">&larr; Back to start</a>
+           class="font-label-md text-label-md text-on-surface-variant border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors"><span class="dir-flip">&larr;</span> {{ chrome.t("admin-clients-prev") }}</a>
       {% else %}
         <span></span>
       {% endif %}
       {% if !next_page_token.is_empty() %}
         <a href="/admin/clients?page_token={{ next_page_token }}{% if !filter_q.is_empty() %}&q={{ filter_q }}{% endif %}{% if !filter_type.is_empty() %}&type={{ filter_type }}{% endif %}{% if !filter_verification.is_empty() %}&verification={{ filter_verification }}{% endif %}"
-           class="font-label-md text-label-md text-primary border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">Next page &rarr;</a>
+           class="font-label-md text-label-md text-primary border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">{{ chrome.t("admin-clients-next") }} <span class="dir-flip">&rarr;</span></a>
       {% endif %}
     </div>
   {% endif %}

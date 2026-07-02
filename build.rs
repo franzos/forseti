@@ -4,8 +4,9 @@ use std::path::Path;
 
 // cargo doesn't track files inside include_dir!, so emit rerun-if-changed per file.
 fn main() {
-    let static_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("static");
-    watch(&static_dir);
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    watch(&root.join("static"));
+    watch(&root.join("locales"));
 }
 
 fn watch(path: &Path) {

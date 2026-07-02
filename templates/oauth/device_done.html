@@ -2,31 +2,26 @@
 
 {% block title %}
   {% if error %}
-    Login not approved
+    {{ chrome.t("device-done-title-error") }}
   {% else %}
-    Login approved
+    {{ chrome.t("device-done-title-ok") }}
   {% endif %}
   &middot; {{ chrome.brand.name }}
 {% endblock %}
 
 {% block card_title %}
   {% if error %}
-    We couldn't approve that login
+    {{ chrome.t("device-done-card-title-error") }}
   {% else %}
-    Approved
+    {{ chrome.t("device-done-card-title-ok") }}
   {% endif %}
 {% endblock %}
 
 {% block card_body %}
   {% if error %}
-    <p class="font-body-md text-body-md text-on-surface-variant">
-      That code may have expired or already been used. Start the login again on your terminal to
-      get a fresh code.
-    </p>
+    <p class="font-body-md text-body-md text-on-surface-variant">{{ chrome.t("device-done-body-error") }}</p>
   {% else %}
-    <p class="font-body-md text-body-md text-on-surface">
-      You can return to your terminal — the login will continue there.
-    </p>
-    <p class="font-body-sm text-body-sm text-on-surface-variant mt-stack-xs">It's safe to close this page.</p>
+    <p class="font-body-md text-body-md text-on-surface">{{ chrome.t("device-done-body-ok") }}</p>
+    <p class="font-body-sm text-body-sm text-on-surface-variant mt-stack-xs">{{ chrome.t("device-done-body-safe") }}</p>
   {% endif %}
 {% endblock %}

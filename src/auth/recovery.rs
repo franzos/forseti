@@ -47,10 +47,11 @@ pub(crate) async fn recovery(
             tracing::error!(error = ?e, ?flow_id, "failed to fetch Kratos recovery flow");
             render_error_boundary(
                 &state,
-                "Recovery unavailable",
-                crate::web::AUTH_UNAVAILABLE_BODY,
+                &chrome.locale,
+                &crate::i18n::lookup(&chrome.locale, "error-boundary-recovery-title"),
+                &crate::i18n::lookup(&chrome.locale, "error-boundary-auth-unavailable-body"),
                 "/login",
-                "Sign in",
+                crate::i18n::lookup(&chrome.locale, "error-boundary-cta-sign-in"),
             )
             .into_response()
         }
@@ -62,9 +63,10 @@ fn render_recovery(
     flow: &serde_json::Value,
     return_to: Option<&str>,
 ) -> Response {
+    let form = FlowFormView::from_flow(flow, FlowKind::Recovery, return_to, &chrome.locale);
     render(&RecoveryTemplate {
         chrome,
-        form: FlowFormView::from_flow(flow, FlowKind::Recovery, return_to),
+        form,
         state: flow_state(flow).to_string(),
     })
 }

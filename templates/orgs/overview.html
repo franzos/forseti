@@ -16,26 +16,26 @@
     <section class="flex-1 flex flex-col gap-stack-lg">
       <header class="mt-2 mb-stack-lg">
         <h1 class="font-headline-lg-mobile md:font-headline-lg text-headline-lg-mobile md:text-headline-lg text-on-surface">
-          {{ org.name }}
+          <bdi>{{ org.name }}</bdi>
         </h1>
         <p class="font-body-md text-body-md text-on-surface-variant mt-1">
           {% if is_default %}
-            This is the default organization for this {{ chrome.brand.name }} install. Anyone who signs up joins it automatically.
+            {{ chrome.tv1("orgs-overview-subtitle-default", "brand", &chrome.brand.name) }}
           {% else %}
-            Manage this organization's settings, branding, and membership.
+            {{ chrome.t("orgs-overview-subtitle") }}
           {% endif %}
         </p>
       </header>
 
       <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg">
-        <h2 class="font-headline-md text-headline-md text-on-surface mb-stack-md">Identity</h2>
+        <h2 class="font-headline-md text-headline-md text-on-surface mb-stack-md">{{ chrome.t("orgs-overview-identity-heading") }}</h2>
         {% if is_owner %}
           <form method="POST"
                 action="{% if is_default %}/settings/organization{% else %}/settings/organizations/{{ org.slug }}{% endif %}"
                 class="flex flex-col gap-stack-md">
             <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
             <label class="flex flex-col gap-1">
-              <span class="font-label-sm text-label-sm text-on-surface-variant">Name</span>
+              <span class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("orgs-field-name") }}</span>
               <input type="text"
                      name="name"
                      value="{{ org.name }}"
@@ -43,7 +43,7 @@
                      class="border border-outline-variant rounded-lg px-3 py-2 bg-surface-container-low">
             </label>
             <label class="flex flex-col gap-1">
-              <span class="font-label-sm text-label-sm text-on-surface-variant">Slug</span>
+              <span class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("orgs-field-slug") }}</span>
               <input type="text"
                      name="slug"
                      value="{{ org.slug }}"
@@ -53,16 +53,16 @@
             </label>
             <div>
               <button type="submit"
-                      class="bg-primary text-on-primary rounded-lg px-4 py-2 font-label-md text-label-md">Save</button>
+                      class="bg-primary text-on-primary rounded-lg px-4 py-2 font-label-md text-label-md">{{ chrome.t("common-action-save") }}</button>
             </div>
           </form>
         {% else %}
           <dl class="grid grid-cols-2 gap-stack-md">
-            <dt class="font-label-sm text-label-sm text-on-surface-variant">Name</dt>
+            <dt class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("orgs-field-name") }}</dt>
             <dd class="font-body-md text-body-md">
-              {{ org.name }}
+              <bdi>{{ org.name }}</bdi>
             </dd>
-            <dt class="font-label-sm text-label-sm text-on-surface-variant">Slug</dt>
+            <dt class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("orgs-field-slug") }}</dt>
             <dd class="font-body-md text-body-md font-mono">
               {{ org.slug }}
             </dd>
@@ -71,54 +71,52 @@
       </div>
 
       <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg">
-        <h2 class="font-headline-md text-headline-md text-on-surface mb-stack-md">Quick links</h2>
+        <h2 class="font-headline-md text-headline-md text-on-surface mb-stack-md">{{ chrome.t("orgs-overview-quicklinks-heading") }}</h2>
         <ul class="flex flex-col gap-stack-sm">
           <li>
             <a href="{% if is_default %}/settings/organization/branding{% else %}/settings/organizations/{{ org.slug }}/branding{% endif %}"
-               class="text-primary font-label-md">Branding &rarr;</a>
+               class="text-primary font-label-md">{{ chrome.t("orgs-link-branding") }} <span class="dir-flip">&rarr;</span></a>
           </li>
           <li>
             <a href="{% if is_default %}/settings/organization/members{% else %}/settings/organizations/{{ org.slug }}/members{% endif %}"
-               class="text-primary font-label-md">Members ({{ member_count }}) &rarr;</a>
+               class="text-primary font-label-md">{{ chrome.t("orgs-link-members") }} ({{ member_count }}) <span class="dir-flip">&rarr;</span></a>
           </li>
           <li>
             <a href="{% if is_default %}/settings/organization/teams{% else %}/settings/organizations/{{ org.slug }}/teams{% endif %}"
-               class="text-primary font-label-md">Teams &rarr;</a>
+               class="text-primary font-label-md">{{ chrome.t("orgs-link-teams") }} <span class="dir-flip">&rarr;</span></a>
           </li>
         </ul>
       </div>
 
       {% if let Some(sso) = sso %}
         <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg">
-          <h2 class="font-headline-md text-headline-md text-on-surface mb-stack-md">Enterprise SSO</h2>
+          <h2 class="font-headline-md text-headline-md text-on-surface mb-stack-md">{{ chrome.t("orgs-sso-heading") }}</h2>
           <p class="font-body-md text-body-md text-on-surface">
-            {{ sso.display_name }}
+            <bdi>{{ sso.display_name }}</bdi>
             (
             {% if sso.enabled %}
-              enabled
+              {{ chrome.t("orgs-sso-status-enabled") }}
             {% else %}
-              disabled
+              {{ chrome.t("orgs-sso-status-disabled") }}
             {% endif %}
             )
             &mdash; <span class="font-mono">{{ sso.sso_path }}</span>
           </p>
-          <p class="font-label-sm text-label-sm text-on-surface-variant mt-2">SSO connections are managed by the operator.</p>
+          <p class="font-label-sm text-label-sm text-on-surface-variant mt-2">{{ chrome.t("orgs-sso-operator-note") }}</p>
         </div>
       {% endif %}
 
       {% if !is_default && is_owner %}
         <div class="bg-error-container/40 border border-outline-variant rounded-xl p-stack-lg">
-          <h2 class="font-headline-md text-headline-md text-on-error-container mb-stack-md">Danger zone</h2>
-          <p class="font-body-md text-body-md text-on-surface-variant mb-stack-md">
-            Hard-delete this organization. Forseti refuses if any OAuth2 clients are still associated.
-          </p>
+          <h2 class="font-headline-md text-headline-md text-on-error-container mb-stack-md">{{ chrome.t("orgs-danger-heading") }}</h2>
+          <p class="font-body-md text-body-md text-on-surface-variant mb-stack-md">{{ chrome.t("orgs-danger-delete-body") }}</p>
           <form method="POST"
                 action="/settings/organizations/{{ org.slug }}/delete"
-                onsubmit="return confirm('Delete {{ org.name }}? This cannot be undone.');">
+                onsubmit="return confirm('{{ chrome.tv1('orgs-confirm-delete-org', 'name', &org.name) }}');">
             <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
             <button type="submit"
                     class="bg-error text-on-error rounded-lg px-4 py-2 font-label-md text-label-md">
-              Delete organization
+              {{ chrome.t("orgs-danger-delete-action") }}
             </button>
           </form>
         </div>

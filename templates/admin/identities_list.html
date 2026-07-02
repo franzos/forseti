@@ -1,13 +1,13 @@
 {% extends "admin/admin_shell.html" %}
 
-{% block admin_title %}Identities{% endblock %}
+{% block admin_title %}{{ chrome.t("admin-identities-page-title") }}{% endblock %}
 
 {% block admin_content %}
   <header class="mt-2 mb-stack-lg">
     <h1 class="font-headline-lg-mobile md:font-headline-lg text-headline-lg-mobile md:text-headline-lg text-on-surface">
-      Identities
+      {{ chrome.t("admin-identities-page-title") }}
     </h1>
-    <p class="font-body-md text-body-md text-on-surface-variant mt-1">Kratos-managed identities and their state.</p>
+    <p class="font-body-md text-body-md text-on-surface-variant mt-1">{{ chrome.t("admin-identities-subtitle") }}</p>
   </header>
 
   <form method="GET"
@@ -16,21 +16,21 @@
     <input type="text"
            name="q"
            value="{{ filter_q }}"
-           placeholder="Search by ID or email"
+           placeholder="{{ chrome.t('admin-identities-search-placeholder') }}"
            class="font-body-md text-body-md bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2 flex-1">
     <button type="submit"
             class="font-label-md text-label-md text-primary border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">
-      Search
+      {{ chrome.t("admin-identities-search-button") }}
     </button>
   </form>
 
   <div class="bg-surface-container-lowest border border-outline-variant rounded-xl overflow-x-auto">
-    <table class="w-full text-left">
+    <table class="w-full text-start">
       <thead class="bg-surface-container-low">
         <tr>
-          <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Email</th>
-          <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">State</th>
-          <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Created</th>
+          <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">{{ chrome.t("admin-identities-col-email") }}</th>
+          <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">{{ chrome.t("admin-identities-col-state") }}</th>
+          <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">{{ chrome.t("admin-identities-col-created") }}</th>
         </tr>
       </thead>
       <tbody>
@@ -38,7 +38,7 @@
           <tr>
             <td colspan="3"
                 class="px-4 py-6 text-center font-body-md text-body-md text-on-surface-variant">
-              No identities found.
+              {{ chrome.t("admin-identities-empty") }}
             </td>
           </tr>
         {% else %}
@@ -47,7 +47,7 @@
               <td class="px-4 py-3 font-body-md text-body-md text-on-surface">
                 <a href="/admin/identities/{{ r.id }}"
                    class="text-primary font-bold hover:underline"
-                   title="{{ r.id }}">{{ r.email }}</a>
+                   title="{{ r.id }}"><bdi>{{ r.email }}</bdi></a>
               </td>
               <td class="px-4 py-3">
                 {% if r.state == "active" %}
@@ -69,13 +69,13 @@
     <div class="mt-stack-md flex justify-between items-center">
       {% if has_prev %}
         <a href="/admin/identities{% if !filter_q.is_empty() %}?q={{ filter_q }}{% endif %}"
-           class="font-label-md text-label-md text-on-surface-variant border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">&larr; Back to start</a>
+           class="font-label-md text-label-md text-on-surface-variant border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors"><span class="dir-flip">&larr;</span> {{ chrome.t("admin-identities-prev") }}</a>
       {% else %}
         <span></span>
       {% endif %}
       {% if !next_page_token.is_empty() %}
         <a href="/admin/identities?page_token={{ next_page_token }}{% if !filter_q.is_empty() %}&q={{ filter_q }}{% endif %}"
-           class="font-label-md text-label-md text-primary border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">Next page &rarr;</a>
+           class="font-label-md text-label-md text-primary border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">{{ chrome.t("admin-identities-next") }} <span class="dir-flip">&rarr;</span></a>
       {% endif %}
     </div>
   {% endif %}

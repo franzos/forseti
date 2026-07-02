@@ -18,49 +18,49 @@
           <form method="POST" action="/admin/posix/{{ account.identity_id }}/disable">
             <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
             <button type="submit"
-                    class="font-label-sm text-label-sm text-on-surface-variant border border-outline-variant rounded-lg px-3 py-2 hover:bg-surface-container-high transition-colors">Disable</button>
+                    class="font-label-sm text-label-sm text-on-surface-variant border border-outline-variant rounded-lg px-3 py-2 hover:bg-surface-container-high transition-colors">{{ chrome.t("admin-posix-action-disable") }}</button>
           </form>
         {% else %}
           <form method="POST" action="/admin/posix/{{ account.identity_id }}/enable">
             <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
             <button type="submit"
-                    class="font-label-sm text-label-sm text-on-secondary-container bg-secondary-container rounded-lg px-3 py-2 hover:opacity-90 transition-opacity">Enable</button>
+                    class="font-label-sm text-label-sm text-on-secondary-container bg-secondary-container rounded-lg px-3 py-2 hover:opacity-90 transition-opacity">{{ chrome.t("admin-posix-action-enable") }}</button>
           </form>
         {% endif %}
         <a href="/admin/posix/{{ account.identity_id }}/delete"
-           class="font-label-sm text-label-sm text-error border border-error rounded-lg px-3 py-2 hover:bg-error-container hover:text-on-error-container transition-colors">Delete</a>
+           class="font-label-sm text-label-sm text-error border border-error rounded-lg px-3 py-2 hover:bg-error-container hover:text-on-error-container transition-colors">{{ chrome.t("admin-posix-action-delete") }}</a>
       </div>
     </div>
 
     <div class="grid grid-cols-2 sm:grid-cols-4 gap-stack-md mb-stack-lg">
       <div>
-        <p class="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">UID</p>
+        <p class="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">{{ chrome.t("admin-posix-col-uid") }}</p>
         <p class="font-body-md text-body-md text-on-surface font-mono">{{ account.uid }}</p>
       </div>
       <div>
-        <p class="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">GID</p>
+        <p class="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">{{ chrome.t("admin-posix-col-gid") }}</p>
         <p class="font-body-md text-body-md text-on-surface font-mono">{{ account.gid }}</p>
       </div>
       <div>
-        <p class="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Status</p>
+        <p class="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">{{ chrome.t("admin-posix-col-status") }}</p>
         <p class="font-body-md text-body-md text-on-surface">
           {% if account.enabled %}
-            enabled
+            {{ chrome.t("admin-posix-status-enabled") }}
           {% else %}
-            disabled
+            {{ chrome.t("admin-posix-status-disabled") }}
           {% endif %}
         </p>
       </div>
       <div>
-        <p class="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Created</p>
+        <p class="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">{{ chrome.t("admin-posix-col-created") }}</p>
         <p class="font-body-md text-body-md text-on-surface"
            title="{{ account.created_at }}">{{ account.created_at_pretty }}</p>
       </div>
     </div>
 
-    <h2 class="font-headline-md text-headline-md text-on-surface mb-stack-sm">SSH keys</h2>
+    <h2 class="font-headline-md text-headline-md text-on-surface mb-stack-sm">{{ chrome.t("admin-posix-ssh-keys-heading") }}</h2>
     <p class="font-body-sm text-body-sm text-on-surface-variant mb-stack-md">
-      Public keys added here are served to the device's sshd (<code>AuthorizedKeysCommand</code>) so this user can <code>ssh</code> in with their key, no per-host <code>authorized_keys</code> file needed. Requires the host's sshd hook (set up automatically by the <code>forseti-unix</code> Guix service; manual sshd config on other distros). Not used for console / PAM login.
+      {{ chrome.t("admin-posix-ssh-keys-desc-part1") }}<code>AuthorizedKeysCommand</code>{{ chrome.t("admin-posix-ssh-keys-desc-part2") }} <code>ssh</code> {{ chrome.t("admin-posix-ssh-keys-desc-part3") }} <code>authorized_keys</code> {{ chrome.t("admin-posix-ssh-keys-desc-part4") }} <code>forseti-unix</code> {{ chrome.t("admin-posix-ssh-keys-desc-part5") }}
     </p>
 
     {% if !error_message.is_empty() %}
@@ -70,11 +70,11 @@
     {% endif %}
 
     <div class="bg-surface-container-lowest border border-outline-variant rounded-xl overflow-x-auto mb-stack-md">
-      <table class="w-full text-left">
+      <table class="w-full text-start">
         <tbody>
           {% if keys.is_empty() %}
             <tr>
-              <td class="px-4 py-6 text-center font-body-md text-body-md text-on-surface-variant">No SSH keys yet.</td>
+              <td class="px-4 py-6 text-center font-body-md text-body-md text-on-surface-variant">{{ chrome.t("admin-posix-ssh-empty") }}</td>
             </tr>
           {% else %}
             {% for k in keys %}
@@ -83,15 +83,15 @@
                   <p class="font-mono text-body-sm text-on-surface break-all">{{ k.public_key }}</p>
                   <p class="font-body-sm text-body-sm text-on-surface-variant">
                     {% if !k.comment.is_empty() %}{{ k.comment }} &middot; {% endif %}
-                    added {{ k.created_at_pretty }}
+                    {{ chrome.t("admin-posix-ssh-key-added-prefix") }} {{ k.created_at_pretty }}
                   </p>
                 </td>
-                <td class="px-4 py-3 text-right whitespace-nowrap">
+                <td class="px-4 py-3 text-end whitespace-nowrap">
                   <form method="POST"
                         action="/admin/posix/{{ account.identity_id }}/keys/{{ k.id }}/delete">
                     <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
                     <button type="submit"
-                            class="font-label-sm text-label-sm text-error border border-error rounded-lg px-3 py-1 hover:bg-error-container hover:text-on-error-container transition-colors">Remove</button>
+                            class="font-label-sm text-label-sm text-error border border-error rounded-lg px-3 py-1 hover:bg-error-container hover:text-on-error-container transition-colors">{{ chrome.t("admin-posix-ssh-action-remove") }}</button>
                   </form>
                 </td>
               </tr>
@@ -106,7 +106,7 @@
           class="flex flex-col gap-stack-md max-w-2xl">
       <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
       <label class="flex flex-col gap-stack-xs">
-        <span class="font-label-md text-label-md text-on-surface">Public key</span>
+        <span class="font-label-md text-label-md text-on-surface">{{ chrome.t("admin-posix-ssh-field-public-key") }}</span>
         <textarea name="public_key"
                   rows="3"
                   required
@@ -114,26 +114,26 @@
                   class="font-mono text-body-sm bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2"></textarea>
       </label>
       <label class="flex flex-col gap-stack-xs">
-        <span class="font-label-md text-label-md text-on-surface">Comment (optional)</span>
+        <span class="font-label-md text-label-md text-on-surface">{{ chrome.t("admin-posix-ssh-field-comment") }}</span>
         <input type="text"
                name="comment"
                class="font-body-md text-body-md bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2 w-64">
       </label>
       <div>
         <button type="submit"
-                class="bg-primary text-on-primary font-label-md text-label-md font-bold px-4 py-2 rounded-lg hover:opacity-90 transition-opacity">Add key</button>
+                class="bg-primary text-on-primary font-label-md text-label-md font-bold px-4 py-2 rounded-lg hover:opacity-90 transition-opacity">{{ chrome.t("admin-posix-ssh-action-add") }}</button>
       </div>
     </form>
 
     {% if !teams.is_empty() %}
-      <h2 class="font-headline-md text-headline-md text-on-surface mt-stack-lg mb-stack-sm">Teams</h2>
+      <h2 class="font-headline-md text-headline-md text-on-surface mt-stack-lg mb-stack-sm">{{ chrome.t("admin-posix-teams-heading") }}</h2>
       <div class="bg-surface-container-lowest border border-outline-variant rounded-xl overflow-x-auto mb-stack-md">
-        <table class="w-full text-left">
+        <table class="w-full text-start">
           <tbody>
             {% for t in teams %}
               <tr class="border-t border-outline-variant first:border-t-0">
                 <td class="px-4 py-3 font-body-md text-body-md text-on-surface">{{ t.name }}</td>
-                <td class="px-4 py-3 text-right font-body-sm text-body-sm text-on-surface-variant font-mono">{{ t.org_id }}</td>
+                <td class="px-4 py-3 text-end font-body-sm text-body-sm text-on-surface-variant font-mono">{{ t.org_id }}</td>
               </tr>
             {% endfor %}
           </tbody>
@@ -142,14 +142,14 @@
     {% endif %}
 
     {% if !hosts.is_empty() %}
-      <h2 class="font-headline-md text-headline-md text-on-surface mt-stack-lg mb-stack-sm">Reachable hosts</h2>
+      <h2 class="font-headline-md text-headline-md text-on-surface mt-stack-lg mb-stack-sm">{{ chrome.t("admin-posix-hosts-heading") }}</h2>
       <div class="bg-surface-container-lowest border border-outline-variant rounded-xl overflow-x-auto mb-stack-md">
-        <table class="w-full text-left">
+        <table class="w-full text-start">
           <tbody>
             {% for h in hosts %}
               <tr class="border-t border-outline-variant first:border-t-0">
                 <td class="px-4 py-3 font-body-md text-body-md text-on-surface font-mono">{{ h.hostname }}</td>
-                <td class="px-4 py-3 text-right font-body-sm text-body-sm text-on-surface-variant font-mono">{{ h.org_id }}</td>
+                <td class="px-4 py-3 text-end font-body-sm text-body-sm text-on-surface-variant font-mono">{{ h.org_id }}</td>
               </tr>
             {% endfor %}
           </tbody>
@@ -159,7 +159,7 @@
 
     <div class="mt-stack-lg">
       <a href="/admin/posix"
-         class="font-label-md text-label-md text-primary hover:underline">&larr; All POSIX accounts</a>
+         class="font-label-md text-label-md text-primary hover:underline">{{ chrome.t("admin-posix-back") }}</a>
     </div>
   </div>
 {% endblock %}

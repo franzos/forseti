@@ -31,13 +31,25 @@ pub(crate) fn account_view_from_identity(id: &str, identity: &ory::Identity) -> 
             let first = o.get("first").and_then(|x| x.as_str()).unwrap_or("");
             let last = o.get("last").and_then(|x| x.as_str()).unwrap_or("");
             let joined = format!("{first} {last}").trim().to_string();
-            if joined.is_empty() { email.clone() } else { joined }
+            if joined.is_empty() {
+                email.clone()
+            } else {
+                joined
+            }
         }
         _ => email.clone(),
     };
-    let display_name = if display_name.is_empty() { id.to_string() } else { display_name };
+    let display_name = if display_name.is_empty() {
+        id.to_string()
+    } else {
+        display_name
+    };
 
-    AccountView { id: id.to_string(), email, display_name }
+    AccountView {
+        id: id.to_string(),
+        email,
+        display_name,
+    }
 }
 
 /// Resolve identity ids to display views; failed lookups are silently dropped so the list self-heals.
@@ -56,12 +68,7 @@ mod tests {
     use super::*;
 
     fn identity_with(traits: serde_json::Value) -> ory::Identity {
-        ory::Identity::new(
-            String::new(),
-            String::new(),
-            String::new(),
-            Some(traits),
-        )
+        ory::Identity::new(String::new(), String::new(), String::new(), Some(traits))
     }
 
     #[test]

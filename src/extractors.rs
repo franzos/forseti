@@ -100,12 +100,15 @@ where
                 // Transport/5xx, not a real 401: redirecting to /login would sign the user out on a network
                 // flap (and /login itself hits whoami, so we'd loop). Render an error page so the user can retry.
                 tracing::error!(error = ?e, path, "RequireSession: whoami failed");
+                // whoami failed, so no session; resolve locale from cookie/Accept-Language only.
+                let locale = crate::page_chrome::resolve_locale(parts, &OptionalSession::None);
                 return Err(crate::web::render_error_boundary(
                     &app_state,
-                    crate::web::AUTH_UNAVAILABLE_TITLE,
-                    crate::web::AUTH_UNAVAILABLE_BODY,
+                    &locale,
+                    &crate::i18n::lookup(&locale, "error-boundary-auth-unavailable-title"),
+                    &crate::i18n::lookup(&locale, "error-boundary-auth-unavailable-body"),
                     "/",
-                    "Try again",
+                    crate::i18n::lookup(&locale, "error-boundary-cta-try-again"),
                 ));
             }
         };
@@ -245,7 +248,11 @@ where
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let app_state = app_state(parts, state).await;
         let path = parts.uri.path().to_string();
-        let ctx = require_admin(&app_state, &parts.headers, &path).await?;
+        let mut ctx = require_admin(&app_state, &parts.headers, &path).await?;
+        let session = OptionalSession::from_request_parts(parts, state)
+            .await
+            .expect("OptionalSession extractor is infallible");
+        ctx.locale = crate::page_chrome::resolve_locale(parts, &session);
         Ok(RequireAdmin { ctx })
     }
 }
@@ -278,7 +285,7 @@ where
             .get::<csrf::CsrfToken>()
             .map(|t| t.0.clone())
             .unwrap_or_default();
-        let (ctx, scope) = require_admin_with_scope(
+        let (mut ctx, scope) = require_admin_with_scope(
             &app_state,
             &parts.headers,
             &path,
@@ -286,6 +293,10 @@ where
             &csrf_token,
         )
         .await?;
+        let session = OptionalSession::from_request_parts(parts, state)
+            .await
+            .expect("OptionalSession extractor is infallible");
+        ctx.locale = crate::page_chrome::resolve_locale(parts, &session);
         Ok(RequireAdminScoped { ctx, scope })
     }
 }
@@ -301,7 +312,14 @@ pub(crate) fn gate_orgs_feature_or_upsell(
 ) -> Result<FeatureStatus, Response> {
     let status = state.license.feature(Feature::Orgs);
     if matches!(status, FeatureStatus::Locked) {
-        return Err(render_upsell(state, csrf_token, email, Feature::Orgs));
+        // no request context here; upsell locale is inert
+        return Err(render_upsell(
+            state,
+            csrf_token,
+            email,
+            Feature::Orgs,
+            crate::locale::default_locale(),
+        ));
     }
     Ok(status)
 }

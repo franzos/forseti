@@ -2,9 +2,11 @@
 //! `ory_client`'s untagged enums (which can't deserialize, see ory.rs). Grouping by Kratos `node.group`
 //! drives the visual layout (OIDC stack, code shortcut, profile/password form, OR-divider).
 
+use crate::locale::LanguageIdentifier;
 use crate::ory::{self, FlowKind};
 
 /// A single input field projected from a `UiNode` whose attributes are `Input`.
+#[derive(Default)]
 pub(crate) struct InputView {
     pub(crate) name: String,
     /// HTML `type=` attribute (`text`, `password`, `hidden`, `submit`, …).
@@ -33,6 +35,12 @@ pub(crate) struct InputView {
     pub(crate) onclick: Option<String>,
     /// Validation messages attached to this specific node.
     pub(crate) messages: Vec<MessageView>,
+    /// Kratos `meta.label.id` — stable numeric id for the node's label, used
+    /// by `translate_ory` to produce a localized label. Zero when absent.
+    pub(crate) label_id: u64,
+    /// Kratos `meta.label.context` — arg bag for the label translation
+    /// (e.g. `{"provider": "Google"}` for OIDC buttons). `Null` when absent.
+    pub(crate) label_context: serde_json::Value,
 }
 
 /// A flash/validation message, with a coarse severity used to pick styling.
@@ -44,6 +52,8 @@ pub(crate) struct MessageView {
     /// 4000007 = "account exists already", which lets the registration page
     /// surface a `/claim-email` CTA without sniffing the localised text).
     pub(crate) id: u64,
+    /// Kratos `context` object — arg bag for `translate_ory`. `Null` when absent.
+    pub(crate) context: serde_json::Value,
 }
 
 /// A `<script>` tag projected from a `UiNode` whose `type == "script"`.
@@ -102,19 +112,25 @@ impl FlowFormView {
     /// Project a fetched flow into the shared form view-model. `return_to`
     /// falls back to the flow's own `return_to` when the caller's is absent,
     /// matching the open-coded `return_to.or_else(|| flow_return_to(flow))`.
+    /// Messages and node labels are translated through `translate_ory` using
+    /// `locale`; Kratos English is the fallback for unmapped/failed ids.
     pub(crate) fn from_flow(
         flow: &serde_json::Value,
         kind: FlowKind,
         return_to: Option<&str>,
+        locale: &LanguageIdentifier,
     ) -> Self {
         let (form_action, form_method) = form_target(flow);
         let mut groups = group_nodes(flow);
         mark_primary_submits(&mut groups, kind);
         let has_visible_default = has_visible_default_inputs(&groups);
+        translate_all_groups(&mut groups, locale);
+        let mut msgs = flow_messages(flow);
+        translate_messages(&mut msgs, locale);
         FlowFormView {
             form_action,
             form_method,
-            flow_messages: flow_messages(flow),
+            flow_messages: msgs,
             groups,
             has_visible_default,
             return_to_qs: return_to_qs(return_to.or_else(|| flow_return_to(flow))),
@@ -130,7 +146,13 @@ pub(crate) fn map_message(m: &serde_json::Value) -> Option<MessageView> {
         _ => "info",
     };
     let id = m.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
-    Some(MessageView { text, severity, id })
+    let context = m.get("context").cloned().unwrap_or(serde_json::Value::Null);
+    Some(MessageView {
+        text,
+        severity,
+        id,
+        context,
+    })
 }
 
 pub(crate) fn node_to_input(node: &serde_json::Value) -> Option<InputView> {
@@ -139,6 +161,12 @@ pub(crate) fn node_to_input(node: &serde_json::Value) -> Option<InputView> {
     }
     let attrs = node.get("attributes")?.as_object()?;
     let name = attrs.get("name")?.as_str()?.to_string();
+    // Suppress the Kratos-generated field for preferred_language; it is set
+    // exclusively via /settings/language and must not appear on registration
+    // or settings/profile forms.
+    if name == "traits.preferred_language" {
+        return None;
+    }
     let input_type = attrs.get("type")?.as_str()?.to_string();
 
     let value = match attrs.get("value") {
@@ -170,13 +198,22 @@ pub(crate) fn node_to_input(node: &serde_json::Value) -> Option<InputView> {
         .and_then(|l| l.get("text"))
         .and_then(|t| t.as_str())
         .map(str::to_string);
-    let meta_label = node
-        .get("meta")
-        .and_then(|m| m.get("label"))
+    let meta = node.get("meta").and_then(|m| m.get("label"));
+    let meta_label = meta
         .and_then(|l| l.get("text"))
         .and_then(|t| t.as_str())
         .map(str::to_string);
     let label = attr_label.or_else(|| meta_label.clone());
+    // Retain the label's Kratos id + context for translate_ory (OIDC provider
+    // buttons and other meta-label nodes carry these for translation).
+    let label_id = meta
+        .and_then(|l| l.get("id"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let label_context = meta
+        .and_then(|l| l.get("context"))
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
 
     // Prefer `onclickTrigger` (function on `window` from Kratos's webauthn.js) over the legacy literal `onclick`.
     // Trigger functions must be called bare: a truthy first arg (e.g. `event`) is treated as the options object and crashes at `opt.publicKey.user.id`.
@@ -220,6 +257,8 @@ pub(crate) fn node_to_input(node: &serde_json::Value) -> Option<InputView> {
         is_primary: false,
         onclick,
         messages,
+        label_id,
+        label_context,
     })
 }
 
@@ -499,6 +538,59 @@ pub(crate) fn flow_messages(flow: &serde_json::Value) -> Vec<MessageView> {
         .unwrap_or_default()
 }
 
+/// Translate all messages in `msgs` through `translate_ory`. Messages without
+/// a Kratos id (id == 0) are left unchanged. Must be called after `flow_messages`
+/// or `map_message` has populated the `id` and `context` fields.
+pub(crate) fn translate_messages(msgs: &mut [MessageView], locale: &LanguageIdentifier) {
+    for msg in msgs {
+        if msg.id > 0 {
+            let translated = crate::i18n::translate_ory(locale, msg.id, &msg.context, &msg.text);
+            msg.text = translated;
+        }
+    }
+}
+
+/// Well-known Kratos trait / identifier field names whose label is the identity
+/// schema `title`. Kratos emits these with the generic label id 1070002, a
+/// passthrough whose text IS the title, so the numeric catalog cannot localize
+/// them. Map them to Forseti surface keys instead.
+fn trait_label_key(name: &str) -> Option<&'static str> {
+    match name {
+        "identifier" | "traits.email" => Some("auth-field-email"),
+        "traits.name.first" => Some("auth-field-first-name"),
+        "traits.name.last" => Some("auth-field-last-name"),
+        _ => None,
+    }
+}
+
+/// Translate node labels through `translate_ory` for nodes that carry a
+/// `label_id`. Also translates per-node messages recursively.
+pub(crate) fn translate_inputs(nodes: &mut [InputView], locale: &LanguageIdentifier) {
+    for node in nodes {
+        if node.label_id > 0 {
+            if let Some(label) = &node.label {
+                let translated =
+                    crate::i18n::translate_ory(locale, node.label_id, &node.label_context, label);
+                node.label = Some(translated);
+            }
+        }
+        // Schema-driven trait labels can't be reached by numeric id; override by name.
+        if let Some(key) = trait_label_key(&node.name) {
+            node.label = Some(crate::i18n::lookup(locale, key));
+        }
+        translate_messages(&mut node.messages, locale);
+    }
+}
+
+fn translate_all_groups(groups: &mut GroupedNodes, locale: &LanguageIdentifier) {
+    translate_inputs(&mut groups.default, locale);
+    translate_inputs(&mut groups.oidc, locale);
+    translate_inputs(&mut groups.code, locale);
+    translate_inputs(&mut groups.password, locale);
+    translate_inputs(&mut groups.profile, locale);
+    translate_inputs(&mut groups.other, locale);
+}
+
 pub(crate) fn return_to_qs(return_to: Option<&str>) -> String {
     match return_to {
         Some(rt) if !rt.is_empty() => {
@@ -605,6 +697,36 @@ mod tests {
         assert_eq!(v.name, "password");
         assert_eq!(v.input_type, "password");
         assert_eq!(v.value, "");
+    }
+
+    #[test]
+    fn node_to_input_suppresses_preferred_language() {
+        // Both the registration flow (group "default") and the settings/profile
+        // flow (group "profile") may emit this node; it must be filtered in both.
+        for group in &["default", "profile"] {
+            let n = input_node(group, "traits.preferred_language", "text", json!("en"));
+            assert!(
+                node_to_input(&n).is_none(),
+                "expected None for traits.preferred_language in group {group}"
+            );
+        }
+    }
+
+    #[test]
+    fn translate_inputs_overrides_schema_trait_labels() {
+        // Trait fields carry Kratos label id 1070002 (schema title passthrough);
+        // flow_view must override them by name with the localized surface label.
+        let de: crate::locale::LanguageIdentifier = "de".parse().unwrap();
+        let mut nodes: Vec<InputView> = [
+            input_node("default", "traits.name.first", "text", json!("")),
+            input_node("default", "traits.name.last", "text", json!("")),
+        ]
+        .iter()
+        .filter_map(node_to_input)
+        .collect();
+        translate_inputs(&mut nodes, &de);
+        assert_eq!(nodes[0].label.as_deref(), Some("Vorname"));
+        assert_eq!(nodes[1].label.as_deref(), Some("Nachname"));
     }
 
     #[test]
@@ -748,6 +870,38 @@ mod tests {
         assert_eq!(g.code.len(), 1);
         assert!(g.profile.is_empty());
         assert!(g.other.is_empty());
+    }
+
+    #[test]
+    fn group_nodes_excludes_preferred_language_keeps_email() {
+        // Simulates a registration flow: preferred_language lands in "default"
+        // alongside email/csrf; a settings/profile flow puts it in "profile".
+        // Either way it must be absent; normal fields must survive.
+        let flow = flow_with(vec![
+            input_node("default", "csrf_token", "hidden", json!("tok")),
+            input_node("default", "traits.email", "email", json!("")),
+            input_node("default", "traits.preferred_language", "text", json!("en")),
+            input_node("profile", "traits.preferred_language", "text", json!("de")),
+            input_node("profile", "method", "submit", json!("profile")),
+        ]);
+        let g = group_nodes(&flow);
+        assert!(
+            g.default.iter().any(|n| n.name == "traits.email"),
+            "traits.email must survive in default group"
+        );
+        let all: Vec<_> = g
+            .default
+            .iter()
+            .chain(g.profile.iter())
+            .map(|n| n.name.as_str())
+            .collect();
+        assert!(
+            !all.contains(&"traits.preferred_language"),
+            "traits.preferred_language must not appear in any group; got: {all:?}"
+        );
+        // The profile group should only have the submit node.
+        assert_eq!(g.profile.len(), 1);
+        assert_eq!(g.profile[0].name, "method");
     }
 
     #[test]
@@ -959,29 +1113,12 @@ mod tests {
                     name: "method".into(),
                     input_type: "submit".into(),
                     value: "Sign in".into(),
-                    label: None,
-                    autocomplete: None,
-                    pattern: None,
-                    inputmode: None,
-                    required: false,
-                    disabled: false,
-                    is_primary: false,
-                    onclick: None,
-                    messages: vec![],
+                    ..Default::default()
                 },
                 InputView {
                     name: "password".into(),
                     input_type: "password".into(),
-                    value: "".into(),
-                    label: None,
-                    autocomplete: None,
-                    pattern: None,
-                    inputmode: None,
-                    required: false,
-                    disabled: false,
-                    is_primary: false,
-                    onclick: None,
-                    messages: vec![],
+                    ..Default::default()
                 },
             ],
             ..Default::default()

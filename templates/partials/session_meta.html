@@ -30,7 +30,7 @@
       <p class="font-label-md text-label-md text-on-surface"
          title="{{ s.user_agent }}">{{ s.user_agent_pretty }}</p>
       {% if show_current && s.is_current %}
-        <span class="font-label-sm text-label-sm bg-tertiary-fixed text-on-tertiary-fixed px-2.5 py-0.5 rounded-full font-semibold">Current</span>
+        <span class="font-label-sm text-label-sm bg-tertiary-fixed text-on-tertiary-fixed px-2.5 py-0.5 rounded-full font-semibold">{{ chrome.t("session-meta-current-badge") }}</span>
       {% endif %}
     </div>
     {% if !s.ip_address.is_empty() %}
@@ -40,10 +40,10 @@
       </p>
     {% endif %}
     <p class="font-label-sm text-label-sm text-outline">
-      <span title="{{ s.authenticated_at }}">Signed in {{ s.authenticated_at_pretty }}</span>
+      <span title="{{ s.authenticated_at }}">{{ chrome.t("session-meta-signed-in-prefix") }} {{ s.authenticated_at_pretty }}</span>
       {% if !s.expires_at.is_empty() %}
         <span class="mx-1">&middot;</span>
-        <span title="{{ s.expires_at }}">expires {{ s.expires_at_pretty }}</span>
+        <span title="{{ s.expires_at }}">{{ chrome.t("session-meta-expires-prefix") }} {{ s.expires_at_pretty }}</span>
       {% endif %}
     </p>
   </div>

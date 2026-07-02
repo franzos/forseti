@@ -1,5 +1,6 @@
 <!DOCTYPE html>
-<html lang="en"
+<html lang="{{ chrome.locale }}"
+      dir="{{ chrome.dir() }}"
       class="{{ chrome.theme_pref.css_class() }}"
       data-theme="{{ chrome.theme_pref.as_str() }}">
   <head>
@@ -42,12 +43,12 @@
            class="font-headline-md text-headline-md font-extrabold text-on-surface tracking-tight">{{ chrome.brand.name }}</a>
         <nav class="hidden md:flex items-end h-full gap-stack-lg">
           <a href="/"
-             class="{% block nav_dashboard_class %}text-on-surface-variant hover:text-primary{% endblock %} transition-colors pb-4 px-1 font-label-md text-label-md">Dashboard</a>
+             class="{% block nav_dashboard_class %}text-on-surface-variant hover:text-primary{% endblock %} transition-colors pb-4 px-1 font-label-md text-label-md">{{ chrome.t("nav-dashboard") }}</a>
           <a href="/settings"
-             class="{% block nav_settings_class %}text-on-surface-variant hover:text-primary{% endblock %} transition-colors pb-4 px-1 font-label-md text-label-md">Settings</a>
+             class="{% block nav_settings_class %}text-on-surface-variant hover:text-primary{% endblock %} transition-colors pb-4 px-1 font-label-md text-label-md">{{ chrome.t("nav-settings") }}</a>
           {% if chrome.is_admin %}
             <a href="/admin"
-               class="{% block nav_admin_class %}text-on-surface-variant hover:text-primary{% endblock %} transition-colors pb-4 px-1 font-label-md text-label-md">Admin</a>
+               class="{% block nav_admin_class %}text-on-surface-variant hover:text-primary{% endblock %} transition-colors pb-4 px-1 font-label-md text-label-md">{{ chrome.t("nav-admin") }}</a>
           {% endif %}
           {% block org_nav %}{% endblock %}
         </nav>
@@ -55,17 +56,18 @@
           {% block user_indicator %}
             {% if !chrome.user_email.is_empty() %}
               <div class="hidden md:flex items-center font-label-sm text-label-sm text-on-surface-variant">
-                {{ chrome.user_email }}
+                <bdi>{{ chrome.user_email }}</bdi>
               </div>
               <form method="POST" action="/logout" class="inline">
                 <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
                 <button type="submit"
                         class="font-label-md text-label-md text-primary font-bold hover:opacity-80 transition-opacity">
-                  Sign out
+                  {{ chrome.t("nav-sign-out") }}
                 </button>
               </form>
             {% endif %}
           {% endblock %}
+          {% include "partials/_language_switcher.html" %}
           {% include "partials/_theme_toggle.html" %}
         </div>
       </div>

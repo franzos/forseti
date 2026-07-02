@@ -4,7 +4,7 @@
   {% include "_referrer_banner.html" %}
 {% endblock %}
 
-{% block title %}Authorized apps &middot; {{ chrome.brand.name }}{% endblock %}
+{% block title %}{{ chrome.t("settings-apps-heading") }} &middot; {{ chrome.brand.name }}{% endblock %}
 
 {% block nav_settings_class %}text-primary font-bold border-b-2 border-primary{% endblock %}
 
@@ -15,10 +15,8 @@
 
     <section class="flex-1 flex flex-col gap-stack-lg">
       <div>
-        <h1 class="font-headline-lg text-headline-lg text-on-surface">Authorized apps</h1>
-        <p class="font-body-md text-body-md text-on-surface-variant mt-1">
-          Apps you've granted access to your account. Revoke any you no longer use — they'll have to ask for permission again next time you sign in.
-        </p>
+        <h1 class="font-headline-lg text-headline-lg text-on-surface">{{ chrome.t("settings-apps-heading") }}</h1>
+        <p class="font-body-md text-body-md text-on-surface-variant mt-1">{{ chrome.t("settings-apps-subtitle") }}</p>
       </div>
 
       {% if !flash.is_empty() %}
@@ -29,7 +27,7 @@
 
       {% if apps.is_empty() %}
         <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg">
-          <p class="font-body-md text-body-md text-on-surface-variant">No apps have been granted access to your account yet.</p>
+          <p class="font-body-md text-body-md text-on-surface-variant">{{ chrome.t("settings-apps-empty") }}</p>
         </div>
       {% else %}
         <ul class="flex flex-col gap-stack-md">
@@ -63,10 +61,10 @@
 
                 <div class="min-w-0 flex flex-col gap-stack-sm">
                   <div class="flex items-center gap-2 flex-wrap">
-                    <h2 class="font-headline-sm text-headline-sm text-on-surface truncate">{{ app.client_name }}</h2>
+                    <h2 class="font-headline-sm text-headline-sm text-on-surface truncate"><bdi>{{ app.client_name }}</bdi></h2>
                     {% if app.verified %}
                       <span class="inline-flex items-center gap-1 font-label-sm text-label-sm text-tertiary"
-                            title="Reviewed by your administrator">
+                            title="{{ chrome.t('settings-apps-reviewed-title') }}">
                         <svg xmlns="http://www.w3.org/2000/svg"
                              width="14"
                              height="14"
@@ -81,7 +79,7 @@
                           <path d="M9 12l2 2 4-4" />
                           <circle cx="12" cy="12" r="10" />
                         </svg>
-                        Verified
+                        {{ chrome.t("settings-apps-verified-label") }}
                       </span>
                     {% endif %}
                   </div>
@@ -94,7 +92,7 @@
                   {% endif %}
 
                   <p class="font-label-sm text-label-sm text-on-surface-variant"
-                     title="{{ app.granted_at }}">Access granted {{ app.granted_at_pretty }}</p>
+                     title="{{ app.granted_at }}">{{ chrome.t("settings-apps-access-granted-prefix") }} {{ app.granted_at_pretty }}</p>
 
                   {% if !app.scopes.is_empty() %}
                     <ul class="flex flex-wrap gap-1.5 mt-1">
@@ -113,7 +111,7 @@
                 <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
                 <button type="submit"
                         class="font-label-md text-label-md text-error border border-error rounded-lg px-4 py-2 hover:bg-error-container hover:text-on-error-container transition-colors focus:outline-none focus:ring-2 focus:ring-error focus:ring-offset-2">
-                  Revoke access
+                  {{ chrome.t("settings-apps-revoke-action") }}
                 </button>
               </form>
             </li>
@@ -123,7 +121,7 @@
 
       <div>
         <a href="/settings"
-           class="font-label-md text-label-md text-on-surface-variant hover:text-primary transition-colors">&larr; Back to settings</a>
+           class="font-label-md text-label-md text-on-surface-variant hover:text-primary transition-colors"><span class="dir-flip">&larr;</span> {{ chrome.t("settings-apps-back") }}</a>
       </div>
     </section>
   </div>

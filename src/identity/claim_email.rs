@@ -75,9 +75,13 @@ struct ClaimEmailTemplate {
     info: Option<String>,
 }
 
-async fn claim_get(State(state): State<AppState>, csrf: Csrf) -> Response {
+async fn claim_get(
+    State(state): State<AppState>,
+    csrf: Csrf,
+    crate::page_chrome::ReqLocale(locale): crate::page_chrome::ReqLocale,
+) -> Response {
     render(&ClaimEmailTemplate {
-        chrome: PageChrome::from_parts(&state, String::new(), csrf.0),
+        chrome: PageChrome::from_parts(&state, String::new(), csrf.0, locale),
         error: None,
         info: None,
     })
@@ -91,11 +95,13 @@ struct ClaimForm {
 async fn claim_post(
     State(state): State<AppState>,
     csrf: Csrf,
+    crate::page_chrome::ReqLocale(locale): crate::page_chrome::ReqLocale,
     CsrfForm(form): CsrfForm<ClaimForm>,
 ) -> Response {
     let email = form.email.trim().to_lowercase();
     if email.is_empty() || lettre::Address::from_str(&email).is_err() {
-        return render_claim_error(&state, &csrf.0, "Enter a valid email address.");
+        let msg = crate::i18n::lookup(&locale, "claim-error-invalid-email");
+        return render_claim_error(&state, &csrf.0, locale, &msg);
     }
 
     // Always redirect to /claim-email/confirm with a token, regardless of
@@ -204,9 +210,14 @@ fn decoy_token() -> String {
     hex::encode(bytes)
 }
 
-fn render_claim_error(state: &AppState, csrf_token: &str, msg: &str) -> Response {
+fn render_claim_error(
+    state: &AppState,
+    csrf_token: &str,
+    locale: crate::locale::LanguageIdentifier,
+    msg: &str,
+) -> Response {
     render(&ClaimEmailTemplate {
-        chrome: PageChrome::from_parts(state, String::new(), csrf_token.to_string()),
+        chrome: PageChrome::from_parts(state, String::new(), csrf_token.to_string(), locale),
         error: Some(msg.to_string()),
         info: None,
     })
@@ -229,12 +240,13 @@ async fn confirm_get(
     State(state): State<AppState>,
     Query(q): Query<ConfirmQuery>,
     csrf: Csrf,
+    crate::page_chrome::ReqLocale(locale): crate::page_chrome::ReqLocale,
 ) -> Response {
     let Some(token) = q.token.filter(|t| !t.is_empty()) else {
         return Redirect::to("/claim-email").into_response();
     };
     render(&ClaimConfirmTemplate {
-        chrome: PageChrome::from_parts(&state, String::new(), csrf.0),
+        chrome: PageChrome::from_parts(&state, String::new(), csrf.0, locale),
         token,
         error: None,
     })
@@ -249,6 +261,7 @@ struct ConfirmForm {
 async fn confirm_post(
     State(state): State<AppState>,
     csrf: Csrf,
+    crate::page_chrome::ReqLocale(locale): crate::page_chrome::ReqLocale,
     CsrfForm(form): CsrfForm<ConfirmForm>,
 ) -> Response {
     // Peek (don't consume yet) so a mistyped code doesn't waste the
@@ -266,8 +279,9 @@ async fn confirm_post(
                 return render_claim_confirm_error(
                     &state,
                     &csrf.0,
+                    locale.clone(),
                     &form.token,
-                    "The code has expired. Start over.",
+                    &crate::i18n::lookup(&locale, "claim-error-code-expired"),
                 );
             }
         };
@@ -277,8 +291,9 @@ async fn confirm_post(
         return render_claim_confirm_error(
             &state,
             &csrf.0,
+            locale.clone(),
             &form.token,
-            "Invalid token. Start over.",
+            &crate::i18n::lookup(&locale, "claim-error-invalid-token"),
         );
     }
     // Hash both sides before ct_eq, mirroring the webhook bearer path:
@@ -315,17 +330,19 @@ async fn confirm_post(
                 return render_claim_confirm_error(
                     &state,
                     &csrf.0,
+                    locale.clone(),
                     &form.token,
-                    "Service temporarily unavailable. Try again in a moment.",
+                    &crate::i18n::lookup(&locale, "claim-error-service-unavailable"),
                 );
             }
         };
-        let msg = if exhausted {
-            "Too many wrong codes. Start over."
+        let key = if exhausted {
+            "claim-error-too-many-attempts"
         } else {
-            "Code didn't match. Try again."
+            "claim-error-code-mismatch"
         };
-        return render_claim_confirm_error(&state, &csrf.0, &form.token, msg);
+        let msg = crate::i18n::lookup(&locale, key);
+        return render_claim_confirm_error(&state, &csrf.0, locale.clone(), &form.token, &msg);
     }
     // Code matched — consume the reveal exactly once. Anything below
     // this point operates on a token that's already gone from the DB.
@@ -370,8 +387,9 @@ async fn confirm_post(
         return render_claim_confirm_error(
             &state,
             &csrf.0,
+            locale.clone(),
             &form.token,
-            "This email can no longer be claimed.",
+            &crate::i18n::lookup(&locale, "claim-error-no-longer-claimable"),
         );
     }
 
@@ -398,8 +416,9 @@ async fn confirm_post(
         return render_claim_confirm_error(
             &state,
             &csrf.0,
+            locale.clone(),
             &form.token,
-            "We couldn't release the email. Contact support.",
+            &crate::i18n::lookup(&locale, "claim-error-release-failed"),
         );
     }
 
@@ -432,11 +451,12 @@ async fn confirm_post(
 fn render_claim_confirm_error(
     state: &AppState,
     csrf_token: &str,
+    locale: crate::locale::LanguageIdentifier,
     token: &str,
     msg: &str,
 ) -> Response {
     render(&ClaimConfirmTemplate {
-        chrome: PageChrome::from_parts(state, String::new(), csrf_token.to_string()),
+        chrome: PageChrome::from_parts(state, String::new(), csrf_token.to_string(), locale),
         token: token.to_string(),
         error: Some(msg.to_string()),
     })

@@ -447,6 +447,38 @@ pub async fn admin_get_identity_full(clients: &OryClients, id: &str) -> Result<I
     .map_err(|e| anyhow::anyhow!("kratos admin get_identity_full failed: {e}"))
 }
 
+/// Set the `preferred_language` trait on an identity without clobbering other
+/// fields. Round-trips schema_id + full traits (mirroring
+/// [`admin_update_identity_state`]) and defaults to `Active` since a
+/// self-service caller is by definition active.
+pub async fn admin_set_identity_language(
+    clients: &OryClients,
+    id: &str,
+    lang: &str,
+) -> Result<Identity> {
+    let current = admin_get_identity(clients, id).await?;
+    let mut traits = match current.traits.unwrap_or(serde_json::Value::Null) {
+        serde_json::Value::Null => serde_json::Value::Object(serde_json::Map::new()),
+        t => t,
+    };
+    if let serde_json::Value::Object(ref mut map) = traits {
+        map.insert("preferred_language".to_string(), serde_json::json!(lang));
+    }
+    let body = UpdateIdentityBody {
+        credentials: None,
+        external_id: None,
+        metadata_admin: None,
+        metadata_public: None,
+        region: None,
+        schema_id: current.schema_id,
+        state: ory_client::models::update_identity_body::StateEnum::Active,
+        traits,
+    };
+    identity_api::update_identity(&clients.kratos_admin, id, Some(body))
+        .await
+        .map_err(|e| anyhow::anyhow!("kratos admin set_identity_language failed: {e}"))
+}
+
 /// Set an identity's state (`active` / `inactive`). Update goes through
 /// `update_identity` since Kratos has no dedicated state-toggle endpoint;
 /// we round-trip the existing schema_id + traits to avoid clobbering

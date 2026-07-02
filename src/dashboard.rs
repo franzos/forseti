@@ -12,6 +12,7 @@ use crate::flow_view::{session_email, session_needs_verification};
 use crate::format::{humanise_timestamp, humanise_user_agent};
 use crate::ory;
 use crate::page_chrome::PageChrome;
+use crate::page_chrome::ReqLocale;
 use crate::render::render;
 use crate::state::AppState;
 
@@ -52,17 +53,18 @@ pub(crate) async fn root(
     headers: HeaderMap,
     sess: RequireSession,
     csrf: Csrf,
+    ReqLocale(locale): ReqLocale,
 ) -> Response {
     let cookie = cookies::cookie_header(&headers);
     let session = sess.session;
 
     let (activity, health) = tokio::join!(
-        build_activity_feed(&state, &session),
+        build_activity_feed(&state, &session, &locale),
         build_account_health(&state, &session, &cookie)
     );
 
     render(&DashboardTemplate {
-        chrome: PageChrome::from_parts(&state, session_email(&session), csrf.0),
+        chrome: PageChrome::from_parts(&state, session_email(&session), csrf.0, locale),
         needs_verification: session_needs_verification(&session),
         apps: state.cfg.apps.clone(),
         activity,
@@ -72,7 +74,11 @@ pub(crate) async fn root(
 
 /// "Recent Activity" payload from Kratos's session history (most recent 5).
 /// Failures are non-fatal: log and return empty.
-async fn build_activity_feed(state: &AppState, session: &ory::Session) -> Vec<ActivityEvent> {
+async fn build_activity_feed(
+    state: &AppState,
+    session: &ory::Session,
+    locale: &crate::locale::LanguageIdentifier,
+) -> Vec<ActivityEvent> {
     let Some(identity_id) = session.identity.as_ref().map(|id| id.id.clone()) else {
         return Vec::new();
     };
@@ -98,17 +104,17 @@ async fn build_activity_feed(state: &AppState, session: &ory::Session) -> Vec<Ac
                 .unwrap_or_default();
             let ua_full = device.user_agent.unwrap_or_default();
             let ip = device.ip_address.unwrap_or_default();
-            let ua_pretty = humanise_user_agent(&ua_full);
+            let ua_pretty = humanise_user_agent(locale, &ua_full);
             let detail = match (ua_pretty.is_empty(), ip.is_empty()) {
                 (false, false) => format!("{ua_pretty} \u{00b7} {ip}"),
                 (false, true) => ua_pretty,
                 (true, false) => ip,
-                (true, true) => "Unknown device".to_string(),
+                (true, true) => crate::i18n::lookup(locale, "format-device-unknown"),
             };
             let when_full = s.authenticated_at.unwrap_or_else(|| "—".to_string());
-            let when = humanise_timestamp(&when_full);
+            let when = humanise_timestamp(locale, &when_full);
             ActivityEvent {
-                title: "Successful sign-in".to_string(),
+                title: crate::i18n::lookup(locale, "dashboard-activity-signin-title"),
                 detail,
                 when,
                 when_full,

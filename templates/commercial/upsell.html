@@ -22,7 +22,7 @@
         </span>
         <div>
           <p class="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">
-            {{ required_tier_label }} feature
+            {{ chrome.tv1("upsell-feature-eyebrow", "tier", &required_tier_label) }}
           </p>
           <h1 class="font-headline-lg text-headline-lg text-on-surface">{{ feature_label }}</h1>
         </div>
@@ -30,11 +30,11 @@
 
       {% if has_license %}
         <p class="font-body-md text-body-md text-on-surface-variant">
-          Your current <strong>{{ current_tier_label }}</strong> license doesn't include {{ feature_label }}. Upgrade to <strong>{{ required_tier_label }}</strong> to enable it for this installation.
+          {{ chrome.tv3("upsell-body-has-license", "current", &current_tier_label, "feature", &feature_label, "tier", &required_tier_label) }}
         </p>
       {% else %}
         <p class="font-body-md text-body-md text-on-surface-variant">
-          {{ feature_label }} is part of the {{ required_tier_label }} tier of the {{ chrome.brand.name }} commercial offering. Activate a license to unlock it for this installation.
+          {{ chrome.tv3("upsell-body-no-license", "feature", &feature_label, "tier", &required_tier_label, "brand", &chrome.brand.name) }}
         </p>
       {% endif %}
 
@@ -45,21 +45,21 @@
              rel="noopener noreferrer"
              class="font-label-md text-label-md bg-primary text-on-primary rounded-lg px-4 py-2 hover:opacity-90 transition-opacity">
             {% if has_license %}
-              Upgrade your plan
+              {{ chrome.t("upsell-upgrade") }}
             {% else %}
-              Get a license
+              {{ chrome.t("upsell-get") }}
             {% endif %}
-            &rarr;
+            <span class="dir-flip">&rarr;</span>
           </a>
         {% endif %}
         <a href="/admin/license"
-           class="font-label-md text-label-md text-primary border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">Activate an existing license</a>
+           class="font-label-md text-label-md text-primary border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">{{ chrome.t("upsell-activate-existing") }}</a>
       </div>
     </div>
 
     <div>
       <a href="/"
-         class="font-label-md text-label-md text-on-surface-variant hover:text-primary transition-colors">&larr; Back to dashboard</a>
+         class="font-label-md text-label-md text-on-surface-variant hover:text-primary transition-colors"><span class="dir-flip">&larr;</span> {{ chrome.t("upsell-back") }}</a>
     </div>
   </div>
 {% endblock %}

@@ -24,6 +24,7 @@ use serde::Deserialize;
 use crate::audit::{AuditCtx, AuditEvent};
 use crate::config::BrandConfig;
 use crate::cookies;
+use crate::locale::LanguageIdentifier;
 use crate::ory;
 use crate::page_chrome::PageChrome;
 use crate::render::render;
@@ -169,6 +170,10 @@ pub struct AdminCtx {
     /// True when the email is in `[admin].allowed_emails` (Tier 1). False for
     /// org-scoped owners, who don't get the Forseti-wide "Admin" top-nav link.
     pub is_forseti_admin: bool,
+    /// Negotiated request locale. Resolved by the `RequireAdmin` /
+    /// `RequireAdminScoped` extractors after the auth gate passes. Defaults to
+    /// `en` in the rare error-boundary path where no extractor is involved.
+    pub locale: LanguageIdentifier,
 }
 
 impl AdminCtx {
@@ -179,6 +184,7 @@ impl AdminCtx {
             self.email.clone(),
             csrf.0.clone(),
             self.is_forseti_admin,
+            self.locale.clone(),
         )
     }
 
@@ -199,7 +205,7 @@ async fn gate_admin_prefix(
     state: &AppState,
     headers: &HeaderMap,
     path: &str,
-) -> Result<(ory::Session, String, String), Response> {
+) -> Result<(ory::Session, String, String, LanguageIdentifier), Response> {
     use crate::extractors::{resolve_session, SessionFailure};
     let cookie = cookies::cookie_header(headers);
     let session = match resolve_session(state, &cookie, path).await {
@@ -209,10 +215,12 @@ async fn gate_admin_prefix(
         }
         Err(SessionFailure::KratosError(e)) => {
             tracing::error!(error = ?e, path, "admin gate: whoami failed");
+            let locale = admin_gate_locale(headers);
             return Err(render_forbidden(
                 state,
-                crate::web::AUTH_UNAVAILABLE_TITLE,
-                crate::web::AUTH_UNAVAILABLE_BODY,
+                &locale,
+                &crate::i18n::lookup(&locale, "error-boundary-auth-unavailable-title"),
+                &crate::i18n::lookup(&locale, "error-boundary-auth-unavailable-body"),
             ));
         }
     };
@@ -223,7 +231,8 @@ async fn gate_admin_prefix(
         return Err(Redirect::to(&crate::auth::aal2_step_up_url(path)).into_response());
     }
 
-    Ok((session, identity_id, email))
+    let locale = admin_request_locale(headers, &session);
+    Ok((session, identity_id, email, locale))
 }
 
 /// Like `require_admin` but with the `?org=<slug>` org-scoping convention
@@ -246,16 +255,18 @@ pub async fn require_admin_with_scope(
     csrf_token: &str,
 ) -> Result<(AdminCtx, crate::orgs::AdminScope), Response> {
     use crate::orgs::{AdminScope, AdminScopeOutcome};
-    let (_session, identity_id, email) = gate_admin_prefix(state, headers, path).await?;
+    let (_session, identity_id, email, locale) = gate_admin_prefix(state, headers, path).await?;
 
     let scope = crate::orgs::resolve_admin_scope(&state.db, &identity_id, org_slug).await;
     let scope = match scope {
         AdminScopeOutcome::Resolved(AdminScope::Forseti) => {
             if !state.cfg.admin.is_admin(&email) {
+                let locale = admin_gate_locale(headers);
                 return Err(render_forbidden(
                     state,
-                    "Access denied",
-                    "Your account isn't authorised to use the Forseti-wide admin tools.",
+                    &locale,
+                    &crate::i18n::lookup(&locale, "error-admin-access-denied-title"),
+                    &crate::i18n::lookup(&locale, "error-admin-access-denied-forseti-body"),
                 ));
             }
             AdminScope::Forseti
@@ -269,10 +280,12 @@ pub async fn require_admin_with_scope(
             other
         }
         AdminScopeOutcome::UnknownOrg | AdminScopeOutcome::NotOwner => {
+            let locale = admin_gate_locale(headers);
             return Err(render_forbidden(
                 state,
-                "Access denied",
-                "You don't have admin access to that organization.",
+                &locale,
+                &crate::i18n::lookup(&locale, "error-admin-access-denied-title"),
+                &crate::i18n::lookup(&locale, "error-admin-access-denied-org-body"),
             ));
         }
     };
@@ -284,6 +297,7 @@ pub async fn require_admin_with_scope(
             email,
             brand: state.cfg.brand.clone(),
             is_forseti_admin,
+            locale,
         },
         scope,
     ))
@@ -297,7 +311,7 @@ pub async fn require_admin(
     headers: &HeaderMap,
     path: &str,
 ) -> Result<AdminCtx, Response> {
-    let (_session, identity_id, email) = gate_admin_prefix(state, headers, path).await?;
+    let (_session, identity_id, email, locale) = gate_admin_prefix(state, headers, path).await?;
 
     if !state.cfg.admin.is_admin(&email) {
         tracing::warn!(
@@ -305,10 +319,12 @@ pub async fn require_admin(
             path,
             "admin gate: rejected non-admin"
         );
+        let locale = admin_gate_locale(headers);
         return Err(render_forbidden(
             state,
-            "Access denied",
-            "Your account isn't authorised to use the admin tools.",
+            &locale,
+            &crate::i18n::lookup(&locale, "error-admin-access-denied-title"),
+            &crate::i18n::lookup(&locale, "error-admin-access-denied-body"),
         ));
     }
 
@@ -317,14 +333,60 @@ pub async fn require_admin(
         email,
         brand: state.cfg.brand.clone(),
         is_forseti_admin: true,
+        locale,
     })
 }
 
 /// Render the admin 403 page using the admin base layout so the "Admin" banner
 /// stays visible (the user is on the admin path, just not allowed through).
-fn render_forbidden(state: &AppState, title: &str, body: &str) -> Response {
+/// Best-effort locale for the admin gate's error/forbidden pages, which run
+/// before any handler and have no request `Parts`. Cookie then Accept-Language;
+/// `?lang=` and the session trait aren't consulted here.
+fn admin_gate_locale(headers: &HeaderMap) -> crate::locale::LanguageIdentifier {
+    crate::locale::read_locale_cookie(headers).unwrap_or_else(|| {
+        let accept = headers
+            .get(axum::http::header::ACCEPT_LANGUAGE)
+            .and_then(|v| v.to_str().ok());
+        crate::locale::from_accept_language(accept)
+    })
+}
+
+/// Request locale for an authenticated admin surface. The admin gate runs on a
+/// `HeaderMap` (no request `Parts`), so the live `?lang=` query is unavailable;
+/// the cookie it writes carries that choice forward. Ladder: `forseti_locale`
+/// cookie, then the `preferred_language` identity trait (off the already
+/// resolved session, no extra Kratos call), then `Accept-Language`, then `en`.
+fn admin_request_locale(
+    headers: &HeaderMap,
+    session: &ory::Session,
+) -> crate::locale::LanguageIdentifier {
+    if let Some(locale) = crate::locale::read_locale_cookie(headers) {
+        return locale;
+    }
+    let trait_locale = session
+        .identity
+        .as_ref()
+        .and_then(|id| id.traits.as_ref())
+        .and_then(|t| t.get("preferred_language"))
+        .and_then(|v| v.as_str())
+        .and_then(crate::locale::from_query_or_cookie);
+    if let Some(locale) = trait_locale {
+        return locale;
+    }
+    let accept = headers
+        .get(axum::http::header::ACCEPT_LANGUAGE)
+        .and_then(|v| v.to_str().ok());
+    crate::locale::from_accept_language(accept)
+}
+
+fn render_forbidden(
+    state: &AppState,
+    locale: &crate::locale::LanguageIdentifier,
+    title: &str,
+    body: &str,
+) -> Response {
     let tpl = AdminForbiddenTemplate {
-        chrome: PageChrome::from_parts(state, String::new(), String::new()),
+        chrome: PageChrome::from_parts(state, String::new(), String::new(), locale.clone()),
         title: title.to_string(),
         body: body.to_string(),
     };
@@ -418,7 +480,13 @@ pub(crate) struct ConfirmTemplate {
 /// Render a generic admin error page for an irrecoverable upstream failure.
 pub fn render_admin_error(state: &AppState, title: &str, body: &str) -> Response {
     let tpl = AdminErrorTemplate {
-        chrome: PageChrome::from_parts(state, String::new(), String::new()),
+        // called from error paths throughout admin handlers without Parts; locale is inert here
+        chrome: PageChrome::from_parts(
+            state,
+            String::new(),
+            String::new(),
+            crate::locale::default_locale(),
+        ),
         title: title.to_string(),
         body: body.to_string(),
     };

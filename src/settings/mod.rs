@@ -15,11 +15,12 @@ use serde::Deserialize;
 use crate::cookies;
 use crate::flow_view::{
     flow_messages, flow_state, form_target, group_nodes, mark_settings_primary, session_email,
-    session_needs_verification,
+    session_needs_verification, translate_inputs, translate_messages,
 };
+use crate::locale::LanguageIdentifier;
 use crate::ory::kratos::FlowOutcome;
 use crate::ory::{self, FlowFetch, FlowKind};
-use crate::page_chrome::PageChrome;
+use crate::page_chrome::{PageChrome, ReqLocale};
 use crate::render::render;
 use crate::state::AppState;
 use crate::{render_error_boundary, FlowQuery};
@@ -44,6 +45,7 @@ pub(crate) fn router() -> Router<AppState> {
             "/settings/profile/extended",
             post(profile::settings_profile_extended_save),
         )
+        .route("/settings/language", post(profile::settings_language_save))
         .route("/settings/password", get(password::settings_password))
         .route("/settings/2fa", get(two_factor::settings_2fa))
         .route("/settings/sessions", get(sessions::settings_sessions))
@@ -97,6 +99,7 @@ async fn settings_hub(
     sess: crate::extractors::RequireSession,
     csrf: crate::extractors::Csrf,
     banner: crate::handoff::ReferrerBanner,
+    ReqLocale(locale): ReqLocale,
 ) -> Response {
     // Kratos's `selfservice.flows.settings.ui_url` points at `/settings`, so
     // every settings flow lands here with `?flow=<id>`. Inspect the flow's
@@ -120,7 +123,7 @@ async fn settings_hub(
     }
 
     render(&SettingsHubTemplate {
-        chrome: PageChrome::from_parts(&state, sess.email, csrf.0),
+        chrome: PageChrome::from_parts(&state, sess.email, csrf.0, locale),
         referrer_banner: banner.0,
     })
 }
@@ -278,6 +281,41 @@ fn settings_section_from_flow(flow: &serde_json::Value) -> SettingsSection {
     SettingsSection::Password
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::BrandConfig;
+    use askama::Template;
+
+    #[test]
+    #[ignore]
+    fn render_settings_hub_demo() {
+        let brand = BrandConfig {
+            name: "Forseti".to_string(),
+            support_email: None,
+            logo_url: None,
+            consent_intro: String::new(),
+        };
+
+        for locale_str in ["en", "de"] {
+            let locale: crate::locale::LanguageIdentifier = locale_str.parse().unwrap();
+            let chrome = PageChrome::from_brand_with_admin(
+                brand.clone(),
+                "maria@example.de".to_string(),
+                "csrf-demo".to_string(),
+                true,
+                locale,
+            );
+            let tmpl = SettingsHubTemplate {
+                chrome,
+                referrer_banner: None,
+            };
+            let html = tmpl.render().unwrap();
+            std::fs::write(format!("demo_settings_{locale_str}.html"), html).unwrap();
+        }
+    }
+}
+
 /// `Err(resp)` is a fully-formed early-return (redirect / error page) so
 /// callers can `?`-short-circuit; `Ok` lets them run their own renderer.
 pub(crate) type SettingsFlowOutcome = Result<(ory::Session, Box<serde_json::Value>), Response>;
@@ -291,6 +329,7 @@ pub(crate) async fn fetch_settings_subpage(
     query: &FlowQuery,
     section: SettingsSection,
     sess: &crate::extractors::RequireSession,
+    locale: &LanguageIdentifier,
 ) -> SettingsFlowOutcome {
     let cookie = cookies::cookie_header(headers);
 
@@ -331,10 +370,11 @@ pub(crate) async fn fetch_settings_subpage(
             tracing::error!(error = ?e, ?flow_id, "failed to fetch Kratos settings flow");
             Err(render_error_boundary(
                 state,
-                "Settings unavailable",
-                crate::web::AUTH_UNAVAILABLE_BODY,
+                locale,
+                &crate::i18n::lookup(locale, "error-boundary-settings-title"),
+                &crate::i18n::lookup(locale, "error-boundary-auth-unavailable-body"),
                 "/settings",
-                "Back to settings",
+                crate::i18n::lookup(locale, "error-boundary-cta-back-to-settings"),
             )
             .into_response())
         }
@@ -357,9 +397,11 @@ pub(crate) async fn settings_subpage(
     sess: &crate::extractors::RequireSession,
     banner: crate::handoff::ReferrerBanner,
     profile_saved: bool,
+    locale: LanguageIdentifier,
 ) -> Response {
     let (session, flow) =
-        match fetch_settings_subpage(state, headers, query, section.section(), sess).await {
+        match fetch_settings_subpage(state, headers, query, section.section(), sess, &locale).await
+        {
             Ok(pair) => pair,
             Err(resp) => return resp,
         };
@@ -384,6 +426,7 @@ pub(crate) async fn settings_subpage(
         profile,
         extended_saved,
         banner.0,
+        locale,
     )
 }
 
@@ -397,10 +440,22 @@ fn render_settings(
     profile: Option<crate::profiles::Profile>,
     extended_saved: bool,
     referrer_banner: Option<crate::handoff::ReferrerBannerView>,
+    locale: LanguageIdentifier,
 ) -> Response {
     let (form_action, form_method) = form_target(flow);
     let mut groups = group_nodes(flow);
     mark_settings_primary(&mut groups, section.group());
+
+    // Translate node labels and per-node messages.
+    translate_inputs(&mut groups.default, &locale);
+    translate_inputs(&mut groups.oidc, &locale);
+    translate_inputs(&mut groups.code, &locale);
+    translate_inputs(&mut groups.password, &locale);
+    translate_inputs(&mut groups.profile, &locale);
+    translate_inputs(&mut groups.other, &locale);
+
+    let mut msgs = flow_messages(flow);
+    translate_messages(&mut msgs, &locale);
     let token = csrf_token.to_string();
 
     match section {
@@ -408,10 +463,10 @@ fn render_settings(
             let p = profile.unwrap_or_default();
             let links_text = crate::settings::profile::links_to_text(&p.links);
             render(&SettingsProfileTemplate {
-                chrome: PageChrome::from_parts(state, session_email(session), token),
+                chrome: PageChrome::from_parts(state, session_email(session), token, locale),
                 form_action,
                 form_method,
-                flow_messages: flow_messages(flow),
+                flow_messages: msgs,
                 groups,
                 profiles_enabled: state.cfg.profiles.enabled,
                 bio: p.bio.unwrap_or_default(),
@@ -434,19 +489,19 @@ fn render_settings(
                     return Redirect::to("/").into_response();
                 }
                 render(&SettingsPasswordHandoffTemplate {
-                    chrome: PageChrome::from_parts(state, String::new(), token),
+                    chrome: PageChrome::from_parts(state, String::new(), token, locale),
                     form_action,
                     form_method,
-                    flow_messages: flow_messages(flow),
+                    flow_messages: msgs,
                     groups,
                     privileged_deadline: privileged_deadline_rfc3339(flow),
                 })
             } else {
                 render(&SettingsPasswordTemplate {
-                    chrome: PageChrome::from_parts(state, session_email(session), token),
+                    chrome: PageChrome::from_parts(state, session_email(session), token, locale),
                     form_action,
                     form_method,
-                    flow_messages: flow_messages(flow),
+                    flow_messages: msgs,
                     groups,
                     referrer_banner,
                 })

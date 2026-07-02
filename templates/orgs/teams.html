@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}Teams &middot; {{ org.name }} &middot; {{ chrome.brand.name }}{% endblock %}
+{% block title %}{{ chrome.t("orgs-teams-page-heading") }} &middot; {{ org.name }} &middot; {{ chrome.brand.name }}{% endblock %}
 
 {% block nav_settings_class %}text-primary font-bold border-b-2 border-primary{% endblock %}
 
@@ -16,21 +16,19 @@
     <section class="flex-1 flex flex-col gap-stack-lg">
       <header class="mt-2 mb-stack-lg">
         <h1 class="font-headline-lg-mobile md:font-headline-lg text-headline-lg-mobile md:text-headline-lg text-on-surface">
-          Teams &middot; {{ org.name }}
+          {{ chrome.t("orgs-teams-page-heading") }} &middot; <bdi>{{ org.name }}</bdi>
         </h1>
-        <p class="font-body-md text-body-md text-on-surface-variant mt-1">
-          Group members into teams. Teams scope host access and drive same-team directory visibility.
-        </p>
+        <p class="font-body-md text-body-md text-on-surface-variant mt-1">{{ chrome.t("orgs-teams-subtitle") }}</p>
       </header>
 
       <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg">
-        <h2 class="font-headline-md text-headline-md text-on-surface mb-stack-md">Create a team</h2>
+        <h2 class="font-headline-md text-headline-md text-on-surface mb-stack-md">{{ chrome.t("orgs-teams-create-heading") }}</h2>
         <form method="POST"
               action="{% if is_default %}/settings/organization/teams{% else %}/settings/organizations/{{ org.slug }}/teams{% endif %}"
               class="flex flex-col md:flex-row gap-stack-md items-end">
           <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
           <label class="flex flex-col gap-1 flex-1">
-            <span class="font-label-sm text-label-sm text-on-surface-variant">Name</span>
+            <span class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("orgs-field-name") }}</span>
             <input type="text"
                    name="name"
                    required
@@ -38,17 +36,17 @@
           </label>
           <button type="submit"
                   class="bg-primary text-on-primary rounded-lg px-4 py-2 font-label-md text-label-md">
-            Create team
+            {{ chrome.t("orgs-teams-action-create") }}
           </button>
         </form>
       </div>
 
       <div class="bg-surface-container-lowest border border-outline-variant rounded-xl overflow-hidden">
         <table class="w-full">
-          <thead class="bg-surface-container-low text-left">
+          <thead class="bg-surface-container-low text-start">
             <tr>
-              <th class="px-stack-md py-stack-sm font-label-sm text-label-sm text-on-surface-variant">Team</th>
-              <th class="px-stack-md py-stack-sm font-label-sm text-label-sm text-on-surface-variant">Members</th>
+              <th class="px-stack-md py-stack-sm font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("orgs-teams-col-team") }}</th>
+              <th class="px-stack-md py-stack-sm font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("orgs-teams-col-members") }}</th>
               <th></th>
             </tr>
           </thead>
@@ -65,20 +63,20 @@
                            value="{{ t.name }}"
                            required
                            class="border border-outline-variant rounded px-2 py-1 bg-surface-container-low">
-                    <button type="submit" class="font-label-sm text-primary">Rename</button>
+                    <button type="submit" class="font-label-sm text-primary">{{ chrome.t("orgs-teams-action-rename") }}</button>
                   </form>
                 </td>
                 <td class="px-stack-md py-stack-sm font-body-md text-body-md">{{ t.member_count }}</td>
-                <td class="px-stack-md py-stack-sm text-right">
+                <td class="px-stack-md py-stack-sm text-end">
                   <div class="inline-flex items-center gap-3">
                     <a href="{% if is_default %}/settings/organization/teams?team={{ t.id }}{% else %}/settings/organizations/{{ org.slug }}/teams?team={{ t.id }}{% endif %}"
-                       class="font-label-sm text-primary">Manage members</a>
+                       class="font-label-sm text-primary">{{ chrome.t("orgs-teams-action-manage-members") }}</a>
                     <form method="POST"
                           action="{% if is_default %}/settings/organization/teams/{{ t.id }}/delete{% else %}/settings/organizations/{{ org.slug }}/teams/{{ t.id }}/delete{% endif %}"
-                          onsubmit="return confirm('Delete {{ t.name }}? This removes the team and its memberships.');"
+                          onsubmit="return confirm('{{ chrome.tv1('orgs-confirm-delete-team', 'name', &t.name) }}');"
                           class="inline">
                       <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
-                      <button type="submit" class="text-error font-label-sm">Delete</button>
+                      <button type="submit" class="text-error font-label-sm">{{ chrome.t("orgs-teams-action-delete") }}</button>
                     </form>
                   </div>
                 </td>
@@ -90,14 +88,14 @@
 
       {% if let Some(sel) = selected_team %}
         <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg flex flex-col gap-stack-md">
-          <h2 class="font-headline-md text-headline-md text-on-surface">Members of {{ sel.name }}</h2>
+          <h2 class="font-headline-md text-headline-md text-on-surface">{{ chrome.tv1("orgs-teams-selected-heading", "team", &sel.name) }}</h2>
 
           <form method="POST"
                 action="{% if is_default %}/settings/organization/teams/{{ sel.id }}/members{% else %}/settings/organizations/{{ org.slug }}/teams/{{ sel.id }}/members{% endif %}"
                 class="flex flex-col md:flex-row gap-stack-md items-end">
             <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
             <label class="flex flex-col gap-1 flex-1">
-              <span class="font-label-sm text-label-sm text-on-surface-variant">Add member</span>
+              <span class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("orgs-teams-add-member-label") }}</span>
               <select name="identity_id"
                       required
                       class="border border-outline-variant rounded-lg px-3 py-2 bg-surface-container-low">
@@ -114,15 +112,15 @@
             </label>
             <button type="submit"
                     class="bg-primary text-on-primary rounded-lg px-4 py-2 font-label-md text-label-md"
-                    {% if addable.is_empty() %}disabled{% endif %}>Add</button>
+                    {% if addable.is_empty() %}disabled{% endif %}>{{ chrome.t("orgs-teams-action-add") }}</button>
           </form>
 
           <div class="border border-outline-variant rounded-xl overflow-hidden">
             <table class="w-full">
-              <thead class="bg-surface-container-low text-left">
+              <thead class="bg-surface-container-low text-start">
                 <tr>
-                  <th class="px-stack-md py-stack-sm font-label-sm text-label-sm text-on-surface-variant">Name</th>
-                  <th class="px-stack-md py-stack-sm font-label-sm text-label-sm text-on-surface-variant">Email</th>
+                  <th class="px-stack-md py-stack-sm font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("orgs-field-name") }}</th>
+                  <th class="px-stack-md py-stack-sm font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("orgs-field-email") }}</th>
                   <th></th>
                 </tr>
               </thead>
@@ -137,12 +135,12 @@
                       {% endif %}
                     </td>
                     <td class="px-stack-md py-stack-sm font-body-md text-body-md font-mono">{{ m.email }}</td>
-                    <td class="px-stack-md py-stack-sm text-right">
+                    <td class="px-stack-md py-stack-sm text-end">
                       <form method="POST"
                             action="{% if is_default %}/settings/organization/teams/{{ sel.id }}/members/{{ m.identity_id }}/remove{% else %}/settings/organizations/{{ org.slug }}/teams/{{ sel.id }}/members/{{ m.identity_id }}/remove{% endif %}"
                             class="inline">
                         <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
-                        <button type="submit" class="text-error font-label-sm">Remove</button>
+                        <button type="submit" class="text-error font-label-sm">{{ chrome.t("orgs-members-action-remove") }}</button>
                       </form>
                     </td>
                   </tr>

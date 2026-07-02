@@ -187,7 +187,10 @@ pub async fn show(
         }
     };
 
-    let rows: Vec<AuditRow> = raw_rows.into_iter().map(project_summary_row).collect();
+    let rows: Vec<AuditRow> = raw_rows
+        .into_iter()
+        .map(|r| project_summary_row(&ctx.locale, r))
+        .collect();
 
     let has_prev = page > 1;
     let has_next = offset + (rows.len() as i64) < total;
@@ -299,7 +302,7 @@ pub async fn show_one(
         }
     }
 
-    let row = project_detail_row(&state, raw).await;
+    let row = project_detail_row(&state, &ctx.locale, raw).await;
 
     let chrome = ctx.chrome(&csrf);
     render(&AuditShowTemplate {
@@ -311,14 +314,14 @@ pub async fn show_one(
 
 /// Project one DB row into the summary view-model. No external lookups: those
 /// would be O(N) Hydra/Kratos calls per page. The detail view resolves labels.
-fn project_summary_row(r: audit::AuditRow) -> AuditRow {
+fn project_summary_row(locale: &crate::locale::LanguageIdentifier, r: audit::AuditRow) -> AuditRow {
     let success = r.succeeded();
     let target_kind = r.target_kind.clone().unwrap_or_default();
     let target_id = r.target_id.clone().unwrap_or_default();
     let target_link = target_admin_link(&target_kind, &target_id);
     let target_id_short = short_id(&target_id);
     AuditRow {
-        when_pretty: humanise_timestamp(&r.created_at),
+        when_pretty: humanise_timestamp(locale, &r.created_at),
         when: r.created_at,
         severity: r.severity,
         success,
@@ -335,7 +338,11 @@ fn project_summary_row(r: audit::AuditRow) -> AuditRow {
 
 /// Detail-row projection. Resolves the target label via Hydra/Kratos (e.g. a
 /// client name instead of a bare UUID), falling back to the raw id if deleted.
-async fn project_detail_row(state: &AppState, r: audit::AuditRow) -> AuditDetail {
+async fn project_detail_row(
+    state: &AppState,
+    locale: &crate::locale::LanguageIdentifier,
+    r: audit::AuditRow,
+) -> AuditDetail {
     let target_kind = r.target_kind.clone().unwrap_or_default();
     let target_id = r.target_id.clone().unwrap_or_default();
     let target_link = target_admin_link(&target_kind, &target_id);
@@ -354,7 +361,7 @@ async fn project_detail_row(state: &AppState, r: audit::AuditRow) -> AuditDetail
     };
 
     AuditDetail {
-        when_pretty: humanise_timestamp(&r.created_at),
+        when_pretty: humanise_timestamp(locale, &r.created_at),
         when: r.created_at,
         severity: r.severity,
         success,

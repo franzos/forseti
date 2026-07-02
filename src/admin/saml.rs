@@ -67,7 +67,14 @@ struct SamlNewTemplate {
 #[allow(clippy::result_large_err)] // house pattern for sync Response-error gates
 fn gate(state: &AppState, csrf: &Csrf, email: &str) -> Result<bool, Response> {
     match state.license.feature(Feature::Saml) {
-        FeatureStatus::Locked => Err(render_upsell(state, &csrf.0, email, Feature::Saml)),
+        // no request context here; upsell locale is inert
+        FeatureStatus::Locked => Err(render_upsell(
+            state,
+            &csrf.0,
+            email,
+            Feature::Saml,
+            crate::locale::default_locale(),
+        )),
         FeatureStatus::GraceReadOnly => Ok(true),
         FeatureStatus::Allowed => Ok(false),
     }

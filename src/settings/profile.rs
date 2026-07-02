@@ -50,6 +50,7 @@ pub(crate) async fn settings_profile(
     sess: crate::extractors::RequireSession,
     csrf: crate::extractors::Csrf,
     banner: crate::handoff::ReferrerBanner,
+    crate::page_chrome::ReqLocale(locale): crate::page_chrome::ReqLocale,
 ) -> Response {
     settings_subpage(
         &state,
@@ -60,6 +61,7 @@ pub(crate) async fn settings_profile(
         &sess,
         banner,
         saved.profile_saved.unwrap_or(false),
+        locale,
     )
     .await
 }
@@ -85,6 +87,7 @@ pub(crate) async fn settings_profile_extended_save(
     State(state): State<AppState>,
     sess: crate::extractors::RequireSession,
     actx: AuditCtx,
+    crate::page_chrome::ReqLocale(locale): crate::page_chrome::ReqLocale,
     CsrfForm(form): CsrfForm<ExtendedProfileForm>,
 ) -> Response {
     if !state.cfg.profiles.enabled {
@@ -109,7 +112,7 @@ pub(crate) async fn settings_profile_extended_save(
     if !url_ok(&form.website) || !url_ok(&form.avatar_url) {
         return (
             StatusCode::BAD_REQUEST,
-            "website and avatar_url must be valid http:// or https:// URLs",
+            crate::i18n::lookup(&locale, "settings-profile-url-invalid"),
         )
             .into_response();
     }
@@ -119,7 +122,7 @@ pub(crate) async fn settings_profile_extended_save(
         if !url_ok(&link.url) {
             return (
                 StatusCode::BAD_REQUEST,
-                "every link URL must be a valid http:// or https:// URL",
+                crate::i18n::lookup(&locale, "settings-profile-link-url-invalid"),
             )
                 .into_response();
         }
@@ -140,7 +143,11 @@ pub(crate) async fn settings_profile_extended_save(
     .await
     {
         tracing::error!(error = ?e, "settings_profile_extended_save: upsert failed");
-        return (StatusCode::INTERNAL_SERVER_ERROR, "save failed").into_response();
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            crate::i18n::lookup(&locale, "settings-save-failed"),
+        )
+            .into_response();
     }
 
     let _ = audit::log(
@@ -182,6 +189,52 @@ fn parse_links(raw: &str) -> Vec<ProfileLink> {
             }
         })
         .collect()
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct LangForm {
+    #[serde(default)]
+    pub(crate) lang: String,
+}
+
+pub(crate) async fn settings_language_save(
+    State(state): State<AppState>,
+    sess: crate::extractors::RequireSession,
+    actx: AuditCtx,
+    crate::page_chrome::ReqLocale(locale): crate::page_chrome::ReqLocale,
+    CsrfForm(form): CsrfForm<LangForm>,
+) -> Response {
+    let Some(tag) = crate::locale::from_query_or_cookie(&form.lang) else {
+        return Redirect::to("/settings/profile").into_response();
+    };
+    let lang = tag.language.as_str().to_string();
+    if let Err(e) =
+        crate::ory::kratos::admin_set_identity_language(&state.ory, &sess.identity_id, &lang).await
+    {
+        tracing::error!(error = ?e, "settings_language_save: failed to persist language preference");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            crate::i18n::lookup(&locale, "settings-save-failed"),
+        )
+            .into_response();
+    }
+    let _ = audit::log(
+        &state.db,
+        AuditEvent::new(action::PROFILE_UPDATED)
+            .actor_user(&sess.identity_id, &sess.email)
+            .target(
+                crate::audit::target_kind::IDENTITY,
+                sess.identity_id.clone(),
+            )
+            .with_ctx(&actx)
+            .metadata(audit_metadata!("lang" => lang.as_str())),
+    )
+    .await;
+    let secure = state.cfg.self_.is_https();
+    let cookie = crate::locale::build_locale_cookie(&lang, secure);
+    let mut resp = Redirect::to("/settings/profile").into_response();
+    crate::web::append_set_cookie(&mut resp, Some(cookie));
+    resp
 }
 
 /// Serialise stored links back into the textarea-friendly format.

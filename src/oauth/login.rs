@@ -1,6 +1,7 @@
 //! `/oauth/login` — Hydra's "who is this user?" redirect target.
 
 use axum::extract::{Query, State};
+use axum::http::{HeaderMap, Uri};
 use axum::response::{IntoResponse, Redirect, Response};
 use serde::Deserialize;
 
@@ -19,6 +20,8 @@ pub(crate) struct OAuthLoginQuery {
 pub(crate) async fn oauth_login(
     State(state): State<AppState>,
     Query(query): Query<OAuthLoginQuery>,
+    uri: Uri,
+    headers: HeaderMap,
     session: OptionalSession,
 ) -> Response {
     let challenge = query.login_challenge;
@@ -36,6 +39,20 @@ pub(crate) async fn oauth_login(
         ory_client::apis::urlencode(&challenge),
     );
 
+    // Resolve the display locale for the login surface honoring ui_locales (D1).
+    // Passed as ?lang= to the /login redirect so the Kratos login page renders
+    // in the right language without the login handler needing the challenge.
+    let ui_locales: Option<Vec<String>> = req
+        .oidc_context
+        .as_ref()
+        .and_then(|ctx| ctx.ui_locales.clone());
+    let login_locale = {
+        let (mut p, _) = axum::http::Request::new(()).into_parts();
+        p.uri = uri;
+        p.headers = headers;
+        crate::page_chrome::resolve_locale_for_flow(&p, &session, ui_locales.as_deref())
+    };
+
     let session = match session {
         OptionalSession::Ok { session, .. } => *session,
         // InsufficientAal: we don't know the client's ACR ask yet, but the
@@ -45,8 +62,9 @@ pub(crate) async fn oauth_login(
         }
         OptionalSession::None => {
             let url = format!(
-                "/login?return_to={}",
-                ory_client::apis::urlencode(&self_login_url)
+                "/login?return_to={}&lang={}",
+                ory_client::apis::urlencode(&self_login_url),
+                login_locale.language.as_str(),
             );
             return Redirect::to(&url).into_response();
         }

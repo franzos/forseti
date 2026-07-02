@@ -8,14 +8,14 @@
 {% block nav_admin_class %}text-primary font-bold border-b-2 border-primary{% endblock %}
 
 {% block title %}
-  {% block admin_title %}Admin{% endblock %}
+  {% block admin_title %}{{ chrome.t("nav-admin") }}{% endblock %}
   &middot; {{ chrome.brand.name }}
 {% endblock %}
 
 {% block content %}
   <div class="bg-error-container border border-error rounded-xl px-4 py-2 mb-stack-md flex items-center gap-3">
-    <span class="font-label-md text-label-md text-on-error-container font-bold">ADMIN</span>
-    <span class="font-body-sm text-body-sm text-on-error-container">You're on a privileged surface. Actions here are audit-logged.</span>
+    <span class="font-label-md text-label-md text-on-error-container font-bold">{{ chrome.t("admin-banner-label") }}</span>
+    <span class="font-body-sm text-body-sm text-on-error-container">{{ chrome.t("admin-banner-body") }}</span>
   </div>
 
   <div class="flex flex-col md:flex-row gap-stack-lg">

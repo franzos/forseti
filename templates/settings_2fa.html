@@ -4,7 +4,7 @@
   {% include "_referrer_banner.html" %}
 {% endblock %}
 
-{% block title %}Two-factor authentication &middot; {{ chrome.brand.name }}{% endblock %}
+{% block title %}{{ chrome.t("settings-2fa-heading") }} &middot; {{ chrome.brand.name }}{% endblock %}
 
 {% block nav_settings_class %}text-primary font-bold border-b-2 border-primary{% endblock %}
 
@@ -15,8 +15,8 @@
 
     <section class="flex-1 flex flex-col gap-stack-lg">
       <div>
-        <h1 class="font-headline-lg text-headline-lg text-on-surface">Two-factor authentication</h1>
-        <p class="font-body-md text-body-md text-on-surface-variant mt-1">Strengthen your account with a second factor.</p>
+        <h1 class="font-headline-lg text-headline-lg text-on-surface">{{ chrome.t("settings-2fa-heading") }}</h1>
+        <p class="font-body-md text-body-md text-on-surface-variant mt-1">{{ chrome.t("settings-2fa-subtitle") }}</p>
       </div>
 
       {% if !flow_messages.is_empty() %}
@@ -35,14 +35,14 @@
       {% if needs_recovery_codes %}
         <div class="bg-error-container border border-error rounded-xl p-stack-lg flex flex-col sm:flex-row justify-between items-start sm:items-center gap-stack-md">
           <div class="flex flex-col gap-stack-sm">
-            <p class="font-label-md text-label-md text-on-error-container">No recovery codes — you risk being locked out</p>
+            <p class="font-label-md text-label-md text-on-error-container">{{ chrome.t("settings-2fa-no-recovery-warning-heading") }}</p>
             <p class="font-body-sm text-body-sm text-on-error-container">
-              Two-factor authentication is on, but you have no recovery codes. If you lose your authenticator or security key, recovery codes are the only way back into your account. Generate them now.
+              {{ chrome.t("settings-2fa-no-recovery-warning-body") }}
             </p>
           </div>
           <a href="#recovery-codes"
              class="font-label-md text-label-md text-on-error-container border border-error rounded-lg px-4 py-2 hover:bg-error hover:text-on-error transition-colors focus:outline-none focus:ring-2 focus:ring-error focus:ring-offset-2 whitespace-nowrap">
-            Generate codes
+            {{ chrome.t("settings-2fa-no-recovery-warning-action") }}
           </a>
         </div>
       {% endif %}
@@ -51,13 +51,11 @@
       <article class="bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg flex flex-col gap-stack-md">
         <header class="flex items-start justify-between gap-stack-md">
           <div>
-            <h2 class="font-headline-md text-headline-md text-on-surface">Authenticator app (TOTP)</h2>
-            <p class="font-body-sm text-body-sm text-on-surface-variant mt-1">
-              Use an app like 1Password, Bitwarden, Aegis, or Authy to generate 6-digit codes.
-            </p>
+            <h2 class="font-headline-md text-headline-md text-on-surface">{{ chrome.t("settings-2fa-totp-heading") }}</h2>
+            <p class="font-body-sm text-body-sm text-on-surface-variant mt-1">{{ chrome.t("settings-2fa-totp-desc") }}</p>
           </div>
           {% if totp_enrolled %}
-            <span class="font-label-sm text-label-sm bg-tertiary-container text-on-tertiary-container px-3 py-1 rounded-full">Enabled</span>
+            <span class="font-label-sm text-label-sm bg-tertiary-container text-on-tertiary-container px-3 py-1 rounded-full">{{ chrome.t("settings-2fa-totp-enabled") }}</span>
           {% endif %}
         </header>
 
@@ -76,12 +74,10 @@
             {% if let Some(qr) = totp_qr %}
               <div class="flex flex-col sm:flex-row items-start gap-stack-lg">
                 <img src="{{ qr }}"
-                     alt="TOTP QR code"
+                     alt="{{ chrome.t('settings-2fa-qr-alt') }}"
                      class="w-40 h-40 bg-on-surface p-2 rounded-lg" />
                 <div class="flex flex-col gap-stack-sm">
-                  <p class="font-body-sm text-body-sm text-on-surface">
-                    Scan this QR code with your authenticator app, or enter the secret manually:
-                  </p>
+                  <p class="font-body-sm text-body-sm text-on-surface">{{ chrome.t("settings-2fa-totp-scan-hint") }}</p>
                   {% if let Some(secret) = totp_secret %}
                     <code class="font-mono text-body-sm bg-surface-container px-3 py-2 rounded border border-outline-variant break-all">{{ secret }}</code>
                   {% endif %}
@@ -99,163 +95,155 @@
                   <label for="{{ node.name }}"
                          class="font-label-md text-label-md text-on-surface">
                     {% match node.label %}{% when Some with (l) %}{{ l }}{% when None %}{{ node.name }}{% endmatch %}
-                  </label>
-                  {% include "partials/flow_node.html" %}
-                  {% for m in node.messages %}
-                    <p class="font-body-sm text-body-sm {% if m.severity == "error" %}text-error{% else %}text-on-surface-variant{% endif %}">
-                      {{ m.text }}
-                    </p>
-                  {% endfor %}
-                </div>
-              {% endif %}
-            {% endfor %}
-
-            <input type="hidden" name="method" value="totp">
-          </form>
-        {% else %}
-          <p class="font-body-sm text-body-sm text-on-surface-variant">
-            Authenticator-app setup is not currently offered by your server.
-          </p>
-        {% endif %}
-      </article>
-
-      {# ----------- Lookup / recovery codes section ----------- #}
-      <article id="recovery-codes"
-               class="bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg flex flex-col gap-stack-md scroll-mt-stack-lg">
-        <header class="flex items-start justify-between gap-stack-md">
-          <div>
-            <h2 class="font-headline-md text-headline-md text-on-surface">Recovery codes</h2>
-            <p class="font-body-sm text-body-sm text-on-surface-variant mt-1">
-              One-time codes that let you sign in if you lose access to your authenticator.
-            </p>
-          </div>
-          {% if lookup_enrolled %}
-            <span class="font-label-sm text-label-sm bg-tertiary-container text-on-tertiary-container px-3 py-1 rounded-full">Active</span>
-          {% endif %}
-        </header>
-
-        {% if lookup_just_regenerated %}
-          <div class="bg-surface-container border border-outline-variant rounded-lg p-stack-md">
-            <p class="font-body-sm text-body-sm text-on-surface mb-stack-sm">
-              <strong>Save these now.</strong> They will not be shown again. Store them somewhere safe — a password manager works well.
-            </p>
-            <ul class="grid grid-cols-2 sm:grid-cols-3 gap-2 font-mono text-body-sm text-on-surface">
-              {% for code in lookup_codes %}
-                <li class="bg-surface-container-lowest border border-outline-variant rounded px-3 py-2">{{ code }}</li>
-              {% endfor %}
-            </ul>
-          </div>
-        {% endif %}
-
-        {% if !lookup_nodes.is_empty() %}
-          <form method="{{ form_method }}"
-                action="{{ form_action }}"
-                class="flex flex-col gap-stack-sm">
-            {% for node in hidden_defaults %}
-              {% include "partials/flow_node.html" %}
-            {% endfor %}
-            {% for node in lookup_nodes %}
-              {% include "partials/flow_node.html" %}
-            {% endfor %}
-            <input type="hidden" name="method" value="lookup_secret">
-          </form>
-        {% else %}
-          <p class="font-body-sm text-body-sm text-on-surface-variant">
-            Recovery codes are not currently offered by your server.
-          </p>
-        {% endif %}
-      </article>
-
-      {# ----------- WebAuthn / passkeys section ----------- #}
-      <article class="bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg flex flex-col gap-stack-md">
-        <header>
-          <h2 class="font-headline-md text-headline-md text-on-surface">Security keys &amp; passkeys</h2>
-          <p class="font-body-sm text-body-sm text-on-surface-variant mt-1">
-            Use a hardware key (YubiKey, Titan) or a platform passkey (Touch ID, Windows Hello) as your second factor.
-          </p>
-        </header>
-
-        {% if webauthn_enabled %}
-          <form method="{{ form_method }}"
-                action="{{ form_action }}"
-                class="flex flex-col gap-stack-md">
-            {% for node in hidden_defaults %}
-              {% include "partials/flow_node.html" %}
-            {% endfor %}
-            {% for node in webauthn_nodes %}
-              {% if node.name == "webauthn_remove" %}
-                <button type="{{ node.input_type }}"
-                        name="{{ node.name }}"
-                        value="{{ node.value }}"
-                        formnovalidate
-                        {% if node.disabled %}disabled{% endif %}
-                        class="w-full flex items-center justify-center gap-stack-md bg-surface-container-lowest border border-error text-error font-label-md text-label-md py-stack-md px-stack-lg rounded-lg hover:bg-error hover:text-on-error focus:outline-none focus:ring-2 focus:ring-error focus:ring-offset-2 transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
-                  {% match node.label %}{% when Some with (l) %}{{ l }}{% when None %}Remove security key{% endmatch %}
-                </button>
-              {% else if node.input_type == "hidden" || node.input_type == "submit" || node.input_type == "button" %}
+                </label>
                 {% include "partials/flow_node.html" %}
-              {% else %}
-                <div class="flex flex-col gap-stack-sm">
-                  {% match node.label %}{% when Some with (l) %}
-                  <label for="{{ node.name }}"
-                         class="font-label-md text-label-md text-on-surface">{{ l }}</label>
-                  {% when None %}{% endmatch %}
-                  {% include "partials/flow_node.html" %}
-                  {% for m in node.messages %}
-                    <p class="font-body-sm text-body-sm {% if m.severity == "error" %}text-error{% else %}text-on-surface-variant{% endif %}">
-                      {{ m.text }}
-                    </p>
-                  {% endfor %}
-                </div>
-              {% endif %}
+                {% for m in node.messages %}
+                  <p class="font-body-sm text-body-sm {% if m.severity == "error" %}text-error{% else %}text-on-surface-variant{% endif %}">
+                    {{ m.text }}
+                  </p>
+                {% endfor %}
+              </div>
+            {% endif %}
+          {% endfor %}
+
+          <input type="hidden" name="method" value="totp">
+        </form>
+      {% else %}
+        <p class="font-body-sm text-body-sm text-on-surface-variant">{{ chrome.t("settings-2fa-totp-not-offered") }}</p>
+      {% endif %}
+    </article>
+
+    {# ----------- Lookup / recovery codes section ----------- #}
+    <article id="recovery-codes"
+             class="bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg flex flex-col gap-stack-md scroll-mt-stack-lg">
+      <header class="flex items-start justify-between gap-stack-md">
+        <div>
+          <h2 class="font-headline-md text-headline-md text-on-surface">{{ chrome.t("settings-2fa-recovery-heading") }}</h2>
+          <p class="font-body-sm text-body-sm text-on-surface-variant mt-1">{{ chrome.t("settings-2fa-recovery-desc") }}</p>
+        </div>
+        {% if lookup_enrolled %}
+          <span class="font-label-sm text-label-sm bg-tertiary-container text-on-tertiary-container px-3 py-1 rounded-full">{{ chrome.t("settings-2fa-recovery-active") }}</span>
+        {% endif %}
+      </header>
+
+      {% if lookup_just_regenerated %}
+        <div class="bg-surface-container border border-outline-variant rounded-lg p-stack-md">
+          <p class="font-body-sm text-body-sm text-on-surface mb-stack-sm">
+            <strong>{{ chrome.t("settings-2fa-recovery-save-strong") }}</strong> {{ chrome.t("settings-2fa-recovery-save-suffix") }}
+          </p>
+          <ul class="grid grid-cols-2 sm:grid-cols-3 gap-2 font-mono text-body-sm text-on-surface">
+            {% for code in lookup_codes %}
+              <li class="bg-surface-container-lowest border border-outline-variant rounded px-3 py-2">{{ code }}</li>
             {% endfor %}
-            <input type="hidden" name="method" value="webauthn">
-          </form>
-          {# Kratos ships a webauthn helper that wires the browser
+          </ul>
+        </div>
+      {% endif %}
+
+      {% if !lookup_nodes.is_empty() %}
+        <form method="{{ form_method }}"
+              action="{{ form_action }}"
+              class="flex flex-col gap-stack-sm">
+          {% for node in hidden_defaults %}
+            {% include "partials/flow_node.html" %}
+          {% endfor %}
+          {% for node in lookup_nodes %}
+            {% include "partials/flow_node.html" %}
+          {% endfor %}
+          <input type="hidden" name="method" value="lookup_secret">
+        </form>
+      {% else %}
+        <p class="font-body-sm text-body-sm text-on-surface-variant">{{ chrome.t("settings-2fa-recovery-not-offered") }}</p>
+      {% endif %}
+    </article>
+
+    {# ----------- WebAuthn / passkeys section ----------- #}
+    <article class="bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg flex flex-col gap-stack-md">
+      <header>
+        <h2 class="font-headline-md text-headline-md text-on-surface">{{ chrome.t("settings-2fa-webauthn-heading") }}</h2>
+        <p class="font-body-sm text-body-sm text-on-surface-variant mt-1">{{ chrome.t("settings-2fa-webauthn-desc") }}</p>
+      </header>
+
+      {% if webauthn_enabled %}
+        <form method="{{ form_method }}"
+              action="{{ form_action }}"
+              class="flex flex-col gap-stack-md">
+          {% for node in hidden_defaults %}
+            {% include "partials/flow_node.html" %}
+          {% endfor %}
+          {% for node in webauthn_nodes %}
+            {% if node.name == "webauthn_remove" %}
+              <button type="{{ node.input_type }}"
+                      name="{{ node.name }}"
+                      value="{{ node.value }}"
+                      formnovalidate
+                      {% if node.disabled %}disabled{% endif %}
+                      class="w-full flex items-center justify-center gap-stack-md bg-surface-container-lowest border border-error text-error font-label-md text-label-md py-stack-md px-stack-lg rounded-lg hover:bg-error hover:text-on-error focus:outline-none focus:ring-2 focus:ring-error focus:ring-offset-2 transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+                {% match node.label %}{% when Some with (l) %}{{ l }}{% when None %}{{ chrome.t("settings-2fa-webauthn-remove-fallback") }}{% endmatch %}
+            </button>
+          {% else if node.input_type == "hidden" || node.input_type == "submit" || node.input_type == "button" %}
+            {% include "partials/flow_node.html" %}
+          {% else %}
+            <div class="flex flex-col gap-stack-sm">
+              {% match node.label %}{% when Some with (l) %}
+              <label for="{{ node.name }}"
+                     class="font-label-md text-label-md text-on-surface">{{ l }}</label>
+              {% when None %}{% endmatch %}
+            {% include "partials/flow_node.html" %}
+            {% for m in node.messages %}
+              <p class="font-body-sm text-body-sm {% if m.severity == "error" %}text-error{% else %}text-on-surface-variant{% endif %}">
+                {{ m.text }}
+              </p>
+            {% endfor %}
+          </div>
+        {% endif %}
+      {% endfor %}
+      <input type="hidden" name="method" value="webauthn">
+    </form>
+    {# Kratos ships a webauthn helper that wires the browser
                credential APIs to the form fields it just rendered, and serves
                it itself at `/.well-known/ory/webauthn.js` — version-matched to
                the running Kratos instance. The flow includes a `script` node
                pointing at that URL (with an SRI hash); we render it verbatim
                so the helper and the wire format always agree. #}
-          {% for s in webauthn_scripts %}
-            <script src="{{ s.src }}"
-                    {% if s.is_async %}async{% endif %}
-                    {% match s.integrity %}
-                    {% when Some with (v) %}
-                    integrity="{{ v }}"
-                    {% when None %}
-                    {% endmatch %}
-                    {% match s.referrerpolicy %}
-                    {% when Some with (v) %}
-                    referrerpolicy="{{ v }}"
-                    {% when None %}
-                    {% endmatch %}
-                    {% match s.crossorigin %}
-                    {% when Some with (v) %}
-                    crossorigin="{{ v }}"
-                    {% when None %}
-                    {% endmatch %}
-                    {% match s.id %}
-                    {% when Some with (v) %}
-                    id="{{ v }}"
-                    {% when None %}
-                    {% endmatch %}
-                    {% match s.nonce %}
-                    {% when Some with (v) %}
-                    nonce="{{ v }}"
-                    {% when None %}
-                    {% endmatch %}></script>
-          {% endfor %}
-          {% include "partials/webauthn_helper.html" %}
-        {% else %}
-          <p class="font-body-sm text-body-sm text-on-surface-variant">Passkey support is not enabled by your administrator.</p>
-        {% endif %}
-      </article>
+    {% for s in webauthn_scripts %}
+      <script src="{{ s.src }}"
+              {% if s.is_async %}async{% endif %}
+              {% match s.integrity %}
+              {% when Some with (v) %}
+              integrity="{{ v }}"
+              {% when None %}
+              {% endmatch %}
+              {% match s.referrerpolicy %}
+              {% when Some with (v) %}
+              referrerpolicy="{{ v }}"
+              {% when None %}
+              {% endmatch %}
+              {% match s.crossorigin %}
+              {% when Some with (v) %}
+              crossorigin="{{ v }}"
+              {% when None %}
+              {% endmatch %}
+              {% match s.id %}
+              {% when Some with (v) %}
+              id="{{ v }}"
+              {% when None %}
+              {% endmatch %}
+              {% match s.nonce %}
+              {% when Some with (v) %}
+              nonce="{{ v }}"
+              {% when None %}
+              {% endmatch %}></script>
+{% endfor %}
+{% include "partials/webauthn_helper.html" %}
+{% else %}
+<p class="font-body-sm text-body-sm text-on-surface-variant">{{ chrome.t("settings-2fa-webauthn-not-enabled") }}</p>
+{% endif %}
+</article>
 
-      <div>
-        <a href="/settings"
-           class="font-label-md text-label-md text-on-surface-variant hover:text-primary transition-colors">&larr; Back to settings</a>
-      </div>
-    </section>
-  </div>
+<div>
+  <a href="/settings"
+     class="font-label-md text-label-md text-on-surface-variant hover:text-primary transition-colors"><span class="dir-flip">&larr;</span> {{ chrome.t("settings-2fa-back") }}</a>
+</div>
+</section>
+</div>
 {% endblock %}

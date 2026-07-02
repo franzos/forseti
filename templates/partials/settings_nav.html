@@ -3,42 +3,42 @@
    Grouped like the admin nav: the first label is plain (top), the rest sit on a
    faint rule. The Account (danger zone) entry is set apart and highlights in
    error tones when active. #}
-<aside class="md:w-60 md:shrink-0 md:border-r md:border-outline-variant md:pr-stack-lg">
+<aside class="md:w-60 md:shrink-0 md:border-e md:border-outline-variant md:pe-stack-lg">
   <nav class="flex flex-col gap-stack-xs mt-2">
-    <p class="font-label-sm text-label-sm text-outline">General</p>
+    <p class="font-label-sm text-label-sm text-outline">{{ chrome.t("settings-nav-general") }}</p>
     <a href="/settings"
-       class="flex items-center gap-3 px-4 py-2 rounded-xl font-label-md text-label-md {% if active == "hub" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">Overview</a>
+       class="flex items-center gap-3 px-4 py-2 rounded-xl font-label-md text-label-md {% if active == "hub" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">{{ chrome.t("settings-nav-overview") }}</a>
     <a href="/settings/profile"
-       class="flex items-center gap-3 px-4 py-2 rounded-xl font-label-md text-label-md {% if active == "profile" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">Profile</a>
+       class="flex items-center gap-3 px-4 py-2 rounded-xl font-label-md text-label-md {% if active == "profile" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">{{ chrome.t("settings-nav-profile") }}</a>
     <a href="/settings/organization"
-       class="flex items-center gap-3 px-4 py-2 rounded-xl font-label-md text-label-md {% if active == "organization" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">Organization</a>
+       class="flex items-center gap-3 px-4 py-2 rounded-xl font-label-md text-label-md {% if active == "organization" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">{{ chrome.t("settings-nav-organization") }}</a>
 
-    <div class="flex items-center gap-2 pr-3 my-1">
-      <span class="font-label-sm text-label-sm text-outline">Security</span>
+    <div class="flex items-center gap-2 pe-3 my-1">
+      <span class="font-label-sm text-label-sm text-outline">{{ chrome.t("settings-nav-security") }}</span>
       <span class="flex-1 border-t border-outline-variant/60"></span>
     </div>
     <a href="/settings/password"
-       class="flex items-center gap-3 px-4 py-2 rounded-xl font-label-md text-label-md {% if active == "password" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">Password</a>
+       class="flex items-center gap-3 px-4 py-2 rounded-xl font-label-md text-label-md {% if active == "password" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">{{ chrome.t("settings-nav-password") }}</a>
     <a href="/settings/2fa"
-       class="flex items-center gap-3 px-4 py-2 rounded-xl font-label-md text-label-md {% if active == "2fa" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">2FA</a>
+       class="flex items-center gap-3 px-4 py-2 rounded-xl font-label-md text-label-md {% if active == "2fa" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">{{ chrome.t("settings-nav-2fa") }}</a>
     <a href="/settings/sessions"
-       class="flex items-center gap-3 px-4 py-2 rounded-xl font-label-md text-label-md {% if active == "sessions" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">Sessions</a>
+       class="flex items-center gap-3 px-4 py-2 rounded-xl font-label-md text-label-md {% if active == "sessions" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">{{ chrome.t("settings-nav-sessions") }}</a>
     <a href="/settings/offline-access"
-       class="flex items-center gap-3 px-4 py-2 rounded-xl font-label-md text-label-md {% if active == "offline-access" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">Offline login</a>
+       class="flex items-center gap-3 px-4 py-2 rounded-xl font-label-md text-label-md {% if active == "offline-access" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">{{ chrome.t("settings-nav-offline") }}</a>
 
-    <div class="flex items-center gap-2 pr-3 my-1">
-      <span class="font-label-sm text-label-sm text-outline">Connections</span>
+    <div class="flex items-center gap-2 pe-3 my-1">
+      <span class="font-label-sm text-label-sm text-outline">{{ chrome.t("settings-nav-connections") }}</span>
       <span class="flex-1 border-t border-outline-variant/60"></span>
     </div>
     <a href="/settings/authorized-apps"
-       class="flex items-center gap-3 px-4 py-2 rounded-xl font-label-md text-label-md {% if active == "authorized-apps" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">Authorized apps</a>
+       class="flex items-center gap-3 px-4 py-2 rounded-xl font-label-md text-label-md {% if active == "authorized-apps" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">{{ chrome.t("settings-nav-authorized-apps") }}</a>
     <a href="/settings/linked-providers"
-       class="flex items-center gap-3 px-4 py-2 rounded-xl font-label-md text-label-md {% if active == "linked-providers" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">Linked providers</a>
+       class="flex items-center gap-3 px-4 py-2 rounded-xl font-label-md text-label-md {% if active == "linked-providers" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">{{ chrome.t("settings-nav-linked-providers") }}</a>
 
-    <div class="flex items-center pr-3 my-1">
+    <div class="flex items-center pe-3 my-1">
       <span class="flex-1 border-t border-outline-variant/60"></span>
     </div>
     <a href="/settings/account"
-       class="flex items-center gap-3 px-4 py-2 rounded-xl font-label-md text-label-md {% if active == "account" %}bg-error-container text-on-error-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">Account</a>
+       class="flex items-center gap-3 px-4 py-2 rounded-xl font-label-md text-label-md {% if active == "account" %}bg-error-container text-on-error-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">{{ chrome.t("settings-nav-account") }}</a>
   </nav>
 </aside>

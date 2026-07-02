@@ -21,6 +21,7 @@ use crate::audit_metadata;
 use crate::csrf;
 use crate::extractors::Csrf;
 use crate::flow_view::session_email;
+use crate::locale::LanguageIdentifier;
 use crate::ory;
 use crate::page_chrome::PageChrome;
 use crate::render::render;
@@ -62,9 +63,10 @@ pub(crate) async fn settings_account(
     sess: crate::extractors::RequireSession,
     csrf: Csrf,
     banner: crate::handoff::ReferrerBanner,
+    crate::page_chrome::ReqLocale(locale): crate::page_chrome::ReqLocale,
 ) -> Response {
     render(&SettingsAccountTemplate {
-        chrome: PageChrome::from_parts(&state, sess.email, csrf.0),
+        chrome: PageChrome::from_parts(&state, sess.email, csrf.0, locale),
         referrer_banner: banner.0,
     })
 }
@@ -77,14 +79,21 @@ pub(crate) async fn settings_account_delete(
     sess: crate::extractors::RequireSession,
     csrf: Csrf,
     banner: crate::handoff::ReferrerBanner,
+    crate::page_chrome::ReqLocale(locale): crate::page_chrome::ReqLocale,
 ) -> Response {
-    let (session, flow) =
-        match fetch_settings_subpage(&state, &headers, &query, SettingsSection::Account, &sess)
-            .await
-        {
-            Ok(pair) => pair,
-            Err(resp) => return resp,
-        };
+    let (session, flow) = match fetch_settings_subpage(
+        &state,
+        &headers,
+        &query,
+        SettingsSection::Account,
+        &sess,
+        &locale,
+    )
+    .await
+    {
+        Ok(pair) => pair,
+        Err(resp) => return resp,
+    };
 
     let user_id = session
         .identity
@@ -99,7 +108,7 @@ pub(crate) async fn settings_account_delete(
         .to_string();
 
     render(&SettingsAccountDeleteConfirmTemplate {
-        chrome: PageChrome::from_parts(&state, session_email(&session), csrf.0),
+        chrome: PageChrome::from_parts(&state, session_email(&session), csrf.0, locale),
         notified_apps,
         flow_id,
         referrer_banner: banner.0,
@@ -120,17 +129,24 @@ pub(crate) async fn settings_account_delete_submit(
     headers: HeaderMap,
     sess: crate::extractors::RequireSession,
     actx: AuditCtx,
+    crate::page_chrome::ReqLocale(locale): crate::page_chrome::ReqLocale,
     csrf::CsrfForm(form): csrf::CsrfForm<DeleteForm>,
 ) -> Response {
     // Re-run the privileged gate in case the window lapsed between confirm and
     // submit.
-    let session =
-        match fetch_settings_subpage(&state, &headers, &query, SettingsSection::Account, &sess)
-            .await
-        {
-            Ok((session, _)) => session,
-            Err(resp) => return resp,
-        };
+    let session = match fetch_settings_subpage(
+        &state,
+        &headers,
+        &query,
+        SettingsSection::Account,
+        &sess,
+        &locale,
+    )
+    .await
+    {
+        Ok((session, _)) => session,
+        Err(resp) => return resp,
+    };
 
     // Typed-email confirm must match the session's email.
     let session_email_str = session_email(&session);
@@ -146,15 +162,21 @@ pub(crate) async fn settings_account_delete_submit(
         return Redirect::to("/settings/account/delete").into_response();
     }
 
-    run_delete_saga(&state, &session, &actx).await
+    run_delete_saga(&state, &session, &actx, &locale).await
 }
 
-async fn run_delete_saga(state: &AppState, session: &ory::Session, actx: &AuditCtx) -> Response {
+async fn run_delete_saga(
+    state: &AppState,
+    session: &ory::Session,
+    actx: &AuditCtx,
+    locale: &LanguageIdentifier,
+) -> Response {
     let Some(identity) = session.identity.as_ref() else {
         tracing::error!("session has no identity; refusing self-delete");
         return render_delete_failure(
             state,
-            "Your session is in an unexpected state. Please sign in again and retry.",
+            locale,
+            &crate::i18n::lookup(locale, "error-boundary-account-delete-bad-session"),
         );
     };
     let user_id = identity.id.clone();
@@ -185,11 +207,18 @@ async fn run_delete_saga(state: &AppState, session: &ory::Session, actx: &AuditC
                 orgs = %names,
                 "account self-delete blocked: sole owner of org(s) with other members"
             );
+            let mut args: std::collections::HashMap<
+                std::borrow::Cow<'static, str>,
+                fluent_templates::fluent_bundle::FluentValue,
+            > = std::collections::HashMap::new();
+            args.insert(std::borrow::Cow::Borrowed("names"), names.clone().into());
             return render_delete_failure(
                 state,
-                &format!(
-                    "You're the only owner of {names}. Transfer ownership to another \
-                     member before deleting your account."
+                locale,
+                &crate::i18n::lookup_args(
+                    locale,
+                    "error-boundary-account-delete-sole-owner",
+                    &args,
                 ),
             );
         }
@@ -202,8 +231,11 @@ async fn run_delete_saga(state: &AppState, session: &ory::Session, actx: &AuditC
             );
             return render_delete_failure(
                 state,
-                "We couldn't verify your organization ownership. Nothing was changed; \
-                 please try again in a moment.",
+                locale,
+                &crate::i18n::lookup(
+                    locale,
+                    "error-boundary-account-delete-ownership-check-failed",
+                ),
             );
         }
     }
@@ -222,8 +254,8 @@ async fn run_delete_saga(state: &AppState, session: &ory::Session, actx: &AuditC
             );
             return render_delete_failure(
                 state,
-                "We couldn't reach the consent service to notify your connected apps. \
-                 Nothing was changed; please try again in a moment.",
+                locale,
+                &crate::i18n::lookup(locale, "error-boundary-account-delete-consent-unreachable"),
             );
         }
     };
@@ -244,7 +276,8 @@ async fn run_delete_saga(state: &AppState, session: &ory::Session, actx: &AuditC
         tracing::error!(error = %e, event_id = %event_id, "outbox write failed; aborting saga");
         return render_delete_failure(
             state,
-            "We couldn't prepare the delete notifications. Nothing was changed; please try again.",
+            locale,
+            &crate::i18n::lookup(locale, "error-boundary-account-delete-notifications-failed"),
         );
     }
 
@@ -336,7 +369,8 @@ async fn run_delete_saga(state: &AppState, session: &ory::Session, actx: &AuditC
             }
             render_delete_failure(
                 state,
-                "We couldn't delete your account. Please try again in a moment.",
+                locale,
+                &crate::i18n::lookup(locale, "error-boundary-account-delete-failed"),
             )
         }
     }
@@ -419,13 +453,14 @@ fn deletion_url_from_metadata(metadata: Option<&serde_json::Value>) -> Option<St
         .map(|s| s.to_string())
 }
 
-fn render_delete_failure(state: &AppState, body: &str) -> Response {
+fn render_delete_failure(state: &AppState, locale: &LanguageIdentifier, body: &str) -> Response {
     crate::web::render_error_boundary(
         state,
-        "Account deletion failed",
+        locale,
+        &crate::i18n::lookup(locale, "error-boundary-account-deletion-title"),
         body,
         "/settings/account",
-        "Back to account",
+        crate::i18n::lookup(locale, "error-boundary-cta-back-to-account"),
     )
     .into_response()
 }

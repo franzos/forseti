@@ -98,10 +98,11 @@ pub(crate) async fn registration(
             tracing::error!(error = ?e, ?flow_id, "failed to fetch Kratos registration flow");
             render_error_boundary(
                 &state,
-                "Sign-up unavailable",
-                crate::web::AUTH_UNAVAILABLE_BODY,
+                &chrome.locale,
+                &crate::i18n::lookup(&chrome.locale, "error-boundary-signup-title"),
+                &crate::i18n::lookup(&chrome.locale, "error-boundary-auth-unavailable-body"),
                 "/registration",
-                "Try again",
+                crate::i18n::lookup(&chrome.locale, "error-boundary-cta-try-again"),
             )
             .into_response()
         }
@@ -125,7 +126,7 @@ fn render_registration(
     return_to: Option<&str>,
     prefill_email: Option<&str>,
 ) -> Response {
-    let mut form = FlowFormView::from_flow(flow, FlowKind::Registration, return_to);
+    let mut form = FlowFormView::from_flow(flow, FlowKind::Registration, return_to, &chrome.locale);
     // Overwrite the empty `traits.email` Kratos persists on flow init rather
     // than re-initialising the flow. Only mutates `value`, so the already-computed
     // `has_visible_default` (keyed on `input_type`) is unaffected.

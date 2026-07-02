@@ -4,7 +4,7 @@
   {% include "_referrer_banner.html" %}
 {% endblock %}
 
-{% block title %}Active sessions &middot; {{ chrome.brand.name }}{% endblock %}
+{% block title %}{{ chrome.t("settings-sessions-heading") }} &middot; {{ chrome.brand.name }}{% endblock %}
 
 {% block nav_settings_class %}text-primary font-bold border-b-2 border-primary{% endblock %}
 
@@ -15,10 +15,8 @@
 
     <section class="flex-1 flex flex-col gap-stack-lg">
       <div>
-        <h1 class="font-headline-lg text-headline-lg text-on-surface">Active sessions</h1>
-        <p class="font-body-md text-body-md text-on-surface-variant mt-1">
-          Devices currently signed into your account. Revoke any you don't recognise.
-        </p>
+        <h1 class="font-headline-lg text-headline-lg text-on-surface">{{ chrome.t("settings-sessions-heading") }}</h1>
+        <p class="font-body-md text-body-md text-on-surface-variant mt-1">{{ chrome.t("settings-sessions-subtitle") }}</p>
       </div>
 
       {% if !flash.is_empty() %}
@@ -39,7 +37,7 @@
                 <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
                 <button type="submit"
                         class="font-label-md text-label-md text-error border border-error rounded-lg px-4 py-2 hover:bg-error-container hover:text-on-error-container transition-colors focus:outline-none focus:ring-2 focus:ring-error focus:ring-offset-2">
-                  Sign out
+                  {{ chrome.t("settings-sessions-revoke-action") }}
                 </button>
               </form>
             {% endif %}
@@ -52,22 +50,22 @@
               action="/settings/sessions/revoke-others"
               class="bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg flex flex-col sm:flex-row sm:items-center justify-between gap-stack-md">
           <div>
-            <h2 class="font-headline-sm text-headline-sm text-on-surface">Sign out of all other devices</h2>
+            <h2 class="font-headline-sm text-headline-sm text-on-surface">{{ chrome.t("settings-sessions-revoke-others-heading") }}</h2>
             <p class="font-body-sm text-body-sm text-on-surface-variant mt-1">
-              Keeps this session active and revokes every other one.
+              {{ chrome.t("settings-sessions-revoke-others-desc") }}
             </p>
           </div>
           <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
           <button type="submit"
                   class="font-label-md text-label-md text-on-primary bg-primary rounded-lg px-4 py-2 hover:opacity-90 transition-opacity focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2">
-            Sign out others
+            {{ chrome.t("settings-sessions-revoke-others-action") }}
           </button>
         </form>
       {% endif %}
 
       <div>
         <a href="/settings"
-           class="font-label-md text-label-md text-on-surface-variant hover:text-primary transition-colors">&larr; Back to settings</a>
+           class="font-label-md text-label-md text-on-surface-variant hover:text-primary transition-colors"><span class="dir-flip">&larr;</span> {{ chrome.t("settings-sessions-back") }}</a>
       </div>
     </section>
   </div>

@@ -34,7 +34,11 @@ impl SessionView {
     /// Project a Kratos session into the template row. `is_current` should
     /// be `true` only when this session corresponds to the request's own
     /// cookie (always `false` from admin views).
-    pub(crate) fn from_kratos(s: &ory::Session, is_current: bool) -> Self {
+    pub(crate) fn from_kratos(
+        locale: &crate::locale::LanguageIdentifier,
+        s: &ory::Session,
+        is_current: bool,
+    ) -> Self {
         let device = s
             .devices
             .as_ref()
@@ -49,7 +53,7 @@ impl SessionView {
             .user_agent
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "Unknown device".to_string());
-        let user_agent_pretty = humanise_user_agent(&user_agent);
+        let user_agent_pretty = humanise_user_agent(locale, &user_agent);
         let authenticated_at = s
             .authenticated_at
             .clone()
@@ -66,9 +70,9 @@ impl SessionView {
             user_agent_pretty,
             ip_address: device.ip_address.unwrap_or_default(),
             location: device.location.unwrap_or_default(),
-            authenticated_at_pretty: humanise_timestamp(&authenticated_at),
+            authenticated_at_pretty: humanise_timestamp(locale, &authenticated_at),
             authenticated_at,
-            expires_at_pretty: humanise_timestamp(&expires_at),
+            expires_at_pretty: humanise_timestamp(locale, &expires_at),
             expires_at,
             is_current,
         }

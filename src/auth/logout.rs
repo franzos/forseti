@@ -20,6 +20,7 @@ pub(crate) async fn logout(
     headers: HeaderMap,
     actx: AuditCtx,
     session: OptionalSession,
+    crate::page_chrome::ReqLocale(locale): crate::page_chrome::ReqLocale,
     _: csrf::CsrfForm<csrf::NoPayload>,
 ) -> Response {
     let cookie = cookies::cookie_header(&headers);
@@ -59,10 +60,11 @@ pub(crate) async fn logout(
             // logout while the session cookie is still valid.
             render_error_boundary(
                 &state,
-                "Logout unavailable",
-                "We couldn't complete your logout because the authentication service is unreachable. Your session is still active — please try again in a moment.",
+                &locale,
+                &crate::i18n::lookup(&locale, "error-boundary-logout-title"),
+                &crate::i18n::lookup(&locale, "error-boundary-logout-body"),
                 "/",
-                "Back to dashboard",
+                crate::i18n::lookup(&locale, "error-boundary-cta-back-to-dashboard"),
             )
             .into_response()
         }

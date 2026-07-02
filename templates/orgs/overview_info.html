@@ -16,29 +16,29 @@
     <section class="flex-1 flex flex-col gap-stack-lg">
       <header class="mt-2 mb-stack-lg">
         <h1 class="font-headline-lg-mobile md:font-headline-lg text-headline-lg-mobile md:text-headline-lg text-on-surface">
-          {{ org.name }}
+          <bdi>{{ org.name }}</bdi>
         </h1>
         <p class="font-body-md text-body-md text-on-surface-variant mt-1">
           {% if is_default %}
-            This is the default organization for this {{ chrome.brand.name }} install. You're a member.
+            {{ chrome.tv1("orgs-info-subtitle-default", "brand", &chrome.brand.name) }}
           {% else %}
-            You're a member of this organization.
+            {{ chrome.t("orgs-info-subtitle") }}
           {% endif %}
         </p>
       </header>
 
       <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg">
-        <h2 class="font-headline-md text-headline-md text-on-surface mb-stack-md">Organization</h2>
+        <h2 class="font-headline-md text-headline-md text-on-surface mb-stack-md">{{ chrome.t("orgs-info-org-heading") }}</h2>
         <dl class="grid grid-cols-2 gap-stack-md">
-          <dt class="font-label-sm text-label-sm text-on-surface-variant">Name</dt>
+          <dt class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("orgs-field-name") }}</dt>
           <dd class="font-body-md text-body-md">
-            {{ org.name }}
+            <bdi>{{ org.name }}</bdi>
           </dd>
-          <dt class="font-label-sm text-label-sm text-on-surface-variant">Slug</dt>
+          <dt class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("orgs-field-slug") }}</dt>
           <dd class="font-body-md text-body-md font-mono">
             {{ org.slug }}
           </dd>
-          <dt class="font-label-sm text-label-sm text-on-surface-variant">Members</dt>
+          <dt class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("orgs-info-members-label") }}</dt>
           <dd class="font-body-md text-body-md">
             {{ member_count }}
           </dd>
@@ -46,41 +46,41 @@
       </div>
 
       <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg">
-        <h2 class="font-headline-md text-headline-md text-on-surface mb-stack-md">Quick links</h2>
+        <h2 class="font-headline-md text-headline-md text-on-surface mb-stack-md">{{ chrome.t("orgs-overview-quicklinks-heading") }}</h2>
         <ul class="flex flex-col gap-stack-sm">
           <li>
             <a href="{% if is_default %}/settings/organization/members{% else %}/settings/organizations/{{ org.slug }}/members{% endif %}"
-               class="text-primary font-label-md">Members ({{ member_count }}) &rarr;</a>
+               class="text-primary font-label-md">{{ chrome.t("orgs-link-members") }} ({{ member_count }}) <span class="dir-flip">&rarr;</span></a>
           </li>
         </ul>
       </div>
 
       {% if let Some(sso) = sso %}
         <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg">
-          <h2 class="font-headline-md text-headline-md text-on-surface mb-stack-md">Enterprise SSO</h2>
+          <h2 class="font-headline-md text-headline-md text-on-surface mb-stack-md">{{ chrome.t("orgs-sso-heading") }}</h2>
           <p class="font-body-md text-body-md text-on-surface">
-            {{ sso.display_name }}
+            <bdi>{{ sso.display_name }}</bdi>
             (
             {% if sso.enabled %}
-              enabled
+              {{ chrome.t("orgs-sso-status-enabled") }}
             {% else %}
-              disabled
+              {{ chrome.t("orgs-sso-status-disabled") }}
             {% endif %}
             )
             &mdash; <span class="font-mono">{{ sso.sso_path }}</span>
           </p>
-          <p class="font-label-sm text-label-sm text-on-surface-variant mt-2">SSO connections are managed by the operator.</p>
+          <p class="font-label-sm text-label-sm text-on-surface-variant mt-2">{{ chrome.t("orgs-sso-operator-note") }}</p>
         </div>
       {% endif %}
 
       {% if !owner_emails.is_empty() %}
         <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg">
-          <h2 class="font-headline-md text-headline-md text-on-surface mb-stack-md">Managed by</h2>
+          <h2 class="font-headline-md text-headline-md text-on-surface mb-stack-md">{{ chrome.t("orgs-info-managed-by-heading") }}</h2>
           <p class="font-body-sm text-body-sm text-on-surface-variant mb-stack-sm">
-            Contact an owner for changes to org name, branding, or membership.
+            {{ chrome.t("orgs-info-managed-by-note") }}
           </p>
           <ul class="flex flex-col gap-1">
-            {% for email in owner_emails %}<li class="font-body-md text-body-md font-mono">{{ email }}</li>{% endfor %}
+            {% for email in owner_emails %}<li class="font-body-md text-body-md font-mono"><bdi>{{ email }}</bdi></li>{% endfor %}
           </ul>
         </div>
       {% endif %}

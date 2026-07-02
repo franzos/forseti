@@ -148,7 +148,7 @@ pub async fn list(
         .map(|c| {
             let id = c.client_id.clone().unwrap_or_default();
             let meta = meta_by_id.get(&id).copied();
-            project_row(c, meta)
+            project_row(&ctx.locale, c, meta)
         })
         .collect();
 

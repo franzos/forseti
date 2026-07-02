@@ -1,30 +1,26 @@
 {% extends "admin/admin_shell.html" %}
 
-{% block admin_title %}Configuration{% endblock %}
+{% block admin_title %}{{ chrome.t("admin-config-page-title") }}{% endblock %}
 
 {% block admin_content %}
   <div class="mb-stack-lg">
-    <h1 class="font-display-lg text-display-lg text-on-surface">Configuration</h1>
-    <p class="font-body-lg text-body-lg text-on-surface-variant mt-2">
-      How this identity provider is configured: OIDC endpoints and capabilities, signing keys, and Kratos identity schemas.
-    </p>
+    <h1 class="font-display-lg text-display-lg text-on-surface">{{ chrome.t("admin-config-page-title") }}</h1>
+    <p class="font-body-lg text-body-lg text-on-surface-variant mt-2">{{ chrome.t("admin-config-subtitle") }}</p>
   </div>
 
   {% if !discovery_ok %}
     <div class="mb-stack-lg bg-error-container text-on-error-container border border-error rounded-xl p-4">
-      <p class="font-label-md text-label-md font-semibold uppercase tracking-widest">OIDC discovery</p>
-      <p class="font-body-md text-body-md mt-1">
-        Couldn't reach Hydra's discovery document. Endpoints and capabilities are hidden until it's reachable again.
-      </p>
+      <p class="font-label-md text-label-md font-semibold uppercase tracking-widest">{{ chrome.t("admin-config-discovery-warning-label") }}</p>
+      <p class="font-body-md text-body-md mt-1">{{ chrome.t("admin-config-discovery-warning-body") }}</p>
     </div>
   {% endif %}
 
   <section class="mb-stack-lg">
-    <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest">OIDC endpoints</h2>
+    <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest">{{ chrome.t("admin-config-section-oidc") }}</h2>
     <dl class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4 grid grid-cols-1 sm:grid-cols-2 gap-4">
       {% if !disc.issuer.is_empty() %}
         <div class="sm:col-span-2">
-          <dt class="font-label-sm text-label-sm text-on-surface-variant">Issuer</dt>
+          <dt class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-config-field-issuer") }}</dt>
           <dd class="font-body-md text-body-md text-on-surface mt-1 break-all">
             {{ disc.issuer }}
           </dd>
@@ -32,7 +28,7 @@
       {% endif %}
       {% if !discovery_url.is_empty() %}
         <div class="sm:col-span-2">
-          <dt class="font-label-sm text-label-sm text-on-surface-variant">Discovery URL</dt>
+          <dt class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-config-field-discovery-url") }}</dt>
           <dd class="font-body-md text-body-md text-on-surface mt-1 break-all">
             <a href="{{ discovery_url }}"
                class="underline"
@@ -43,7 +39,7 @@
       {% endif %}
       {% if !disc.authorization_endpoint.is_empty() %}
         <div>
-          <dt class="font-label-sm text-label-sm text-on-surface-variant">Authorization</dt>
+          <dt class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-config-field-authorization") }}</dt>
           <dd class="font-body-md text-body-md text-on-surface mt-1 break-all">
             {{ disc.authorization_endpoint }}
           </dd>
@@ -51,7 +47,7 @@
       {% endif %}
       {% if !disc.token_endpoint.is_empty() %}
         <div>
-          <dt class="font-label-sm text-label-sm text-on-surface-variant">Token</dt>
+          <dt class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-config-field-token") }}</dt>
           <dd class="font-body-md text-body-md text-on-surface mt-1 break-all">
             {{ disc.token_endpoint }}
           </dd>
@@ -59,7 +55,7 @@
       {% endif %}
       {% if !disc.userinfo_endpoint.is_empty() %}
         <div>
-          <dt class="font-label-sm text-label-sm text-on-surface-variant">Userinfo</dt>
+          <dt class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-config-field-userinfo") }}</dt>
           <dd class="font-body-md text-body-md text-on-surface mt-1 break-all">
             {{ disc.userinfo_endpoint }}
           </dd>
@@ -67,7 +63,7 @@
       {% endif %}
       {% if !disc.jwks_uri.is_empty() %}
         <div>
-          <dt class="font-label-sm text-label-sm text-on-surface-variant">JWKS</dt>
+          <dt class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-config-field-jwks") }}</dt>
           <dd class="font-body-md text-body-md text-on-surface mt-1 break-all">
             {{ disc.jwks_uri }}
           </dd>
@@ -75,7 +71,7 @@
       {% endif %}
       {% if !disc.end_session_endpoint.is_empty() %}
         <div>
-          <dt class="font-label-sm text-label-sm text-on-surface-variant">End session</dt>
+          <dt class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-config-field-end-session") }}</dt>
           <dd class="font-body-md text-body-md text-on-surface mt-1 break-all">
             {{ disc.end_session_endpoint }}
           </dd>
@@ -83,7 +79,7 @@
       {% endif %}
       {% if !disc.registration_endpoint.is_empty() %}
         <div>
-          <dt class="font-label-sm text-label-sm text-on-surface-variant">Registration (DCR)</dt>
+          <dt class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-config-field-registration") }}</dt>
           <dd class="font-body-md text-body-md text-on-surface mt-1 break-all">
             {{ disc.registration_endpoint }}
           </dd>
@@ -91,7 +87,7 @@
       {% endif %}
       {% if !disc.revocation_endpoint.is_empty() %}
         <div>
-          <dt class="font-label-sm text-label-sm text-on-surface-variant">Revocation</dt>
+          <dt class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-config-field-revocation") }}</dt>
           <dd class="font-body-md text-body-md text-on-surface mt-1 break-all">
             {{ disc.revocation_endpoint }}
           </dd>
@@ -102,11 +98,11 @@
 
   {% if discovery_ok %}
     <section class="mb-stack-lg">
-      <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest">Capabilities</h2>
+      <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest">{{ chrome.t("admin-config-section-capabilities") }}</h2>
       <dl class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4 grid grid-cols-1 gap-4">
         {% if !disc.scopes_supported.is_empty() %}
           <div>
-            <dt class="font-label-sm text-label-sm text-on-surface-variant mb-2">Scopes</dt>
+            <dt class="font-label-sm text-label-sm text-on-surface-variant mb-2">{{ chrome.t("admin-config-cap-scopes") }}</dt>
             <dd class="flex flex-wrap gap-2">
               {% for v in disc.scopes_supported %}
                 <span class="inline-block px-2.5 py-0.5 rounded-full bg-surface-container-low text-on-surface-variant font-label-sm text-label-sm">{{ v }}</span>
@@ -116,7 +112,7 @@
         {% endif %}
         {% if !disc.grant_types_supported.is_empty() %}
           <div>
-            <dt class="font-label-sm text-label-sm text-on-surface-variant mb-2">Grant types</dt>
+            <dt class="font-label-sm text-label-sm text-on-surface-variant mb-2">{{ chrome.t("admin-config-cap-grant-types") }}</dt>
             <dd class="flex flex-wrap gap-2">
               {% for v in disc.grant_types_supported %}
                 <span class="inline-block px-2.5 py-0.5 rounded-full bg-surface-container-low text-on-surface-variant font-label-sm text-label-sm">{{ v }}</span>
@@ -126,7 +122,7 @@
         {% endif %}
         {% if !disc.response_types_supported.is_empty() %}
           <div>
-            <dt class="font-label-sm text-label-sm text-on-surface-variant mb-2">Response types</dt>
+            <dt class="font-label-sm text-label-sm text-on-surface-variant mb-2">{{ chrome.t("admin-config-cap-response-types") }}</dt>
             <dd class="flex flex-wrap gap-2">
               {% for v in disc.response_types_supported %}
                 <span class="inline-block px-2.5 py-0.5 rounded-full bg-surface-container-low text-on-surface-variant font-label-sm text-label-sm">{{ v }}</span>
@@ -136,7 +132,7 @@
         {% endif %}
         {% if !disc.token_endpoint_auth_methods_supported.is_empty() %}
           <div>
-            <dt class="font-label-sm text-label-sm text-on-surface-variant mb-2">Token endpoint auth methods</dt>
+            <dt class="font-label-sm text-label-sm text-on-surface-variant mb-2">{{ chrome.t("admin-config-cap-token-auth-methods") }}</dt>
             <dd class="flex flex-wrap gap-2">
               {% for v in disc.token_endpoint_auth_methods_supported %}
                 <span class="inline-block px-2.5 py-0.5 rounded-full bg-surface-container-low text-on-surface-variant font-label-sm text-label-sm">{{ v }}</span>
@@ -146,7 +142,7 @@
         {% endif %}
         {% if !disc.code_challenge_methods_supported.is_empty() %}
           <div>
-            <dt class="font-label-sm text-label-sm text-on-surface-variant mb-2">PKCE methods</dt>
+            <dt class="font-label-sm text-label-sm text-on-surface-variant mb-2">{{ chrome.t("admin-config-cap-pkce-methods") }}</dt>
             <dd class="flex flex-wrap gap-2">
               {% for v in disc.code_challenge_methods_supported %}
                 <span class="inline-block px-2.5 py-0.5 rounded-full bg-surface-container-low text-on-surface-variant font-label-sm text-label-sm">{{ v }}</span>
@@ -156,7 +152,7 @@
         {% endif %}
         {% if !disc.id_token_signing_alg_values_supported.is_empty() %}
           <div>
-            <dt class="font-label-sm text-label-sm text-on-surface-variant mb-2">ID token signing algs</dt>
+            <dt class="font-label-sm text-label-sm text-on-surface-variant mb-2">{{ chrome.t("admin-config-cap-id-token-signing-algs") }}</dt>
             <dd class="flex flex-wrap gap-2">
               {% for v in disc.id_token_signing_alg_values_supported %}
                 <span class="inline-block px-2.5 py-0.5 rounded-full bg-surface-container-low text-on-surface-variant font-label-sm text-label-sm">{{ v }}</span>
@@ -166,7 +162,7 @@
         {% endif %}
         {% if !disc.subject_types_supported.is_empty() %}
           <div>
-            <dt class="font-label-sm text-label-sm text-on-surface-variant mb-2">Subject types</dt>
+            <dt class="font-label-sm text-label-sm text-on-surface-variant mb-2">{{ chrome.t("admin-config-cap-subject-types") }}</dt>
             <dd class="flex flex-wrap gap-2">
               {% for v in disc.subject_types_supported %}
                 <span class="inline-block px-2.5 py-0.5 rounded-full bg-surface-container-low text-on-surface-variant font-label-sm text-label-sm">{{ v }}</span>
@@ -176,22 +172,22 @@
         {% endif %}
         <div class="grid grid-cols-2 gap-4">
           <div>
-            <dt class="font-label-sm text-label-sm text-on-surface-variant">Back-channel logout</dt>
+            <dt class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-config-cap-backchannel-logout") }}</dt>
             <dd class="font-body-md text-body-md text-on-surface mt-1">
               {% if disc.backchannel_logout_supported %}
-                Yes
+                {{ chrome.t("admin-config-cap-yes") }}
               {% else %}
-                No
+                {{ chrome.t("admin-config-cap-no") }}
               {% endif %}
             </dd>
           </div>
           <div>
-            <dt class="font-label-sm text-label-sm text-on-surface-variant">Front-channel logout</dt>
+            <dt class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-config-cap-frontchannel-logout") }}</dt>
             <dd class="font-body-md text-body-md text-on-surface mt-1">
               {% if disc.frontchannel_logout_supported %}
-                Yes
+                {{ chrome.t("admin-config-cap-yes") }}
               {% else %}
-                No
+                {{ chrome.t("admin-config-cap-no") }}
               {% endif %}
             </dd>
           </div>
@@ -201,24 +197,24 @@
   {% endif %}
 
   <section class="mb-stack-lg">
-    <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest">Signing keys (JWKS)</h2>
+    <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest">{{ chrome.t("admin-config-section-signing-keys") }}</h2>
     {% if !jwks_ok %}
       <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4">
-        <p class="font-body-sm text-body-sm text-on-surface-variant">Unavailable — couldn't fetch Hydra's public keys.</p>
+        <p class="font-body-sm text-body-sm text-on-surface-variant">{{ chrome.t("admin-config-signing-keys-unavailable") }}</p>
       </div>
     {% else if signing_keys.is_empty() %}
       <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4">
-        <p class="font-body-sm text-body-sm text-on-surface-variant">Hydra advertised no signing keys.</p>
+        <p class="font-body-sm text-body-sm text-on-surface-variant">{{ chrome.t("admin-config-signing-keys-empty") }}</p>
       </div>
     {% else %}
       <div class="bg-surface-container-lowest border border-outline-variant rounded-xl overflow-hidden">
-        <table class="w-full text-left">
+        <table class="w-full text-start">
           <thead class="bg-surface-container-low">
             <tr>
-              <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Key ID</th>
-              <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Alg</th>
-              <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Type</th>
-              <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Use</th>
+              <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">{{ chrome.t("admin-config-col-key-id") }}</th>
+              <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">{{ chrome.t("admin-config-col-alg") }}</th>
+              <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">{{ chrome.t("admin-config-col-type") }}</th>
+              <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">{{ chrome.t("admin-config-col-use") }}</th>
             </tr>
           </thead>
           <tbody>
@@ -237,12 +233,12 @@
   </section>
 
   <section class="mb-stack-lg">
-    <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest">Kratos identity schemas</h2>
+    <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest">{{ chrome.t("admin-config-section-schemas") }}</h2>
     <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4">
       {% if !schemas_ok %}
-        <p class="font-body-sm text-body-sm text-on-surface-variant">Unavailable — couldn't fetch identity schemas from Kratos.</p>
+        <p class="font-body-sm text-body-sm text-on-surface-variant">{{ chrome.t("admin-config-schemas-unavailable") }}</p>
       {% else if identity_schemas.is_empty() %}
-        <p class="font-body-sm text-body-sm text-on-surface-variant">No identity schemas registered.</p>
+        <p class="font-body-sm text-body-sm text-on-surface-variant">{{ chrome.t("admin-config-schemas-empty") }}</p>
       {% else %}
         <dd class="flex flex-wrap gap-2">
           {% for id in identity_schemas %}
@@ -254,6 +250,6 @@
   </section>
 
   <section>
-    <p class="font-body-sm text-body-sm text-on-surface-variant">Forseti v{{ forseti_version }}</p>
+    <p class="font-body-sm text-body-sm text-on-surface-variant">{{ chrome.brand.name }} v{{ forseti_version }}</p>
   </section>
 {% endblock %}

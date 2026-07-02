@@ -27,14 +27,14 @@
         <header class="flex flex-col gap-1">
           <h1 class="font-headline-lg-mobile md:font-headline-lg text-headline-lg-mobile md:text-headline-lg text-on-surface">
             {% if !display_name.is_empty() %}
-              {{ display_name }}
+              <bdi>{{ display_name }}</bdi>
             {% else %}
-              {{ email }}
+              <bdi>{{ email }}</bdi>
             {% endif %}
           </h1>
           <div class="flex flex-wrap items-baseline gap-stack-sm">
             {% if !display_name.is_empty() %}
-              <span class="font-body-md text-body-md text-on-surface-variant font-mono">{{ email }}</span>
+              <span class="font-body-md text-body-md text-on-surface-variant font-mono"><bdi>{{ email }}</bdi></span>
             {% endif %}
             {% if !pronouns.is_empty() %}
               <span class="font-body-sm text-body-sm text-on-surface-variant">({{ pronouns }})</span>
@@ -73,18 +73,18 @@
         {% if !shared_org_names.is_empty() %}
           <div class="flex flex-wrap gap-stack-sm mt-stack-md">
             {% for org in shared_org_names %}
-              <span class="bg-secondary-container text-on-secondary-container rounded-full px-3 py-1 font-label-sm text-label-sm">{{ org }}</span>
+              <span class="bg-secondary-container text-on-secondary-container rounded-full px-3 py-1 font-label-sm text-label-sm"><bdi>{{ org }}</bdi></span>
             {% endfor %}
           </div>
         {% endif %}
 
         {% if show_teams && !teams.is_empty() %}
           <div class="mt-stack-md flex flex-col gap-stack-sm">
-            <h2 class="font-label-md text-label-md text-on-surface-variant">Teams</h2>
+            <h2 class="font-label-md text-label-md text-on-surface-variant">{{ chrome.t("profile-teams-heading") }}</h2>
             <div class="flex flex-wrap gap-stack-sm">
               {% for team in teams %}
-                <span class="bg-secondary-container text-on-secondary-container rounded-full px-3 py-1 font-label-sm text-label-sm">{{ team.name }}
-                  {% if !team.org_name.is_empty() %} <span class="text-on-surface-variant">&middot; {{ team.org_name }}</span>{% endif %}
+                <span class="bg-secondary-container text-on-secondary-container rounded-full px-3 py-1 font-label-sm text-label-sm"><bdi>{{ team.name }}</bdi>
+                  {% if !team.org_name.is_empty() %} <span class="text-on-surface-variant">&middot; <bdi>{{ team.org_name }}</bdi></span>{% endif %}
                 </span>
               {% endfor %}
             </div>
@@ -93,19 +93,19 @@
 
         {% if show_hosts && !hosts.is_empty() %}
           <div class="mt-stack-md flex flex-col gap-stack-sm">
-            <h2 class="font-label-md text-label-md text-on-surface-variant">Linux hosts</h2>
+            <h2 class="font-label-md text-label-md text-on-surface-variant">{{ chrome.t("profile-hosts-heading") }}</h2>
             <ul class="flex flex-col gap-1">
               {% for host in hosts %}
                 <li class="font-body-sm text-body-sm text-on-surface">
-                  <span class="font-mono">{{ host.hostname }}</span>
-                  {% if !host.org_name.is_empty() %} <span class="text-on-surface-variant">&middot; {{ host.org_name }}</span>{% endif %}
+                  <span class="font-mono"><bdi>{{ host.hostname }}</bdi></span>
+                  {% if !host.org_name.is_empty() %} <span class="text-on-surface-variant">&middot; <bdi>{{ host.org_name }}</bdi></span>{% endif %}
                 </li>
               {% endfor %}
             </ul>
           </div>
         {% endif %}
 
-        <p class="font-body-sm text-body-sm text-on-surface-variant mt-stack-md">Profile updated {{ updated_humanised }}.</p>
+        <p class="font-body-sm text-body-sm text-on-surface-variant mt-stack-md">{{ chrome.tv1("profile-updated", "when", &updated_humanised) }}</p>
       </div>
     </article>
   </div>

@@ -30,7 +30,7 @@ pub(crate) struct IdentityRow {
     pub created_at_pretty: String,
 }
 
-fn project_row(id: &ory::Identity) -> IdentityRow {
+fn project_row(locale: &crate::locale::LanguageIdentifier, id: &ory::Identity) -> IdentityRow {
     let email = id
         .traits
         .as_ref()
@@ -55,7 +55,7 @@ fn project_row(id: &ory::Identity) -> IdentityRow {
         id: id.id.clone(),
         email,
         state,
-        created_at_pretty: humanise_timestamp(&created_at),
+        created_at_pretty: humanise_timestamp(locale, &created_at),
         created_at,
     }
 }
@@ -130,6 +130,7 @@ pub(crate) struct IdentitySearch {
 /// ready-to-send admin-error Response (DB / Kratos failures).
 pub(crate) async fn search_identities(
     state: &AppState,
+    locale: &crate::locale::LanguageIdentifier,
     scope: &crate::orgs::AdminScope,
     filter_q: &str,
     page_token: Option<&str>,
@@ -228,7 +229,10 @@ pub(crate) async fn search_identities(
         }
     };
 
-    let rows: Vec<IdentityRow> = identities.iter().map(project_row).collect();
+    let rows: Vec<IdentityRow> = identities
+        .iter()
+        .map(|id| project_row(locale, id))
+        .collect();
     // Next-page heuristic: a full page implies more. The typed SDK doesn't
     // surface the Link header, so the unscoped path uses the last row's ID as
     // the opaque token; the scoped path threads a numeric DB offset. The
@@ -272,7 +276,7 @@ pub async fn list(
         .unwrap_or_default();
     let page_token = query.page_token.as_deref().filter(|s| !s.is_empty());
 
-    let search = match search_identities(&state, &scope, &filter_q, page_token).await {
+    let search = match search_identities(&state, &ctx.locale, &scope, &filter_q, page_token).await {
         Ok(s) => s,
         Err(resp) => return resp,
     };
@@ -369,7 +373,7 @@ pub async fn pick(
 
     let filter_q = query.q.as_deref().unwrap_or("").trim().to_string();
     let page_token = query.page_token.as_deref().filter(|s| !s.is_empty());
-    let search = match search_identities(&state, &scope, &filter_q, page_token).await {
+    let search = match search_identities(&state, &ctx.locale, &scope, &filter_q, page_token).await {
         Ok(s) => s,
         Err(resp) => return resp,
     };
@@ -475,13 +479,13 @@ pub async fn show(
             tracing::error!(error = ?e, id, "admin: get_identity_full failed");
             return render_admin_error(
                 &state,
-                "Identity unavailable",
-                "We couldn't load that identity. It may have been deleted.",
+                &crate::i18n::lookup(&ctx.locale, "dialog-identity-unavailable-title"),
+                &crate::i18n::lookup(&ctx.locale, "dialog-identity-unavailable-body"),
             );
         }
     };
 
-    let row = project_row(&identity);
+    let row = project_row(&ctx.locale, &identity);
     let traits_json = identity
         .traits
         .as_ref()
@@ -518,7 +522,7 @@ pub async fn show(
     {
         Ok(s) => s
             .iter()
-            .map(|s| SessionRow::from_kratos(s, false))
+            .map(|s| SessionRow::from_kratos(&ctx.locale, s, false))
             .collect(),
         Err(e) => {
             tracing::warn!(
@@ -605,9 +609,8 @@ pub async fn recovery(
                     tracing::error!(error = ?e, id, "admin: recovery code reveal store failed");
                     return render_admin_error(
                         &state,
-                        "Recovery code failed",
-                        "We minted the recovery code but couldn't stage it for one-shot \
-                         display. Generate a fresh code to retry.",
+                        &crate::i18n::lookup(&ctx.locale, "dialog-recovery-code-failed-title"),
+                        &crate::i18n::lookup(&ctx.locale, "dialog-recovery-code-failed-body"),
                     );
                 }
             };
@@ -630,7 +633,7 @@ pub async fn recovery(
             tracing::error!(error = ?e, id, "admin: create_recovery_code failed");
             render_admin_error(
                 &state,
-                "Recovery code failed",
+                &crate::i18n::lookup(&ctx.locale, "dialog-recovery-code-failed-title"),
                 &format!("Could not generate recovery code: {e}"),
             )
         }
@@ -702,13 +705,16 @@ pub async fn disable(
                     .target(target_kind::IDENTITY, id.clone()),
             )
             .await;
-            state.flash_redirect(&target, "Identity disabled.")
+            state.flash_redirect(
+                &target,
+                &crate::i18n::lookup(&ctx.locale, "flash-identity-disabled"),
+            )
         }
         Err(e) => {
             tracing::error!(error = ?e, id, "admin: disable failed");
             render_admin_error(
                 &state,
-                "Disable failed",
+                &crate::i18n::lookup(&ctx.locale, "dialog-disable-failed-title"),
                 &format!("Could not disable identity: {e}"),
             )
         }
@@ -744,13 +750,16 @@ pub async fn enable(
                     .target(target_kind::IDENTITY, id.clone()),
             )
             .await;
-            state.flash_redirect(&target, "Identity enabled.")
+            state.flash_redirect(
+                &target,
+                &crate::i18n::lookup(&ctx.locale, "flash-identity-enabled"),
+            )
         }
         Err(e) => {
             tracing::error!(error = ?e, id, "admin: enable failed");
             render_admin_error(
                 &state,
-                "Enable failed",
+                &crate::i18n::lookup(&ctx.locale, "dialog-enable-failed-title"),
                 &format!("Could not enable identity: {e}"),
             )
         }
@@ -827,7 +836,7 @@ pub async fn delete(
             tracing::error!(error = ?e, id, "admin: delete failed");
             render_admin_error(
                 &state,
-                "Delete failed",
+                &crate::i18n::lookup(&ctx.locale, "dialog-delete-failed-title"),
                 &format!("Could not delete identity: {e}"),
             )
         }

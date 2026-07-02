@@ -1,6 +1,6 @@
 {% extends "card.html" %}
 
-{% block title %}Approve Linux login &middot; {{ chrome.brand.name }}{% endblock %}
+{% block title %}{{ chrome.t("device-verify-page-title") }} &middot; {{ chrome.brand.name }}{% endblock %}
 
 {% block card_icon %}
   <div class="w-12 h-12 bg-primary rounded-lg flex items-center justify-center mb-stack-sm"
@@ -19,26 +19,19 @@
   </div>
 {% endblock %}
 
-{% block card_title %}Approve a Linux login{% endblock %}
+{% block card_title %}{{ chrome.t("device-verify-card-title") }}{% endblock %}
 
 {% block card_body %}
   {% match target %}
   {% when Some with (t) %}
   {# PRIMARY element: the host-bound, informed-consent panel (RFC 8628 §5.4). #}
   <div class="rounded-lg border border-outline-variant bg-surface-container-high p-4 mb-stack-md">
-    <p class="font-title-md text-title-md text-on-surface font-bold mb-stack-xs">
-      Did <span class="underline">you</span> just start this login?
-    </p>
+    <p class="font-title-md text-title-md text-on-surface font-bold mb-stack-xs">{{ chrome.t("device-verify-prompt") }}</p>
     <p class="font-body-md text-body-md text-on-surface">
-      Linux login as
-      <strong class="text-primary">{{ t.username }}</strong>
-      on host
-      <strong class="text-primary">{{ t.hostname }}</strong>
-      <span class="text-on-surface-variant">(host&nbsp;<code>{{ t.host_id }}</code>)</span>.
+      {{ chrome.tv3("device-verify-host", "user", &t.username, "host", &t.hostname, "hostid", &t.host_id) }}
     </p>
     <p class="font-body-sm text-body-sm text-on-surface-variant mt-stack-xs">
-      Only approve if you started this on that machine. If you didn't, close this page —
-      approving lets whoever started it sign in as {{ t.username }}.
+      {{ chrome.tv1("device-verify-warning", "user", &t.username) }}
     </p>
   </div>
 
@@ -50,11 +43,11 @@
     <input type="hidden" name="user_code" value="{{ user_code }}">
     <button type="submit"
             class="bg-primary text-on-primary font-label-md text-label-md font-bold px-4 py-2 rounded-lg hover:opacity-90 transition-opacity">
-      Yes, this was me — continue
+      {{ chrome.t("device-verify-approve") }}
     </button>
     <a href="/"
        class="font-label-md text-label-md text-on-surface-variant border border-outline-variant rounded-lg px-4 py-2 text-center hover:bg-surface-container-high transition-colors">
-      No, cancel
+      {{ chrome.t("device-verify-cancel") }}
     </a>
   </form>
 
@@ -62,7 +55,7 @@
   {# No backing session for this code: bare code-entry prompt. We cannot #}
   {# show the host-bound panel for a code we don't recognise. #}
   <p class="font-body-md text-body-md text-on-surface-variant mb-stack-md">
-    Enter the code shown on your terminal to continue.
+    {{ chrome.t("device-verify-code-prompt") }}
   </p>
   <form method="GET"
         action="/oauth/device"
@@ -81,7 +74,7 @@
            class="font-mono text-title-md tracking-widest text-center px-4 py-2 rounded-lg border border-outline-variant bg-surface-container-high text-on-surface">
     <button type="submit"
             class="bg-primary text-on-primary font-label-md text-label-md font-bold px-4 py-2 rounded-lg hover:opacity-90 transition-opacity">
-      Continue
+      {{ chrome.t("device-verify-code-submit") }}
     </button>
   </form>
 {% endmatch %}

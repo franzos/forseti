@@ -42,6 +42,7 @@ pub(crate) async fn settings_offline_access(
     sess: crate::extractors::RequireSession,
     csrf: crate::extractors::Csrf,
     banner: crate::handoff::ReferrerBanner,
+    crate::page_chrome::ReqLocale(locale): crate::page_chrome::ReqLocale,
 ) -> Response {
     if !state.cfg.posix.offline_auth_enabled {
         return (axum::http::StatusCode::NOT_FOUND, "offline auth disabled").into_response();
@@ -57,7 +58,7 @@ pub(crate) async fn settings_offline_access(
 
     let (flash_msg, clear_flash) = state.take_flash(&headers, "/settings/offline-access");
     let body = render(&SettingsOfflineAccessTemplate {
-        chrome: PageChrome::from_parts(&state, sess.email, csrf.0),
+        chrome: PageChrome::from_parts(&state, sess.email, csrf.0, locale),
         has_secret,
         min_len: state.cfg.posix.offline_min_len,
         flash: flash_msg,
@@ -70,6 +71,7 @@ pub(crate) async fn settings_offline_access_save(
     State(state): State<AppState>,
     sess: crate::extractors::RequireSession,
     actx: AuditCtx,
+    crate::page_chrome::ReqLocale(locale): crate::page_chrome::ReqLocale,
     CsrfForm(form): CsrfForm<OfflinePassphraseForm>,
 ) -> Response {
     if !state.cfg.posix.offline_auth_enabled {
@@ -104,17 +106,24 @@ pub(crate) async fn settings_offline_access_save(
                             )),
                     )
                     .await;
-                    "Offline passphrase saved. Enrolled hosts will pick it up on their next sync."
-                        .to_string()
+                    crate::i18n::lookup(&locale, "flash-offline-passphrase-saved")
                 }
                 Err(e) => {
                     tracing::error!(error = ?e, "settings_offline_access_save: upsert failed");
-                    "Could not save your offline passphrase. Please try again.".to_string()
+                    crate::i18n::lookup(&locale, "flash-offline-passphrase-save-failed")
                 }
             }
         }
         Err(offline::SetSecretError::TooShort) => {
-            format!("Your offline passphrase must be at least {min_len} characters.")
+            let mut args: std::collections::HashMap<
+                std::borrow::Cow<'static, str>,
+                fluent_templates::fluent_bundle::FluentValue,
+            > = std::collections::HashMap::new();
+            args.insert(
+                std::borrow::Cow::Borrowed("min_len"),
+                (min_len as i64).into(),
+            );
+            crate::i18n::lookup_args(&locale, "flash-offline-passphrase-too-short", &args)
         }
     };
 
@@ -125,6 +134,7 @@ pub(crate) async fn settings_offline_access_clear(
     State(state): State<AppState>,
     sess: crate::extractors::RequireSession,
     actx: AuditCtx,
+    crate::page_chrome::ReqLocale(locale): crate::page_chrome::ReqLocale,
     _: CsrfForm<crate::csrf::NoPayload>,
 ) -> Response {
     if !state.cfg.posix.offline_auth_enabled {
@@ -142,16 +152,16 @@ pub(crate) async fn settings_offline_access_clear(
                         .with_ctx(&actx),
                 )
                 .await;
-                "Offline passphrase removed. Hosts will drop it on their next sync."
+                crate::i18n::lookup(&locale, "flash-offline-passphrase-removed")
             } else {
-                "You don't have an offline passphrase set."
+                crate::i18n::lookup(&locale, "flash-offline-passphrase-none")
             }
         }
         Err(e) => {
             tracing::error!(error = ?e, "settings_offline_access_clear: delete failed");
-            "Could not remove your offline passphrase. Please try again."
+            crate::i18n::lookup(&locale, "flash-offline-passphrase-remove-failed")
         }
     };
 
-    state.flash_redirect("/settings/offline-access", msg)
+    state.flash_redirect("/settings/offline-access", &msg)
 }

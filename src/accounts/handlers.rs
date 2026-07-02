@@ -120,12 +120,14 @@ pub(crate) async fn forget(
 ) -> Response {
     let secure = state.cfg.self_.is_https();
     let ttl = state.cfg.accounts.known_accounts_cookie_ttl_seconds;
-    let dest = crate::safe_return_to(&state.cfg, form.return_to.as_deref().unwrap_or("/")).to_string();
+    let dest =
+        crate::safe_return_to(&state.cfg, form.return_to.as_deref().unwrap_or("/")).to_string();
 
     let set_cookie = if form.identity_id == "*" {
         crate::accounts::cookie::clear_known_accounts_cookie(secure)
     } else {
-        let ids = crate::accounts::cookie::read_known_account_ids(&headers, &state.cookie_secret, ttl);
+        let ids =
+            crate::accounts::cookie::read_known_account_ids(&headers, &state.cookie_secret, ttl);
         let next = crate::accounts::cookie::remove(ids, &form.identity_id);
         crate::accounts::cookie::set_known_accounts_cookie(&state.cookie_secret, ttl, &next, secure)
     };

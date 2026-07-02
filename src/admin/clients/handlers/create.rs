@@ -317,7 +317,11 @@ pub async fn create(
     };
 
     if let Err(e) = crate::webhook::validate_webhook_url(&form.account_deletion_url) {
-        return rerender(format!("Account-deletion URL rejected: {e}"));
+        return rerender(lookup_with_error(
+            &ctx.locale,
+            "flash-client-account-deletion-url-rejected",
+            &e.to_string(),
+        ));
     }
 
     let client_name = form.name.clone();
@@ -432,8 +436,7 @@ pub async fn create(
                     );
                     return state.flash_redirect(
                         &target,
-                        "Client created, but we couldn't stage the secret for one-shot \
-                         display. Rotate the secret to retrieve a fresh value.",
+                        &crate::i18n::lookup(&ctx.locale, "flash-client-secret-stage-failed"),
                     );
                 }
             };
@@ -449,9 +452,27 @@ pub async fn create(
         }
         Err(e) => {
             tracing::error!(error = ?e, "admin: create_client failed");
-            rerender(format!("Failed to create client: {e}"))
+            rerender(lookup_with_error(
+                &ctx.locale,
+                "flash-client-create-failed",
+                &e.to_string(),
+            ))
         }
     }
+}
+
+/// Look up `key` binding the developer error detail to `$error`. Kept local
+/// because both create failure paths interpolate an upstream error string.
+fn lookup_with_error(locale: &crate::locale::LanguageIdentifier, key: &str, error: &str) -> String {
+    let mut args: std::collections::HashMap<
+        std::borrow::Cow<'static, str>,
+        fluent_templates::fluent_bundle::FluentValue,
+    > = std::collections::HashMap::new();
+    args.insert(
+        std::borrow::Cow::Borrowed("error"),
+        error.to_string().into(),
+    );
+    crate::i18n::lookup_args(locale, key, &args)
 }
 
 #[cfg(test)]

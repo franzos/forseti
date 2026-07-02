@@ -4,7 +4,7 @@
   {% include "_referrer_banner.html" %}
 {% endblock %}
 
-{% block title %}Linked providers &middot; {{ chrome.brand.name }}{% endblock %}
+{% block title %}{{ chrome.t("settings-providers-heading") }} &middot; {{ chrome.brand.name }}{% endblock %}
 
 {% block nav_settings_class %}text-primary font-bold border-b-2 border-primary{% endblock %}
 
@@ -15,10 +15,8 @@
 
     <section class="flex-1 flex flex-col gap-stack-lg">
       <div>
-        <h1 class="font-headline-lg text-headline-lg text-on-surface">Linked providers</h1>
-        <p class="font-body-md text-body-md text-on-surface-variant mt-1">
-          Sign in to your account using a third-party identity provider.
-        </p>
+        <h1 class="font-headline-lg text-headline-lg text-on-surface">{{ chrome.t("settings-providers-heading") }}</h1>
+        <p class="font-body-md text-body-md text-on-surface-variant mt-1">{{ chrome.t("settings-providers-subtitle") }}</p>
       </div>
 
       {% if !flow_messages.is_empty() %}
@@ -33,10 +31,8 @@
 
       {% if oidc_nodes.is_empty() %}
         <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg">
-          <p class="font-body-md text-body-md text-on-surface">No upstream providers configured by your administrator.</p>
-          <p class="font-body-sm text-body-sm text-on-surface-variant mt-2">
-            Contact your administrator to enable Google, GitHub, or other sign-in providers.
-          </p>
+          <p class="font-body-md text-body-md text-on-surface">{{ chrome.t("settings-providers-empty-heading") }}</p>
+          <p class="font-body-sm text-body-sm text-on-surface-variant mt-2">{{ chrome.t("settings-providers-empty-desc") }}</p>
         </div>
       {% else %}
         <form method="{{ form_method }}"
@@ -51,20 +47,20 @@
             {% else %}
               <div class="flex items-center justify-between gap-stack-md">
                 <span class="font-label-md text-label-md text-on-surface">
-                  {% match node.label %}{% when Some with (l) %}{{ l }}{% when None %}{{ node.name }}{% endmatch %}
-                </span>
-                {% include "partials/flow_node.html" %}
-              </div>
-            {% endif %}
-          {% endfor %}
-          <input type="hidden" name="method" value="oidc">
-        </form>
-      {% endif %}
+                  {% match node.label %}{% when Some with (l) %}<bdi>{{ l }}</bdi>{% when None %}{{ node.name }}{% endmatch %}
+              </span>
+              {% include "partials/flow_node.html" %}
+            </div>
+          {% endif %}
+        {% endfor %}
+        <input type="hidden" name="method" value="oidc">
+      </form>
+    {% endif %}
 
-      <div>
-        <a href="/settings"
-           class="font-label-md text-label-md text-on-surface-variant hover:text-primary transition-colors">&larr; Back to settings</a>
-      </div>
-    </section>
-  </div>
+    <div>
+      <a href="/settings"
+         class="font-label-md text-label-md text-on-surface-variant hover:text-primary transition-colors"><span class="dir-flip">&larr;</span> {{ chrome.t("settings-providers-back") }}</a>
+    </div>
+  </section>
+</div>
 {% endblock %}

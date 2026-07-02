@@ -1,24 +1,24 @@
 {% extends "card.html" %}
 
-{% block title %}Verify your email &middot; {{ chrome.brand.name }}{% endblock %}
+{% block title %}{{ chrome.t("auth-verification-page-title") }} &middot; {{ chrome.brand.name }}{% endblock %}
 
 {% block card_title %}
   {% if state == "passed_challenge" %}
-    Email verified
+    {{ chrome.t("auth-verification-card-title-passed") }}
   {% else if state == "sent_email" %}
-    Check your email
+    {{ chrome.t("auth-verification-card-title-sent") }}
   {% else %}
-    Verify your email
+    {{ chrome.t("auth-verification-card-title-default") }}
   {% endif %}
 {% endblock %}
 
 {% block card_subtitle %}
   {% if state == "passed_challenge" %}
-    Your email has been confirmed. You can close this tab or continue.
+    {{ chrome.t("auth-verification-card-subtitle-passed") }}
   {% else if state == "sent_email" %}
-    We sent a verification code to your inbox. Enter it below to confirm.
+    {{ chrome.t("auth-verification-card-subtitle-sent") }}
   {% else %}
-    Enter your email to receive a verification code.
+    {{ chrome.t("auth-verification-card-subtitle-default") }}
   {% endif %}
 {% endblock %}
 
@@ -53,88 +53,87 @@
               <label for="{{ node.name }}"
                      class="font-label-md text-label-md text-on-surface">
                 {% match node.label %}{% when Some with (l) %}{{ l }}{% when None %}{{ node.name }}{% endmatch %}
-              </label>
-              {% include "partials/flow_node.html" %}
-              {% for m in node.messages %}
-                <p class="font-body-sm text-body-sm {% if m.severity == "error" %}text-error{% else %}text-on-surface-variant{% endif %}">
-                  {{ m.text }}
-                </p>
-              {% endfor %}
-            </div>
-          {% endif %}
-        {% endfor %}
-      </div>
-    {% endif %}
-
-    {# Code method: email input on `choose_method`, code input on `sent_email`. #}
-    {% if !form.groups.code.is_empty() %}
-      <div class="flex flex-col gap-stack-md">
-        {% for node in form.groups.code %}
-          {% if node.input_type == "submit" || node.input_type == "hidden" %}
+            </label>
             {% include "partials/flow_node.html" %}
-          {% else %}
-            <div class="flex flex-col gap-stack-sm">
-              <label for="{{ node.name }}"
-                     class="font-label-md text-label-md text-on-surface">
-                {% match node.label %}{% when Some with (l) %}{{ l }}{% when None %}{{ node.name }}{% endmatch %}
-              </label>
-              {% include "partials/flow_node.html" %}
-              {% for m in node.messages %}
-                <p class="font-body-sm text-body-sm {% if m.severity == "error" %}text-error{% else %}text-on-surface-variant{% endif %}">
-                  {{ m.text }}
-                </p>
-              {% endfor %}
-            </div>
-          {% endif %}
+            {% for m in node.messages %}
+              <p class="font-body-sm text-body-sm {% if m.severity == "error" %}text-error{% else %}text-on-surface-variant{% endif %}">
+                {{ m.text }}
+              </p>
+            {% endfor %}
+          </div>
+        {% endif %}
+      {% endfor %}
+    </div>
+  {% endif %}
+
+  {# Code method: email input on `choose_method`, code input on `sent_email`. #}
+  {% if !form.groups.code.is_empty() %}
+    <div class="flex flex-col gap-stack-md">
+      {% for node in form.groups.code %}
+        {% if node.input_type == "submit" || node.input_type == "hidden" %}
+          {% include "partials/flow_node.html" %}
+        {% else %}
+          <div class="flex flex-col gap-stack-sm">
+            <label for="{{ node.name }}"
+                   class="font-label-md text-label-md text-on-surface">
+              {% match node.label %}{% when Some with (l) %}{{ l }}{% when None %}{{ node.name }}{% endmatch %}
+          </label>
+          {% include "partials/flow_node.html" %}
+          {% for m in node.messages %}
+            <p class="font-body-sm text-body-sm {% if m.severity == "error" %}text-error{% else %}text-on-surface-variant{% endif %}">
+              {{ m.text }}
+            </p>
+          {% endfor %}
+        </div>
+      {% endif %}
+    {% endfor %}
+  </div>
+{% endif %}
+
+{# Anything else (TOTP/lookup_secret recovery paths, etc.). #}
+{% if !form.groups.other.is_empty() %}
+  <div class="flex flex-col gap-stack-md">
+    {% for node in form.groups.other %}
+      {% if node.input_type == "hidden" || node.input_type == "submit" || node.input_type == "button" %}
+        {% include "partials/flow_node.html" %}
+      {% else %}
+        <div class="flex flex-col gap-stack-sm">
+          {% match node.label %}{% when Some with (l) %}
+          <label for="{{ node.name }}"
+                 class="font-label-md text-label-md text-on-surface">{{ l }}</label>
+          {% when None %}{% endmatch %}
+        {% include "partials/flow_node.html" %}
+        {% for m in node.messages %}
+          <p class="font-body-sm text-body-sm {% if m.severity == "error" %}text-error{% else %}text-on-surface-variant{% endif %}">
+            {{ m.text }}
+          </p>
         {% endfor %}
       </div>
     {% endif %}
+  {% endfor %}
+</div>
+{% endif %}
+</form>
 
-    {# Anything else (TOTP/lookup_secret recovery paths, etc.). #}
-    {% if !form.groups.other.is_empty() %}
-      <div class="flex flex-col gap-stack-md">
-        {% for node in form.groups.other %}
-          {% if node.input_type == "hidden" || node.input_type == "submit" || node.input_type == "button" %}
-            {% include "partials/flow_node.html" %}
-          {% else %}
-            <div class="flex flex-col gap-stack-sm">
-              {% match node.label %}{% when Some with (l) %}
-              <label for="{{ node.name }}"
-                     class="font-label-md text-label-md text-on-surface">{{ l }}</label>
-              {% when None %}{% endmatch %}
-              {% include "partials/flow_node.html" %}
-              {% for m in node.messages %}
-                <p class="font-body-sm text-body-sm {% if m.severity == "error" %}text-error{% else %}text-on-surface-variant{% endif %}">
-                  {{ m.text }}
-                </p>
-              {% endfor %}
-            </div>
-          {% endif %}
-        {% endfor %}
-      </div>
-    {% endif %}
-  </form>
-
-  {% if state == "sent_email" %}
-    {# Codes are bound to a single Kratos flow. If a user starts a fresh
+{% if state == "sent_email" %}
+  {# Codes are bound to a single Kratos flow. If a user starts a fresh
    /verification flow (e.g. they opened a new tab), the older code from
    their inbox stops working — Kratos surfaces a generic "code is
    invalid or has already been used" which isn't actionable on its own. #}
-    <p class="font-body-sm text-body-sm text-on-surface-variant text-center mt-stack-sm">
-      Use the code from the most recent verification email, or open the
-      link in that email instead of typing the code by hand.
-    </p>
-  {% endif %}
+  <p class="font-body-sm text-body-sm text-on-surface-variant text-center mt-stack-sm">
+    {{ chrome.t("auth-verification-sent-email-hint") }}
+  </p>
+{% endif %}
 
-  <div class="text-center mt-stack-sm">
-    <p class="font-body-sm text-body-sm text-on-surface-variant">
-      {% if is_logged_in %}
-        <a href="/"
-           class="font-label-md text-label-md text-primary hover:underline transition-colors">Back to dashboard</a>
-      {% else %}
-        <a href="/login{{ form.return_to_qs }}"
-           class="font-label-md text-label-md text-primary hover:underline transition-colors">Back to sign in</a>
-      {% endif %}
-    </p>
-  </div>
+<div class="text-center mt-stack-sm">
+  <p class="font-body-sm text-body-sm text-on-surface-variant">
+    {% if is_logged_in %}
+      <a href="/"
+         class="font-label-md text-label-md text-primary hover:underline transition-colors">{{ chrome.t("auth-verification-back-to-dashboard") }}</a>
+    {% else %}
+      <a href="/login{{ form.return_to_qs }}"
+         class="font-label-md text-label-md text-primary hover:underline transition-colors">{{ chrome.t("auth-verification-back-to-sign-in") }}</a>
+    {% endif %}
+  </p>
+</div>
 {% endblock %}

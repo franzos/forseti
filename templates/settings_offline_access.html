@@ -4,7 +4,7 @@
   {% include "_referrer_banner.html" %}
 {% endblock %}
 
-{% block title %}Offline host login &middot; {{ chrome.brand.name }}{% endblock %}
+{% block title %}{{ chrome.t("settings-offline-heading") }} &middot; {{ chrome.brand.name }}{% endblock %}
 
 {% block nav_settings_class %}text-primary font-bold border-b-2 border-primary{% endblock %}
 
@@ -15,12 +15,8 @@
 
     <section class="flex-1 flex flex-col gap-stack-lg">
       <div>
-        <h1 class="font-headline-lg text-headline-lg text-on-surface">Offline host login</h1>
-        <p class="font-body-md text-body-md text-on-surface-variant mt-1">
-          Set a dedicated passphrase that lets you log in at the terminal of an enrolled
-          Linux host when it can't reach this server. It's separate from your account
-          password &mdash; use something you'll remember but wouldn't reuse.
-        </p>
+        <h1 class="font-headline-lg text-headline-lg text-on-surface">{{ chrome.t("settings-offline-heading") }}</h1>
+        <p class="font-body-md text-body-md text-on-surface-variant mt-1">{{ chrome.t("settings-offline-subtitle") }}</p>
       </div>
 
       {% if !flash.is_empty() %}
@@ -32,14 +28,10 @@
       <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg flex flex-col gap-stack-md">
         {% if has_secret %}
           <p class="font-body-md text-body-md text-on-surface">
-            An offline passphrase is <span class="font-bold text-tertiary">set</span>.
-            Enter a new one below to change it, or remove it entirely.
+            {{ chrome.t("settings-offline-status-set-prefix") }} <span class="font-bold text-tertiary">{{ chrome.t("settings-offline-status-set-word") }}</span>{{ chrome.t("settings-offline-status-set-suffix") }}
           </p>
         {% else %}
-          <p class="font-body-md text-body-md text-on-surface-variant">
-            No offline passphrase is set yet. Without one, you can't log in to an
-            enrolled host while it's offline.
-          </p>
+          <p class="font-body-md text-body-md text-on-surface-variant">{{ chrome.t("settings-offline-status-unset") }}</p>
         {% endif %}
 
         <form method="POST"
@@ -49,9 +41,9 @@
           <div class="flex flex-col gap-stack-sm">
             <label for="passphrase" class="font-label-md text-label-md text-on-surface">
               {% if has_secret %}
-                New offline passphrase
+                {{ chrome.t("settings-offline-label-new-passphrase") }}
               {% else %}
-                Offline passphrase
+                {{ chrome.t("settings-offline-label-passphrase") }}
               {% endif %}
             </label>
             <input type="password"
@@ -62,16 +54,16 @@
                    required
                    class="w-full bg-surface-container border border-outline-variant rounded-lg px-4 py-3 font-body-md text-body-md text-on-surface focus:outline-none focus:ring-2 focus:ring-primary">
             <p class="font-label-sm text-label-sm text-on-surface-variant">
-              At least {{ min_len }} characters. Don't reuse your account password.
+              {{ chrome.tv1("settings-offline-passphrase-hint", "min_len", &min_len.to_string() ) }}
             </p>
           </div>
           <div>
             <button type="submit"
                     class="inline-flex items-center justify-center gap-2 bg-primary text-on-primary hover:bg-primary/90 px-5 py-3 rounded-xl font-label-lg text-label-lg font-semibold">
               {% if has_secret %}
-                Change passphrase
+                {{ chrome.t("settings-offline-action-change") }}
               {% else %}
-                Set passphrase
+                {{ chrome.t("settings-offline-action-set") }}
               {% endif %}
             </button>
           </div>
@@ -80,18 +72,15 @@
 
       {% if has_secret %}
         <div class="bg-error-container border border-error rounded-xl p-6">
-          <h2 class="font-headline-sm text-headline-sm text-on-error-container mb-stack-sm">Remove offline access</h2>
-          <p class="font-body-md text-body-md text-on-error-container">
-            Delete your offline passphrase. Enrolled hosts drop it on their next sync, and
-            you'll no longer be able to log in to them while they're offline.
-          </p>
+          <h2 class="font-headline-sm text-headline-sm text-on-error-container mb-stack-sm">{{ chrome.t("settings-offline-remove-heading") }}</h2>
+          <p class="font-body-md text-body-md text-on-error-container">{{ chrome.t("settings-offline-remove-body") }}</p>
           <form method="POST"
                 action="/settings/offline-access/clear"
                 class="mt-stack-md">
             <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
             <button type="submit"
                     class="inline-flex items-center justify-center gap-2 bg-error text-on-error hover:bg-error/90 px-5 py-3 rounded-xl font-label-lg text-label-lg font-semibold">
-              Remove passphrase
+              {{ chrome.t("settings-offline-action-remove") }}
             </button>
           </form>
         </div>
@@ -99,7 +88,7 @@
 
       <div>
         <a href="/settings"
-           class="font-label-md text-label-md text-on-surface-variant hover:text-primary transition-colors">&larr; Back to settings</a>
+           class="font-label-md text-label-md text-on-surface-variant hover:text-primary transition-colors"><span class="dir-flip">&larr;</span> {{ chrome.t("settings-offline-back") }}</a>
       </div>
     </section>
   </div>

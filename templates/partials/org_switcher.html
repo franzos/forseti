@@ -6,7 +6,7 @@
 {% if nav.memberships.len() > 0 %}
   <details class="relative">
     <summary class="cursor-pointer list-none flex items-center gap-2 pb-4 px-1 font-label-md text-label-md text-on-surface-variant hover:text-primary transition-colors">
-      <span class="font-bold">{% if let Some(name) = nav.active_name() %}{{ name }}{% endif %}</span>
+      <span class="font-bold">{% if let Some(name) = nav.active_name() %}<bdi>{{ name }}</bdi>{% endif %}</span>
       <svg width="14"
            height="14"
            viewBox="0 0 24 24"
@@ -16,23 +16,23 @@
         <polyline points="6 9 12 15 18 9" />
       </svg>
     </summary>
-    <div class="absolute right-0 top-12 z-50 min-w-56 bg-surface-container-lowest border border-outline-variant rounded-xl shadow-lg p-stack-sm flex flex-col gap-1">
+    <div class="absolute end-0 top-12 z-50 min-w-56 bg-surface-container-lowest border border-outline-variant rounded-xl shadow-lg p-stack-sm flex flex-col gap-1">
       <p class="font-label-sm text-label-sm text-on-surface-variant px-3 pt-2 uppercase tracking-widest">
-        Switch organization
+        {{ chrome.t("orgs-switcher-label") }}
       </p>
       {% for m in nav.memberships %}
         <form method="POST" action="/orgs/switch">
           <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
           <input type="hidden" name="org_id" value="{{ m.org_id }}">
           <button type="submit"
-                  class="w-full text-left px-3 py-2 rounded-lg font-body-md hover:bg-surface-container-high {% if nav.active_slug() == Some(m.slug.as_str()) %}text-primary font-bold{% endif %}">
-            {{ m.name }} <span class="text-on-surface-variant font-label-sm">({{ m.role }})</span>
+                  class="w-full text-start px-3 py-2 rounded-lg font-body-md hover:bg-surface-container-high {% if nav.active_slug() == Some(m.slug.as_str()) %}text-primary font-bold{% endif %}">
+            <bdi>{{ m.name }}</bdi> <span class="text-on-surface-variant font-label-sm">({{ m.role }})</span>
           </button>
         </form>
       {% endfor %}
       <hr class="border-outline-variant my-2">
       <a href="/settings/organizations"
-         class="px-3 py-2 rounded-lg font-label-md text-primary hover:bg-surface-container-high">Manage organizations &rarr;</a>
+         class="px-3 py-2 rounded-lg font-label-md text-primary hover:bg-surface-container-high">{{ chrome.t("orgs-switcher-manage-link") }} <span class="dir-flip">&rarr;</span></a>
     </div>
   </details>
 {% endif %}

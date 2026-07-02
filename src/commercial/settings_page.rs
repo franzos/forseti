@@ -74,7 +74,7 @@ pub(crate) async fn settings_license(
     let view = view_from_status(&status, &state, &flash_msg);
 
     let tpl = LicenseSettingsTemplate {
-        chrome: PageChrome::from_parts(&state, admin.ctx.email, csrf.0),
+        chrome: PageChrome::from_parts(&state, admin.ctx.email, csrf.0, admin.ctx.locale.clone()),
         admin_active: AdminSection::License,
         flash: view.flash,
         state_label: view.state_label,

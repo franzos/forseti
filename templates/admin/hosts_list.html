@@ -1,83 +1,81 @@
 {% extends "admin/admin_shell.html" %}
 
-{% block admin_title %}Hosts{% endblock %}
+{% block admin_title %}{{ chrome.t("admin-hosts-page-title") }}{% endblock %}
 
 {% block admin_content %}
   <div class="flex items-center justify-between mt-2 mb-stack-lg">
     <div>
       <h1 class="font-headline-lg-mobile md:font-headline-lg text-headline-lg-mobile md:text-headline-lg text-on-surface">
-        Hosts
+        {{ chrome.t("admin-hosts-page-title") }}
       </h1>
-      <p class="font-body-md text-body-md text-on-surface-variant mt-1">
-        Linux machines enrolled against Forseti's POSIX/NSS resolver. Each host authenticates with a one-shot secret you reveal on enrollment.
-      </p>
+      <p class="font-body-md text-body-md text-on-surface-variant mt-1">{{ chrome.t("admin-hosts-subtitle") }}</p>
     </div>
     <a href="/admin/hosts/new"
-       class="bg-primary text-on-primary font-label-md text-label-md font-bold px-4 py-2 rounded-lg hover:opacity-90 transition-opacity whitespace-nowrap">Enroll host</a>
+       class="bg-primary text-on-primary font-label-md text-label-md font-bold px-4 py-2 rounded-lg hover:opacity-90 transition-opacity whitespace-nowrap">{{ chrome.t("admin-hosts-action-enroll") }}</a>
   </div>
 
   {% match revealed_credential %}
   {% when Some with (cred) %}
   <div class="bg-tertiary-container border border-tertiary rounded-xl p-4 mb-stack-lg">
     <p class="font-label-md text-label-md text-on-tertiary-container font-bold mb-stack-sm">
-      Host credential (shown once)
+      {{ chrome.t("admin-hosts-credential-heading") }}
     </p>
     <pre class="font-mono text-sm bg-surface-container-lowest rounded-lg p-3 break-all">{{ cred }}</pre>
     <p class="font-body-sm text-body-sm text-on-tertiary-container mt-stack-sm">
-      Format is <code class="font-mono">host_id:secret</code>. Configure the host agent with this credential now — we don't store the raw secret, only its SHA-256.
+      {{ chrome.t("admin-hosts-credential-note-prefix") }} <code class="font-mono">host_id:secret</code>{{ chrome.t("admin-hosts-credential-note-suffix") }}
     </p>
   </div>
   {% when None %}{% endmatch %}
 
-  <div class="bg-surface-container-lowest border border-outline-variant rounded-xl overflow-x-auto">
-    <table class="w-full text-left">
-      <thead class="bg-surface-container-low">
+<div class="bg-surface-container-lowest border border-outline-variant rounded-xl overflow-x-auto">
+  <table class="w-full text-start">
+    <thead class="bg-surface-container-low">
+      <tr>
+        <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">{{ chrome.t("admin-hosts-col-hostname") }}</th>
+        <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">{{ chrome.t("admin-hosts-col-teams") }}</th>
+        <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">{{ chrome.t("admin-hosts-col-force-mfa") }}</th>
+        <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">{{ chrome.t("admin-hosts-col-enrolled") }}</th>
+        <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">{{ chrome.t("admin-hosts-col-last-seen") }}</th>
+        <th class="px-4 py-3"></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% if rows.is_empty() %}
         <tr>
-          <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Hostname</th>
-          <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Teams</th>
-          <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Force MFA</th>
-          <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Enrolled</th>
-          <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">Last seen</th>
-          <th class="px-4 py-3"></th>
+          <td colspan="6"
+              class="px-4 py-6 text-center font-body-md text-body-md text-on-surface-variant">
+            {{ chrome.t("admin-hosts-empty-prefix") }} <a href="/admin/hosts/new" class="text-primary hover:underline">{{ chrome.t("admin-hosts-empty-link") }}</a> {{ chrome.t("admin-hosts-empty-suffix") }}
+          </td>
         </tr>
-      </thead>
-      <tbody>
-        {% if rows.is_empty() %}
-          <tr>
-            <td colspan="6"
-                class="px-4 py-6 text-center font-body-md text-body-md text-on-surface-variant">
-              No hosts enrolled. <a href="/admin/hosts/new" class="text-primary hover:underline">Enroll one</a> to let it resolve POSIX accounts.
+      {% else %}
+        {% for r in rows %}
+          <tr class="border-t border-outline-variant">
+            <td class="px-4 py-3 font-body-md text-body-md text-on-surface"
+                title="{{ r.id }}">{{ r.hostname }}</td>
+            <td class="px-4 py-3 font-body-sm text-body-sm text-on-surface-variant">{{ r.teams }}</td>
+            <td class="px-4 py-3 font-body-sm text-body-sm">
+              {% if r.force_mfa %}
+                <span class="font-label-sm text-label-sm bg-tertiary-container text-on-tertiary-container px-2 py-0.5 rounded-full font-semibold"
+                      title="{{ chrome.t('admin-hosts-mfa-pending-title') }}">{{ chrome.t("admin-hosts-status-mfa-pending") }}</span>
+              {% else %}
+                <span class="text-on-surface-variant">—</span>
+              {% endif %}
+            </td>
+            <td class="px-4 py-3 font-body-sm text-body-sm text-on-surface-variant"
+                title="{{ r.created_at }}">{{ r.created_at_pretty }}</td>
+            <td class="px-4 py-3 font-body-sm text-body-sm text-on-surface-variant">{{ r.last_seen_pretty }}</td>
+            <td class="px-4 py-3 text-end whitespace-nowrap">
+              <a href="/admin/hosts/{{ r.id }}/edit"
+                 class="font-label-sm text-label-sm text-on-surface-variant border border-outline-variant rounded-lg px-3 py-1 hover:bg-surface-container-high transition-colors">{{ chrome.t("admin-hosts-action-edit") }}</a>
+              <a href="/admin/hosts/{{ r.id }}/rotate"
+                 class="font-label-sm text-label-sm text-on-surface-variant border border-outline-variant rounded-lg px-3 py-1 hover:bg-surface-container-high transition-colors ms-2">{{ chrome.t("admin-hosts-action-rotate") }}</a>
+              <a href="/admin/hosts/{{ r.id }}/revoke"
+                 class="font-label-sm text-label-sm text-error border border-error rounded-lg px-3 py-1 hover:bg-error-container hover:text-on-error-container transition-colors ms-2">{{ chrome.t("admin-hosts-action-revoke") }}</a>
             </td>
           </tr>
-        {% else %}
-          {% for r in rows %}
-            <tr class="border-t border-outline-variant">
-              <td class="px-4 py-3 font-body-md text-body-md text-on-surface"
-                  title="{{ r.id }}">{{ r.hostname }}</td>
-              <td class="px-4 py-3 font-body-sm text-body-sm text-on-surface-variant">{{ r.teams }}</td>
-              <td class="px-4 py-3 font-body-sm text-body-sm">
-                {% if r.force_mfa %}
-                  <span class="font-label-sm text-label-sm bg-tertiary-container text-on-tertiary-container px-2 py-0.5 rounded-full font-semibold"
-                        title="Recorded but not yet enforced; enforcement lands with interactive login (PAM).">MFA (pending)</span>
-                {% else %}
-                  <span class="text-on-surface-variant">—</span>
-                {% endif %}
-              </td>
-              <td class="px-4 py-3 font-body-sm text-body-sm text-on-surface-variant"
-                  title="{{ r.created_at }}">{{ r.created_at_pretty }}</td>
-              <td class="px-4 py-3 font-body-sm text-body-sm text-on-surface-variant">{{ r.last_seen_pretty }}</td>
-              <td class="px-4 py-3 text-right whitespace-nowrap">
-                <a href="/admin/hosts/{{ r.id }}/edit"
-                   class="font-label-sm text-label-sm text-on-surface-variant border border-outline-variant rounded-lg px-3 py-1 hover:bg-surface-container-high transition-colors">Edit</a>
-                <a href="/admin/hosts/{{ r.id }}/rotate"
-                   class="font-label-sm text-label-sm text-on-surface-variant border border-outline-variant rounded-lg px-3 py-1 hover:bg-surface-container-high transition-colors ml-2">Rotate</a>
-                <a href="/admin/hosts/{{ r.id }}/revoke"
-                   class="font-label-sm text-label-sm text-error border border-error rounded-lg px-3 py-1 hover:bg-error-container hover:text-on-error-container transition-colors ml-2">Revoke</a>
-              </td>
-            </tr>
-          {% endfor %}
-        {% endif %}
-      </tbody>
-    </table>
-  </div>
+        {% endfor %}
+      {% endif %}
+    </tbody>
+  </table>
+</div>
 {% endblock %}

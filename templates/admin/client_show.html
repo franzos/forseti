@@ -24,11 +24,11 @@
               <path d="M9 12l2 2 4-4" />
               <circle cx="12" cy="12" r="10" />
             </svg>
-            Verified
+            {{ chrome.t("admin-client-badge-verified") }}
           </span>
         {% else %}
           <span class="font-label-sm text-label-sm bg-error-container text-on-error-container px-2.5 py-0.5 rounded-full font-semibold"
-                title="An administrator has not vetted this client. The consent screen warns end-users.">Unverified</span>
+                title="{{ chrome.t('admin-client-badge-unverified-title') }}">{{ chrome.t("admin-client-badge-unverified") }}</span>
         {% endif %}
         {% if !row.client_type_label.is_empty() %}
           <span class="font-label-sm text-label-sm bg-tertiary-fixed text-on-tertiary-fixed px-2.5 py-0.5 rounded-full font-semibold">{{ row.client_type_label }}</span>
@@ -39,7 +39,7 @@
     <div class="flex items-center gap-stack-sm">
       {% if row.verified %}
         <a href="/admin/clients/{{ row.id }}/unverify"
-           class="font-label-md text-label-md text-error border border-error rounded-lg px-4 py-2 hover:bg-error-container hover:text-on-error-container transition-colors">Revoke verification</a>
+           class="font-label-md text-label-md text-error border border-error rounded-lg px-4 py-2 hover:bg-error-container hover:text-on-error-container transition-colors">{{ chrome.t("admin-client-action-revoke-verification") }}</a>
       {% else %}
         <form method="POST"
               action="/admin/clients/{{ row.id }}/verify"
@@ -47,14 +47,14 @@
           <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
           <button type="submit"
                   class="font-label-md text-label-md text-primary border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">
-            Mark as verified
+            {{ chrome.t("admin-client-action-mark-verified") }}
           </button>
         </form>
       {% endif %}
       <a href="/admin/clients/{{ row.id }}/rotate-secret"
-         class="font-label-md text-label-md text-primary border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">Rotate secret</a>
+         class="font-label-md text-label-md text-primary border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">{{ chrome.t("admin-client-action-rotate-secret") }}</a>
       <a href="/admin/clients/{{ row.id }}/delete"
-         class="font-label-md text-label-md text-error border border-error rounded-lg px-4 py-2 hover:bg-error-container hover:text-on-error-container transition-colors">Delete</a>
+         class="font-label-md text-label-md text-error border border-error rounded-lg px-4 py-2 hover:bg-error-container hover:text-on-error-container transition-colors">{{ chrome.t("admin-client-action-delete") }}</a>
     </div>
   </div>
 
@@ -67,425 +67,422 @@
   {% match secret_revealed %}
   {% when Some with (secret) %}
   <div class="bg-tertiary-container border border-tertiary rounded-xl p-4 mb-stack-lg">
-    <p class="font-label-md text-label-md text-on-tertiary-container font-bold mb-stack-sm">Credentials — shown once</p>
+    <p class="font-label-md text-label-md text-on-tertiary-container font-bold mb-stack-sm">{{ chrome.t("admin-client-credentials-heading") }}</p>
     <p class="font-body-sm text-body-sm text-on-tertiary-container mb-stack-md">
-      Copy these now. They won't be shown again; reload to dismiss. The client ID
-      and endpoints above are not secret and stay visible.
+      {{ chrome.t("admin-client-credentials-note") }}
     </p>
     {% if !setup_note.is_empty() %}
       <div class="bg-error-container border border-error rounded-lg px-3 py-2 mb-stack-md">
         <p class="font-body-sm text-body-sm text-on-error-container">{{ setup_note }}</p>
       </div>
     {% endif %}
-    <p class="font-label-sm text-label-sm text-on-tertiary-container font-semibold mb-1">Client secret</p>
+    <p class="font-label-sm text-label-sm text-on-tertiary-container font-semibold mb-1">{{ chrome.t("admin-client-credentials-secret-label") }}</p>
     <pre class="font-mono text-sm bg-surface-container-lowest rounded-lg p-3 break-all">{{ secret }}</pre>
     {% match registration_access_token %}
     {% when Some with (rat) %}
     <p class="font-label-sm text-label-sm text-on-tertiary-container font-semibold mt-stack-md mb-1">
-      Registration access token
+      {{ chrome.t("admin-client-credentials-rat-label") }}
     </p>
     <pre class="font-mono text-sm bg-surface-container-lowest rounded-lg p-3 break-all">{{ rat }}</pre>
     <p class="font-body-sm text-body-sm text-on-tertiary-container mt-stack-sm">
-      Per RFC 7592 — lets the client manage its own registration (read/update/delete)
-      via Hydra's dynamic-client-registration API. It cannot be re-issued, so if in
-      doubt, store it.
+      {{ chrome.t("admin-client-credentials-rat-note") }}
     </p>
     {% when None %}{% endmatch %}
+</div>
+{% when None %}{% endmatch %}
+
+{% if !missing_scope_descriptions.is_empty() %}
+  <div class="bg-tertiary-container border border-tertiary rounded-xl p-4 mb-stack-lg">
+    <p class="font-label-md text-label-md text-on-tertiary-container font-bold mb-stack-sm">{{ chrome.t("admin-client-undoc-scopes-heading") }}</p>
+    <p class="font-body-sm text-body-sm text-on-tertiary-container">
+      {{ chrome.t("admin-client-undoc-scopes-desc-part1") }} <code class="font-mono">[oauth.scope_descriptions]</code> {{ chrome.t("admin-client-undoc-scopes-desc-part2") }} <code class="font-mono">config.toml</code>{{ chrome.t("admin-client-undoc-scopes-desc-part3") }}
+    </p>
+    <ul class="list-disc list-inside font-mono text-sm text-on-tertiary-container mt-stack-sm">
+      {% for s in missing_scope_descriptions %}
+        <li>{{ s }}</li>
+      {% endfor %}
+    </ul>
   </div>
-  {% when None %}{% endmatch %}
+{% endif %}
 
-  {% if !missing_scope_descriptions.is_empty() %}
-    <div class="bg-tertiary-container border border-tertiary rounded-xl p-4 mb-stack-lg">
-      <p class="font-label-md text-label-md text-on-tertiary-container font-bold mb-stack-sm">Undocumented scopes</p>
-      <p class="font-body-sm text-body-sm text-on-tertiary-container">
-        These scopes are registered on this client but have no entry under <code class="font-mono">[oauth.scope_descriptions]</code> in <code class="font-mono">config.toml</code>. The consent screen falls back to the raw scope name for them.
-      </p>
-      <ul class="list-disc list-inside font-mono text-sm text-on-tertiary-container mt-stack-sm">
-        {% for s in missing_scope_descriptions %}
-          <li>{{ s }}</li>
-        {% endfor %}
-      </ul>
+<section class="mb-stack-lg">
+  <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest">
+    {{ chrome.t("admin-client-section-connection") }}
+  </h2>
+  <p class="font-body-sm text-body-sm text-on-surface-variant mb-stack-md">
+    {{ chrome.t("admin-client-connection-intro") }}
+    {% if !discovery_ok %}
+      <span class="text-error">{{ chrome.t("admin-client-discovery-error-part1") }} <code class="font-mono">&lt;hydra-public-url&gt;/.well-known/openid-configuration</code>{{ chrome.t("admin-client-discovery-error-part2") }}</span>
+    {% endif %}
+  </p>
+  <dl class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4 grid grid-cols-1 gap-4">
+    <div>
+      <dt class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-client-conn-client-id") }}</dt>
+      <dd class="font-body-md text-body-md text-on-surface mt-1 font-mono break-all">
+        {{ row.id }}
+      </dd>
     </div>
-  {% endif %}
-
-  <section class="mb-stack-lg">
-    <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest">
-      Connection details
-    </h2>
-    <p class="font-body-sm text-body-sm text-on-surface-variant mb-stack-md">
-      Paste these into the OIDC/OAuth client configuration on the app's side.
-      {% if !discovery_ok %}
-        <span class="text-error">Couldn't reach Hydra's discovery endpoint, so the issuer and endpoints are hidden to avoid showing a wrong value — fetch them yourself from <code class="font-mono">&lt;hydra-public-url&gt;/.well-known/openid-configuration</code>.</span>
-      {% endif %}
-    </p>
-    <dl class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4 grid grid-cols-1 gap-4">
+    {% if !conn.issuer.is_empty() %}
       <div>
-        <dt class="font-label-sm text-label-sm text-on-surface-variant">Client ID</dt>
+        <dt class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-client-conn-issuer") }}</dt>
         <dd class="font-body-md text-body-md text-on-surface mt-1 font-mono break-all">
-          {{ row.id }}
+          {{ conn.issuer }}
         </dd>
       </div>
-      {% if !conn.issuer.is_empty() %}
-        <div>
-          <dt class="font-label-sm text-label-sm text-on-surface-variant">Issuer</dt>
-          <dd class="font-body-md text-body-md text-on-surface mt-1 font-mono break-all">
-            {{ conn.issuer }}
-          </dd>
-        </div>
-      {% endif %}
-      {% if !conn.discovery_url.is_empty() %}
-        <div>
-          <dt class="font-label-sm text-label-sm text-on-surface-variant">Discovery URL</dt>
-          <dd class="font-body-md text-body-md text-on-surface mt-1 font-mono break-all">
-            {{ conn.discovery_url }}
-          </dd>
-        </div>
-      {% endif %}
-      {% if !conn.authorization_endpoint.is_empty() %}
-        <div>
-          <dt class="font-label-sm text-label-sm text-on-surface-variant">Authorization endpoint</dt>
-          <dd class="font-body-md text-body-md text-on-surface mt-1 font-mono break-all">
-            {{ conn.authorization_endpoint }}
-          </dd>
-        </div>
-      {% endif %}
-      {% if !conn.token_endpoint.is_empty() %}
-        <div>
-          <dt class="font-label-sm text-label-sm text-on-surface-variant">Token endpoint</dt>
-          <dd class="font-body-md text-body-md text-on-surface mt-1 font-mono break-all">
-            {{ conn.token_endpoint }}
-          </dd>
-        </div>
-      {% endif %}
-      {% if !conn.userinfo_endpoint.is_empty() %}
-        <div>
-          <dt class="font-label-sm text-label-sm text-on-surface-variant">Userinfo endpoint</dt>
-          <dd class="font-body-md text-body-md text-on-surface mt-1 font-mono break-all">
-            {{ conn.userinfo_endpoint }}
-          </dd>
-        </div>
-      {% endif %}
-      {% if !conn.jwks_uri.is_empty() %}
-        <div>
-          <dt class="font-label-sm text-label-sm text-on-surface-variant">JWKS URI</dt>
-          <dd class="font-body-md text-body-md text-on-surface mt-1 font-mono break-all">
-            {{ conn.jwks_uri }}
-          </dd>
-        </div>
-      {% endif %}
-      {% if !conn.end_session_endpoint.is_empty() %}
-        <div>
-          <dt class="font-label-sm text-label-sm text-on-surface-variant">End-session endpoint</dt>
-          <dd class="font-body-md text-body-md text-on-surface mt-1 font-mono break-all">
-            {{ conn.end_session_endpoint }}
-          </dd>
-        </div>
-      {% endif %}
+    {% endif %}
+    {% if !conn.discovery_url.is_empty() %}
       <div>
-        <dt class="font-label-sm text-label-sm text-on-surface-variant">Token endpoint auth method</dt>
+        <dt class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-client-conn-discovery-url") }}</dt>
         <dd class="font-body-md text-body-md text-on-surface mt-1 font-mono break-all">
-          {{ token_endpoint_auth_method }}
+          {{ conn.discovery_url }}
         </dd>
       </div>
+    {% endif %}
+    {% if !conn.authorization_endpoint.is_empty() %}
       <div>
-        <dt class="font-label-sm text-label-sm text-on-surface-variant">Scope</dt>
+        <dt class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-client-conn-auth-endpoint") }}</dt>
         <dd class="font-body-md text-body-md text-on-surface mt-1 font-mono break-all">
-          {{ scope }}
+          {{ conn.authorization_endpoint }}
         </dd>
       </div>
-    </dl>
-  </section>
+    {% endif %}
+    {% if !conn.token_endpoint.is_empty() %}
+      <div>
+        <dt class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-client-conn-token-endpoint") }}</dt>
+        <dd class="font-body-md text-body-md text-on-surface mt-1 font-mono break-all">
+          {{ conn.token_endpoint }}
+        </dd>
+      </div>
+    {% endif %}
+    {% if !conn.userinfo_endpoint.is_empty() %}
+      <div>
+        <dt class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-client-conn-userinfo-endpoint") }}</dt>
+        <dd class="font-body-md text-body-md text-on-surface mt-1 font-mono break-all">
+          {{ conn.userinfo_endpoint }}
+        </dd>
+      </div>
+    {% endif %}
+    {% if !conn.jwks_uri.is_empty() %}
+      <div>
+        <dt class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-client-conn-jwks-uri") }}</dt>
+        <dd class="font-body-md text-body-md text-on-surface mt-1 font-mono break-all">
+          {{ conn.jwks_uri }}
+        </dd>
+      </div>
+    {% endif %}
+    {% if !conn.end_session_endpoint.is_empty() %}
+      <div>
+        <dt class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-client-conn-end-session-endpoint") }}</dt>
+        <dd class="font-body-md text-body-md text-on-surface mt-1 font-mono break-all">
+          {{ conn.end_session_endpoint }}
+        </dd>
+      </div>
+    {% endif %}
+    <div>
+      <dt class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-client-field-token-auth") }}</dt>
+      <dd class="font-body-md text-body-md text-on-surface mt-1 font-mono break-all">
+        {{ token_endpoint_auth_method }}
+      </dd>
+    </div>
+    <div>
+      <dt class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-client-field-scope") }}</dt>
+      <dd class="font-body-md text-body-md text-on-surface mt-1 font-mono break-all">
+        {{ scope }}
+      </dd>
+    </div>
+  </dl>
+</section>
 
-  <section class="mb-stack-lg">
-    <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest">
-      Configuration
-    </h2>
-    <dl class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4 grid grid-cols-1 sm:grid-cols-2 gap-4">
-      <div>
-        <dt class="font-label-sm text-label-sm text-on-surface-variant">Grant types</dt>
-        <dd class="font-body-md text-body-md text-on-surface mt-1 font-mono">
-          {{ row.grant_types }}
-        </dd>
-      </div>
-      <div>
-        <dt class="font-label-sm text-label-sm text-on-surface-variant">Response types</dt>
-        <dd class="font-body-md text-body-md text-on-surface mt-1 font-mono">
-          {{ response_types }}
-        </dd>
-      </div>
-      <div class="sm:col-span-2">
-        <dt class="font-label-sm text-label-sm text-on-surface-variant">Scope</dt>
-        <dd class="font-body-md text-body-md text-on-surface mt-1 font-mono">
-          {{ scope }}
-        </dd>
-      </div>
-      <div class="sm:col-span-2">
-        <dt class="font-label-sm text-label-sm text-on-surface-variant">Redirect URIs</dt>
-        <dd class="font-body-md text-body-md text-on-surface mt-1 font-mono">
-          {{ row.redirect_uris }}
-        </dd>
-      </div>
-      <div class="sm:col-span-2">
-        <dt class="font-label-sm text-label-sm text-on-surface-variant">Post-logout redirect URIs</dt>
-        <dd class="font-body-md text-body-md text-on-surface mt-1 font-mono">
-          {{ post_logout_redirect_uris }}
-        </dd>
-      </div>
-      <div class="sm:col-span-2">
-        <dt class="font-label-sm text-label-sm text-on-surface-variant">Back-channel logout URI</dt>
-        <dd class="font-body-md text-body-md text-on-surface mt-1 font-mono">
-          {% if backchannel_logout_uri.is_empty() %}
-            <span class="text-on-surface-variant italic">not configured</span>
-          {% else %}
-            {{ backchannel_logout_uri }}
-            {% if backchannel_logout_session_required %}
-              <span class="font-label-sm text-label-sm text-on-surface-variant font-sans">(sid required)</span>
-            {% endif %}
+<section class="mb-stack-lg">
+  <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest">
+    {{ chrome.t("admin-client-section-config") }}
+  </h2>
+  <dl class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4 grid grid-cols-1 sm:grid-cols-2 gap-4">
+    <div>
+      <dt class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-client-field-grant-types") }}</dt>
+      <dd class="font-body-md text-body-md text-on-surface mt-1 font-mono">
+        {{ row.grant_types }}
+      </dd>
+    </div>
+    <div>
+      <dt class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-client-field-response-types") }}</dt>
+      <dd class="font-body-md text-body-md text-on-surface mt-1 font-mono">
+        {{ response_types }}
+      </dd>
+    </div>
+    <div class="sm:col-span-2">
+      <dt class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-client-field-scope") }}</dt>
+      <dd class="font-body-md text-body-md text-on-surface mt-1 font-mono">
+        {{ scope }}
+      </dd>
+    </div>
+    <div class="sm:col-span-2">
+      <dt class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-client-field-redirect-uris") }}</dt>
+      <dd class="font-body-md text-body-md text-on-surface mt-1 font-mono">
+        {{ row.redirect_uris }}
+      </dd>
+    </div>
+    <div class="sm:col-span-2">
+      <dt class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-client-field-post-logout-uris") }}</dt>
+      <dd class="font-body-md text-body-md text-on-surface mt-1 font-mono">
+        {{ post_logout_redirect_uris }}
+      </dd>
+    </div>
+    <div class="sm:col-span-2">
+      <dt class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-client-field-backchannel-uri") }}</dt>
+      <dd class="font-body-md text-body-md text-on-surface mt-1 font-mono">
+        {% if backchannel_logout_uri.is_empty() %}
+          <span class="text-on-surface-variant italic">{{ chrome.t("admin-client-not-configured") }}</span>
+        {% else %}
+          {{ backchannel_logout_uri }}
+          {% if backchannel_logout_session_required %}
+            <span class="font-label-sm text-label-sm text-on-surface-variant font-sans">{{ chrome.t("admin-client-config-sid-required") }}</span>
           {% endif %}
-        </dd>
-      </div>
+        {% endif %}
+      </dd>
+    </div>
+    <div class="sm:col-span-2">
+      <dt class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-client-field-frontchannel-uri") }}</dt>
+      <dd class="font-body-md text-body-md text-on-surface mt-1 font-mono">
+        {% if frontchannel_logout_uri.is_empty() %}
+          <span class="text-on-surface-variant italic">{{ chrome.t("admin-client-not-configured") }}</span>
+        {% else %}
+          {{ frontchannel_logout_uri }}
+          {% if frontchannel_logout_session_required %}
+            <span class="font-label-sm text-label-sm text-on-surface-variant font-sans">{{ chrome.t("admin-client-config-iss-sid-required") }}</span>
+          {% endif %}
+        {% endif %}
+      </dd>
+    </div>
+    <div class="sm:col-span-2">
+      <dt class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-client-field-audience") }}</dt>
+      <dd class="font-body-md text-body-md text-on-surface mt-1 font-mono">
+        {% if audience.is_empty() %}
+          <span class="text-on-surface-variant italic">{{ chrome.t("admin-client-audience-none") }}</span>
+        {% else %}
+          <pre class="whitespace-pre-wrap">{{ audience }}</pre>
+        {% endif %}
+      </dd>
+    </div>
+    <div>
+      <dt class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-client-config-token-auth") }}</dt>
+      <dd class="font-body-md text-body-md text-on-surface mt-1 font-mono">
+        {{ token_endpoint_auth_method }}
+      </dd>
+    </div>
+    <div>
+      <dt class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-client-config-require-pkce") }}</dt>
+      <dd class="font-body-md text-body-md text-on-surface mt-1">
+        {% if require_pkce %}
+          {{ chrome.t("admin-client-bool-yes") }}
+        {% else %}
+          {{ chrome.t("admin-client-bool-no") }}
+        {% endif %}
+      </dd>
+    </div>
+    <div>
+      <dt class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-client-config-trusted") }}</dt>
+      <dd class="font-body-md text-body-md text-on-surface mt-1">
+        {% if skip_consent %}
+          {{ chrome.t("admin-client-bool-yes") }}
+        {% else %}
+          {{ chrome.t("admin-client-bool-no") }}
+        {% endif %}
+      </dd>
+    </div>
+    <div>
+      <dt class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-client-config-created") }}</dt>
+      <dd class="font-body-md text-body-md text-on-surface mt-1">
+        {{ row.created_at }}
+      </dd>
+    </div>
+    {% if !provenance_audience.is_empty() %}
       <div class="sm:col-span-2">
-        <dt class="font-label-sm text-label-sm text-on-surface-variant">Front-channel logout URI</dt>
+        <dt class="font-label-sm text-label-sm text-on-surface-variant">
+          {{ chrome.t("admin-client-config-provenance-audience") }} <span class="text-on-surface-variant font-normal">{{ chrome.t("admin-client-config-provenance-audience-note") }}</span>
+        </dt>
         <dd class="font-body-md text-body-md text-on-surface mt-1 font-mono">
-          {% if frontchannel_logout_uri.is_empty() %}
-            <span class="text-on-surface-variant italic">not configured</span>
-          {% else %}
-            {{ frontchannel_logout_uri }}
-            {% if frontchannel_logout_session_required %}
-              <span class="font-label-sm text-label-sm text-on-surface-variant font-sans">(iss+sid required)</span>
-            {% endif %}
-          {% endif %}
+          {{ provenance_audience }}
         </dd>
       </div>
+    {% endif %}
+    {% if !provenance_resource_url.is_empty() %}
       <div class="sm:col-span-2">
-        <dt class="font-label-sm text-label-sm text-on-surface-variant">Audience allow-list</dt>
+        <dt class="font-label-sm text-label-sm text-on-surface-variant">
+          {{ chrome.t("admin-client-config-provenance-url") }} <span class="text-on-surface-variant font-normal">{{ chrome.t("admin-client-config-provenance-url-note") }}</span>
+        </dt>
         <dd class="font-body-md text-body-md text-on-surface mt-1 font-mono">
-          {% if audience.is_empty() %}
-            <span class="text-on-surface-variant italic">none</span>
-          {% else %}
-            <pre class="whitespace-pre-wrap">{{ audience }}</pre>
-          {% endif %}
+          {{ provenance_resource_url }}
         </dd>
       </div>
-      <div>
-        <dt class="font-label-sm text-label-sm text-on-surface-variant">Token endpoint auth</dt>
-        <dd class="font-body-md text-body-md text-on-surface mt-1 font-mono">
-          {{ token_endpoint_auth_method }}
-        </dd>
-      </div>
-      <div>
-        <dt class="font-label-sm text-label-sm text-on-surface-variant">Require PKCE</dt>
-        <dd class="font-body-md text-body-md text-on-surface mt-1">
-          {% if require_pkce %}
-            yes
-          {% else %}
-            no
-          {% endif %}
-        </dd>
-      </div>
-      <div>
-        <dt class="font-label-sm text-label-sm text-on-surface-variant">Trusted (skip consent)</dt>
-        <dd class="font-body-md text-body-md text-on-surface mt-1">
-          {% if skip_consent %}
-            yes
-          {% else %}
-            no
-          {% endif %}
-        </dd>
-      </div>
-      <div>
-        <dt class="font-label-sm text-label-sm text-on-surface-variant">Created</dt>
-        <dd class="font-body-md text-body-md text-on-surface mt-1">
-          {{ row.created_at }}
-        </dd>
-      </div>
-      {% if !provenance_audience.is_empty() %}
-        <div class="sm:col-span-2">
-          <dt class="font-label-sm text-label-sm text-on-surface-variant">
-            Audience <span class="text-on-surface-variant font-normal">(DCR caller-declared)</span>
-          </dt>
-          <dd class="font-body-md text-body-md text-on-surface mt-1 font-mono">
-            {{ provenance_audience }}
-          </dd>
-        </div>
-      {% endif %}
-      {% if !provenance_resource_url.is_empty() %}
-        <div class="sm:col-span-2">
-          <dt class="font-label-sm text-label-sm text-on-surface-variant">
-            Used at <span class="text-on-surface-variant font-normal">(first observed on consent)</span>
-          </dt>
-          <dd class="font-body-md text-body-md text-on-surface mt-1 font-mono">
-            {{ provenance_resource_url }}
-          </dd>
-        </div>
-      {% endif %}
-      <div class="sm:col-span-2">
-        <dt class="font-label-sm text-label-sm text-on-surface-variant">Account deletion webhook</dt>
-        <dd class="font-body-md text-body-md text-on-surface mt-1 font-mono">
-          {% if account_deletion_url.is_empty() %}
-            <span class="text-on-surface-variant italic">not configured</span>
-          {% else %}
-            {{ account_deletion_url }}
-          {% endif %}
-        </dd>
-      </div>
-    </dl>
-  </section>
+    {% endif %}
+    <div class="sm:col-span-2">
+      <dt class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-client-config-webhook") }}</dt>
+      <dd class="font-body-md text-body-md text-on-surface mt-1 font-mono">
+        {% if account_deletion_url.is_empty() %}
+          <span class="text-on-surface-variant italic">{{ chrome.t("admin-client-not-configured") }}</span>
+        {% else %}
+          {{ account_deletion_url }}
+        {% endif %}
+      </dd>
+    </div>
+  </dl>
+</section>
 
-  <section>
-    <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest">Edit</h2>
-    <p class="font-body-sm text-body-sm text-on-surface-variant mb-stack-md">
-      Update the client fields below. Changes are pushed via Hydra's <code class="font-mono">PUT /admin/clients/&lt;id&gt;</code>; unrelated fields are preserved.
-    </p>
-    <form method="POST"
-          action="/admin/clients/{{ row.id }}"
-          class="flex flex-col gap-stack-md max-w-2xl">
-      <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
-      <input type="hidden" name="client_type" value="{{ row.client_type }}">
+<section>
+  <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest">{{ chrome.t("admin-client-section-edit") }}</h2>
+  <p class="font-body-sm text-body-sm text-on-surface-variant mb-stack-md">
+    {{ chrome.t("admin-client-edit-intro-part1") }} <code class="font-mono">PUT /admin/clients/&lt;id&gt;</code>{{ chrome.t("admin-client-edit-intro-part2") }}
+  </p>
+  <form method="POST"
+        action="/admin/clients/{{ row.id }}"
+        class="flex flex-col gap-stack-md max-w-2xl">
+    <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+    <input type="hidden" name="client_type" value="{{ row.client_type }}">
 
-      <label class="flex flex-col gap-1">
-        <span class="font-label-md text-label-md text-on-surface">Client name</span>
-        <input type="text"
-               name="name"
-               required
-               value="{{ row.name }}"
-               class="font-body-md text-body-md bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2">
-      </label>
+    <label class="flex flex-col gap-1">
+      <span class="font-label-md text-label-md text-on-surface">{{ chrome.t("admin-client-field-name") }}</span>
+      <input type="text"
+             name="name"
+             required
+             value="{{ row.name }}"
+             class="font-body-md text-body-md bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2">
+    </label>
 
-      <fieldset class="flex flex-col gap-1">
-        <legend class="font-label-md text-label-md text-on-surface">Grant types</legend>
-        <div class="flex flex-col gap-1 mt-1">
-          <label class="flex items-center gap-2 font-body-md text-body-md">
-            <input type="checkbox"
-                   name="grant_types"
-                   value="authorization_code"
-                   {% if self.has_grant("authorization_code") %}checked{% endif %}>
-            <code class="font-mono">authorization_code</code>
-          </label>
-          <label class="flex items-center gap-2 font-body-md text-body-md">
-            <input type="checkbox"
-                   name="grant_types"
-                   value="refresh_token"
-                   {% if self.has_grant("refresh_token") %}checked{% endif %}>
-            <code class="font-mono">refresh_token</code>
-          </label>
-          <label class="flex items-center gap-2 font-body-md text-body-md">
-            <input type="checkbox"
-                   name="grant_types"
-                   value="client_credentials"
-                   {% if self.has_grant("client_credentials") %}checked{% endif %}>
-            <code class="font-mono">client_credentials</code>
-          </label>
-        </div>
-      </fieldset>
-
-      <label class="flex flex-col gap-1">
-        <span class="font-label-md text-label-md text-on-surface">Response types</span>
-        <input type="text"
-               name="response_types"
-               value="{{ response_types }}"
-               class="font-body-md text-body-md bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2 font-mono">
-      </label>
-      <label class="flex flex-col gap-1">
-        <span class="font-label-md text-label-md text-on-surface">Scope</span>
-        <input type="text"
-               name="scope"
-               value="{{ scope }}"
-               class="font-body-md text-body-md bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2 font-mono">
-      </label>
-      <label class="flex flex-col gap-1">
-        <span class="font-label-md text-label-md text-on-surface">Redirect URIs</span>
-        <textarea name="redirect_uris"
-                  rows="3"
-                  class="font-body-md text-body-md bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2 font-mono">{{ row.redirect_uris }}</textarea>
-      </label>
-      <label class="flex flex-col gap-1">
-        <span class="font-label-md text-label-md text-on-surface">Post-logout redirect URIs</span>
-        <textarea name="post_logout_redirect_uris"
-                  rows="2"
-                  class="font-body-md text-body-md bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2 font-mono">{{ post_logout_redirect_uris }}</textarea>
-      </label>
-      <fieldset class="flex flex-col gap-stack-sm border border-outline-variant rounded-lg p-4">
-        <legend class="font-label-md text-label-md text-on-surface px-1">OIDC logout fan-out</legend>
-        <label class="flex flex-col gap-1">
-          <span class="font-label-md text-label-md text-on-surface">Back-channel logout URI</span>
-          <input type="url"
-                 name="backchannel_logout_uri"
-                 value="{{ backchannel_logout_uri }}"
-                 class="font-body-md text-body-md bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2 font-mono">
-        </label>
-        <label class="flex items-center gap-2">
+    <fieldset class="flex flex-col gap-1">
+      <legend class="font-label-md text-label-md text-on-surface">{{ chrome.t("admin-client-field-grant-types") }}</legend>
+      <div class="flex flex-col gap-1 mt-1">
+        <label class="flex items-center gap-2 font-body-md text-body-md">
           <input type="checkbox"
-                 name="backchannel_logout_session_required"
-                 {% if backchannel_logout_session_required %}checked{% endif %}>
-          <span class="font-label-md text-label-md text-on-surface">Require <code class="font-mono">sid</code> claim</span>
+                 name="grant_types"
+                 value="authorization_code"
+                 {% if self.has_grant("authorization_code") %}checked{% endif %}>
+          <code class="font-mono">authorization_code</code>
         </label>
-        <label class="flex flex-col gap-1 mt-stack-sm">
-          <span class="font-label-md text-label-md text-on-surface">Front-channel logout URI</span>
-          <input type="url"
-                 name="frontchannel_logout_uri"
-                 value="{{ frontchannel_logout_uri }}"
-                 class="font-body-md text-body-md bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2 font-mono">
-        </label>
-        <label class="flex items-center gap-2">
+        <label class="flex items-center gap-2 font-body-md text-body-md">
           <input type="checkbox"
-                 name="frontchannel_logout_session_required"
-                 {% if frontchannel_logout_session_required %}checked{% endif %}>
-          <span class="font-label-md text-label-md text-on-surface">Require <code class="font-mono">iss</code> + <code class="font-mono">sid</code> query parameters</span>
+                 name="grant_types"
+                 value="refresh_token"
+                 {% if self.has_grant("refresh_token") %}checked{% endif %}>
+          <code class="font-mono">refresh_token</code>
         </label>
-      </fieldset>
+        <label class="flex items-center gap-2 font-body-md text-body-md">
+          <input type="checkbox"
+                 name="grant_types"
+                 value="client_credentials"
+                 {% if self.has_grant("client_credentials") %}checked{% endif %}>
+          <code class="font-mono">client_credentials</code>
+        </label>
+      </div>
+    </fieldset>
+
+    <label class="flex flex-col gap-1">
+      <span class="font-label-md text-label-md text-on-surface">{{ chrome.t("admin-client-field-response-types") }}</span>
+      <input type="text"
+             name="response_types"
+             value="{{ response_types }}"
+             class="font-body-md text-body-md bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2 font-mono">
+    </label>
+    <label class="flex flex-col gap-1">
+      <span class="font-label-md text-label-md text-on-surface">{{ chrome.t("admin-client-field-scope") }}</span>
+      <input type="text"
+             name="scope"
+             value="{{ scope }}"
+             class="font-body-md text-body-md bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2 font-mono">
+    </label>
+    <label class="flex flex-col gap-1">
+      <span class="font-label-md text-label-md text-on-surface">{{ chrome.t("admin-client-field-redirect-uris") }}</span>
+      <textarea name="redirect_uris"
+                rows="3"
+                class="font-body-md text-body-md bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2 font-mono">{{ row.redirect_uris }}</textarea>
+    </label>
+    <label class="flex flex-col gap-1">
+      <span class="font-label-md text-label-md text-on-surface">{{ chrome.t("admin-client-field-post-logout-uris") }}</span>
+      <textarea name="post_logout_redirect_uris"
+                rows="2"
+                class="font-body-md text-body-md bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2 font-mono">{{ post_logout_redirect_uris }}</textarea>
+    </label>
+    <fieldset class="flex flex-col gap-stack-sm border border-outline-variant rounded-lg p-4">
+      <legend class="font-label-md text-label-md text-on-surface px-1">{{ chrome.t("admin-client-section-logout-fanout") }}</legend>
       <label class="flex flex-col gap-1">
-        <span class="font-label-md text-label-md text-on-surface">Token endpoint auth method</span>
-        <select name="token_endpoint_auth_method"
-                class="font-body-md text-body-md bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2 font-mono">
-          <option value="client_secret_post"
-                  {% if token_endpoint_auth_method == "client_secret_post" %}selected{% endif %}>
-            client_secret_post
-          </option>
-          <option value="client_secret_basic"
-                  {% if token_endpoint_auth_method == "client_secret_basic" %}selected{% endif %}>
-            client_secret_basic
-          </option>
-          <option value="none"
-                  {% if token_endpoint_auth_method == "none" %}selected{% endif %}>none (public + PKCE)</option>
-        </select>
-      </label>
-      <label class="flex flex-col gap-1">
-        <span class="font-label-md text-label-md text-on-surface">Audience allow-list</span>
-        <textarea name="audience"
-                  rows="2"
-                  class="font-body-md text-body-md bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2 font-mono">{{ audience }}</textarea>
-        <span class="font-label-sm text-label-sm text-on-surface-variant">One per line. Hydra requires audience values to be pre-registered here.</span>
-      </label>
-      <label class="flex items-center gap-2">
-        <input type="checkbox"
-               name="require_pkce"
-               {% if require_pkce %}checked{% endif %}>
-        <span class="font-label-md text-label-md text-on-surface">Require PKCE (informational)</span>
-      </label>
-      <label class="flex items-center gap-2">
-        <input type="checkbox"
-               name="skip_consent"
-               {% if skip_consent %}checked{% endif %}>
-        <span class="font-label-md text-label-md text-on-surface">Trusted client (skip consent screen)</span>
-      </label>
-      <label class="flex flex-col gap-1">
-        <span class="font-label-md text-label-md text-on-surface">Account deletion webhook URL</span>
+        <span class="font-label-md text-label-md text-on-surface">{{ chrome.t("admin-client-field-backchannel-uri") }}</span>
         <input type="url"
-               name="account_deletion_url"
-               placeholder="https://app.example.com/internal/forseti/account-purged"
-               value="{{ account_deletion_url }}"
+               name="backchannel_logout_uri"
+               value="{{ backchannel_logout_uri }}"
                class="font-body-md text-body-md bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2 font-mono">
-        <span class="font-body-sm text-body-sm text-on-surface-variant">When the user self-deletes, Forseti POSTs an RFC 8417 Security Event Token (RISC <code class="font-mono">account-purged</code>) here. Leave blank to opt out. Receivers verify the JWS against Forseti's JWKS at <code class="font-mono">/.well-known/webhook-jwks.json</code>.</span>
       </label>
-      <div class="flex items-center gap-stack-md mt-stack-md">
-        <button type="submit"
-                class="bg-primary text-on-primary font-label-md text-label-md font-bold px-4 py-2 rounded-lg hover:opacity-90 transition-opacity">
-          Save changes
-        </button>
-        <a href="/admin/clients"
-           class="font-label-md text-label-md text-on-surface-variant border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">Back to list</a>
-      </div>
-    </form>
-  </section>
+      <label class="flex items-center gap-2">
+        <input type="checkbox"
+               name="backchannel_logout_session_required"
+               {% if backchannel_logout_session_required %}checked{% endif %}>
+        <span class="font-label-md text-label-md text-on-surface">{{ chrome.t("admin-client-field-backchannel-sid-prefix") }} <code class="font-mono">sid</code> {{ chrome.t("admin-client-field-backchannel-sid-short") }}</span>
+      </label>
+      <label class="flex flex-col gap-1 mt-stack-sm">
+        <span class="font-label-md text-label-md text-on-surface">{{ chrome.t("admin-client-field-frontchannel-uri") }}</span>
+        <input type="url"
+               name="frontchannel_logout_uri"
+               value="{{ frontchannel_logout_uri }}"
+               class="font-body-md text-body-md bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2 font-mono">
+      </label>
+      <label class="flex items-center gap-2">
+        <input type="checkbox"
+               name="frontchannel_logout_session_required"
+               {% if frontchannel_logout_session_required %}checked{% endif %}>
+        <span class="font-label-md text-label-md text-on-surface">{{ chrome.t("admin-client-field-frontchannel-sid-prefix") }} <code class="font-mono">iss</code> {{ chrome.t("admin-client-field-frontchannel-sid-middle") }} <code class="font-mono">sid</code> {{ chrome.t("admin-client-field-frontchannel-sid-short") }}</span>
+      </label>
+    </fieldset>
+    <label class="flex flex-col gap-1">
+      <span class="font-label-md text-label-md text-on-surface">{{ chrome.t("admin-client-field-token-auth") }}</span>
+      <select name="token_endpoint_auth_method"
+              class="font-body-md text-body-md bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2 font-mono">
+        <option value="client_secret_post"
+                {% if token_endpoint_auth_method == "client_secret_post" %}selected{% endif %}>
+          client_secret_post
+        </option>
+        <option value="client_secret_basic"
+                {% if token_endpoint_auth_method == "client_secret_basic" %}selected{% endif %}>
+          client_secret_basic
+        </option>
+        <option value="none"
+                {% if token_endpoint_auth_method == "none" %}selected{% endif %}>{{ chrome.t("admin-client-token-auth-none-short") }}</option>
+      </select>
+    </label>
+    <label class="flex flex-col gap-1">
+      <span class="font-label-md text-label-md text-on-surface">{{ chrome.t("admin-client-field-audience") }}</span>
+      <textarea name="audience"
+                rows="2"
+                class="font-body-md text-body-md bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2 font-mono">{{ audience }}</textarea>
+      <span class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-client-field-audience-hint-short") }}</span>
+    </label>
+    <label class="flex items-center gap-2">
+      <input type="checkbox"
+             name="require_pkce"
+             {% if require_pkce %}checked{% endif %}>
+      <span class="font-label-md text-label-md text-on-surface">{{ chrome.t("admin-client-field-require-pkce") }}</span>
+    </label>
+    <label class="flex items-center gap-2">
+      <input type="checkbox"
+             name="skip_consent"
+             {% if skip_consent %}checked{% endif %}>
+      <span class="font-label-md text-label-md text-on-surface">{{ chrome.t("admin-client-field-skip-consent") }}</span>
+    </label>
+    <label class="flex flex-col gap-1">
+      <span class="font-label-md text-label-md text-on-surface">{{ chrome.t("admin-client-field-webhook-url") }}</span>
+      <input type="url"
+             name="account_deletion_url"
+             placeholder="https://app.example.com/internal/forseti/account-purged"
+             value="{{ account_deletion_url }}"
+             class="font-body-md text-body-md bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2 font-mono">
+      <span class="font-body-sm text-body-sm text-on-surface-variant">{{ chrome.t("admin-client-field-webhook-hint-part1") }} <code class="font-mono">account-purged</code>{{ chrome.t("admin-client-field-webhook-hint-part2") }} <code class="font-mono">/.well-known/webhook-jwks.json</code>{{ chrome.t("admin-client-field-webhook-hint-part3") }}</span>
+    </label>
+    <div class="flex items-center gap-stack-md mt-stack-md">
+      <button type="submit"
+              class="bg-primary text-on-primary font-label-md text-label-md font-bold px-4 py-2 rounded-lg hover:opacity-90 transition-opacity">
+        {{ chrome.t("admin-client-action-save") }}
+      </button>
+      <a href="/admin/clients"
+         class="font-label-md text-label-md text-on-surface-variant border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">{{ chrome.t("admin-client-action-back") }}</a>
+    </div>
+  </form>
+</section>
 {% endblock %}

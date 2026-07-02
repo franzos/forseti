@@ -31,7 +31,7 @@
 
   {% if !error_id.is_empty() %}
     <p class="font-label-sm text-label-sm text-outline text-center">
-      Reference ID: <code class="font-code-md text-code-md">{{ error_id }}</code>
+      {{ chrome.t("error-reference-id") }} <code class="font-code-md text-code-md">{{ error_id }}</code>
     </p>
   {% endif %}
 

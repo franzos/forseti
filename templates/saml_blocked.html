@@ -1,6 +1,6 @@
 {% extends "card.html" %}
 
-{% block title %}Sign-on blocked &middot; {{ chrome.brand.name }}{% endblock %}
+{% block title %}{{ chrome.t("error-saml-blocked-page-title") }} &middot; {{ chrome.brand.name }}{% endblock %}
 
 {% block card_icon %}
   <div class="w-12 h-12 bg-error-container rounded-lg flex items-center justify-center mb-stack-sm"
@@ -20,25 +20,22 @@
   </div>
 {% endblock %}
 
-{% block card_title %}We couldn't sign you in{% endblock %}
+{% block card_title %}{{ chrome.t("error-saml-blocked-card-title") }}{% endblock %}
 
 {% block card_subtitle %}
   {% match reason %}
   {% when BlockedReason::Unverified %}
-  An account for <strong>{{ email }}</strong> already exists but its email address
-  hasn't been verified, so single sign-on can't safely attach to it.
-  Verify the address from your original sign-up email, or ask your administrator for help.
+  {{ chrome.t("error-saml-unverified-prefix") }} <strong>{{ email }}</strong> {{ chrome.t("error-saml-unverified-suffix") }}
   {% when BlockedReason::CrossOrgNotMember %}
-  Your account isn't a member of this organization yet. Ask your administrator
-  to add you, then try again.
+  {{ chrome.t("error-saml-cross-org-not-member") }}
   {% when BlockedReason::Conflict %}
-  We couldn't sign you in. Please contact your administrator.
+  {{ chrome.t("error-saml-conflict") }}
 {% endmatch %}
 {% endblock %}
 
 {% block card_body %}
   <a href="/login"
      class="w-full bg-primary text-on-primary font-label-md text-label-md py-stack-md px-stack-lg rounded-lg hover:bg-primary-hover focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2 transition-colors flex items-center justify-center gap-base">
-    Go to sign in
+    {{ chrome.t("error-saml-blocked-cta") }}
   </a>
 {% endblock %}

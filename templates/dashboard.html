@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}Dashboard &middot; {{ chrome.brand.name }}{% endblock %}
+{% block title %}{{ chrome.t("nav-dashboard") }} &middot; {{ chrome.brand.name }}{% endblock %}
 
 {# Highlight Dashboard in the top nav. #}
 {% block nav_dashboard_class %}text-primary font-bold border-b-2 border-primary{% endblock %}
@@ -12,10 +12,10 @@
    from the active session). #}
   {% if needs_verification %}
     <div class="bg-surface-container border border-outline-variant rounded-xl p-4 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
-      <p class="font-body-md text-body-md text-on-surface">Please verify your email to access all features.</p>
+      <p class="font-body-md text-body-md text-on-surface">{{ chrome.t("dashboard-verify-email-body") }}</p>
       <a href="/verification"
          class="font-label-md text-label-md text-primary border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2">
-        Resend email
+        {{ chrome.t("dashboard-verify-email-resend") }}
       </a>
     </div>
   {% endif %}
@@ -25,19 +25,19 @@
      2FA settings page where codes can be generated. #}
   {% if health.two_factor_without_recovery_codes %}
     <div class="bg-error-container border border-error rounded-xl p-4 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
-      <p class="font-body-md text-body-md text-on-error-container">Two-factor is on but you have no recovery codes — generate some so you can't get locked out.</p>
+      <p class="font-body-md text-body-md text-on-error-container">{{ chrome.t("dashboard-2fa-no-recovery-body") }}</p>
       <a href="/settings/2fa#recovery-codes"
          class="font-label-md text-label-md text-on-error-container border border-error rounded-lg px-4 py-2 hover:bg-error hover:text-on-error transition-colors focus:outline-none focus:ring-2 focus:ring-error focus:ring-offset-2 whitespace-nowrap">
-        Generate codes
+        {{ chrome.t("dashboard-2fa-no-recovery-action") }}
       </a>
     </div>
   {% endif %}
 
   <header class="mt-2 mb-2">
     <h1 class="font-headline-lg-mobile md:font-headline-lg text-headline-lg-mobile md:text-headline-lg text-on-surface">
-      Welcome back
+      {{ chrome.t("dashboard-welcome-heading") }}
     </h1>
-    <p class="font-body-md text-body-md text-on-surface-variant mt-1">Manage your identity and connected applications.</p>
+    <p class="font-body-md text-body-md text-on-surface-variant mt-1">{{ chrome.t("dashboard-welcome-subtitle") }}</p>
   </header>
 
   <div class="grid grid-cols-1 lg:grid-cols-12 gap-gutter">
@@ -48,7 +48,7 @@
            Each row deep-links to the matching settings page. #}
       <section>
         <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest">
-          Account health
+          {{ chrome.t("dashboard-health-heading") }}
         </h2>
         <div class="bg-surface-container-lowest border border-outline-variant rounded-xl divide-y divide-outline-variant">
           <a href="{% if health.email_verified %}/settings/profile{% else %}/verification{% endif %}"
@@ -81,284 +81,276 @@
               {% endif %}
             </span>
             <div class="flex-1 min-w-0">
-              <p class="font-label-md text-label-md text-on-surface">Email address</p>
+              <p class="font-label-md text-label-md text-on-surface">{{ chrome.t("dashboard-health-email-title") }}</p>
               <p class="font-body-sm text-body-sm text-on-surface-variant">
                 {% if health.email_verified %}
-                  Verified
+                  {{ chrome.t("dashboard-health-email-verified") }}
                 {% else %}
-                  Pending verification
+                  {{ chrome.t("dashboard-health-email-pending") }}
                 {% endif %}
               </p>
             </div>
             <span class="font-label-sm text-label-sm text-on-surface-variant group-hover:text-primary transition-colors">
               {% if health.email_verified %}
-                Manage
+                {{ chrome.t("dashboard-action-manage") }}
               {% else %}
-                Verify
+                {{ chrome.t("dashboard-health-email-verify") }}
               {% endif %}
-            &rarr;</span>
-          </a>
-          <a href="/settings/2fa"
-             class="flex items-center gap-4 p-4 hover:bg-surface-container-low transition-colors group">
-            <span class="w-9 h-9 rounded-full flex items-center justify-center shrink-0 {% if health.two_factor_enabled %}bg-tertiary-fixed text-on-tertiary-fixed{% else %}bg-secondary-container text-on-secondary-container{% endif %}">
-              <svg xmlns="http://www.w3.org/2000/svg"
-                   width="18"
-                   height="18"
-                   viewBox="0 0 24 24"
-                   fill="none"
-                   stroke="currentColor"
-                   stroke-width="2"
-                   stroke-linecap="round"
-                   stroke-linejoin="round">
-                <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
-                <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
-              </svg>
-            </span>
-            <div class="flex-1 min-w-0">
-              <p class="font-label-md text-label-md text-on-surface">Two-factor authentication</p>
-              <p class="font-body-sm text-body-sm text-on-surface-variant">
-                {% if health.two_factor_enabled %}
-                  Enabled
-                {% else %}
-                  Not configured
-                {% endif %}
-              </p>
-            </div>
-            <span class="font-label-sm text-label-sm text-on-surface-variant group-hover:text-primary transition-colors">
-              {% if health.two_factor_enabled %}
-                Manage
-              {% else %}
-                Set up
-              {% endif %}
-            &rarr;</span>
-          </a>
-          <a href="/settings/sessions"
-             class="flex items-center gap-4 p-4 hover:bg-surface-container-low transition-colors group">
-            <span class="w-9 h-9 rounded-full flex items-center justify-center shrink-0 bg-surface-container text-on-surface-variant">
-              <svg xmlns="http://www.w3.org/2000/svg"
-                   width="18"
-                   height="18"
-                   viewBox="0 0 24 24"
-                   fill="none"
-                   stroke="currentColor"
-                   stroke-width="2"
-                   stroke-linecap="round"
-                   stroke-linejoin="round">
-                <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line>
-              </svg>
-            </span>
-            <div class="flex-1 min-w-0">
-              <p class="font-label-md text-label-md text-on-surface">Active sessions</p>
-              <p class="font-body-sm text-body-sm text-on-surface-variant">
-                {{ health.active_sessions }} device
-                {% if health.active_sessions != 1 %}s{% endif %}
-                signed in
-              </p>
-            </div>
-            <span class="font-label-sm text-label-sm text-on-surface-variant group-hover:text-primary transition-colors">Review &rarr;</span>
-          </a>
-          <a href="/settings/linked-providers"
-             class="flex items-center gap-4 p-4 hover:bg-surface-container-low transition-colors group">
-            <span class="w-9 h-9 rounded-full flex items-center justify-center shrink-0 bg-surface-container text-on-surface-variant">
-              <svg xmlns="http://www.w3.org/2000/svg"
-                   width="18"
-                   height="18"
-                   viewBox="0 0 24 24"
-                   fill="none"
-                   stroke="currentColor"
-                   stroke-width="2"
-                   stroke-linecap="round"
-                   stroke-linejoin="round">
-                <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path>
-                <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path>
-              </svg>
-            </span>
-            <div class="flex-1 min-w-0">
-              <p class="font-label-md text-label-md text-on-surface">Linked providers</p>
-              <p class="font-body-sm text-body-sm text-on-surface-variant">
-                {% if health.linked_providers == 0 %}
-                  No third-party sign-in linked
-                {% else %}
-                  {{ health.linked_providers }} provider
-                  {% if health.linked_providers != 1 %}s{% endif %}
-                  linked
-                {% endif %}
-              </p>
-            </div>
-            <span class="font-label-sm text-label-sm text-on-surface-variant group-hover:text-primary transition-colors">Manage &rarr;</span>
-          </a>
-        </div>
-      </section>
-
-      {% if !apps.is_empty() %}
-        <section>
-          <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest">Your Apps</h2>
-          <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            {% for app in apps %}
-              <a href="{{ app.url }}"
-                 class="group bg-surface-container-lowest border border-outline-variant rounded-xl p-6 flex flex-col gap-4 hover:border-primary hover:shadow-sm transition-all duration-200">
-                <div class="w-12 h-12 bg-surface-container rounded-lg flex items-center justify-center text-primary">
-                  <svg xmlns="http://www.w3.org/2000/svg"
-                       width="22"
-                       height="22"
-                       viewBox="0 0 24 24"
-                       fill="none"
-                       stroke="currentColor"
-                       stroke-width="2"
-                       stroke-linecap="round"
-                       stroke-linejoin="round">
-                    <rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect>
-                  </svg>
-                </div>
-                <div>
-                  <h3 class="text-[18px] leading-[24px] font-semibold font-headline-md text-on-surface mb-1">{{ app.name }}</h3>
-                  <p class="font-body-sm text-body-sm text-on-surface-variant">{{ app.description }}</p>
-                </div>
-              </a>
-            {% endfor %}
-          </div>
-        </section>
-      {% endif %}
-
-      <section>
-        <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest">
-          Quick Actions
-        </h2>
-        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <a href="/settings/profile"
-             class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4 flex items-center gap-4 hover:border-primary transition-colors text-left group">
-            <div class="w-10 h-10 rounded-full bg-surface-container flex items-center justify-center text-secondary group-hover:text-primary transition-colors shrink-0">
-              <svg xmlns="http://www.w3.org/2000/svg"
-                   width="18"
-                   height="18"
-                   viewBox="0 0 24 24"
-                   fill="none"
-                   stroke="currentColor"
-                   stroke-width="2"
-                   stroke-linecap="round"
-                   stroke-linejoin="round">
-                <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
-                <circle cx="12" cy="7" r="4"></circle>
-              </svg>
-            </div>
-            <span class="font-label-md text-label-md text-on-surface flex-1">Manage Profile</span>
-          </a>
-          <a href="/settings/password"
-             class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4 flex items-center gap-4 hover:border-primary transition-colors text-left group">
-            <div class="w-10 h-10 rounded-full bg-surface-container flex items-center justify-center text-secondary group-hover:text-primary transition-colors shrink-0">
-              <svg xmlns="http://www.w3.org/2000/svg"
-                   width="18"
-                   height="18"
-                   viewBox="0 0 24 24"
-                   fill="none"
-                   stroke="currentColor"
-                   stroke-width="2"
-                   stroke-linecap="round"
-                   stroke-linejoin="round">
-                <circle cx="12" cy="16" r="1"></circle><rect x="3" y="10" width="18" height="12" rx="2" ry="2"></rect>
-                <path d="M7 10V6a5 5 0 0 1 10 0v4"></path>
-              </svg>
-            </div>
-            <span class="font-label-md text-label-md text-on-surface flex-1">Change Password</span>
-          </a>
-          <a href="/settings/2fa"
-             class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4 flex items-center gap-4 hover:border-primary transition-colors text-left group">
-            <div class="w-10 h-10 rounded-full bg-surface-container flex items-center justify-center text-secondary group-hover:text-primary transition-colors shrink-0">
-              <svg xmlns="http://www.w3.org/2000/svg"
-                   width="18"
-                   height="18"
-                   viewBox="0 0 24 24"
-                   fill="none"
-                   stroke="currentColor"
-                   stroke-width="2"
-                   stroke-linecap="round"
-                   stroke-linejoin="round">
-                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
-              </svg>
-            </div>
-            <span class="font-label-md text-label-md text-on-surface flex-1">Two-factor auth</span>
-          </a>
-          <a href="/settings/sessions"
-             class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4 flex items-center gap-4 hover:border-primary transition-colors text-left group">
-            <div class="w-10 h-10 rounded-full bg-surface-container flex items-center justify-center text-secondary group-hover:text-primary transition-colors shrink-0">
-              <svg xmlns="http://www.w3.org/2000/svg"
-                   width="18"
-                   height="18"
-                   viewBox="0 0 24 24"
-                   fill="none"
-                   stroke="currentColor"
-                   stroke-width="2"
-                   stroke-linecap="round"
-                   stroke-linejoin="round">
-                <circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline>
-              </svg>
-            </div>
-            <span class="font-label-md text-label-md text-on-surface flex-1">Active sessions</span>
-          </a>
-        </div>
-      </section>
-    </div>
-
-    {# Recent activity sidebar — derived from Kratos's identity session
-       history via the admin API. Kratos doesn't expose a queryable audit
-       event stream in this SDK version; sessions are the closest stand-in
-       (each row = "user authenticated from device X at time T"). A richer
-       event log will layer on top later. #}
-    <div class="lg:col-span-4">
-      <section class="bg-surface-container-lowest border border-outline-variant rounded-xl p-6 h-full flex flex-col">
-        <div class="flex items-center justify-between mb-6 pb-4 border-b border-outline-variant">
-          <h2 class="font-label-md text-label-md text-on-surface">Recent Activity</h2>
-        </div>
-        <ul class="flex flex-col gap-6">
-          {% if activity.is_empty() %}
-            <li class="flex gap-4">
-              <div class="w-8 h-8 rounded-full bg-surface-container flex items-center justify-center shrink-0 mt-0.5 text-on-surface-variant">
+              <span class="dir-flip">&rarr;</span></span>
+            </a>
+            <a href="/settings/2fa"
+               class="flex items-center gap-4 p-4 hover:bg-surface-container-low transition-colors group">
+              <span class="w-9 h-9 rounded-full flex items-center justify-center shrink-0 {% if health.two_factor_enabled %}bg-tertiary-fixed text-on-tertiary-fixed{% else %}bg-secondary-container text-on-secondary-container{% endif %}">
                 <svg xmlns="http://www.w3.org/2000/svg"
-                     width="14"
-                     height="14"
+                     width="18"
+                     height="18"
                      viewBox="0 0 24 24"
                      fill="none"
                      stroke="currentColor"
                      stroke-width="2"
                      stroke-linecap="round"
                      stroke-linejoin="round">
-                  <circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line>
+                  <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+                  <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
                 </svg>
+              </span>
+              <div class="flex-1 min-w-0">
+                <p class="font-label-md text-label-md text-on-surface">{{ chrome.t("dashboard-health-2fa-title") }}</p>
+                <p class="font-body-sm text-body-sm text-on-surface-variant">
+                  {% if health.two_factor_enabled %}
+                    {{ chrome.t("dashboard-health-2fa-enabled") }}
+                  {% else %}
+                    {{ chrome.t("dashboard-health-2fa-not-configured") }}
+                  {% endif %}
+                </p>
               </div>
-              <div class="flex flex-col">
-                <p class="font-label-md text-label-md text-on-surface">No recent activity</p>
-                <p class="font-body-sm text-body-sm text-on-surface-variant mt-0.5">Sign-in events will show up here.</p>
-              </div>
-            </li>
-          {% else %}
-            {% for e in activity %}
-              <li class="flex gap-4">
-                <div class="w-8 h-8 rounded-full bg-tertiary-fixed flex items-center justify-center shrink-0 mt-0.5 text-on-tertiary-fixed">
+              <span class="font-label-sm text-label-sm text-on-surface-variant group-hover:text-primary transition-colors">
+                {% if health.two_factor_enabled %}
+                  {{ chrome.t("dashboard-action-manage") }}
+                {% else %}
+                  {{ chrome.t("dashboard-health-2fa-setup") }}
+                {% endif %}
+                <span class="dir-flip">&rarr;</span></span>
+              </a>
+              <a href="/settings/sessions"
+                 class="flex items-center gap-4 p-4 hover:bg-surface-container-low transition-colors group">
+                <span class="w-9 h-9 rounded-full flex items-center justify-center shrink-0 bg-surface-container text-on-surface-variant">
                   <svg xmlns="http://www.w3.org/2000/svg"
-                       width="14"
-                       height="14"
+                       width="18"
+                       height="18"
                        viewBox="0 0 24 24"
                        fill="none"
                        stroke="currentColor"
-                       stroke-width="2.2"
+                       stroke-width="2"
                        stroke-linecap="round"
                        stroke-linejoin="round">
-                    <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"></path>
-                    <polyline points="10 17 15 12 10 7"></polyline><line x1="15" y1="12" x2="3" y2="12"></line>
+                    <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line>
+                  </svg>
+                </span>
+                <div class="flex-1 min-w-0">
+                  <p class="font-label-md text-label-md text-on-surface">{{ chrome.t("dashboard-health-sessions-title") }}</p>
+                  <p class="font-body-sm text-body-sm text-on-surface-variant">
+                    {{ chrome.tv_count("dashboard-sessions-count", health.active_sessions as i64) }}
+                  </p>
+                </div>
+                <span class="font-label-sm text-label-sm text-on-surface-variant group-hover:text-primary transition-colors">{{ chrome.t("dashboard-health-sessions-review") }} <span class="dir-flip">&rarr;</span></span>
+              </a>
+              <a href="/settings/linked-providers"
+                 class="flex items-center gap-4 p-4 hover:bg-surface-container-low transition-colors group">
+                <span class="w-9 h-9 rounded-full flex items-center justify-center shrink-0 bg-surface-container text-on-surface-variant">
+                  <svg xmlns="http://www.w3.org/2000/svg"
+                       width="18"
+                       height="18"
+                       viewBox="0 0 24 24"
+                       fill="none"
+                       stroke="currentColor"
+                       stroke-width="2"
+                       stroke-linecap="round"
+                       stroke-linejoin="round">
+                    <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path>
+                    <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path>
+                  </svg>
+                </span>
+                <div class="flex-1 min-w-0">
+                  <p class="font-label-md text-label-md text-on-surface">{{ chrome.t("dashboard-health-providers-title") }}</p>
+                  <p class="font-body-sm text-body-sm text-on-surface-variant">
+                    {{ chrome.tv_count("dashboard-providers-count", health.linked_providers as i64) }}
+                  </p>
+                </div>
+                <span class="font-label-sm text-label-sm text-on-surface-variant group-hover:text-primary transition-colors">{{ chrome.t("dashboard-action-manage") }} <span class="dir-flip">&rarr;</span></span>
+              </a>
+            </div>
+          </section>
+
+          {% if !apps.is_empty() %}
+            <section>
+              <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest">{{ chrome.t("dashboard-apps-heading") }}</h2>
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                {% for app in apps %}
+                  <a href="{{ app.url }}"
+                     class="group bg-surface-container-lowest border border-outline-variant rounded-xl p-6 flex flex-col gap-4 hover:border-primary hover:shadow-sm transition-all duration-200">
+                    <div class="w-12 h-12 bg-surface-container rounded-lg flex items-center justify-center text-primary">
+                      <svg xmlns="http://www.w3.org/2000/svg"
+                           width="22"
+                           height="22"
+                           viewBox="0 0 24 24"
+                           fill="none"
+                           stroke="currentColor"
+                           stroke-width="2"
+                           stroke-linecap="round"
+                           stroke-linejoin="round">
+                        <rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect>
+                      </svg>
+                    </div>
+                    <div>
+                      <h3 class="text-[18px] leading-[24px] font-semibold font-headline-md text-on-surface mb-1"><bdi>{{ app.name }}</bdi></h3>
+                      <p class="font-body-sm text-body-sm text-on-surface-variant">{{ app.description }}</p>
+                    </div>
+                  </a>
+                {% endfor %}
+              </div>
+            </section>
+          {% endif %}
+
+          <section>
+            <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest">
+              {{ chrome.t("dashboard-quick-actions-heading") }}
+            </h2>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <a href="/settings/profile"
+                 class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4 flex items-center gap-4 hover:border-primary transition-colors text-start group">
+                <div class="w-10 h-10 rounded-full bg-surface-container flex items-center justify-center text-secondary group-hover:text-primary transition-colors shrink-0">
+                  <svg xmlns="http://www.w3.org/2000/svg"
+                       width="18"
+                       height="18"
+                       viewBox="0 0 24 24"
+                       fill="none"
+                       stroke="currentColor"
+                       stroke-width="2"
+                       stroke-linecap="round"
+                       stroke-linejoin="round">
+                    <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
+                    <circle cx="12" cy="7" r="4"></circle>
                   </svg>
                 </div>
-                <div class="flex flex-col min-w-0">
-                  <p class="font-label-md text-label-md text-on-surface">{{ e.title }}</p>
-                  <p class="font-body-sm text-body-sm text-on-surface-variant mt-0.5 truncate"
-                     title="{{ e.ua_full }}">{{ e.detail }}</p>
-                  <p class="font-label-sm text-label-sm text-outline mt-1 font-normal"
-                     title="{{ e.when_full }}">{{ e.when }}</p>
+                <span class="font-label-md text-label-md text-on-surface flex-1">{{ chrome.t("dashboard-quick-action-profile") }}</span>
+              </a>
+              <a href="/settings/password"
+                 class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4 flex items-center gap-4 hover:border-primary transition-colors text-start group">
+                <div class="w-10 h-10 rounded-full bg-surface-container flex items-center justify-center text-secondary group-hover:text-primary transition-colors shrink-0">
+                  <svg xmlns="http://www.w3.org/2000/svg"
+                       width="18"
+                       height="18"
+                       viewBox="0 0 24 24"
+                       fill="none"
+                       stroke="currentColor"
+                       stroke-width="2"
+                       stroke-linecap="round"
+                       stroke-linejoin="round">
+                    <circle cx="12" cy="16" r="1"></circle><rect x="3" y="10" width="18" height="12" rx="2" ry="2"></rect>
+                    <path d="M7 10V6a5 5 0 0 1 10 0v4"></path>
+                  </svg>
                 </div>
-              </li>
-            {% endfor %}
-          {% endif %}
-        </ul>
-      </section>
-    </div>
-  </div>
-{% endblock %}
+                <span class="font-label-md text-label-md text-on-surface flex-1">{{ chrome.t("dashboard-quick-action-password") }}</span>
+              </a>
+              <a href="/settings/2fa"
+                 class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4 flex items-center gap-4 hover:border-primary transition-colors text-start group">
+                <div class="w-10 h-10 rounded-full bg-surface-container flex items-center justify-center text-secondary group-hover:text-primary transition-colors shrink-0">
+                  <svg xmlns="http://www.w3.org/2000/svg"
+                       width="18"
+                       height="18"
+                       viewBox="0 0 24 24"
+                       fill="none"
+                       stroke="currentColor"
+                       stroke-width="2"
+                       stroke-linecap="round"
+                       stroke-linejoin="round">
+                    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+                  </svg>
+                </div>
+                <span class="font-label-md text-label-md text-on-surface flex-1">{{ chrome.t("dashboard-quick-action-2fa") }}</span>
+              </a>
+              <a href="/settings/sessions"
+                 class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4 flex items-center gap-4 hover:border-primary transition-colors text-start group">
+                <div class="w-10 h-10 rounded-full bg-surface-container flex items-center justify-center text-secondary group-hover:text-primary transition-colors shrink-0">
+                  <svg xmlns="http://www.w3.org/2000/svg"
+                       width="18"
+                       height="18"
+                       viewBox="0 0 24 24"
+                       fill="none"
+                       stroke="currentColor"
+                       stroke-width="2"
+                       stroke-linecap="round"
+                       stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline>
+                  </svg>
+                </div>
+                <span class="font-label-md text-label-md text-on-surface flex-1">{{ chrome.t("dashboard-quick-action-sessions") }}</span>
+              </a>
+            </div>
+          </section>
+        </div>
+
+        {# Recent activity sidebar — derived from Kratos's identity session
+       history via the admin API. Kratos doesn't expose a queryable audit
+       event stream in this SDK version; sessions are the closest stand-in
+       (each row = "user authenticated from device X at time T"). A richer
+       event log will layer on top later. #}
+        <div class="lg:col-span-4">
+          <section class="bg-surface-container-lowest border border-outline-variant rounded-xl p-6 h-full flex flex-col">
+            <div class="flex items-center justify-between mb-6 pb-4 border-b border-outline-variant">
+              <h2 class="font-label-md text-label-md text-on-surface">{{ chrome.t("dashboard-activity-heading") }}</h2>
+            </div>
+            <ul class="flex flex-col gap-6">
+              {% if activity.is_empty() %}
+                <li class="flex gap-4">
+                  <div class="w-8 h-8 rounded-full bg-surface-container flex items-center justify-center shrink-0 mt-0.5 text-on-surface-variant">
+                    <svg xmlns="http://www.w3.org/2000/svg"
+                         width="14"
+                         height="14"
+                         viewBox="0 0 24 24"
+                         fill="none"
+                         stroke="currentColor"
+                         stroke-width="2"
+                         stroke-linecap="round"
+                         stroke-linejoin="round">
+                      <circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line>
+                    </svg>
+                  </div>
+                  <div class="flex flex-col">
+                    <p class="font-label-md text-label-md text-on-surface">{{ chrome.t("dashboard-activity-empty-title") }}</p>
+                    <p class="font-body-sm text-body-sm text-on-surface-variant mt-0.5">{{ chrome.t("dashboard-activity-empty-body") }}</p>
+                  </div>
+                </li>
+              {% else %}
+                {% for e in activity %}
+                  <li class="flex gap-4">
+                    <div class="w-8 h-8 rounded-full bg-tertiary-fixed flex items-center justify-center shrink-0 mt-0.5 text-on-tertiary-fixed">
+                      <svg xmlns="http://www.w3.org/2000/svg"
+                           width="14"
+                           height="14"
+                           viewBox="0 0 24 24"
+                           fill="none"
+                           stroke="currentColor"
+                           stroke-width="2.2"
+                           stroke-linecap="round"
+                           stroke-linejoin="round">
+                        <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"></path>
+                        <polyline points="10 17 15 12 10 7"></polyline><line x1="15" y1="12" x2="3" y2="12"></line>
+                      </svg>
+                    </div>
+                    <div class="flex flex-col min-w-0">
+                      <p class="font-label-md text-label-md text-on-surface">{{ e.title }}</p>
+                      <p class="font-body-sm text-body-sm text-on-surface-variant mt-0.5 truncate"
+                         title="{{ e.ua_full }}">{{ e.detail }}</p>
+                      <p class="font-label-sm text-label-sm text-outline mt-1 font-normal"
+                         title="{{ e.when_full }}">{{ e.when }}</p>
+                    </div>
+                  </li>
+                {% endfor %}
+              {% endif %}
+            </ul>
+          </section>
+        </div>
+      </div>
+    {% endblock %}

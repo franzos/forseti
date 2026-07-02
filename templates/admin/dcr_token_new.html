@@ -1,12 +1,12 @@
 {% extends "admin/admin_shell.html" %}
 
-{% block admin_title %}Issue DCR token{% endblock %}
+{% block admin_title %}{{ chrome.t("admin-dcr-new-page-title") }}{% endblock %}
 
 {% block admin_content %}
   <div class="max-w-2xl">
-    <h1 class="font-headline-lg text-headline-lg text-on-surface mb-stack-sm">Issue a DCR initial access token</h1>
+    <h1 class="font-headline-lg text-headline-lg text-on-surface mb-stack-sm">{{ chrome.t("admin-dcr-new-heading") }}</h1>
     <p class="font-body-md text-body-md text-on-surface-variant mb-stack-lg">
-      The token is revealed once on the next page. Hand it to the client author — they send it as <code class="font-mono">Authorization: Bearer &lt;token&gt;</code> on a single <code class="font-mono">POST /oauth2/register</code> call.
+      {{ chrome.t("admin-dcr-new-subtitle-part1") }} <code class="font-mono">Authorization: Bearer &lt;token&gt;</code> {{ chrome.t("admin-dcr-new-subtitle-part2") }} <code class="font-mono">POST /oauth2/register</code> {{ chrome.t("admin-dcr-new-subtitle-part3") }}
     </p>
 
     {% if !error_message.is_empty() %}
@@ -21,44 +21,44 @@
       <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
 
       <label class="flex flex-col gap-stack-xs">
-        <span class="font-label-md text-label-md text-on-surface">Note</span>
+        <span class="font-label-md text-label-md text-on-surface">{{ chrome.t("admin-dcr-new-field-note") }}</span>
         <input type="text"
                name="note"
                value="{{ note }}"
-               placeholder="What is this token for? (e.g. 'Claude Desktop — formshive')"
+               placeholder="{{ chrome.t('admin-dcr-new-field-note-placeholder') }}"
                class="font-body-md text-body-md bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2">
-        <span class="font-label-sm text-label-sm text-on-surface-variant">Optional, for your records only. The client author never sees this.</span>
+        <span class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-dcr-new-field-note-hint") }}</span>
       </label>
 
       <label class="flex flex-col gap-stack-xs">
-        <span class="font-label-md text-label-md text-on-surface">TTL (hours)</span>
+        <span class="font-label-md text-label-md text-on-surface">{{ chrome.t("admin-dcr-new-field-ttl") }}</span>
         <input type="number"
                name="ttl_hours"
                min="1"
                value="{{ ttl_hours }}"
                placeholder="24"
                class="font-body-md text-body-md bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2 w-32">
-        <span class="font-label-sm text-label-sm text-on-surface-variant">Leave blank for no expiry.</span>
+        <span class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-dcr-new-field-ttl-hint") }}</span>
       </label>
 
       <label class="flex flex-col gap-stack-xs">
-        <span class="font-label-md text-label-md text-on-surface">Max uses</span>
+        <span class="font-label-md text-label-md text-on-surface">{{ chrome.t("admin-dcr-new-field-max-uses") }}</span>
         <input type="number"
                name="max_uses"
                min="1"
                value="{{ max_uses }}"
                placeholder="1"
                class="font-body-md text-body-md bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2 w-32">
-        <span class="font-label-sm text-label-sm text-on-surface-variant">Leave blank for unlimited. Single-use (<code class="font-mono">1</code>) is the safest default.</span>
+        <span class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-dcr-new-field-max-uses-hint-part1") }}<code class="font-mono">1</code>{{ chrome.t("admin-dcr-new-field-max-uses-hint-part2") }}</span>
       </label>
 
       <div class="flex items-center gap-stack-md mt-stack-sm">
         <button type="submit"
                 class="bg-primary text-on-primary font-label-md text-label-md font-bold px-4 py-2 rounded-lg hover:opacity-90 transition-opacity">
-          Issue token
+          {{ chrome.t("admin-dcr-action-issue") }}
         </button>
         <a href="/admin/dcr-tokens"
-           class="font-label-md text-label-md text-on-surface-variant border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">Cancel</a>
+           class="font-label-md text-label-md text-on-surface-variant border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">{{ chrome.t("admin-dcr-new-action-cancel") }}</a>
       </div>
     </form>
   </div>

@@ -16,6 +16,17 @@
   }
 }
 
+@layer utilities {
+  /* Mirror physically-directional arrow glyphs under RTL. Apply class
+     `dir-flip` to a <span> wrapping &rarr;/&larr;/&rsaquo;/&lsaquo; so the
+     glyph flips to its logical counterpart without changing markup globally.
+     Activate once a real RTL locale ships (see i7-rtl-report.md). */
+  [dir="rtl"] .dir-flip {
+    display: inline-block;
+    transform: scaleX(-1);
+  }
+}
+
 /* Tailwind v4 auto-detects sources from the working directory, but we
  * pin the template glob explicitly so the CLI scans the right tree
  * regardless of where it's invoked from. */

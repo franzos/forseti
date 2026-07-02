@@ -1,12 +1,12 @@
 {% extends "admin/admin_shell.html" %}
 
-{% block admin_title %}Enroll host{% endblock %}
+{% block admin_title %}{{ chrome.t("admin-hosts-action-enroll") }}{% endblock %}
 
 {% block admin_content %}
   <div class="max-w-2xl">
-    <h1 class="font-headline-lg text-headline-lg text-on-surface mb-stack-sm">Enroll a Linux host</h1>
+    <h1 class="font-headline-lg text-headline-lg text-on-surface mb-stack-sm">{{ chrome.t("admin-hosts-new-heading") }}</h1>
     <p class="font-body-md text-body-md text-on-surface-variant mb-stack-lg">
-      A one-shot secret is revealed once on the next page. Configure the host agent with the <code class="font-mono">host_id:secret</code> credential it shows.
+      {{ chrome.t("admin-hosts-new-intro-prefix") }} <code class="font-mono">host_id:secret</code> {{ chrome.t("admin-hosts-new-intro-suffix") }}
     </p>
 
     {% if !error_message.is_empty() %}
@@ -21,18 +21,18 @@
       <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
 
       <label class="flex flex-col gap-stack-xs">
-        <span class="font-label-md text-label-md text-on-surface">Hostname</span>
+        <span class="font-label-md text-label-md text-on-surface">{{ chrome.t("admin-hosts-field-hostname") }}</span>
         <input type="text"
                name="hostname"
                value="{{ hostname }}"
                placeholder="web-01.example.com"
                required
                class="font-body-md text-body-md bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2">
-        <span class="font-label-sm text-label-sm text-on-surface-variant">A label for your records. Doesn't have to match the machine's actual hostname.</span>
+        <span class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-hosts-hostname-hint") }}</span>
       </label>
 
       <label class="flex flex-col gap-stack-xs">
-        <span class="font-label-md text-label-md text-on-surface">Organization</span>
+        <span class="font-label-md text-label-md text-on-surface">{{ chrome.t("admin-hosts-field-org") }}</span>
         <select name="org_id"
                 required
                 class="font-body-md text-body-md bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2">
@@ -40,17 +40,15 @@
             <option value="{{ o.id }}" {% if o.selected %}selected{% endif %}>{{ o.name }}</option>
           {% endfor %}
         </select>
-        <span class="font-label-sm text-label-sm text-on-surface-variant">The host belongs to this org. Fixed after enrollment.</span>
+        <span class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-hosts-org-belongs-hint") }}</span>
       </label>
 
       <fieldset class="flex flex-col gap-stack-sm">
-        <legend class="font-label-md text-label-md text-on-surface">Allowed teams</legend>
+        <legend class="font-label-md text-label-md text-on-surface">{{ chrome.t("admin-hosts-field-allowed-teams") }}</legend>
         {% if !any_teams %}
-          <p class="font-body-sm text-body-sm text-on-surface-variant">
-            No teams exist yet. This host will allow any org member. Scoping a host to specific teams needs the Organizations feature.
-          </p>
+          <p class="font-body-sm text-body-sm text-on-surface-variant">{{ chrome.t("admin-hosts-new-teams-empty") }}</p>
         {% else %}
-          <span class="font-label-sm text-label-sm text-on-surface-variant">Restrict this host to members of the selected teams. Only teams in the chosen org apply; select none to allow any org member.</span>
+          <span class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-hosts-new-teams-scope-hint") }}</span>
           {% for g in team_groups %}
             {% if !g.teams.is_empty() %}
               <div class="flex flex-col gap-stack-xs">
@@ -78,18 +76,18 @@
                  value="1"
                  {% if force_mfa %}checked{% endif %}
                  class="rounded border-outline-variant">
-          <span class="font-label-md text-label-md text-on-surface">Force MFA on this host</span>
+          <span class="font-label-md text-label-md text-on-surface">{{ chrome.t("admin-hosts-field-force-mfa") }}</span>
         </span>
-        <span class="font-label-sm text-label-sm text-on-surface-variant">Recorded now; enforced once interactive login (PAM) ships.</span>
+        <span class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-hosts-force-mfa-hint") }}</span>
       </label>
 
       <div class="flex items-center gap-stack-md mt-stack-sm">
         <button type="submit"
                 class="bg-primary text-on-primary font-label-md text-label-md font-bold px-4 py-2 rounded-lg hover:opacity-90 transition-opacity">
-          Enroll host
+          {{ chrome.t("admin-hosts-action-enroll") }}
         </button>
         <a href="/admin/hosts"
-           class="font-label-md text-label-md text-on-surface-variant border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">Cancel</a>
+           class="font-label-md text-label-md text-on-surface-variant border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">{{ chrome.t("admin-hosts-action-cancel") }}</a>
       </div>
     </form>
   </div>

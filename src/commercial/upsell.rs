@@ -40,6 +40,7 @@ pub fn render_upsell(
     csrf_token: &str,
     user_email: &str,
     feature: Feature,
+    locale: crate::locale::LanguageIdentifier,
 ) -> Response {
     const TIER_LABEL: &str = "Business";
     let status = state.license.status();
@@ -47,7 +48,12 @@ pub fn render_upsell(
     let purchase_url = effective_purchase_url(state);
 
     render(&UpsellTemplate {
-        chrome: PageChrome::from_parts(state, user_email.to_string(), csrf_token.to_string()),
+        chrome: PageChrome::from_parts(
+            state,
+            user_email.to_string(),
+            csrf_token.to_string(),
+            locale,
+        ),
         feature_label: feature.label().to_string(),
         required_tier_label: TIER_LABEL.to_string(),
         current_tier_label: TIER_LABEL.to_string(),

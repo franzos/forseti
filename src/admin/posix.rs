@@ -65,14 +65,17 @@ struct AccountRow {
     created_at_pretty: String,
 }
 
-fn project_row(a: posix_db::PosixAccount) -> AccountRow {
+fn project_row(
+    locale: &crate::locale::LanguageIdentifier,
+    a: posix_db::PosixAccount,
+) -> AccountRow {
     AccountRow {
         identity_id: a.identity_id,
         username: a.username,
         uid: a.uid,
         gid: a.gid,
         enabled: a.enabled != 0,
-        created_at_pretty: humanise_timestamp(&a.created_at),
+        created_at_pretty: humanise_timestamp(locale, &a.created_at),
         created_at: a.created_at,
     }
 }
@@ -154,7 +157,10 @@ pub async fn list(State(state): State<AppState>, admin: RequireAdmin, csrf: Csrf
     let cap = effective_cap(&linux_auth, max_seats, state.cfg.posix.free_seats);
     let current = accounts.iter().filter(|a| a.enabled != 0).count() as u32;
 
-    let rows = accounts.into_iter().map(project_row).collect();
+    let rows = accounts
+        .into_iter()
+        .map(|a| project_row(&ctx.locale, a))
+        .collect();
     let chrome = ctx.chrome(&csrf);
     render(&PosixListTemplate {
         chrome,
@@ -422,7 +428,7 @@ async fn render_account(
         Ok(rows) => rows
             .into_iter()
             .map(|k| KeyRow {
-                created_at_pretty: humanise_timestamp(&k.created_at),
+                created_at_pretty: humanise_timestamp(&ctx.locale, &k.created_at),
                 id: k.id,
                 public_key: k.public_key,
                 comment: k.comment,
@@ -466,7 +472,7 @@ async fn render_account(
     render(&PosixAccountTemplate {
         chrome,
         admin_active: AdminSection::Posix,
-        account: project_row(account),
+        account: project_row(&ctx.locale, account),
         email,
         keys,
         teams,
