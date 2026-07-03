@@ -21,7 +21,7 @@
     <input type="text"
            name="q"
            value="{{ filter_q }}"
-           placeholder="{{ chrome.t('admin-clients-search-placeholder') }}"
+           placeholder="{{ chrome.t("admin-clients-search-placeholder") }}"
            class="font-body-md text-body-md bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2 flex-1 min-w-[16rem]">
     <select name="type"
             class="font-body-md text-body-md bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2">
@@ -76,15 +76,15 @@
                           {% if !r.verified_by.is_empty() %}title="Verified by {{ r.verified_by }}{% if !r.verified_at.is_empty() %} at {{ r.verified_at }}{% endif %}
                           "
                           {% else %}
-                          title="{{ chrome.t('admin-client-badge-verified') }}"
+                          title="{{ chrome.t("admin-client-badge-verified") }}"
                           {% endif %}>{{ chrome.t("admin-client-badge-verified") }}</span>
                   {% else %}
                     <span class="font-label-sm text-label-sm bg-error-container text-on-error-container px-2 py-0.5 rounded-full font-semibold"
-                          title="{{ chrome.t('admin-clients-badge-unverified-title') }}">{{ chrome.t("admin-client-badge-unverified") }}</span>
+                          title="{{ chrome.t("admin-clients-badge-unverified-title") }}">{{ chrome.t("admin-client-badge-unverified") }}</span>
                   {% endif %}
                   {% if r.self_registered %}
                     <span class="font-label-sm text-label-sm bg-surface-container-high text-on-surface-variant px-2 py-0.5 rounded-full font-semibold"
-                          title="{{ chrome.t('admin-clients-badge-self-registered-title') }}">{{ chrome.t("admin-clients-badge-self-registered") }}</span>
+                          title="{{ chrome.t("admin-clients-badge-self-registered-title") }}">{{ chrome.t("admin-clients-badge-self-registered") }}</span>
                   {% endif %}
                 </div>
               </td>

@@ -133,6 +133,13 @@ pub(crate) struct PageChrome {
     /// Negotiated request locale. Drives `<html lang/dir>` and every
     /// `chrome.t(...)` lookup. Required at construction, never defaulted.
     pub(crate) locale: LanguageIdentifier,
+    /// Pre-rendered `:root` CSS custom properties for the resolved theme.
+    /// Defaults to the global (operator) theme; tenant pages override via
+    /// [`PageChrome::with_theme`].
+    pub(crate) theme_css_root: String,
+    /// Pre-rendered `html.dark` CSS custom properties for the resolved
+    /// theme's dark variant.
+    pub(crate) theme_css_dark: String,
 }
 
 impl PageChrome {
@@ -165,6 +172,10 @@ impl PageChrome {
         is_admin: bool,
         locale: LanguageIdentifier,
     ) -> Self {
+        let theme = crate::theming::resolve(
+            &crate::theming::TokenOverrides::default(),
+            &crate::theming::global_overrides(&brand),
+        );
         Self {
             brand,
             version: FORSETI_VERSION,
@@ -173,7 +184,27 @@ impl PageChrome {
             is_admin,
             theme_pref: crate::theme::ThemePref::System,
             locale,
+            theme_css_root: theme.css_root(),
+            theme_css_dark: theme.css_dark(),
         }
+    }
+
+    /// Override the chrome's theme, e.g. with a tenant-resolved theme
+    /// instead of the global default set by [`Self::from_brand_with_admin`].
+    pub(crate) fn with_theme(mut self, theme: crate::theming::ResolvedTheme) -> Self {
+        self.theme_css_root = theme.css_root();
+        self.theme_css_dark = theme.css_dark();
+        self
+    }
+
+    /// Defence-in-depth: strip `\`/control chars so the operator brand name can't escape the CSS string quote.
+    pub(crate) fn brand_name_css(&self) -> String {
+        self.brand
+            .name
+            .chars()
+            .filter(|c| *c != '\\' && !c.is_control())
+            .take(128)
+            .collect()
     }
 
     pub(crate) fn t(&self, id: &str) -> String {
@@ -195,6 +226,8 @@ impl PageChrome {
         crate::i18n::lookup_args(&self.locale, id, &args)
     }
 
+    // i18n helper: id plus three name/value pairs; a struct would obscure the call site.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn tv3(
         &self,
         id: &str,
@@ -274,6 +307,10 @@ mod tests {
                 support_email: None,
                 logo_url: None,
                 consent_intro: String::new(),
+                theme_preset: None,
+                brand_primary: None,
+                brand_on_primary: None,
+                brand_secondary: None,
             },
             String::new(),
             String::new(),
@@ -297,6 +334,41 @@ mod tests {
     #[test]
     fn dir_defaults_ltr() {
         assert_eq!(chrome("en").dir(), "ltr");
+    }
+
+    fn chrome_named(name: &str) -> PageChrome {
+        PageChrome::from_brand_with_admin(
+            BrandConfig {
+                name: name.to_string(),
+                support_email: None,
+                logo_url: None,
+                consent_intro: String::new(),
+                theme_preset: None,
+                brand_primary: None,
+                brand_on_primary: None,
+                brand_secondary: None,
+            },
+            String::new(),
+            String::new(),
+            false,
+            "en".parse().unwrap(),
+        )
+    }
+
+    #[test]
+    fn brand_name_css_strips_backslash() {
+        assert_eq!(chrome_named("Acme\\").brand_name_css(), "Acme");
+    }
+
+    #[test]
+    fn brand_name_css_strips_control_chars() {
+        assert_eq!(chrome_named("Acme\nCorp\t!").brand_name_css(), "AcmeCorp!");
+    }
+
+    #[test]
+    fn brand_name_css_clamps_to_128_chars() {
+        let long_name = "A".repeat(500);
+        assert_eq!(chrome_named(&long_name).brand_name_css().len(), 128);
     }
 
     fn parts_with(headers: HeaderMap, uri: &str) -> axum::http::request::Parts {

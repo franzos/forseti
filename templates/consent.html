@@ -57,7 +57,7 @@
 
   {% if verified %}
     <p class="flex items-center gap-1 font-label-sm text-label-sm text-on-surface-variant"
-       title="{{ chrome.t('consent-verified-by-admin') }}">
+       title="{{ chrome.t("consent-verified-by-admin") }}">
       <svg xmlns="http://www.w3.org/2000/svg"
            width="16"
            height="16"
@@ -123,7 +123,7 @@
                      class="flex-1 font-body-sm text-body-sm text-on-surface">
                 {{ scope.description }}
                 <span class="block font-label-sm text-label-sm text-on-surface-variant"
-                      title="{{ chrome.t('consent-required-for-signin') }}">{{ chrome.t("consent-required-for-signin") }}</span>
+                      title="{{ chrome.t("consent-required-for-signin") }}">{{ chrome.t("consent-required-for-signin") }}</span>
               </label>
             {% else %}
               <input type="checkbox"

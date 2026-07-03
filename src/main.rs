@@ -37,6 +37,7 @@ mod signed_cookie;
 mod state;
 mod static_assets;
 mod theme;
+mod theming;
 mod web;
 mod webhook;
 

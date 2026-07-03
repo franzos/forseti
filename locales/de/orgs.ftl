@@ -96,3 +96,13 @@ orgs-branding-subtitle-infix = in
 orgs-branding-subtitle-suffix = zurück, wenn nicht gesetzt.
 orgs-branding-field-logo-url = Logo-URL
 orgs-branding-field-support-email = Support-E-Mail
+orgs-branding-theme-preset = Design-Vorlage
+orgs-branding-primary = Primärfarbe
+orgs-branding-on-primary = Text auf Primärfarbe
+orgs-branding-secondary = Akzentfarbe
+orgs-branding-request-public = Öffentliche Anmeldeseite aktivieren (/o/ihr-slug)
+orgs-branding-preview = Vorschau
+
+# Öffentliche Landingpage (public_landing.html)
+orgs-public-landing-note = Zum Anmelden öffnen Sie die Anwendung, die Ihr Team bereitgestellt hat. Die Anmeldung erfolgt dort.
+orgs-public-landing-register = Konto erstellen

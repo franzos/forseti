@@ -12,6 +12,7 @@ use axum::{
     Router,
 };
 use tokio_util::sync::CancellationToken;
+use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::audit;
@@ -158,6 +159,7 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         .merge(csrf_routes)
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
+        .route("/o/{slug}", get(orgs::public_landing::landing))
         // Public JWKS for outbound webhook signature verification (RFC 8417 SETs); outside the CSRF layer.
         .route(
             "/.well-known/webhook-jwks.json",
@@ -173,6 +175,12 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             audit::middleware,
+        ))
+        // No page here needs to leak its URL (often carrying tokens/state params) to a
+        // third-party Location header via the Referer request header on outbound links.
+        .layer(SetResponseHeaderLayer::overriding(
+            axum::http::header::REFERRER_POLICY,
+            axum::http::HeaderValue::from_static("no-referrer"),
         ))
         .layer(TraceLayer::new_for_http())
         .with_state(state.clone());

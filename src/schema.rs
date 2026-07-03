@@ -80,6 +80,11 @@ diesel::table! {
         created_at -> Text,
         created_by -> Nullable<Text>,
         member_visibility -> Text,
+        theme_preset -> Nullable<Text>,
+        brand_primary -> Nullable<Text>,
+        brand_on_primary -> Nullable<Text>,
+        brand_secondary -> Nullable<Text>,
+        public_login_enabled -> Integer,
     }
 }
 

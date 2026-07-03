@@ -255,8 +255,24 @@ pub(crate) async fn oauth_consent(
         })
         .collect();
 
+    // Theme from the active-org cookie, same source `finalize_consent` reads
+    // for the `org` claim; falls back to the global theme when absent or the
+    // org hasn't opted in (enabled), gated by `public_branding_by_id`.
+    let active_org_id = crate::orgs::cookie::read_active_org_cookie(
+        &headers,
+        &state.cookie_secret,
+        state.cfg.orgs.active_org_cookie_ttl_seconds,
+    );
+    let chrome = crate::theming::theme_chrome_for_org_id(
+        &state.db,
+        &state.cfg.brand,
+        PageChrome::from_parts(&state, subject_email.clone(), csrf.0, locale),
+        active_org_id.as_deref(),
+    )
+    .await;
+
     render(&ConsentTemplate {
-        chrome: PageChrome::from_parts(&state, subject_email.clone(), csrf.0, locale),
+        chrome,
         consent_intro: state.cfg.brand.consent_intro.clone(),
         client_name,
         subject_email,
@@ -617,6 +633,8 @@ impl FinalizeOutcome {
 
 /// Build the id_token claims from identity traits + granted scopes, then
 /// accept the consent challenge. Shared by the auto-grant and Allow paths.
+// Cohesive consent-finalization inputs; splitting into a struct adds no clarity.
+#[allow(clippy::too_many_arguments)]
 async fn finalize_consent(
     state: &AppState,
     challenge: &str,

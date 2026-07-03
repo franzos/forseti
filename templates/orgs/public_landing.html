@@ -1,0 +1,23 @@
+{% extends "card.html" %}
+
+{% block title %}
+  {% match org_name %}
+    {% when Some with (name) %}{{ name }}
+    {% when None %}{{ chrome.brand.name }}
+  {% endmatch %}
+{% endblock %}
+
+{% block card_title %}
+  {% match org_name %}
+    {% when Some with (name) %}{{ name }}
+    {% when None %}{{ chrome.brand.name }}
+  {% endmatch %}
+{% endblock %}
+
+{% block card_body %}
+  <p class="font-body-md text-body-md text-on-surface-variant">{{ chrome.t("orgs-public-landing-note") }}</p>
+  <a href="/registration"
+     class="inline-flex items-center justify-center font-label-lg text-label-lg rounded-lg bg-primary text-on-primary px-stack-lg py-stack-sm hover:opacity-90 transition-opacity">
+    {{ chrome.t("orgs-public-landing-register") }}
+  </a>
+{% endblock %}

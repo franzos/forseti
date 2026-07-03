@@ -295,6 +295,10 @@ mod tests {
             support_email: None,
             logo_url: None,
             consent_intro: String::new(),
+            theme_preset: None,
+            brand_primary: None,
+            brand_on_primary: None,
+            brand_secondary: None,
         };
 
         for locale_str in ["en", "de"] {

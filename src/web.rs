@@ -60,6 +60,10 @@ pub(crate) struct FlowQuery {
     /// `whoami` returns a session, else the user livelocks at `privileged_session_max_age`.
     #[serde(default, deserialize_with = "deserialize_bool_str")]
     pub(crate) refresh: Option<bool>,
+    /// Forwarded from `/oauth/login` (Hydra's `request_url`) so `/login` can
+    /// theme itself from the org's public branding; ignored by every other
+    /// consumer of `FlowQuery`.
+    pub(crate) organization_id: Option<String>,
 }
 
 /// Coerce bare query strings (`true`/`1`/`yes`/`on`) to `Option<bool>`, since the default

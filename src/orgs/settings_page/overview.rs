@@ -222,6 +222,11 @@ pub(super) async fn overview_save(
     }
     let new_slug = orgs::slugify(&form.slug);
     if new_slug != target.org.slug {
+        // Second slug write-path (after create): guard here too so a rename
+        // can't claim a route-shadowing slug the create path already refuses.
+        if orgs::is_reserved_slug(&new_slug) {
+            return (StatusCode::CONFLICT, "slug is reserved").into_response();
+        }
         // Reject duplicates loudly (the database UNIQUE constraint would
         // also catch this, but a friendly error is nicer than a 500).
         if orgs::org_by_slug(&state.db, &new_slug)
@@ -252,4 +257,19 @@ pub(super) async fn overview_save(
         None => target.base_path,
     };
     Redirect::to(&redirect_to).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::orgs;
+
+    /// The rename path slugifies the submitted slug then guards it, same as
+    /// create. A submitted "admin" must resolve to a reserved slug and be
+    /// rejected rather than shadowing `/admin` and friends.
+    #[test]
+    fn rename_to_reserved_word_is_flagged() {
+        assert!(orgs::is_reserved_slug(&orgs::slugify("Admin")));
+        assert!(orgs::is_reserved_slug(&orgs::slugify("login")));
+        assert!(!orgs::is_reserved_slug(&orgs::slugify("Acme Corp")));
+    }
 }

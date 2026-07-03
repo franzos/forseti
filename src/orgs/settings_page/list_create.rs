@@ -128,6 +128,9 @@ pub(super) async fn orgs_create(
             }
         },
     };
+    if orgs::is_reserved_slug(&slug) {
+        return (StatusCode::CONFLICT, "slug is reserved").into_response();
+    }
     if orgs::org_by_slug(&state.db, &slug)
         .await
         .ok()

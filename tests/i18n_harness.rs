@@ -170,13 +170,12 @@ fn kratos_placeables_match_across_locales() {
 fn locales_have_identical_key_sets() {
     let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("locales");
     let en = keys_for_locale(&base.join("en"));
-    for locale in ["de"] {
-        let other = keys_for_locale(&base.join(locale));
-        let missing: Vec<_> = en.difference(&other).collect();
-        let extra: Vec<_> = other.difference(&en).collect();
-        assert!(
-            missing.is_empty() && extra.is_empty(),
-            "locale {locale}: missing {missing:?}, extra {extra:?}"
-        );
-    }
+    let locale = "de";
+    let other = keys_for_locale(&base.join(locale));
+    let missing: Vec<_> = en.difference(&other).collect();
+    let extra: Vec<_> = other.difference(&en).collect();
+    assert!(
+        missing.is_empty() && extra.is_empty(),
+        "locale {locale}: missing {missing:?}, extra {extra:?}"
+    );
 }

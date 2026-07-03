@@ -61,10 +61,10 @@ pub(crate) async fn oauth_login(
             return Redirect::to(&crate::auth::aal2_step_up_url(&self_login_url)).into_response();
         }
         OptionalSession::None => {
-            let url = format!(
-                "/login?return_to={}&lang={}",
-                ory_client::apis::urlencode(&self_login_url),
+            let url = anonymous_login_redirect_url(
+                &self_login_url,
                 login_locale.language.as_str(),
+                req.request_url.as_str(),
             );
             return Redirect::to(&url).into_response();
         }
@@ -166,6 +166,22 @@ pub(crate) async fn oauth_login(
     }
 }
 
+/// Build the `/login` redirect for an anonymous visitor, forwarding
+/// `organization_id` (if present on the original `/oauth2/auth` request) so
+/// `/login` can theme itself from the org's public branding.
+fn anonymous_login_redirect_url(self_login_url: &str, lang: &str, request_url: &str) -> String {
+    let org_q = parse_organization_id_param(request_url)
+        .filter(|id: &String| !id.is_empty())
+        .map(|id| format!("&organization_id={}", ory_client::apis::urlencode(&id)))
+        .unwrap_or_default();
+    format!(
+        "/login?return_to={}&lang={}{}",
+        ory_client::apis::urlencode(self_login_url),
+        lang,
+        org_q,
+    )
+}
+
 /// Pull `organization_id=<id>` out of Hydra's `request_url` (the verbatim
 /// `/oauth2/auth` URL the downstream app called).
 fn parse_organization_id_param(request_url: &str) -> Option<String> {
@@ -178,7 +194,7 @@ fn parse_organization_id_param(request_url: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_organization_id_param;
+    use super::{anonymous_login_redirect_url, parse_organization_id_param};
 
     #[test]
     fn parses_valid_organization_id() {
@@ -205,5 +221,21 @@ mod tests {
             parse_organization_id_param(url),
             Some("acme-co".to_string())
         );
+    }
+
+    #[test]
+    fn anonymous_redirect_forwards_organization_id() {
+        let request_url =
+            "https://hydra.example.com/oauth2/auth?client_id=x&organization_id=acme-id";
+        let url = anonymous_login_redirect_url("https://self/oauth/login", "en", request_url);
+        assert!(url.starts_with("/login?return_to="));
+        assert!(url.contains("organization_id=acme-id"));
+    }
+
+    #[test]
+    fn anonymous_redirect_omits_organization_id_when_absent() {
+        let request_url = "https://hydra.example.com/oauth2/auth?client_id=x";
+        let url = anonymous_login_redirect_url("https://self/oauth/login", "en", request_url);
+        assert!(!url.contains("organization_id"));
     }
 }

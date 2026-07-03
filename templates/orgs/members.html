@@ -169,7 +169,7 @@
                     {% if is_owner && !m.is_self %}
                       <form method="POST"
                             action="{% if is_default %}/settings/organization/members/{{ m.identity_id }}/remove{% else %}/settings/organizations/{{ org.slug }}/members/{{ m.identity_id }}/remove{% endif %}"
-                            onsubmit="return confirm('{{ chrome.tv1('orgs-confirm-remove-member', 'email', &m.email) }}');"
+                            onsubmit="return confirm('{{ chrome.tv1("orgs-confirm-remove-member", "email", &m.email) }}');"
                             class="inline">
                         <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
                         <button type="submit" class="text-error font-label-sm">{{ chrome.t("orgs-members-action-remove") }}</button>

@@ -73,7 +73,7 @@
                        class="font-label-sm text-primary">{{ chrome.t("orgs-teams-action-manage-members") }}</a>
                     <form method="POST"
                           action="{% if is_default %}/settings/organization/teams/{{ t.id }}/delete{% else %}/settings/organizations/{{ org.slug }}/teams/{{ t.id }}/delete{% endif %}"
-                          onsubmit="return confirm('{{ chrome.tv1('orgs-confirm-delete-team', 'name', &t.name) }}');"
+                          onsubmit="return confirm('{{ chrome.tv1("orgs-confirm-delete-team", "name", &t.name) }}');"
                           class="inline">
                       <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
                       <button type="submit" class="text-error font-label-sm">{{ chrome.t("orgs-teams-action-delete") }}</button>

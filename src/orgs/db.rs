@@ -28,6 +28,11 @@ pub struct Org {
     pub created_at: String,
     pub created_by: Option<String>,
     pub member_visibility: String,
+    pub theme_preset: Option<String>,
+    pub brand_primary: Option<String>,
+    pub brand_on_primary: Option<String>,
+    pub brand_secondary: Option<String>,
+    pub public_login_enabled: i32,
 }
 
 // `added_by` is selected by `as_select()` but not read at runtime.
@@ -329,6 +334,92 @@ pub async fn update_branding(
             .map(|_| ())
     })?;
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn update_theme(
+    db: &DbPool,
+    org_id: &str,
+    preset: Option<&str>,
+    primary: Option<&str>,
+    on_primary: Option<&str>,
+    secondary: Option<&str>,
+    public_login_enabled: i32,
+) -> anyhow::Result<()> {
+    let id = org_id.to_string();
+    let preset = preset.map(str::to_string);
+    let primary = primary.map(str::to_string);
+    let on_primary = on_primary.map(str::to_string);
+    let secondary = secondary.map(str::to_string);
+    db_interact!(db, |conn| {
+        diesel::update(organizations::table.filter(organizations::id.eq(&id)))
+            .set((
+                organizations::theme_preset.eq(preset.clone()),
+                organizations::brand_primary.eq(primary.clone()),
+                organizations::brand_on_primary.eq(on_primary.clone()),
+                organizations::brand_secondary.eq(secondary.clone()),
+                organizations::public_login_enabled.eq(public_login_enabled),
+            ))
+            .execute(conn)
+            .map(|_| ())
+    })?;
+    Ok(())
+}
+
+/// Pre-auth-readable projection of an org's public branding. Excludes
+/// `support_email`, ids, and members; readers only return a row when the org
+/// has opted in (`public_login_enabled=1`).
+#[derive(Queryable, Debug, Clone, Serialize)]
+pub struct PublicBranding {
+    pub name: String,
+    pub preset: Option<String>,
+    pub primary: Option<String>,
+    pub on_primary: Option<String>,
+    pub secondary: Option<String>,
+}
+
+pub async fn public_branding_by_id(
+    db: &DbPool,
+    id: &str,
+) -> anyhow::Result<Option<PublicBranding>> {
+    let i = id.to_string();
+    let row: Option<PublicBranding> = db_interact!(db, |conn| {
+        organizations::table
+            .filter(organizations::id.eq(&i))
+            .filter(organizations::public_login_enabled.eq(1))
+            .select((
+                organizations::name,
+                organizations::theme_preset,
+                organizations::brand_primary,
+                organizations::brand_on_primary,
+                organizations::brand_secondary,
+            ))
+            .first(conn)
+            .optional()
+    })?;
+    Ok(row)
+}
+
+pub async fn public_branding_by_slug(
+    db: &DbPool,
+    slug: &str,
+) -> anyhow::Result<Option<PublicBranding>> {
+    let s = slug.to_string();
+    let row: Option<PublicBranding> = db_interact!(db, |conn| {
+        organizations::table
+            .filter(organizations::slug.eq(&s))
+            .filter(organizations::public_login_enabled.eq(1))
+            .select((
+                organizations::name,
+                organizations::theme_preset,
+                organizations::brand_primary,
+                organizations::brand_on_primary,
+                organizations::brand_secondary,
+            ))
+            .first(conn)
+            .optional()
+    })?;
+    Ok(row)
 }
 
 pub async fn delete_org(db: &DbPool, org_id: &str) -> anyhow::Result<()> {
@@ -789,6 +880,29 @@ pub async fn finalize_invite_txn(
 
 // --- slug helpers --------------------------------------------------------
 
+/// Slugs that would shadow a top-level route (`/o`, `/admin`, ...) if an org
+/// claimed them. Checked at create time; never enforced retroactively.
+pub const RESERVED_SLUGS: &[&str] = &[
+    "o",
+    "admin",
+    "login",
+    "logout",
+    "register",
+    "registration",
+    "oauth",
+    "oauth2",
+    "static",
+    "settings",
+    "consent",
+    "error",
+    "api",
+    "well-known",
+];
+
+pub fn is_reserved_slug(slug: &str) -> bool {
+    RESERVED_SLUGS.contains(&slug)
+}
+
 /// Auto-generate a URL-safe slug from a human-readable name. Drops anything
 /// that isn't `[a-z0-9-]`; collapses runs of dashes; trims leading/trailing
 /// dashes. Empty result falls back to `"org"`.
@@ -830,12 +944,12 @@ pub async fn suggest_slug(db: &DbPool, name: &str) -> anyhow::Result<String> {
             .load(conn)
     })?;
     let taken: std::collections::HashSet<String> = existing.into_iter().collect();
-    if !taken.contains(&base) {
+    if !taken.contains(&base) && !is_reserved_slug(&base) {
         return Ok(base);
     }
     for n in 2..=1000 {
         let candidate = format!("{base}-{n}");
-        if !taken.contains(&candidate) {
+        if !taken.contains(&candidate) && !is_reserved_slug(&candidate) {
             return Ok(candidate);
         }
     }
@@ -846,6 +960,63 @@ pub async fn suggest_slug(db: &DbPool, name: &str) -> anyhow::Result<String> {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+    use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
+
+    const TEST_MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations/sqlite");
+
+    /// Single-connection `:memory:` pool: sqlite's `:memory:` database lives
+    /// only on the connection that created it, so the pool must never hand
+    /// out a second connection or the migrated schema disappears.
+    async fn test_pool() -> DbPool {
+        use deadpool_diesel::sqlite::{Manager, Pool, Runtime};
+        let manager = Manager::new(":memory:", Runtime::Tokio1);
+        let pool = Pool::builder(manager)
+            .max_size(1)
+            .build()
+            .expect("build test sqlite pool");
+        let conn = pool.get().await.expect("get test conn");
+        conn.interact(|c: &mut diesel::sqlite::SqliteConnection| {
+            c.run_pending_migrations(TEST_MIGRATIONS).map(|_| ())
+        })
+        .await
+        .expect("interact panic")
+        .expect("run test migrations");
+        DbPool::Sqlite(pool)
+    }
+
+    #[tokio::test]
+    async fn public_branding_hidden_until_enabled() {
+        let db = test_pool().await;
+        create_org(&db, "o1", "acme", "Acme", None)
+            .await
+            .expect("create_org");
+
+        // Not yet enabled: hidden.
+        update_theme(&db, "o1", Some("classic"), Some("#111827"), None, None, 0)
+            .await
+            .expect("update_theme");
+        let hidden = public_branding_by_slug(&db, "acme")
+            .await
+            .expect("query by_slug");
+        assert!(hidden.is_none());
+
+        update_theme(&db, "o1", Some("classic"), Some("#111827"), None, None, 1)
+            .await
+            .expect("update_theme");
+        let visible = public_branding_by_slug(&db, "acme")
+            .await
+            .expect("query by_slug")
+            .expect("branding should be visible once enabled");
+        assert_eq!(visible.name, "Acme");
+        assert_eq!(visible.preset.as_deref(), Some("classic"));
+        assert_eq!(visible.primary.as_deref(), Some("#111827"));
+
+        let by_id = public_branding_by_id(&db, "o1")
+            .await
+            .expect("query by_id")
+            .expect("branding should be visible by id too");
+        assert_eq!(by_id.name, "Acme");
+    }
 
     fn invite_with_expiry(expires_at: &str) -> OrgInvite {
         OrgInvite {
@@ -924,5 +1095,16 @@ mod tests {
         assert_eq!(slugify(""), "org");
         assert_eq!(slugify("!!!"), "org");
         assert_eq!(slugify("---hi---"), "hi");
+    }
+
+    #[tokio::test]
+    async fn suggest_slug_skips_reserved_words() {
+        let db = test_pool().await;
+        let slug = suggest_slug(&db, "Admin").await.expect("suggest_slug");
+        assert!(
+            !is_reserved_slug(&slug),
+            "suggested a reserved slug: {slug}"
+        );
+        assert_eq!(slug, "admin-2");
     }
 }

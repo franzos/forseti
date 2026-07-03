@@ -55,6 +55,56 @@
                class="border border-outline-variant rounded-lg px-3 py-2 bg-surface-container-low">
       {% endmatch %}
     </label>
+
+    <hr class="border-outline-variant">
+
+    {% let current_preset = org.theme_preset.as_deref().unwrap_or("") %}
+    <label class="flex flex-col gap-1">
+      <span class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("orgs-branding-theme-preset") }}</span>
+      <select name="theme_preset"
+              class="border border-outline-variant rounded-lg px-3 py-2 bg-surface-container-low">
+        <option value=""{% if current_preset.is_empty() %} selected{% endif %}></option>
+        {% for p in presets %}
+        <option value="{{ p }}"{% if *p == current_preset %} selected{% endif %}>{{ p }}</option>
+        {% endfor %}
+      </select>
+    </label>
+
+    {% let primary_hex = org.brand_primary.as_deref().unwrap_or("#000000") %}
+    {% let on_primary_hex = org.brand_on_primary.as_deref().unwrap_or("#ffffff") %}
+    {% let secondary_hex = org.brand_secondary.as_deref().unwrap_or("#555f73") %}
+    <div class="grid grid-cols-1 sm:grid-cols-3 gap-stack-md">
+      <label class="flex flex-col gap-1">
+        <span class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("orgs-branding-primary") }}</span>
+        <input type="color" id="brand_primary" name="brand_primary" value="{{ primary_hex }}">
+      </label>
+      <label class="flex flex-col gap-1">
+        <span class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("orgs-branding-on-primary") }}</span>
+        <input type="color" id="brand_on_primary" name="brand_on_primary" value="{{ on_primary_hex }}">
+      </label>
+      <label class="flex flex-col gap-1">
+        <span class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("orgs-branding-secondary") }}</span>
+        <input type="color" id="brand_secondary" name="brand_secondary" value="{{ secondary_hex }}">
+      </label>
+    </div>
+
+    <div>
+      <span class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("orgs-branding-preview") }}</span>
+      <div id="theme_preview"
+           class="mt-1 rounded-lg px-4 py-3 font-label-md text-label-md"
+           style="background-color: {{ primary_hex }}; color: {{ on_primary_hex }};">
+        {{ org.name }}
+      </div>
+    </div>
+
+    <label class="flex items-center gap-stack-sm">
+      <input type="checkbox"
+             name="request_public_login"
+             value="on"
+             {% if org.public_login_enabled == 1 %}checked{% endif %}>
+      <span class="font-body-md text-body-md text-on-surface">{{ chrome.t("orgs-branding-request-public") }}</span>
+    </label>
+
     <div>
       <button type="submit"
               class="bg-primary text-on-primary rounded-lg px-4 py-2 font-label-md text-label-md">{{ chrome.t("common-action-save") }}</button>
@@ -62,4 +112,19 @@
   </form>
 </section>
 </div>
+<script>
+  (function () {
+    'use strict';
+    var primary = document.getElementById('brand_primary');
+    var onPrimary = document.getElementById('brand_on_primary');
+    var preview = document.getElementById('theme_preview');
+    if (!primary || !onPrimary || !preview) return;
+    function update() {
+      preview.style.backgroundColor = primary.value;
+      preview.style.color = onPrimary.value;
+    }
+    primary.addEventListener('input', update);
+    onPrimary.addEventListener('input', update);
+  })();
+</script>
 {% endblock %}

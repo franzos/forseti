@@ -40,6 +40,14 @@ pub(crate) async fn registration(
     session: OptionalSession,
     Chrome(chrome): Chrome,
 ) -> Response {
+    let chrome = apply_brand_hint(
+        &state.db,
+        &state.cfg.brand,
+        &state.cookie_secret,
+        &headers,
+        chrome,
+    )
+    .await;
     let cookie = cookies::cookie_header(&headers);
     // Explicit ?prefill_email= wins over the one-shot cookie dropped by
     // /claim-email/confirm, which we clear on render.
@@ -109,6 +117,23 @@ pub(crate) async fn registration(
     }
 }
 
+// Fail-safe: any missing/invalid step leaves the global theme.
+async fn apply_brand_hint(
+    db: &crate::db::DbPool,
+    brand: &crate::config::BrandConfig,
+    cookie_secret: &[u8],
+    headers: &HeaderMap,
+    chrome: PageChrome,
+) -> PageChrome {
+    let Some(slug) = crate::theming::brand_hint::read_brand_hint(headers, cookie_secret) else {
+        return chrome;
+    };
+    match crate::orgs::db::public_branding_by_slug(db, &slug).await {
+        Ok(Some(pb)) => crate::theming::theme_chrome_for_org(chrome, brand, &pb),
+        _ => chrome,
+    }
+}
+
 /// Clear the one-shot prefill cookie from `/claim-email/confirm`.
 fn attach_prefill_clear_cookie(resp: &mut Response, secure: bool) {
     let secure_attr = if secure { "; Secure" } else { "" };
@@ -150,4 +175,124 @@ fn render_registration(
         form,
         webauthn_scripts,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::apply_brand_hint;
+    use crate::config::BrandConfig;
+    use crate::db::DbPool;
+    use crate::page_chrome::PageChrome;
+    use crate::theming::brand_hint::set_brand_hint;
+    use axum::http::{header::COOKIE, HeaderMap};
+    use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
+
+    const TEST_MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations/sqlite");
+    const SECRET: &[u8] = b"registration-brand-hint-test-secret";
+
+    /// Single-connection `:memory:` pool, mirroring `orgs::db`'s test helper.
+    async fn test_pool() -> DbPool {
+        use deadpool_diesel::sqlite::{Manager, Pool, Runtime};
+        let manager = Manager::new(":memory:", Runtime::Tokio1);
+        let pool = Pool::builder(manager)
+            .max_size(1)
+            .build()
+            .expect("build test sqlite pool");
+        let conn = pool.get().await.expect("get test conn");
+        conn.interact(|c: &mut diesel::sqlite::SqliteConnection| {
+            c.run_pending_migrations(TEST_MIGRATIONS).map(|_| ())
+        })
+        .await
+        .expect("interact panic")
+        .expect("run test migrations");
+        DbPool::Sqlite(pool)
+    }
+
+    fn brand() -> BrandConfig {
+        BrandConfig {
+            name: String::new(),
+            support_email: None,
+            logo_url: None,
+            consent_intro: String::new(),
+            theme_preset: None,
+            brand_primary: None,
+            brand_on_primary: None,
+            brand_secondary: None,
+        }
+    }
+
+    fn chrome() -> PageChrome {
+        PageChrome::from_brand_with_admin(
+            brand(),
+            String::new(),
+            String::new(),
+            false,
+            "en".parse().unwrap(),
+        )
+    }
+
+    fn headers_with_brand_hint(slug: &str) -> HeaderMap {
+        let set_cookie = set_brand_hint(SECRET, slug, false);
+        let value = set_cookie
+            .split_once('=')
+            .unwrap()
+            .1
+            .split(';')
+            .next()
+            .unwrap();
+        let mut h = HeaderMap::new();
+        h.insert(
+            COOKIE,
+            format!("forseti_brand_hint={value}").parse().unwrap(),
+        );
+        h
+    }
+
+    #[tokio::test]
+    async fn enabled_org_brand_hint_applies_theme() {
+        let db = test_pool().await;
+        crate::orgs::db::create_org(&db, "o1", "acme", "Acme", None)
+            .await
+            .expect("create_org");
+        crate::orgs::db::update_theme(&db, "o1", Some("midnight"), Some("#123456"), None, None, 1)
+            .await
+            .expect("update_theme");
+
+        let headers = headers_with_brand_hint("acme");
+        let themed = apply_brand_hint(&db, &brand(), SECRET, &headers, chrome()).await;
+        assert!(themed.theme_css_root.contains("#123456"));
+    }
+
+    #[tokio::test]
+    async fn disabled_org_leaves_global_theme() {
+        let db = test_pool().await;
+        crate::orgs::db::create_org(&db, "o1", "acme", "Acme", None)
+            .await
+            .expect("create_org");
+        crate::orgs::db::update_theme(&db, "o1", Some("midnight"), Some("#123456"), None, None, 0)
+            .await
+            .expect("update_theme");
+
+        let default_css = chrome().theme_css_root;
+        let headers = headers_with_brand_hint("acme");
+        let themed = apply_brand_hint(&db, &brand(), SECRET, &headers, chrome()).await;
+        assert_eq!(themed.theme_css_root, default_css);
+    }
+
+    #[tokio::test]
+    async fn unknown_slug_leaves_global_theme() {
+        let db = test_pool().await;
+        let default_css = chrome().theme_css_root;
+        let headers = headers_with_brand_hint("nope");
+        let themed = apply_brand_hint(&db, &brand(), SECRET, &headers, chrome()).await;
+        assert_eq!(themed.theme_css_root, default_css);
+    }
+
+    #[tokio::test]
+    async fn absent_cookie_leaves_global_theme() {
+        let db = test_pool().await;
+        let default_css = chrome().theme_css_root;
+        let themed = apply_brand_hint(&db, &brand(), SECRET, &HeaderMap::new(), chrome()).await;
+        assert_eq!(themed.theme_css_root, default_css);
+    }
 }

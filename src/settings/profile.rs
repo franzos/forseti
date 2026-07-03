@@ -42,6 +42,8 @@ pub(crate) struct SettingsProfileTemplate {
     pub(crate) referrer_banner: Option<crate::handoff::ReferrerBannerView>,
 }
 
+// Axum handler: each argument is an extractor; signature is dictated by the framework.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn settings_profile(
     State(state): State<AppState>,
     Query(query): Query<FlowQuery>,

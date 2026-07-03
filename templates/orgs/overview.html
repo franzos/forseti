@@ -112,7 +112,7 @@
           <p class="font-body-md text-body-md text-on-surface-variant mb-stack-md">{{ chrome.t("orgs-danger-delete-body") }}</p>
           <form method="POST"
                 action="/settings/organizations/{{ org.slug }}/delete"
-                onsubmit="return confirm('{{ chrome.tv1('orgs-confirm-delete-org', 'name', &org.name) }}');">
+                onsubmit="return confirm('{{ chrome.tv1("orgs-confirm-delete-org", "name", &org.name) }}');">
             <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
             <button type="submit"
                     class="bg-error text-on-error rounded-lg px-4 py-2 font-label-md text-label-md">

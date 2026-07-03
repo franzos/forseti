@@ -251,6 +251,14 @@ pub struct BrandConfig {
     /// Intro paragraph rendered on `/oauth/consent` above the scope list.
     #[serde(default = "default_consent_intro")]
     pub consent_intro: String,
+    #[serde(default)]
+    pub theme_preset: Option<String>,
+    #[serde(default)]
+    pub brand_primary: Option<String>,
+    #[serde(default)]
+    pub brand_on_primary: Option<String>,
+    #[serde(default)]
+    pub brand_secondary: Option<String>,
 }
 
 fn default_brand_name() -> String {
@@ -952,6 +960,10 @@ impl AppConfig {
                 support_email: None,
                 logo_url: None,
                 consent_intro: String::new(),
+                theme_preset: None,
+                brand_primary: None,
+                brand_on_primary: None,
+                brand_secondary: None,
             },
             apps: Vec::new(),
             oauth: OAuthConfig::default(),

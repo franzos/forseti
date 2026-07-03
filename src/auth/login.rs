@@ -37,6 +37,13 @@ pub(crate) async fn login(
     session: OptionalSession,
     Chrome(chrome): Chrome,
 ) -> Response {
+    let chrome = crate::theming::theme_chrome_for_org_id(
+        &state.db,
+        &state.cfg.brand,
+        chrome,
+        query.organization_id.as_deref(),
+    )
+    .await;
     let cookie = cookies::cookie_header(&headers);
     let requested_aal = query.aal.as_deref().filter(|s| !s.is_empty());
     let refresh = matches!(query.refresh, Some(true));
@@ -130,4 +137,100 @@ fn render_login(chrome: PageChrome, flow: &serde_json::Value, return_to: Option<
         webauthn_scripts,
         aal2_unavailable,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::config::BrandConfig;
+    use crate::db::DbPool;
+    use crate::page_chrome::PageChrome;
+    use crate::theming::theme_chrome_for_org_id;
+    use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
+
+    const TEST_MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations/sqlite");
+
+    /// Single-connection `:memory:` pool, mirroring `orgs::db`'s test helper.
+    async fn test_pool() -> DbPool {
+        use deadpool_diesel::sqlite::{Manager, Pool, Runtime};
+        let manager = Manager::new(":memory:", Runtime::Tokio1);
+        let pool = Pool::builder(manager)
+            .max_size(1)
+            .build()
+            .expect("build test sqlite pool");
+        let conn = pool.get().await.expect("get test conn");
+        conn.interact(|c: &mut diesel::sqlite::SqliteConnection| {
+            c.run_pending_migrations(TEST_MIGRATIONS).map(|_| ())
+        })
+        .await
+        .expect("interact panic")
+        .expect("run test migrations");
+        DbPool::Sqlite(pool)
+    }
+
+    fn brand() -> BrandConfig {
+        BrandConfig {
+            name: String::new(),
+            support_email: None,
+            logo_url: None,
+            consent_intro: String::new(),
+            theme_preset: None,
+            brand_primary: None,
+            brand_on_primary: None,
+            brand_secondary: None,
+        }
+    }
+
+    fn chrome() -> PageChrome {
+        PageChrome::from_brand_with_admin(
+            brand(),
+            String::new(),
+            String::new(),
+            false,
+            "en".parse().unwrap(),
+        )
+    }
+
+    #[tokio::test]
+    async fn absent_org_id_leaves_global_theme() {
+        let db = test_pool().await;
+        let default_css = chrome().theme_css_root;
+        let themed = theme_chrome_for_org_id(&db, &brand(), chrome(), None).await;
+        assert_eq!(themed.theme_css_root, default_css);
+    }
+
+    #[tokio::test]
+    async fn unknown_org_id_leaves_global_theme() {
+        let db = test_pool().await;
+        let default_css = chrome().theme_css_root;
+        let themed = theme_chrome_for_org_id(&db, &brand(), chrome(), Some("nope")).await;
+        assert_eq!(themed.theme_css_root, default_css);
+    }
+
+    #[tokio::test]
+    async fn disabled_org_leaves_global_theme() {
+        let db = test_pool().await;
+        crate::orgs::db::create_org(&db, "o1", "acme", "Acme", None)
+            .await
+            .expect("create_org");
+        crate::orgs::db::update_theme(&db, "o1", Some("midnight"), Some("#123456"), None, None, 0)
+            .await
+            .expect("update_theme");
+        let default_css = chrome().theme_css_root;
+        let themed = theme_chrome_for_org_id(&db, &brand(), chrome(), Some("o1")).await;
+        assert_eq!(themed.theme_css_root, default_css);
+    }
+
+    #[tokio::test]
+    async fn enabled_org_applies_public_branding() {
+        let db = test_pool().await;
+        crate::orgs::db::create_org(&db, "o1", "acme", "Acme", None)
+            .await
+            .expect("create_org");
+        crate::orgs::db::update_theme(&db, "o1", Some("midnight"), Some("#123456"), None, None, 1)
+            .await
+            .expect("update_theme");
+
+        let themed = theme_chrome_for_org_id(&db, &brand(), chrome(), Some("o1")).await;
+        assert!(themed.theme_css_root.contains("#123456"));
+    }
 }

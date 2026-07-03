@@ -8,6 +8,9 @@
 - Scope a host to any of several org groups, not just one
 - "Use a different account" on the OAuth consent screen, to re-authenticate as someone else
 - OIDC `groups` claim: a client granted the `groups` scope receives the user's active-org team slugs (flat array) in the ID token and userinfo, for downstream role mapping (e.g. Parseable, Grafana, ArgoCD).
+- Per-organization theming: brand colors and a preset applied to login, consent, and registration
+- Three built-in themes (default, midnight, cyberpunk) with auto-derived dark-mode variants
+- Public per-org login landing page at `/o/{slug}`, owner-enabled from org branding settings
 
 ### Changed
 - Grouped the admin and settings navigation into labelled sections

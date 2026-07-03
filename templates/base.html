@@ -20,15 +20,18 @@
           as="font"
           type="font/woff2"
           crossorigin>
-    {# Brand-configurable CSS variables. Tokens consumed by Tailwind classes via @theme. #}
-    <style>
-      :root {
-        --brand-name: "{{ chrome.brand.name }}";
-        {% match chrome.brand.logo_url %}{% when Some with (url) %}--brand-logo-url: url("{{ url }}");{% when None %}{% endmatch %}
-      }
-    </style>
     {% include "partials/_theme_head.html" %}
     <link rel="stylesheet" href="/static/styles.css">
+    {# Brand-configurable CSS variables, after styles.css so injected brand
+       tokens win the equal-specificity cascade. Consumed by Tailwind via @theme. #}
+    <style>
+      :root {
+        --brand-name: "{{ chrome.brand_name_css() }}";
+        {% match chrome.brand.logo_url %}{% when Some with (url) %}--brand-logo-url: url("{{ url }}");{% when None %}{% endmatch %}
+        {{ chrome.theme_css_root|safe }}
+      }
+      html.dark { {{ chrome.theme_css_dark|safe }} }
+    </style>
   </head>
   <body class="bg-background min-h-screen flex flex-col font-body-md text-on-background">
     {# RP-initiated account management banner. Settings templates

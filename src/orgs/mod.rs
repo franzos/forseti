@@ -12,6 +12,7 @@ pub mod db;
 pub mod invite;
 pub mod middleware;
 pub mod nav;
+pub mod public_landing;
 pub mod settings_page;
 pub mod teams;
 pub mod visibility;
@@ -22,7 +23,7 @@ use axum::http::HeaderMap;
 
 pub use db::{
     add_member, count_orgs, create_org, delete_org, fetch_invite, find_member, insert_invite,
-    list_member_profiles, list_members, list_members_paged, list_memberships,
+    is_reserved_slug, list_member_profiles, list_members, list_members_paged, list_memberships,
     list_memberships_limited, list_org_invites, org_by_id, org_by_slug, remove_member,
     set_member_hidden, set_member_visibility, slugify, suggest_slug, update_branding, update_role,
     Membership, Org, OrgInvite,
