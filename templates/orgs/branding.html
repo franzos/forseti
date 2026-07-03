@@ -61,11 +61,14 @@
     {% let current_preset = org.theme_preset.as_deref().unwrap_or("") %}
     <label class="flex flex-col gap-1">
       <span class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("orgs-branding-theme-preset") }}</span>
-      <select name="theme_preset"
+      <select name="theme_preset" id="theme_preset"
               class="border border-outline-variant rounded-lg px-3 py-2 bg-surface-container-low">
         <option value=""{% if current_preset.is_empty() %} selected{% endif %}></option>
         {% for p in presets %}
-        <option value="{{ p }}"{% if *p == current_preset %} selected{% endif %}>{{ p }}</option>
+        <option value="{{ p.name }}"
+                data-primary="{{ p.primary }}"
+                data-on-primary="{{ p.on_primary }}"
+                data-secondary="{{ p.secondary }}"{% if p.name == current_preset %} selected{% endif %}>{{ p.name }}</option>
         {% endfor %}
       </select>
     </label>
@@ -117,7 +120,9 @@
     'use strict';
     var primary = document.getElementById('brand_primary');
     var onPrimary = document.getElementById('brand_on_primary');
+    var secondary = document.getElementById('brand_secondary');
     var preview = document.getElementById('theme_preview');
+    var presetSel = document.getElementById('theme_preset');
     if (!primary || !onPrimary || !preview) return;
     function update() {
       preview.style.backgroundColor = primary.value;
@@ -125,6 +130,16 @@
     }
     primary.addEventListener('input', update);
     onPrimary.addEventListener('input', update);
+    if (presetSel) {
+      presetSel.addEventListener('change', function () {
+        var opt = presetSel.options[presetSel.selectedIndex];
+        if (!opt || !opt.dataset.primary) return;
+        primary.value = opt.dataset.primary;
+        onPrimary.value = opt.dataset.onPrimary;
+        if (secondary) secondary.value = opt.dataset.secondary;
+        update();
+      });
+    }
   })();
 </script>
 {% endblock %}

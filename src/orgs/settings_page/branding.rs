@@ -27,7 +27,14 @@ struct BrandingTemplate {
     org: Org,
     is_default: bool,
     nav: orgs::nav::OrgNav,
-    presets: &'static [&'static str],
+    presets: Vec<PresetView>,
+}
+
+struct PresetView {
+    name: &'static str,
+    primary: String,
+    on_primary: String,
+    secondary: String,
 }
 
 pub(super) async fn branding(
@@ -66,7 +73,18 @@ async fn render_branding(
         is_default: org.id == orgs::DEFAULT_ORG_ID,
         org,
         nav,
-        presets: theming::preset::ALL,
+        presets: theming::preset::ALL
+            .iter()
+            .map(|&n| {
+                let p = crate::theming::preset::lookup(n);
+                PresetView {
+                    name: n,
+                    primary: p.primary.as_str().to_string(),
+                    on_primary: p.on_primary.as_str().to_string(),
+                    secondary: p.secondary.as_str().to_string(),
+                }
+            })
+            .collect(),
     })
 }
 
