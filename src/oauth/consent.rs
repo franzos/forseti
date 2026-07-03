@@ -1339,9 +1339,9 @@ mod tests {
 
     #[test]
     fn locale_claim_unsupported_trait_falls_back_to_consent_locale() {
-        // preferred_language="fr" is not supported; consent_locale="de" is used
+        // preferred_language="ja" is not supported; consent_locale="de" is used
         let mut traits = serde_json::Map::new();
-        traits.insert("preferred_language".to_string(), serde_json::json!("fr"));
+        traits.insert("preferred_language".to_string(), serde_json::json!("ja"));
         let identity = ory::Identity {
             id: "id".to_string(),
             traits: Some(serde_json::Value::Object(traits)),

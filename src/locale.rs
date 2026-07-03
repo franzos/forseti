@@ -12,7 +12,8 @@ pub(crate) use unic_langid::LanguageIdentifier;
 use crate::state::AppState;
 
 pub(crate) const LOCALE_COOKIE: &str = "forseti_locale";
-pub(crate) const SUPPORTED: &[&str] = &["en", "de"];
+pub(crate) const SUPPORTED: &[&str] =
+    &["en", "de", "fr", "es", "it", "pt", "ru", "th", "ar"];
 
 pub(crate) fn default_locale() -> LanguageIdentifier {
     langid!("en")
@@ -122,14 +123,15 @@ mod tests {
     fn negotiate_prefers_supported_then_falls_back() {
         let de: LanguageIdentifier = "de".parse().unwrap();
         assert_eq!(negotiate(&["de-AT".parse().unwrap()]), de);
-        assert_eq!(negotiate(&["fr".parse().unwrap()]), default_locale());
+        assert_eq!(negotiate(&["ja".parse().unwrap()]), default_locale());
         assert_eq!(negotiate(&[]), default_locale());
     }
 
     #[test]
     fn query_or_cookie_accepts_only_supported() {
         assert_eq!(from_query_or_cookie("de"), Some("de".parse().unwrap()));
-        assert_eq!(from_query_or_cookie("fr"), None);
+        assert_eq!(from_query_or_cookie("fr"), Some("fr".parse().unwrap()));
+        assert_eq!(from_query_or_cookie("ja"), None);
         assert_eq!(from_query_or_cookie("garbage!"), None);
     }
 
@@ -171,7 +173,7 @@ mod tests {
     #[test]
     fn build_locale_cookie_unsupported_lang_not_persisted() {
         // from_query_or_cookie rejects unsupported tags; verify the guard holds
-        assert!(from_query_or_cookie("fr").is_none());
+        assert!(from_query_or_cookie("ja").is_none());
         assert!(from_query_or_cookie("garbage!").is_none());
     }
 }

@@ -9,5 +9,12 @@
           class="font-label-sm text-label-sm text-on-surface-variant bg-transparent border border-outline-variant rounded-md px-2 py-1 cursor-pointer hover:border-outline focus:outline-none focus:ring-2 focus:ring-primary">
     <option value="en"{% if chrome.is_locale("en") %} selected{% endif %}>{{ chrome.t("nav-language-en") }}</option>
     <option value="de"{% if chrome.is_locale("de") %} selected{% endif %}>{{ chrome.t("nav-language-de") }}</option>
+    <option value="fr"{% if chrome.is_locale("fr") %} selected{% endif %}>{{ chrome.t("nav-language-fr") }}</option>
+    <option value="es"{% if chrome.is_locale("es") %} selected{% endif %}>{{ chrome.t("nav-language-es") }}</option>
+    <option value="it"{% if chrome.is_locale("it") %} selected{% endif %}>{{ chrome.t("nav-language-it") }}</option>
+    <option value="pt"{% if chrome.is_locale("pt") %} selected{% endif %}>{{ chrome.t("nav-language-pt") }}</option>
+    <option value="ru"{% if chrome.is_locale("ru") %} selected{% endif %}>{{ chrome.t("nav-language-ru") }}</option>
+    <option value="th"{% if chrome.is_locale("th") %} selected{% endif %}>{{ chrome.t("nav-language-th") }}</option>
+    <option value="ar"{% if chrome.is_locale("ar") %} selected{% endif %}>{{ chrome.t("nav-language-ar") }}</option>
   </select>
 </form>

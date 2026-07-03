@@ -442,11 +442,11 @@ mod tests {
 
     #[test]
     fn resolve_for_flow_unsupported_ui_locales_falls_through_to_cookie() {
-        // ui_locales=["fr"] is unsupported; falls back to cookie "de"
+        // ui_locales=["ja"] is unsupported; falls back to cookie "de"
         let mut h = HeaderMap::new();
         h.insert("cookie", "forseti_locale=de".parse().unwrap());
         let p = parts_with(h, "/");
-        let ui = vec!["fr".to_string()];
+        let ui = vec!["ja".to_string()];
         assert_eq!(
             resolve_locale_for_flow(&p, &OptionalSession::None, Some(&ui))
                 .language

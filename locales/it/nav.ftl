@@ -1,7 +1,7 @@
 nav-dashboard = Dashboard
-nav-settings = Einstellungen
-nav-admin = Administration
-nav-language-label = Sprache
+nav-settings = Impostazioni
+nav-admin = Amministrazione
+nav-language-label = Lingua
 nav-language-en = English
 nav-language-de = Deutsch
 nav-language-fr = Français

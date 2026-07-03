@@ -150,13 +150,17 @@ fn kratos_vars(path: &Path) -> BTreeMap<String, BTreeSet<String>> {
 fn kratos_placeables_match_across_locales() {
     let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("locales");
     let en = kratos_vars(&base.join("en").join("kratos.ftl"));
-    let de = kratos_vars(&base.join("de").join("kratos.ftl"));
     let mut mismatches = Vec::new();
-    for (id, en_vars) in &en {
-        match de.get(id) {
-            Some(de_vars) if de_vars == en_vars => {}
-            Some(de_vars) => mismatches.push(format!("  {id}: en {en_vars:?} != de {de_vars:?}")),
-            None => mismatches.push(format!("  {id}: missing in de")),
+    for locale in ["de", "fr", "es", "it", "pt", "ru", "th", "ar"] {
+        let de = kratos_vars(&base.join(locale).join("kratos.ftl"));
+        for (id, en_vars) in &en {
+            match de.get(id) {
+                Some(de_vars) if de_vars == en_vars => {}
+                Some(de_vars) => {
+                    mismatches.push(format!("  {locale} {id}: en {en_vars:?} != {de_vars:?}"))
+                }
+                None => mismatches.push(format!("  {locale} {id}: missing")),
+            }
         }
     }
     assert!(
@@ -170,12 +174,13 @@ fn kratos_placeables_match_across_locales() {
 fn locales_have_identical_key_sets() {
     let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("locales");
     let en = keys_for_locale(&base.join("en"));
-    let locale = "de";
-    let other = keys_for_locale(&base.join(locale));
-    let missing: Vec<_> = en.difference(&other).collect();
-    let extra: Vec<_> = other.difference(&en).collect();
-    assert!(
-        missing.is_empty() && extra.is_empty(),
-        "locale {locale}: missing {missing:?}, extra {extra:?}"
-    );
+    for locale in ["de", "fr", "es", "it", "pt", "ru", "th", "ar"] {
+        let other = keys_for_locale(&base.join(locale));
+        let missing: Vec<_> = en.difference(&other).collect();
+        let extra: Vec<_> = other.difference(&en).collect();
+        assert!(
+            missing.is_empty() && extra.is_empty(),
+            "locale {locale}: missing {missing:?}, extra {extra:?}"
+        );
+    }
 }
