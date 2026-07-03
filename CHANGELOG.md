@@ -11,10 +11,18 @@
 - Per-organization theming: brand colors and a preset applied to login, consent, and registration
 - Three built-in themes (default, midnight, cyberpunk) with auto-derived dark-mode variants
 - Public per-org login landing page at `/o/{slug}`, owner-enabled from org branding settings
+- Org owners can upload a logo image (PNG/JPEG/WebP, max 256 KB) from the branding page, validated by magic bytes
+- The authenticated app is white-labeled by the active organization's theme
+- Tenant logos render on login, registration, and the public landing page
 
 ### Changed
 - Grouped the admin and settings navigation into labelled sections
 - Team slugs are now immutable after creation; renaming a team changes its display name only.
+
+### Security
+- Safe response headers: X-Content-Type-Options, X-Frame-Options, minimal CSP
+- Reserved and lookalike organization-name denylist on create and rename
+- Operator trust-anchor on themed pre-auth pages; audit log for public-login and logo changes
 
 ### Fixed
 - Login-screen sign-out hit a CSRF 403 on the account-switch path

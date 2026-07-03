@@ -5,14 +5,14 @@
 //! 2. `/settings/organizations/{slug}/*`: plural, multi-org, gated on
 //!    `feature(Orgs)`.
 
-use axum::extract::{FromRequestParts, Path};
+use axum::extract::{DefaultBodyLimit, FromRequestParts, Path};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
 
-use crate::extractors::{gate_orgs_feature_or_upsell, Csrf, RequireSession};
+use crate::extractors::{gate_orgs_feature_or_upsell, RequireSession};
 use crate::orgs::{self, Org, Role};
 use crate::state::AppState;
 
@@ -22,6 +22,23 @@ mod members;
 mod overview;
 mod switch;
 mod teams;
+
+/// Body-size cap for the logo-upload multipart sub-router: leaves headroom
+/// over the 256 KB validated logo cap for multipart boundary/field overhead.
+const LOGO_UPLOAD_BODY_LIMIT_BYTES: usize = 512 * 1024;
+
+/// `POST /settings/organization(s)/{slug}/logo` on a dedicated sub-router so
+/// the multipart body-size cap doesn't apply to the rest of the settings
+/// surface (precedent: `src/oauth/mod.rs` `register_router`).
+fn logo_router() -> Router<AppState> {
+    Router::new()
+        .route("/settings/organization/logo", post(branding::logo_upload))
+        .route(
+            "/settings/organizations/{slug}/logo",
+            post(branding::logo_upload),
+        )
+        .layer(DefaultBodyLimit::max(LOGO_UPLOAD_BODY_LIMIT_BYTES))
+}
 
 pub(crate) fn router() -> Router<AppState> {
     Router::new()
@@ -36,6 +53,7 @@ pub(crate) fn router() -> Router<AppState> {
             "/settings/organization/branding",
             get(branding::branding).post(branding::branding_save),
         )
+        .merge(logo_router())
         .route("/settings/organization/members", get(members::members))
         .route(
             "/settings/organization/members/visibility",
@@ -172,13 +190,13 @@ pub(super) struct SettingsCtx {
 
 pub(super) fn settings_ctx(
     sess: &RequireSession,
-    csrf: &Csrf,
+    csrf_token: &str,
     locale: crate::locale::LanguageIdentifier,
 ) -> SettingsCtx {
     SettingsCtx {
         identity_id: sess.identity_id.clone(),
         user_email: sess.email.clone(),
-        csrf_token: csrf.0.clone(),
+        csrf_token: csrf_token.to_string(),
         locale,
     }
 }
@@ -268,10 +286,14 @@ pub(super) async fn build_nav(
     state: &AppState,
     headers: &HeaderMap,
     identity_id: &str,
+    cached: Option<&[orgs::Membership]>,
 ) -> orgs::nav::OrgNav {
-    let memberships = orgs::list_memberships(&state.db, identity_id)
-        .await
-        .unwrap_or_default();
+    let memberships = match cached {
+        Some(m) => m.to_vec(),
+        None => orgs::list_memberships(&state.db, identity_id)
+            .await
+            .unwrap_or_default(),
+    };
     let active = orgs::active_org(
         &memberships,
         &state.cookie_secret,

@@ -120,6 +120,9 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         license,
         cookie_secret,
         discovery: crate::state::DiscoveryCache::default(),
+        logo_cache: Arc::new(tokio::sync::Mutex::new(
+            crate::logo_cache::LogoCache::default(),
+        )),
     };
 
     // Forseti-owned CSRF-protected forms/POSTs. The middleware mints `forseti_csrf` and appends `Set-Cookie`;
@@ -160,6 +163,7 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .route("/o/{slug}", get(orgs::public_landing::landing))
+        .merge(orgs::logo::router(&state.cfg.orgs, &state.cfg.proxy))
         // Public JWKS for outbound webhook signature verification (RFC 8417 SETs); outside the CSRF layer.
         .route(
             "/.well-known/webhook-jwks.json",
@@ -170,7 +174,17 @@ pub(crate) async fn run() -> anyhow::Result<()> {
     if state.cfg.saml.is_some() {
         public_app = public_app.merge(crate::saml::router());
     }
-    let public_app = public_app
+    let csp_value =
+        axum::http::HeaderValue::from_str(&build_csp(&state.cfg.security.frame_ancestors))
+            .unwrap_or_else(|e| {
+                eprintln!(
+                "config error: [security].frame_ancestors {:?} is not a valid header value: {e}",
+                state.cfg.security.frame_ancestors
+            );
+                std::process::exit(1);
+            });
+
+    let mut public_app = public_app
         .merge(static_assets::router())
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -182,6 +196,21 @@ pub(crate) async fn run() -> anyhow::Result<()> {
             axum::http::header::REFERRER_POLICY,
             axum::http::HeaderValue::from_static("no-referrer"),
         ))
+        .layer(SetResponseHeaderLayer::overriding(
+            axum::http::header::X_CONTENT_TYPE_OPTIONS,
+            axum::http::HeaderValue::from_static("nosniff"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            axum::http::header::CONTENT_SECURITY_POLICY,
+            csp_value,
+        ));
+    if state.cfg.security.x_frame_options {
+        public_app = public_app.layer(SetResponseHeaderLayer::overriding(
+            axum::http::header::X_FRAME_OPTIONS,
+            axum::http::HeaderValue::from_static("SAMEORIGIN"),
+        ));
+    }
+    let public_app = public_app
         .layer(TraceLayer::new_for_http())
         .with_state(state.clone());
 
@@ -329,5 +358,39 @@ async fn shutdown_signal() {
     tokio::select! {
         _ = ctrl_c => {},
         _ = terminate => {},
+    }
+}
+
+// omits default-src/script-src/style-src/img-src/form-action: those break WebAuthn/QR/Shape-2 forms
+fn build_csp(frame_ancestors: &str) -> String {
+    format!("object-src 'none'; base-uri 'self'; frame-ancestors {frame_ancestors}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_csp;
+
+    #[test]
+    fn csp_contains_safe_directives() {
+        let csp = build_csp("'self'");
+        assert!(csp.contains("object-src 'none'"));
+        assert!(csp.contains("base-uri 'self'"));
+        assert!(csp.contains("frame-ancestors 'self'"));
+    }
+
+    #[test]
+    fn csp_omits_breaking_directives() {
+        let csp = build_csp("'self'");
+        assert!(!csp.contains("default-src"));
+        assert!(!csp.contains("script-src"));
+        assert!(!csp.contains("style-src"));
+        assert!(!csp.contains("img-src"));
+        assert!(!csp.contains("form-action"));
+    }
+
+    #[test]
+    fn csp_uses_configured_frame_ancestors() {
+        let csp = build_csp("https://example.com");
+        assert!(csp.contains("frame-ancestors https://example.com"));
     }
 }

@@ -10,8 +10,8 @@ use serde::Serialize;
 use crate::db::DbPool;
 use crate::db_interact;
 use crate::schema::{
-    host_allowed_groups, org_team_members, org_teams, organization_invites, organization_members,
-    organizations, saml_connections, saml_links,
+    host_allowed_groups, org_logos, org_team_members, org_teams, organization_invites,
+    organization_members, organizations, saml_connections, saml_links,
 };
 
 /// `support_email` + `logo_url` override the global `[brand]` config when set.
@@ -33,6 +33,7 @@ pub struct Org {
     pub brand_on_primary: Option<String>,
     pub brand_secondary: Option<String>,
     pub public_login_enabled: i32,
+    pub has_logo: i32,
 }
 
 // `added_by` is selected by `as_select()` but not read at runtime.
@@ -49,12 +50,19 @@ pub struct OrgMember {
 }
 
 /// Org + role view-model for the nav dropdown; carries name + slug per row.
+/// The brand columns ride along so authenticated chrome can theme by the
+/// active org without a second query.
 #[derive(Debug, Clone, Serialize)]
 pub struct Membership {
     pub org_id: String,
     pub slug: String,
     pub name: String,
     pub role: String,
+    pub theme_preset: Option<String>,
+    pub brand_primary: Option<String>,
+    pub brand_on_primary: Option<String>,
+    pub brand_secondary: Option<String>,
+    pub has_logo: i32,
 }
 
 // `invited_by` / `accepted_by` are selected by `as_select()` but not read.
@@ -159,6 +167,11 @@ pub async fn list_memberships_limited(
             slug: o.slug,
             name: o.name,
             role: m.role,
+            theme_preset: o.theme_preset,
+            brand_primary: o.brand_primary,
+            brand_on_primary: o.brand_on_primary,
+            brand_secondary: o.brand_secondary,
+            has_logo: o.has_logo,
         })
         .collect();
     out.sort_by_key(|a| a.name.to_lowercase());
@@ -367,15 +380,18 @@ pub async fn update_theme(
 }
 
 /// Pre-auth-readable projection of an org's public branding. Excludes
-/// `support_email`, ids, and members; readers only return a row when the org
-/// has opted in (`public_login_enabled=1`).
+/// `support_email` and members; readers only return a row when the org
+/// has opted in (`public_login_enabled=1`). `slug` + `has_logo` let callers
+/// point themed chrome at `/branding/{slug}/logo` without a second query.
 #[derive(Queryable, Debug, Clone, Serialize)]
 pub struct PublicBranding {
     pub name: String,
+    pub slug: String,
     pub preset: Option<String>,
     pub primary: Option<String>,
     pub on_primary: Option<String>,
     pub secondary: Option<String>,
+    pub has_logo: i32,
 }
 
 pub async fn public_branding_by_id(
@@ -389,10 +405,12 @@ pub async fn public_branding_by_id(
             .filter(organizations::public_login_enabled.eq(1))
             .select((
                 organizations::name,
+                organizations::slug,
                 organizations::theme_preset,
                 organizations::brand_primary,
                 organizations::brand_on_primary,
                 organizations::brand_secondary,
+                organizations::has_logo,
             ))
             .first(conn)
             .optional()
@@ -411,10 +429,12 @@ pub async fn public_branding_by_slug(
             .filter(organizations::public_login_enabled.eq(1))
             .select((
                 organizations::name,
+                organizations::slug,
                 organizations::theme_preset,
                 organizations::brand_primary,
                 organizations::brand_on_primary,
                 organizations::brand_secondary,
+                organizations::has_logo,
             ))
             .first(conn)
             .optional()
@@ -456,6 +476,7 @@ pub async fn delete_org(db: &DbPool, org_id: &str) -> anyhow::Result<()> {
                 diesel::delete(org_teams::table.filter(org_teams::id.eq_any(&team_ids)))
                     .execute(c)?;
             }
+            diesel::delete(org_logos::table.filter(org_logos::org_id.eq(&id))).execute(c)?;
             diesel::delete(organizations::table.filter(organizations::id.eq(&id))).execute(c)?;
             Ok(())
         })
@@ -956,33 +977,36 @@ pub async fn suggest_slug(db: &DbPool, name: &str) -> anyhow::Result<String> {
     anyhow::bail!("could not find a free slug after 1000 attempts")
 }
 
+/// Single-connection `:memory:` pool: sqlite's `:memory:` database lives
+/// only on the connection that created it, so the pool must never hand out
+/// a second connection or the migrated schema disappears. Shared across
+/// `orgs::db` and sibling test modules (e.g. `orgs::logo`).
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use chrono::TimeZone;
+pub(crate) async fn test_pool() -> DbPool {
+    use deadpool_diesel::sqlite::{Manager, Pool, Runtime};
     use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 
     const TEST_MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations/sqlite");
 
-    /// Single-connection `:memory:` pool: sqlite's `:memory:` database lives
-    /// only on the connection that created it, so the pool must never hand
-    /// out a second connection or the migrated schema disappears.
-    async fn test_pool() -> DbPool {
-        use deadpool_diesel::sqlite::{Manager, Pool, Runtime};
-        let manager = Manager::new(":memory:", Runtime::Tokio1);
-        let pool = Pool::builder(manager)
-            .max_size(1)
-            .build()
-            .expect("build test sqlite pool");
-        let conn = pool.get().await.expect("get test conn");
-        conn.interact(|c: &mut diesel::sqlite::SqliteConnection| {
-            c.run_pending_migrations(TEST_MIGRATIONS).map(|_| ())
-        })
-        .await
-        .expect("interact panic")
-        .expect("run test migrations");
-        DbPool::Sqlite(pool)
-    }
+    let manager = Manager::new(":memory:", Runtime::Tokio1);
+    let pool = Pool::builder(manager)
+        .max_size(1)
+        .build()
+        .expect("build test sqlite pool");
+    let conn = pool.get().await.expect("get test conn");
+    conn.interact(|c: &mut diesel::sqlite::SqliteConnection| {
+        c.run_pending_migrations(TEST_MIGRATIONS).map(|_| ())
+    })
+    .await
+    .expect("interact panic")
+    .expect("run test migrations");
+    DbPool::Sqlite(pool)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
 
     #[tokio::test]
     async fn public_branding_hidden_until_enabled() {
@@ -1008,8 +1032,10 @@ mod tests {
             .expect("query by_slug")
             .expect("branding should be visible once enabled");
         assert_eq!(visible.name, "Acme");
+        assert_eq!(visible.slug, "acme");
         assert_eq!(visible.preset.as_deref(), Some("classic"));
         assert_eq!(visible.primary.as_deref(), Some("#111827"));
+        assert_eq!(visible.has_logo, 0);
 
         let by_id = public_branding_by_id(&db, "o1")
             .await
@@ -1095,6 +1121,29 @@ mod tests {
         assert_eq!(slugify(""), "org");
         assert_eq!(slugify("!!!"), "org");
         assert_eq!(slugify("---hi---"), "hi");
+    }
+
+    #[tokio::test]
+    async fn delete_org_purges_the_logo_blob() {
+        let db = test_pool().await;
+        create_org(&db, "o1", "acme", "Acme", None)
+            .await
+            .expect("create_org");
+        let bytes = b"fake-png-bytes".to_vec();
+        let etag = crate::orgs::logo::etag_of(&bytes);
+        crate::orgs::logo::upsert(&db, "o1", bytes, "image/png", &etag)
+            .await
+            .expect("upsert logo");
+
+        delete_org(&db, "o1").await.expect("delete_org");
+
+        assert!(
+            crate::orgs::logo::get(&db, "o1")
+                .await
+                .expect("get")
+                .is_none(),
+            "logo blob should be deleted alongside the org"
+        );
     }
 
     #[tokio::test]

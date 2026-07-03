@@ -1,6 +1,7 @@
 pub mod brand_hint;
 pub mod color;
 pub mod derive;
+pub mod image;
 pub mod preset;
 
 use color::Color;
@@ -42,17 +43,78 @@ pub fn overrides_from_public(pb: &crate::orgs::db::PublicBranding) -> TokenOverr
     }
 }
 
+/// Re-parse a [`Membership`](crate::orgs::db::Membership)'s brand columns into
+/// overrides for authenticated app chrome. Ungated: membership already proves
+/// the caller belongs to the org, so `public_login_enabled` is irrelevant here.
+pub fn overrides_from_membership(m: &crate::orgs::db::Membership) -> TokenOverrides {
+    TokenOverrides {
+        preset: m.theme_preset.clone(),
+        primary: m.brand_primary.as_deref().and_then(color::parse_color),
+        on_primary: m.brand_on_primary.as_deref().and_then(color::parse_color),
+        secondary: m.brand_secondary.as_deref().and_then(color::parse_color),
+    }
+}
+
+/// Re-parse an [`Org`](crate::orgs::db::Org)'s brand columns into overrides.
+/// Ungated: the invite token itself is the authorization to see the target
+/// org's brand, so no membership or opt-in check applies here.
+pub fn overrides_from_org(org: &crate::orgs::db::Org) -> TokenOverrides {
+    TokenOverrides {
+        preset: org.theme_preset.clone(),
+        primary: org.brand_primary.as_deref().and_then(color::parse_color),
+        on_primary: org.brand_on_primary.as_deref().and_then(color::parse_color),
+        secondary: org.brand_secondary.as_deref().and_then(color::parse_color),
+    }
+}
+
+/// Theme `chrome` by the caller's active org, resolved strictly through
+/// [`active_org`](crate::orgs::active_org) against the real membership slice.
+/// The signed cookie is never used as a branding key on its own: a cookie
+/// naming a non-member org falls back to the first membership, and the Default
+/// org never themes the app.
+pub fn apply_active_org_theme(
+    chrome: crate::page_chrome::PageChrome,
+    brand: &crate::config::BrandConfig,
+    cookie_secret: &[u8],
+    cookie_ttl_secs: u64,
+    memberships: &[crate::orgs::db::Membership],
+    headers: &axum::http::HeaderMap,
+) -> crate::page_chrome::PageChrome {
+    let Some(m) = crate::orgs::active_org(memberships, cookie_secret, cookie_ttl_secs, headers)
+    else {
+        return chrome;
+    };
+    if m.org_id == crate::orgs::DEFAULT_ORG_ID {
+        return chrome;
+    }
+    let chrome = chrome.with_theme(resolve(
+        &overrides_from_membership(&m),
+        &global_overrides(brand),
+    ));
+    if m.has_logo == 1 {
+        chrome.with_logo_slug(m.slug)
+    } else {
+        chrome
+    }
+}
+
 /// Apply an org's public branding to a chrome, falling back to the global
-/// theme wherever the org left a token unset.
+/// theme wherever the org left a token unset. Also points the card icon at
+/// the org's uploaded logo, if any.
 pub fn theme_chrome_for_org(
     chrome: crate::page_chrome::PageChrome,
     brand: &crate::config::BrandConfig,
     pb: &crate::orgs::db::PublicBranding,
 ) -> crate::page_chrome::PageChrome {
-    chrome.with_theme(resolve(
+    let chrome = chrome.with_theme(resolve(
         &overrides_from_public(pb),
         &global_overrides(brand),
-    ))
+    ));
+    if pb.has_logo != 0 {
+        chrome.with_logo_slug(pb.slug.clone())
+    } else {
+        chrome
+    }
 }
 
 /// Look up `org_id`'s public branding and apply it to `chrome`, falling back
@@ -204,6 +266,7 @@ mod tests {
             brand_primary: Some("#123456".to_string()),
             brand_on_primary: None,
             brand_secondary: None,
+            operator_trust_anchor: None,
         };
         let overrides = global_overrides(&brand);
         assert_eq!(overrides.primary, parse_color("#123456"));
@@ -221,16 +284,209 @@ mod tests {
 
         let pb = PublicBranding {
             name: "Acme".to_string(),
+            slug: "acme".to_string(),
             preset: Some("midnight".to_string()),
             primary: Some("#123456".to_string()),
             on_primary: None,
             secondary: Some("red;}".to_string()),
+            has_logo: 0,
         };
         let overrides = overrides_from_public(&pb);
         assert_eq!(overrides.preset.as_deref(), Some("midnight"));
         assert_eq!(overrides.primary, parse_color("#123456"));
         assert_eq!(overrides.on_primary, None);
         assert_eq!(overrides.secondary, None);
+    }
+
+    fn membership(
+        org_id: &str,
+        slug: &str,
+        primary: Option<&str>,
+        has_logo: i32,
+    ) -> crate::orgs::db::Membership {
+        crate::orgs::db::Membership {
+            org_id: org_id.to_string(),
+            slug: slug.to_string(),
+            name: slug.to_string(),
+            role: "owner".to_string(),
+            theme_preset: None,
+            brand_primary: primary.map(str::to_string),
+            brand_on_primary: None,
+            brand_secondary: None,
+            has_logo,
+        }
+    }
+
+    fn brand_with_primary(primary: &str) -> crate::config::BrandConfig {
+        crate::config::BrandConfig {
+            name: String::new(),
+            support_email: None,
+            logo_url: None,
+            consent_intro: String::new(),
+            theme_preset: None,
+            brand_primary: Some(primary.to_string()),
+            brand_on_primary: None,
+            brand_secondary: None,
+            operator_trust_anchor: None,
+        }
+    }
+
+    fn base_chrome(brand: &crate::config::BrandConfig) -> crate::page_chrome::PageChrome {
+        crate::page_chrome::PageChrome::from_brand_with_admin(
+            brand.clone(),
+            String::new(),
+            String::new(),
+            false,
+            "en".parse().unwrap(),
+        )
+    }
+
+    fn headers_active_org(org_id: &str, secret: &[u8], ttl: u64) -> axum::http::HeaderMap {
+        let sc = crate::orgs::cookie::set_active_org_cookie(secret, ttl, org_id, false);
+        let value = sc.split_once('=').unwrap().1.split(';').next().unwrap();
+        let mut h = axum::http::HeaderMap::new();
+        h.insert(
+            axum::http::header::COOKIE,
+            format!("forseti_active_org={value}").parse().unwrap(),
+        );
+        h
+    }
+
+    const THEME_SECRET: &[u8] = b"themed-chrome-test-secret";
+    const THEME_TTL: u64 = 3600;
+
+    #[test]
+    fn overrides_from_membership_validates_colors() {
+        let m = membership("o", "acme", Some("#123456"), 1);
+        let m = crate::orgs::db::Membership {
+            theme_preset: Some("midnight".to_string()),
+            brand_secondary: Some("red;}".to_string()),
+            ..m
+        };
+        let o = overrides_from_membership(&m);
+        assert_eq!(o.preset.as_deref(), Some("midnight"));
+        assert_eq!(o.primary, parse_color("#123456"));
+        assert_eq!(o.on_primary, None);
+        assert_eq!(o.secondary, None);
+    }
+
+    #[test]
+    fn overrides_from_org_validates_colors() {
+        use crate::orgs::db::Org;
+
+        let org = Org {
+            id: "o".to_string(),
+            slug: "acme".to_string(),
+            name: "Acme".to_string(),
+            logo_url: None,
+            support_email: None,
+            created_at: String::new(),
+            created_by: None,
+            member_visibility: "members".to_string(),
+            theme_preset: Some("midnight".to_string()),
+            brand_primary: Some("#123456".to_string()),
+            brand_on_primary: None,
+            brand_secondary: Some("red;}".to_string()),
+            public_login_enabled: 0,
+            has_logo: 0,
+        };
+        let o = overrides_from_org(&org);
+        assert_eq!(o.preset.as_deref(), Some("midnight"));
+        assert_eq!(o.primary, parse_color("#123456"));
+        assert_eq!(o.on_primary, None);
+        assert_eq!(o.secondary, None);
+    }
+
+    #[test]
+    fn signed_nonmember_cookie_does_not_leak_branding() {
+        let brand = brand_with_primary("#010203");
+        let global_css = base_chrome(&brand).theme_css_root.clone();
+
+        // The active-org cookie is validly signed but names an org the caller
+        // is not a member of; the only membership is the Default org.
+        let memberships = vec![membership(crate::orgs::DEFAULT_ORG_ID, "default", None, 0)];
+        let headers = headers_active_org("evil-org", THEME_SECRET, THEME_TTL);
+        let themed = apply_active_org_theme(
+            base_chrome(&brand),
+            &brand,
+            THEME_SECRET,
+            THEME_TTL,
+            &memberships,
+            &headers,
+        );
+
+        // What the chrome WOULD look like had the cookie's org been honoured.
+        let leaked = apply_active_org_theme(
+            base_chrome(&brand),
+            &brand,
+            THEME_SECRET,
+            THEME_TTL,
+            &[membership("evil-org", "evil", Some("#ff00ff"), 1)],
+            &headers,
+        );
+
+        assert_eq!(themed.theme_css_root, global_css);
+        assert!(themed.theme_css_root.contains("#010203"));
+        assert_ne!(themed.theme_css_root, leaked.theme_css_root);
+        assert!(themed.logo_slug.is_none());
+    }
+
+    #[test]
+    fn default_org_active_uses_global_theme() {
+        let brand = brand_with_primary("#010203");
+        let global_css = base_chrome(&brand).theme_css_root.clone();
+        // Default org carries brand columns yet must never theme the app.
+        let memberships = vec![membership(
+            crate::orgs::DEFAULT_ORG_ID,
+            "default",
+            Some("#ff00ff"),
+            1,
+        )];
+        let headers = headers_active_org(crate::orgs::DEFAULT_ORG_ID, THEME_SECRET, THEME_TTL);
+        let themed = apply_active_org_theme(
+            base_chrome(&brand),
+            &brand,
+            THEME_SECRET,
+            THEME_TTL,
+            &memberships,
+            &headers,
+        );
+        assert_eq!(themed.theme_css_root, global_css);
+        assert!(themed.logo_slug.is_none());
+    }
+
+    #[test]
+    fn nondefault_member_themes_and_sets_logo() {
+        let brand = brand_with_primary("#010203");
+        let memberships = vec![membership("acme", "acme", Some("#abcdef"), 1)];
+        let headers = headers_active_org("acme", THEME_SECRET, THEME_TTL);
+        let themed = apply_active_org_theme(
+            base_chrome(&brand),
+            &brand,
+            THEME_SECRET,
+            THEME_TTL,
+            &memberships,
+            &headers,
+        );
+        assert!(themed.theme_css_root.contains("#abcdef"));
+        assert_eq!(themed.logo_slug.as_deref(), Some("acme"));
+    }
+
+    #[test]
+    fn nondefault_member_without_logo_leaves_slug_unset() {
+        let brand = brand_with_primary("#010203");
+        let memberships = vec![membership("acme", "acme", Some("#abcdef"), 0)];
+        let headers = headers_active_org("acme", THEME_SECRET, THEME_TTL);
+        let themed = apply_active_org_theme(
+            base_chrome(&brand),
+            &brand,
+            THEME_SECRET,
+            THEME_TTL,
+            &memberships,
+            &headers,
+        );
+        assert!(themed.theme_css_root.contains("#abcdef"));
+        assert!(themed.logo_slug.is_none());
     }
 
     #[test]

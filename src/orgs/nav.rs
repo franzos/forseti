@@ -43,6 +43,11 @@ mod tests {
             slug: slug.to_string(),
             name: name.to_string(),
             role: "owner".to_string(),
+            theme_preset: None,
+            brand_primary: None,
+            brand_on_primary: None,
+            brand_secondary: None,
+            has_logo: 0,
         }
     }
 

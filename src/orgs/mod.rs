@@ -10,6 +10,7 @@
 pub mod cookie;
 pub mod db;
 pub mod invite;
+pub(crate) mod logo;
 pub mod middleware;
 pub mod nav;
 pub mod public_landing;

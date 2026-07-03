@@ -85,10 +85,37 @@ pub struct AppConfig {
 
 /// Operator-supplied secrets. `cookie_secret` seeds the HMAC keys for every Forseti-signed cookie;
 /// hex string (`openssl rand -hex 32`) or raw bytes, falling back to a per-boot ephemeral key when unset.
-#[derive(Debug, Clone, Default, Deserialize)]
+/// `frame_ancestors` and `x_frame_options` drive the browser-facing security headers (`src/app.rs`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
 pub struct SecurityConfig {
-    #[serde(default)]
     pub cookie_secret: Option<String>,
+    /// CSP `frame-ancestors` value. `'self'` blocks third-party framing while
+    /// leaving same-origin iframes (e.g. embedded widgets) working.
+    #[serde(default = "default_frame_ancestors")]
+    pub frame_ancestors: String,
+    /// Emit `X-Frame-Options: SAMEORIGIN` alongside `frame-ancestors` for
+    /// browsers that predate CSP2 frame-ancestors support.
+    #[serde(default = "default_true")]
+    pub x_frame_options: bool,
+}
+
+impl Default for SecurityConfig {
+    fn default() -> Self {
+        Self {
+            cookie_secret: None,
+            frame_ancestors: default_frame_ancestors(),
+            x_frame_options: default_true(),
+        }
+    }
+}
+
+fn default_frame_ancestors() -> String {
+    "'self'".to_string()
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Deployment-shape proxy trust. Flip on only when the upstream
@@ -259,6 +286,9 @@ pub struct BrandConfig {
     pub brand_on_primary: Option<String>,
     #[serde(default)]
     pub brand_secondary: Option<String>,
+    /// Operator identity string shown on pre-auth cards; never tenant-derived.
+    #[serde(default)]
+    pub operator_trust_anchor: Option<String>,
 }
 
 fn default_brand_name() -> String {
@@ -826,6 +856,19 @@ pub struct OrgsConfig {
     pub active_org_cookie_ttl_seconds: u64,
     #[serde(default = "default_invite_ttl_days")]
     pub invite_ttl_days: i64,
+    /// Per-IP rate limit on `GET /branding/{slug}/logo`, max requests per minute.
+    /// `None` falls back to the code-side default (60). Set to `0` to disable the per-minute bucket.
+    #[serde(default)]
+    pub logo_ip_rate_per_minute: Option<u32>,
+    /// Per-IP rate limit on `GET /branding/{slug}/logo`, max requests per hour, in parallel
+    /// with the per-minute bucket. `None` falls back to 600. Set to `0` to disable the per-hour bucket.
+    #[serde(default)]
+    pub logo_ip_rate_per_hour: Option<u32>,
+    /// Org-name denylist (create + rename). Case-insensitive, confusable-folded
+    /// substring match against the submitted name. `None` falls back to
+    /// `crate::oauth::register::RESERVED_NAMES_DEFAULT`.
+    #[serde(default)]
+    pub reserved_names: Option<Vec<String>>,
 }
 
 impl Default for OrgsConfig {
@@ -833,6 +876,9 @@ impl Default for OrgsConfig {
         Self {
             active_org_cookie_ttl_seconds: default_active_org_cookie_ttl_seconds(),
             invite_ttl_days: default_invite_ttl_days(),
+            logo_ip_rate_per_minute: None,
+            logo_ip_rate_per_hour: None,
+            reserved_names: None,
         }
     }
 }
@@ -934,6 +980,20 @@ impl AppConfig {
                 RATE_LIMIT_PER_HOUR_CEILING,
             ));
         }
+        if let Some(v) = self.orgs.logo_ip_rate_per_minute {
+            self.orgs.logo_ip_rate_per_minute = Some(clamp_rate(
+                "orgs.logo_ip_rate_per_minute",
+                v,
+                RATE_LIMIT_PER_MINUTE_CEILING,
+            ));
+        }
+        if let Some(v) = self.orgs.logo_ip_rate_per_hour {
+            self.orgs.logo_ip_rate_per_hour = Some(clamp_rate(
+                "orgs.logo_ip_rate_per_hour",
+                v,
+                RATE_LIMIT_PER_HOUR_CEILING,
+            ));
+        }
     }
 }
 
@@ -964,6 +1024,7 @@ impl AppConfig {
                 brand_primary: None,
                 brand_on_primary: None,
                 brand_secondary: None,
+                operator_trust_anchor: None,
             },
             apps: Vec::new(),
             oauth: OAuthConfig::default(),

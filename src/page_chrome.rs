@@ -140,6 +140,10 @@ pub(crate) struct PageChrome {
     /// Pre-rendered `html.dark` CSS custom properties for the resolved
     /// theme's dark variant.
     pub(crate) theme_css_dark: String,
+    /// `Some(slug)` when a tenant theme with an uploaded logo is active;
+    /// the card icon then renders `/branding/{slug}/logo` instead of the
+    /// operator default.
+    pub(crate) logo_slug: Option<String>,
 }
 
 impl PageChrome {
@@ -160,6 +164,28 @@ impl PageChrome {
             csrf_token,
             is_admin,
             locale,
+        )
+    }
+
+    /// Like [`Self::from_parts`] but themed by the caller's active org. The
+    /// `memberships` slice is loaded once by the caller (or the [`ThemedChrome`]
+    /// extractor) and reused for the nav switcher, so no extra query is issued.
+    pub(crate) fn from_parts_themed(
+        state: &AppState,
+        memberships: &[crate::orgs::Membership],
+        headers: &axum::http::HeaderMap,
+        user_email: String,
+        csrf_token: String,
+        locale: LanguageIdentifier,
+    ) -> Self {
+        let chrome = Self::from_parts(state, user_email, csrf_token, locale);
+        crate::theming::apply_active_org_theme(
+            chrome,
+            &state.cfg.brand,
+            &state.cookie_secret,
+            state.cfg.orgs.active_org_cookie_ttl_seconds,
+            memberships,
+            headers,
         )
     }
 
@@ -186,6 +212,7 @@ impl PageChrome {
             locale,
             theme_css_root: theme.css_root(),
             theme_css_dark: theme.css_dark(),
+            logo_slug: None,
         }
     }
 
@@ -194,6 +221,13 @@ impl PageChrome {
     pub(crate) fn with_theme(mut self, theme: crate::theming::ResolvedTheme) -> Self {
         self.theme_css_root = theme.css_root();
         self.theme_css_dark = theme.css_dark();
+        self
+    }
+
+    /// Point the card icon at the tenant's uploaded logo instead of the
+    /// operator default.
+    pub(crate) fn with_logo_slug(mut self, slug: String) -> Self {
+        self.logo_slug = Some(slug);
         self
     }
 
@@ -293,6 +327,56 @@ where
     }
 }
 
+/// Themed counterpart of [`Chrome`] for authenticated app pages: loads the
+/// caller's memberships once, themes the chrome by the active org, and hands
+/// the same `memberships` back so a page rendering the org switcher can pass
+/// them to `build_nav` instead of re-querying.
+pub(crate) struct ThemedChrome {
+    pub(crate) chrome: PageChrome,
+    // Reused by `build_nav` on pages that also render the org switcher.
+    #[allow(dead_code)]
+    pub(crate) memberships: Vec<crate::orgs::Membership>,
+}
+
+impl<S> FromRequestParts<S> for ThemedChrome
+where
+    AppState: FromRef<S>,
+    S: Send + Sync,
+{
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let session = OptionalSession::from_request_parts(parts, state)
+            .await
+            .expect("OptionalSession extractor is infallible");
+        let user_email = session.email().unwrap_or_default().to_string();
+        let app_state = app_state(parts, state).await;
+        let csrf = Csrf::from_request_parts(parts, state)
+            .await
+            .expect("Csrf extractor is infallible");
+        let locale = resolve_locale(parts, &session);
+        let memberships = match session.identity_id() {
+            Some(id) => crate::orgs::list_memberships(&app_state.db, id)
+                .await
+                .unwrap_or_default(),
+            None => Vec::new(),
+        };
+        let mut chrome = PageChrome::from_parts_themed(
+            &app_state,
+            &memberships,
+            &parts.headers,
+            user_email,
+            csrf.0,
+            locale,
+        );
+        chrome.theme_pref = crate::theme::read_theme_cookie(&parts.headers);
+        Ok(ThemedChrome {
+            chrome,
+            memberships,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -311,6 +395,7 @@ mod tests {
                 brand_primary: None,
                 brand_on_primary: None,
                 brand_secondary: None,
+                operator_trust_anchor: None,
             },
             String::new(),
             String::new(),
@@ -347,6 +432,7 @@ mod tests {
                 brand_primary: None,
                 brand_on_primary: None,
                 brand_secondary: None,
+                operator_trust_anchor: None,
             },
             String::new(),
             String::new(),
@@ -369,6 +455,49 @@ mod tests {
     fn brand_name_css_clamps_to_128_chars() {
         let long_name = "A".repeat(500);
         assert_eq!(chrome_named(&long_name).brand_name_css().len(), 128);
+    }
+
+    #[test]
+    fn operator_trust_anchor_flows_onto_chrome_brand() {
+        let brand = BrandConfig {
+            operator_trust_anchor: Some("Secured by Acme Operator".to_string()),
+            ..chrome("en").brand
+        };
+        let chrome = PageChrome::from_brand_with_admin(
+            brand,
+            String::new(),
+            String::new(),
+            false,
+            "en".parse().unwrap(),
+        );
+        assert_eq!(
+            chrome.brand.operator_trust_anchor.as_deref(),
+            Some("Secured by Acme Operator")
+        );
+    }
+
+    #[test]
+    fn operator_trust_anchor_survives_tenant_theme_override() {
+        let brand = BrandConfig {
+            operator_trust_anchor: Some("Secured by Acme Operator".to_string()),
+            ..chrome("en").brand
+        };
+        let tenant_theme = crate::theming::resolve(
+            &crate::theming::TokenOverrides::default(),
+            &crate::theming::TokenOverrides::default(),
+        );
+        let chrome = PageChrome::from_brand_with_admin(
+            brand,
+            String::new(),
+            String::new(),
+            false,
+            "en".parse().unwrap(),
+        )
+        .with_theme(tenant_theme);
+        assert_eq!(
+            chrome.brand.operator_trust_anchor.as_deref(),
+            Some("Secured by Acme Operator")
+        );
     }
 
     fn parts_with(headers: HeaderMap, uri: &str) -> axum::http::request::Parts {

@@ -218,6 +218,7 @@ mod tests {
             brand_primary: None,
             brand_on_primary: None,
             brand_secondary: None,
+            operator_trust_anchor: None,
         }
     }
 

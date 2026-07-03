@@ -11,7 +11,7 @@ use crate::audit_metadata;
 use crate::csrf::CsrfForm;
 use crate::extractors::{Csrf, RequireSession};
 use crate::orgs::{self, Org, Role};
-use crate::page_chrome::PageChrome;
+use crate::page_chrome::{PageChrome, ThemedChrome};
 use crate::render::render;
 use crate::state::AppState;
 
@@ -71,10 +71,10 @@ pub(super) async fn members(
     OrgSlug(slug): OrgSlug,
     headers: HeaderMap,
     sess: RequireSession,
-    csrf: Csrf,
     crate::page_chrome::ReqLocale(locale): crate::page_chrome::ReqLocale,
+    themed: ThemedChrome,
 ) -> Response {
-    let ctx = settings_ctx(&sess, &csrf, locale);
+    let ctx = settings_ctx(&sess, &themed.chrome.csrf_token, locale);
     let target = match resolve_org_or_404(&state, slug.as_deref()).await {
         Ok(t) => t,
         Err(r) => return r,
@@ -88,9 +88,20 @@ pub(super) async fn members(
     if role.is_none() && !admin_aal2 {
         return (StatusCode::NOT_FOUND, "unknown organization").into_response();
     }
-    render_members(&state, &headers, &ctx, target.org, role, admin_aal2).await
+    render_members(
+        &state,
+        &headers,
+        &ctx,
+        target.org,
+        role,
+        admin_aal2,
+        &themed.memberships,
+        themed.chrome,
+    )
+    .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn render_members(
     state: &AppState,
     headers: &HeaderMap,
@@ -98,6 +109,8 @@ async fn render_members(
     org: Org,
     role: Option<Role>,
     admin_aal2: bool,
+    memberships: &[orgs::Membership],
+    chrome: PageChrome,
 ) -> Response {
     let org_id = &org.id;
     let is_owner = role == Some(Role::Owner);
@@ -176,15 +189,10 @@ async fn render_members(
     } else {
         Vec::new()
     };
-    let nav = build_nav(state, headers, &ctx.identity_id).await;
+    let nav = build_nav(state, headers, &ctx.identity_id, Some(memberships)).await;
     let visibility = policy.as_str().to_string();
     let mut resp = render(&MembersTemplate {
-        chrome: PageChrome::from_parts(
-            state,
-            ctx.user_email.clone(),
-            ctx.csrf_token.clone(),
-            ctx.locale.clone(),
-        ),
+        chrome,
         is_default: org.id == orgs::DEFAULT_ORG_ID,
         org,
         members,

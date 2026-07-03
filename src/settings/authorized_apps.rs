@@ -10,11 +10,10 @@ use axum::response::{IntoResponse, Response};
 use crate::audit::{self, action, target_kind, AuditCtx, AuditEvent};
 use crate::audit_metadata;
 use crate::csrf::CsrfForm;
-use crate::extractors::Csrf;
 use crate::flash;
 use crate::format::humanise_timestamp;
 use crate::ory;
-use crate::page_chrome::PageChrome;
+use crate::page_chrome::{PageChrome, ThemedChrome};
 use crate::render::render;
 use crate::render_error_boundary;
 use crate::state::AppState;
@@ -50,9 +49,9 @@ pub(crate) async fn settings_authorized_apps(
     State(state): State<AppState>,
     headers: HeaderMap,
     sess: crate::extractors::RequireSession,
-    csrf: Csrf,
     banner: crate::handoff::ReferrerBanner,
     crate::page_chrome::ReqLocale(locale): crate::page_chrome::ReqLocale,
+    themed: ThemedChrome,
 ) -> Response {
     let subject = sess.identity_id.clone();
     if subject.is_empty() {
@@ -87,7 +86,7 @@ pub(crate) async fn settings_authorized_apps(
 
     let (flash_msg, clear_flash) = state.take_flash(&headers, "/settings/authorized-apps");
     let body = render(&SettingsAuthorizedAppsTemplate {
-        chrome: PageChrome::from_parts(&state, sess.email, csrf.0, locale),
+        chrome: themed.chrome,
         apps,
         flash: flash_msg,
         referrer_banner: banner.0,

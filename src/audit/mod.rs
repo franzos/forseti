@@ -170,6 +170,10 @@ pub mod action {
     pub const ORG_VISIBILITY_CHANGED: &str = "org.visibility_changed";
     pub const ORG_MEMBER_DIRECTORY_HIDDEN: &str = "org.member.directory_hidden";
     pub const ORG_MEMBER_DIRECTORY_UNHIDDEN: &str = "org.member.directory_unhidden";
+    pub const ORG_LOGO_UPLOADED: &str = "org.logo.uploaded";
+    pub const ORG_LOGO_REMOVED: &str = "org.logo.removed";
+    pub const ORG_PUBLIC_LOGIN_ENABLED: &str = "org.public_login.enabled";
+    pub const ORG_PUBLIC_LOGIN_DISABLED: &str = "org.public_login.disabled";
     // org teams (`src/orgs/teams.rs`), wired by the teams settings surface.
     pub const ORG_TEAM_CREATED: &str = "org.team.created";
     pub const ORG_TEAM_RENAMED: &str = "org.team.renamed";

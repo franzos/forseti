@@ -1,7 +1,8 @@
 //! Diesel table definitions. Hand-written rather than emitted by `diesel
 //! print-schema` so they're identical for both backends — every column is
 //! `Text` / `Nullable<Text>` / `Integer`, with timestamps as ISO-8601 UTC
-//! strings. See `migrations/{sqlite,postgres}/...` for the SQL.
+//! strings, except `org_logos.bytes` which is `Binary` (`BLOB`/`BYTEA`).
+//! See `migrations/{sqlite,postgres}/...` for the SQL.
 
 diesel::table! {
     webhook_outbox (id) {
@@ -85,6 +86,17 @@ diesel::table! {
         brand_on_primary -> Nullable<Text>,
         brand_secondary -> Nullable<Text>,
         public_login_enabled -> Integer,
+        has_logo -> Integer,
+    }
+}
+
+diesel::table! {
+    org_logos (org_id) {
+        org_id -> Text,
+        bytes -> Binary,
+        content_type -> Text,
+        etag -> Text,
+        updated_at -> Text,
     }
 }
 

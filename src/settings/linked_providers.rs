@@ -50,14 +50,29 @@ pub(crate) async fn settings_linked_providers(
     .await
     {
         Ok((session, flow)) => {
-            render_linked_providers(&state, &csrf.0, &session, &flow, banner.0, locale)
+            let memberships = crate::orgs::list_memberships(&state.db, &sess.identity_id)
+                .await
+                .unwrap_or_default();
+            render_linked_providers(
+                &state,
+                &memberships,
+                &headers,
+                &csrf.0,
+                &session,
+                &flow,
+                banner.0,
+                locale,
+            )
         }
         Err(resp) => resp,
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_linked_providers(
     state: &AppState,
+    memberships: &[crate::orgs::Membership],
+    headers: &HeaderMap,
     csrf_token: &str,
     session: &ory::Session,
     flow: &serde_json::Value,
@@ -77,8 +92,10 @@ fn render_linked_providers(
     }
 
     render(&SettingsLinkedProvidersTemplate {
-        chrome: PageChrome::from_parts(
+        chrome: PageChrome::from_parts_themed(
             state,
+            memberships,
+            headers,
             session_email(session),
             csrf_token.to_string(),
             locale,

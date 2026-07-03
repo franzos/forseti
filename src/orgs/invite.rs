@@ -23,6 +23,7 @@ use crate::ory;
 use crate::page_chrome::{PageChrome, ReqLocale};
 use crate::render::render;
 use crate::state::AppState;
+use crate::theming;
 
 pub(crate) fn router() -> Router<AppState> {
     Router::new()
@@ -269,12 +270,24 @@ async fn invite_accept_get(
         _ => None,
     };
 
-    let org_name = orgs::org_by_id(&state.db, &invite.org_id)
+    let org = orgs::org_by_id(&state.db, &invite.org_id)
         .await
         .ok()
-        .flatten()
-        .map(|o| o.name)
+        .flatten();
+    let org_name = org
+        .as_ref()
+        .map(|o| o.name.clone())
         .unwrap_or_else(|| "this organization".to_string());
+    // Token is the auth; colors only, no tenant logo (route 404s for non-members).
+    let theme = |chrome: PageChrome| -> PageChrome {
+        match &org {
+            Some(o) => chrome.with_theme(theming::resolve(
+                &theming::overrides_from_org(o),
+                &theming::global_overrides(&state.cfg.brand),
+            )),
+            None => chrome,
+        }
+    };
 
     // Anonymous: send to registration, preserve token through finalize.
     let Some(session) = session else {
@@ -289,12 +302,12 @@ async fn invite_accept_get(
             Some(&return_to),
         );
         return render(&InviteAcceptTemplate {
-            chrome: PageChrome::from_parts(
+            chrome: theme(PageChrome::from_parts(
                 &state,
                 String::new(),
                 csrf_token.clone(),
                 locale.clone(),
-            ),
+            )),
             org_name,
             invited_email: invite.email.clone(),
             role: invite.role.clone(),
@@ -319,21 +332,22 @@ async fn invite_accept_get(
             })
             .unwrap_or(false);
         if !verified {
-            return render_invalid_invite(
+            return render_invalid_invite_themed(
                 &state,
                 &csrf_token,
                 locale.clone(),
                 "Please verify your email before accepting the invite",
+                org.as_ref(),
             )
             .into_response();
         }
         return render(&InviteAcceptTemplate {
-            chrome: PageChrome::from_parts(
+            chrome: theme(PageChrome::from_parts(
                 &state,
                 session_email,
                 csrf_token.clone(),
                 locale.clone(),
-            ),
+            )),
             org_name,
             invited_email: invite.email.clone(),
             role: invite.role.clone(),
@@ -346,7 +360,12 @@ async fn invite_accept_get(
 
     // A different account is signed in: CTA signs out then re-routes to accept.
     render(&InviteAcceptTemplate {
-        chrome: PageChrome::from_parts(&state, session_email, csrf_token, locale),
+        chrome: theme(PageChrome::from_parts(
+            &state,
+            session_email,
+            csrf_token,
+            locale,
+        )),
         org_name,
         invited_email: invite.email.clone(),
         role: invite.role.clone(),
@@ -566,8 +585,28 @@ fn render_invalid_invite(
     locale: crate::locale::LanguageIdentifier,
     message: &str,
 ) -> Response {
+    render_invalid_invite_themed(state, csrf_token, locale, message, None)
+}
+
+/// Like [`render_invalid_invite`] but themed by `org` when the caller already
+/// resolved the invite's target org (colors only, no tenant logo).
+fn render_invalid_invite_themed(
+    state: &AppState,
+    csrf_token: &str,
+    locale: crate::locale::LanguageIdentifier,
+    message: &str,
+    org: Option<&orgs::db::Org>,
+) -> Response {
+    let chrome = PageChrome::from_parts(state, String::new(), csrf_token.to_string(), locale);
+    let chrome = match org {
+        Some(o) => chrome.with_theme(theming::resolve(
+            &theming::overrides_from_org(o),
+            &theming::global_overrides(&state.cfg.brand),
+        )),
+        None => chrome,
+    };
     render(&InvalidInviteTemplate {
-        chrome: PageChrome::from_parts(state, String::new(), csrf_token.to_string(), locale),
+        chrome,
         message: message.to_string(),
     })
 }

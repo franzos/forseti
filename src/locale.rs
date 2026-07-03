@@ -12,8 +12,7 @@ pub(crate) use unic_langid::LanguageIdentifier;
 use crate::state::AppState;
 
 pub(crate) const LOCALE_COOKIE: &str = "forseti_locale";
-pub(crate) const SUPPORTED: &[&str] =
-    &["en", "de", "fr", "es", "it", "pt", "ru", "th", "ar"];
+pub(crate) const SUPPORTED: &[&str] = &["en", "de", "fr", "es", "it", "pt", "ru", "th", "ar"];
 
 pub(crate) fn default_locale() -> LanguageIdentifier {
     langid!("en")

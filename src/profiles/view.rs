@@ -2,7 +2,7 @@
 
 use askama::Template;
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use std::collections::HashSet;
 
@@ -58,6 +58,7 @@ struct ProfileViewTemplate {
 pub(crate) async fn show_profile(
     State(state): State<AppState>,
     Path(identity_id): Path<String>,
+    headers: HeaderMap,
     sess: RequireSession,
     csrf: Csrf,
     crate::page_chrome::ReqLocale(locale): crate::page_chrome::ReqLocale,
@@ -210,10 +211,18 @@ pub(crate) async fn show_profile(
     let identicon = profiles::identicon::render(&identity_id);
     let updated_humanised = crate::format::humanise_timestamp(&locale, &profile.updated_at);
     let token = csrf.0;
+    let chrome = PageChrome::from_parts_themed(
+        &state,
+        &viewer_memberships,
+        &headers,
+        sess.email,
+        token,
+        locale,
+    );
     let nav = crate::orgs::nav::OrgNav::from(None, viewer_memberships);
 
     let mut resp = render(&ProfileViewTemplate {
-        chrome: PageChrome::from_parts(&state, sess.email, token, locale),
+        chrome,
         identicon,
         display_name,
         email,

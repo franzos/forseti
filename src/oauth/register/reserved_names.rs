@@ -37,7 +37,7 @@ pub const RESERVED_NAMES_DEFAULT: &[&str] = &[
 /// [`RESERVED_NAMES_DEFAULT`] when unconfigured. Inputs are normalised first
 /// (see [`normalise_for_reserved_check`]) so Unicode spoofs collapse to the
 /// covered skeleton.
-pub(super) fn reserved_name_hit(
+pub(crate) fn reserved_name_hit(
     configured: &Option<Vec<String>>,
     client_name: &str,
 ) -> Option<String> {
@@ -199,5 +199,23 @@ mod tests {
     fn empty_name_does_not_match() {
         assert!(reserved_name_hit(&None, "").is_none());
         assert!(reserved_name_hit(&None, "   \u{00A0}\u{200B}  ").is_none());
+    }
+
+    #[test]
+    fn reserved_forseti_is_caught() {
+        let hit = reserved_name_hit(&None, "Forseti");
+        assert_eq!(hit.as_deref(), Some("forseti"));
+    }
+
+    /// `"F\u{043E}rseti"` swaps the ASCII `o` for Cyrillic U+043E (`о`).
+    #[test]
+    fn reserved_forseti_cyrillic_homoglyph_is_caught() {
+        let hit = reserved_name_hit(&None, "F\u{043E}rseti");
+        assert_eq!(hit.as_deref(), Some("forseti"));
+    }
+
+    #[test]
+    fn org_name_acme_corp_does_not_match() {
+        assert!(reserved_name_hit(&None, "Acme Corp").is_none());
     }
 }

@@ -28,7 +28,7 @@
 
 mod handler;
 mod iat;
-mod reserved_names;
+pub(crate) mod reserved_names;
 
 pub(crate) use handler::{rate_limit_error_response, register};
 pub(crate) use iat::hash_token;

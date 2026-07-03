@@ -13,7 +13,7 @@ description = "Self-service UI and Hydra login/consent bridge for Ory Kratos + H
 license = "AGPL-3.0-or-later"
 
 [dependencies]
-axum = { version = "0.8", features = ["macros"] }
+axum = { version = "0.8", features = ["macros", "multipart"] }
 axum-extra = { version = "0.12", features = ["cookie", "form"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
 tokio-util = { version = "0.7", default-features = false }

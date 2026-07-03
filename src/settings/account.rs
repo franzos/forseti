@@ -19,11 +19,10 @@ use uuid::Uuid;
 use crate::audit::{self, action, target_kind, AuditCtx, AuditEvent};
 use crate::audit_metadata;
 use crate::csrf;
-use crate::extractors::Csrf;
 use crate::flow_view::session_email;
 use crate::locale::LanguageIdentifier;
 use crate::ory;
-use crate::page_chrome::PageChrome;
+use crate::page_chrome::{PageChrome, ThemedChrome};
 use crate::render::render;
 use crate::state::AppState;
 use crate::webhook;
@@ -59,14 +58,12 @@ struct SettingsAccountDeleteConfirmTemplate {
 /// Danger-zone landing page; the privileged-session check is deferred to the
 /// confirm page.
 pub(crate) async fn settings_account(
-    State(state): State<AppState>,
-    sess: crate::extractors::RequireSession,
-    csrf: Csrf,
+    _sess: crate::extractors::RequireSession,
     banner: crate::handoff::ReferrerBanner,
-    crate::page_chrome::ReqLocale(locale): crate::page_chrome::ReqLocale,
+    themed: ThemedChrome,
 ) -> Response {
     render(&SettingsAccountTemplate {
-        chrome: PageChrome::from_parts(&state, sess.email, csrf.0, locale),
+        chrome: themed.chrome,
         referrer_banner: banner.0,
     })
 }
@@ -77,9 +74,9 @@ pub(crate) async fn settings_account_delete(
     Query(query): Query<FlowQuery>,
     headers: HeaderMap,
     sess: crate::extractors::RequireSession,
-    csrf: Csrf,
     banner: crate::handoff::ReferrerBanner,
     crate::page_chrome::ReqLocale(locale): crate::page_chrome::ReqLocale,
+    themed: ThemedChrome,
 ) -> Response {
     let (session, flow) = match fetch_settings_subpage(
         &state,
@@ -108,7 +105,7 @@ pub(crate) async fn settings_account_delete(
         .to_string();
 
     render(&SettingsAccountDeleteConfirmTemplate {
-        chrome: PageChrome::from_parts(&state, session_email(&session), csrf.0, locale),
+        chrome: themed.chrome,
         notified_apps,
         flow_id,
         referrer_banner: banner.0,

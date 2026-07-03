@@ -93,9 +93,11 @@ The authoritative schema is `src/config.rs`. The example file is `config.example
 
 ### `[security]`
 
-| Key             | Type   | Default            | Description                                                            |
-|-----------------|--------|--------------------|------------------------------------------------------------------------|
-| `cookie_secret` | string | ephemeral per-boot | Seeds the HMAC keys for every Forseti-signed cookie. Long random secret. |
+| Key                | Type   | Default            | Description                                                            |
+|--------------------|--------|--------------------|------------------------------------------------------------------------|
+| `cookie_secret`    | string | ephemeral per-boot | Seeds the HMAC keys for every Forseti-signed cookie. Long random secret. |
+| `frame_ancestors`  | string | `"'self'"`         | CSP `frame-ancestors` on every public_app response. `"'none'"` blocks framing entirely. |
+| `x_frame_options`  | bool   | `true`             | Also emit `X-Frame-Options: SAMEORIGIN` for older browsers.            |
 
 `cookie_secret` is the root key behind the HMAC for Forseti's signed cookies (one-shot flash, `active_org` switcher, `forseti_app_referrer` handoff, CSRF double-submit). Each cookie derives its own key from this secret plus a per-use domain-separation salt (see `src/flash.rs`, `src/orgs/cookie.rs`, `src/handoff/cookie.rs`).
 
@@ -113,6 +115,7 @@ CSRF protection uses a double-submit token (`src/csrf.rs`) keyed off the same se
 | `support_email` | string | none               | Support address rendered in footer / error pages.                      |
 | `logo_url`      | string | none               | Optional logo URL. When omitted, the brand name is rendered as text.   |
 | `consent_intro` | string | (generic sentence) | Intro paragraph rendered on `/oauth/consent` above the scope list.     |
+| `operator_trust_anchor` | string | none | Operator identity shown on pre-auth cards (login, consent, device verify). The strongest anti-phishing lever against a tenant impersonating the operator brand — never set this from tenant-controlled input. |
 
 ### `[[apps]]`
 
@@ -1715,6 +1718,16 @@ Identities whose email matches `admin.allowed_emails` are also auto-promoted to 
 ### Per-org branding
 
 When an org sets `logo_url` / `support_email` on its settings page, those values override `[brand]` in `config.toml` for any request resolved into that org's scope. Unset fields fall back to `[brand]`. The Default org is treated like any other org for this resolution — operators who want a single brand for everyone leave the Default org's branding empty.
+
+### `[orgs]` configuration
+
+| Key                              | Type     | Default   | Description                                                                                  |
+|-----------------------------------|----------|-----------|------------------------------------------------------------------------------------------------|
+| `active_org_cookie_ttl_seconds`   | u64      | `2592000` (30d) | Validity of the signed `forseti_active_org` switcher cookie.                            |
+| `invite_ttl_days`                 | i64      | `7`       | How long a minted org invite stays claimable.                                                  |
+| `reserved_names`                  | string[] | (code-baked set) | Org-name denylist (create + rename), case-insensitive/confusable-folded substring match. When absent, falls back to the same built-in operator-brand denylist as `oauth.dcr_reserved_names`. |
+| `logo_ip_rate_per_minute`         | u32      | `60`      | Per-IP rate limit on `GET /branding/{slug}/logo`, requests per minute. `0` disables the bucket. |
+| `logo_ip_rate_per_hour`           | u32      | `600`     | Per-IP rate limit on `GET /branding/{slug}/logo`, requests per hour, in parallel with the per-minute bucket. `0` disables the bucket. |
 
 ### `[identity]` configuration
 

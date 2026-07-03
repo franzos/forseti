@@ -73,13 +73,30 @@ pub(crate) async fn settings_2fa(
     )
     .await
     {
-        Ok((session, flow)) => render_2fa(&state, &csrf.0, &session, &flow, banner.0, locale),
+        Ok((session, flow)) => {
+            let memberships = crate::orgs::list_memberships(&state.db, &sess.identity_id)
+                .await
+                .unwrap_or_default();
+            render_2fa(
+                &state,
+                &memberships,
+                &headers,
+                &csrf.0,
+                &session,
+                &flow,
+                banner.0,
+                locale,
+            )
+        }
         Err(resp) => resp,
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_2fa(
     state: &AppState,
+    memberships: &[crate::orgs::Membership],
+    headers: &HeaderMap,
     csrf_token: &str,
     session: &ory::Session,
     flow: &serde_json::Value,
@@ -128,8 +145,10 @@ fn render_2fa(
     let mut msgs = flow_messages(flow);
     translate_messages(&mut msgs, &locale);
     render(&Settings2faTemplate {
-        chrome: PageChrome::from_parts(
+        chrome: PageChrome::from_parts_themed(
             state,
+            memberships,
+            headers,
             session_email(session),
             csrf_token.to_string(),
             locale,

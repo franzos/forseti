@@ -1,19 +1,21 @@
 //! Branding page — logo URL + support email.
 
 use askama::Template;
-use axum::extract::State;
+use axum::extract::{Multipart, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use serde::Deserialize;
 
+use crate::audit::{self, action, target_kind, AuditCtx, AuditEvent};
+use crate::audit_metadata;
 use crate::config::BrandConfig;
 use crate::csrf::CsrfForm;
-use crate::extractors::{Csrf, RequireSession};
-use crate::orgs::{self, Org};
-use crate::page_chrome::PageChrome;
+use crate::extractors::{forbid_response, Csrf, RequireSession};
+use crate::orgs::{self, logo, Org};
+use crate::page_chrome::{PageChrome, ThemedChrome};
 use crate::render::render;
 use crate::state::AppState;
-use crate::theming::{self, color::parse_color, derive, TokenOverrides};
+use crate::theming::{self, color::parse_color, derive, image, TokenOverrides};
 
 use super::{
     build_nav, require_org_license, require_org_owner_with_license, resolve_org_or_404,
@@ -42,10 +44,10 @@ pub(super) async fn branding(
     OrgSlug(slug): OrgSlug,
     headers: HeaderMap,
     sess: RequireSession,
-    csrf: Csrf,
     crate::page_chrome::ReqLocale(locale): crate::page_chrome::ReqLocale,
+    themed: ThemedChrome,
 ) -> Response {
-    let ctx = settings_ctx(&sess, &csrf, locale);
+    let ctx = settings_ctx(&sess, &themed.chrome.csrf_token, locale);
     let target = match resolve_org_or_404(&state, slug.as_deref()).await {
         Ok(t) => t,
         Err(r) => return r,
@@ -53,7 +55,15 @@ pub(super) async fn branding(
     if let Err(r) = require_org_license(&state, &ctx.csrf_token, &ctx.user_email, &target.org.id) {
         return r;
     }
-    render_branding(&state, &headers, &ctx, target.org).await
+    render_branding(
+        &state,
+        &headers,
+        &ctx,
+        target.org,
+        &themed.memberships,
+        themed.chrome,
+    )
+    .await
 }
 
 async fn render_branding(
@@ -61,15 +71,12 @@ async fn render_branding(
     headers: &HeaderMap,
     ctx: &SettingsCtx,
     org: Org,
+    memberships: &[orgs::Membership],
+    chrome: PageChrome,
 ) -> Response {
-    let nav = build_nav(state, headers, &ctx.identity_id).await;
+    let nav = build_nav(state, headers, &ctx.identity_id, Some(memberships)).await;
     render(&BrandingTemplate {
-        chrome: PageChrome::from_parts(
-            state,
-            ctx.user_email.clone(),
-            ctx.csrf_token.clone(),
-            ctx.locale.clone(),
-        ),
+        chrome,
         is_default: org.id == orgs::DEFAULT_ORG_ID,
         org,
         nav,
@@ -183,11 +190,20 @@ fn validate_theme_form(
     })
 }
 
+fn public_login_toggle_action(old: i32, new: i32) -> Option<&'static str> {
+    match (old, new) {
+        (0, 1) => Some(action::ORG_PUBLIC_LOGIN_ENABLED),
+        (1, 0) => Some(action::ORG_PUBLIC_LOGIN_DISABLED),
+        _ => None,
+    }
+}
+
 pub(super) async fn branding_save(
     State(state): State<AppState>,
     OrgSlug(slug): OrgSlug,
     sess: RequireSession,
     csrf: Csrf,
+    actx: AuditCtx,
     CsrfForm(form): CsrfForm<BrandingForm>,
 ) -> Response {
     let target = match resolve_org_or_404(&state, slug.as_deref()).await {
@@ -289,6 +305,139 @@ pub(super) async fn branding_save(
         tracing::error!(error = ?e, "branding_save: update_theme failed");
         return (StatusCode::INTERNAL_SERVER_ERROR, "save failed").into_response();
     }
+    if let Some(toggle_action) =
+        public_login_toggle_action(existing.public_login_enabled, theme.public_login_enabled)
+    {
+        let _ = audit::log(
+            &state.db,
+            AuditEvent::new(toggle_action)
+                .actor_user(sess.identity_id.as_str(), sess.email.as_str())
+                .target(target_kind::ORG, org_id.clone())
+                .with_ctx(&actx),
+        )
+        .await;
+    }
+    Redirect::to(&format!("{}/branding", target.base_path)).into_response()
+}
+
+const MAX_LOGO_BYTES: usize = 256 * 1024;
+
+fn validate_logo(bytes: &[u8]) -> Result<&'static str, &'static str> {
+    if bytes.len() > MAX_LOGO_BYTES {
+        return Err("logo file exceeds 256 KB");
+    }
+    image::detect(bytes).ok_or("unsupported image type")
+}
+
+pub(super) async fn logo_upload(
+    State(state): State<AppState>,
+    OrgSlug(slug): OrgSlug,
+    sess: RequireSession,
+    csrf: Csrf,
+    actx: AuditCtx,
+    headers: HeaderMap,
+    mut multipart: Multipart,
+) -> Response {
+    let target = match resolve_org_or_404(&state, slug.as_deref()).await {
+        Ok(t) => t,
+        Err(r) => return r,
+    };
+    let org_id = target.org.id.clone();
+    if let Err(r) =
+        require_org_owner_with_license(&state, &csrf.0, &sess.identity_id, &sess.email, &org_id)
+            .await
+    {
+        return r;
+    }
+
+    let mut csrf_token = String::new();
+    let mut remove = false;
+    let mut logo_bytes: Option<Vec<u8>> = None;
+
+    loop {
+        let field = match multipart.next_field().await {
+            Ok(Some(f)) => f,
+            Ok(None) => break,
+            Err(_) => return (StatusCode::BAD_REQUEST, "malformed multipart body").into_response(),
+        };
+        let name = field.name().unwrap_or_default().to_string();
+        match name.as_str() {
+            "_csrf" => {
+                csrf_token = field.text().await.unwrap_or_default();
+            }
+            "remove" => {
+                remove = field.text().await.unwrap_or_default() == "1";
+            }
+            "logo" => {
+                let mut field = field;
+                let mut bytes = Vec::new();
+                loop {
+                    match field.chunk().await {
+                        Ok(Some(chunk)) => {
+                            bytes.extend_from_slice(&chunk);
+                            if bytes.len() > MAX_LOGO_BYTES {
+                                return (StatusCode::BAD_REQUEST, "logo file exceeds 256 KB")
+                                    .into_response();
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(_) => {
+                            return (StatusCode::BAD_REQUEST, "malformed multipart body")
+                                .into_response()
+                        }
+                    }
+                }
+                if !bytes.is_empty() {
+                    logo_bytes = Some(bytes);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if !crate::csrf::verify_csrf(&headers, &csrf_token) {
+        return forbid_response();
+    }
+
+    if remove {
+        if let Err(e) = logo::delete(&state.db, &org_id).await {
+            tracing::error!(error = ?e, "logo_upload: delete failed");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "remove failed").into_response();
+        }
+        let _ = audit::log(
+            &state.db,
+            AuditEvent::new(action::ORG_LOGO_REMOVED)
+                .actor_user(sess.identity_id.as_str(), sess.email.as_str())
+                .target(target_kind::ORG, org_id.clone())
+                .with_ctx(&actx),
+        )
+        .await;
+        return Redirect::to(&format!("{}/branding", target.base_path)).into_response();
+    }
+
+    let Some(bytes) = logo_bytes else {
+        return (StatusCode::BAD_REQUEST, "no logo file provided").into_response();
+    };
+    let content_type = match validate_logo(&bytes) {
+        Ok(ct) => ct,
+        Err(msg) => return (StatusCode::BAD_REQUEST, msg).into_response(),
+    };
+    let etag = logo::etag_of(&bytes);
+    if let Err(e) = logo::upsert(&state.db, &org_id, bytes, content_type, &etag).await {
+        tracing::error!(error = ?e, "logo_upload: upsert failed");
+        return (StatusCode::INTERNAL_SERVER_ERROR, "save failed").into_response();
+    }
+
+    let _ = audit::log(
+        &state.db,
+        AuditEvent::new(action::ORG_LOGO_UPLOADED)
+            .actor_user(sess.identity_id.as_str(), sess.email.as_str())
+            .target(target_kind::ORG, org_id.clone())
+            .with_ctx(&actx)
+            .metadata(audit_metadata!("content_type" => content_type)),
+    )
+    .await;
+
     Redirect::to(&format!("{}/branding", target.base_path)).into_response()
 }
 
@@ -306,6 +455,7 @@ mod tests {
             brand_primary: None,
             brand_on_primary: None,
             brand_secondary: None,
+            operator_trust_anchor: None,
         }
     }
 
@@ -390,6 +540,28 @@ mod tests {
     }
 
     #[test]
+    fn public_login_toggle_action_detects_enable() {
+        assert_eq!(
+            public_login_toggle_action(0, 1),
+            Some(action::ORG_PUBLIC_LOGIN_ENABLED)
+        );
+    }
+
+    #[test]
+    fn public_login_toggle_action_detects_disable() {
+        assert_eq!(
+            public_login_toggle_action(1, 0),
+            Some(action::ORG_PUBLIC_LOGIN_DISABLED)
+        );
+    }
+
+    #[test]
+    fn public_login_toggle_action_none_when_unchanged() {
+        assert_eq!(public_login_toggle_action(0, 0), None);
+        assert_eq!(public_login_toggle_action(1, 1), None);
+    }
+
+    #[test]
     fn request_public_login_present_sets_enabled_flag() {
         let f = form("", "", "", "", Some("on"));
         let t = validate_theme_form(&f, &brand()).expect("should validate");
@@ -401,5 +573,26 @@ mod tests {
         let f = form("", "", "", "", None);
         let t = validate_theme_form(&f, &brand()).expect("should validate");
         assert_eq!(t.public_login_enabled, 0);
+    }
+
+    #[test]
+    fn validate_logo_accepts_small_png() {
+        let mut png = vec![0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n'];
+        png.extend_from_slice(&[0u8; 32]);
+        assert_eq!(validate_logo(&png), Ok("image/png"));
+    }
+
+    #[test]
+    fn validate_logo_rejects_oversize() {
+        let mut png = vec![0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n'];
+        png.resize(8 + MAX_LOGO_BYTES + 1, 0);
+        let err = validate_logo(&png).unwrap_err();
+        assert_eq!(err, "logo file exceeds 256 KB");
+    }
+
+    #[test]
+    fn validate_logo_rejects_non_image() {
+        let err = validate_logo(b"<svg xmlns=...>").unwrap_err();
+        assert_eq!(err, "unsupported image type");
     }
 }

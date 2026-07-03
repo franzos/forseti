@@ -19,6 +19,7 @@ mod handoff;
 mod i18n;
 mod identity;
 mod locale;
+mod logo_cache;
 mod mailer;
 mod oauth;
 mod oauth_client_metadata;

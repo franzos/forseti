@@ -36,21 +36,28 @@
       <div class="w-full max-w-[440px] bg-surface-container-lowest rounded-xl shadow-[0_4px_6px_-1px_rgba(0,0,0,0.1)] dark:shadow-none border border-outline-variant p-stack-lg md:p-[40px] flex flex-col gap-stack-lg">
         <div class="flex flex-col items-center text-center gap-stack-sm">
           {% block card_icon %}
-            <div class="w-12 h-12 bg-primary rounded-lg flex items-center justify-center mb-stack-sm"
-                 aria-hidden="true">
-              {# Minimal inline SVG keyhole/lock to avoid icon font dependency. #}
-              <svg xmlns="http://www.w3.org/2000/svg"
-                   viewBox="0 0 24 24"
-                   fill="none"
-                   stroke="currentColor"
-                   stroke-width="2"
-                   stroke-linecap="round"
-                   stroke-linejoin="round"
-                   class="w-6 h-6 text-on-primary">
-                <rect x="3" y="11" width="18" height="11" rx="2" />
-                <path d="M7 11V7a5 5 0 0 1 10 0v4" />
-              </svg>
-            </div>
+            {% match chrome.logo_slug %}
+              {% when Some with (slug) %}
+                <img src="/branding/{{ slug }}/logo"
+                     alt=""
+                     class="w-12 h-12 rounded-lg object-contain mb-stack-sm">
+              {% when None %}
+                <div class="w-12 h-12 bg-primary rounded-lg flex items-center justify-center mb-stack-sm"
+                     aria-hidden="true">
+                  {# Minimal inline SVG keyhole/lock to avoid icon font dependency. #}
+                  <svg xmlns="http://www.w3.org/2000/svg"
+                       viewBox="0 0 24 24"
+                       fill="none"
+                       stroke="currentColor"
+                       stroke-width="2"
+                       stroke-linecap="round"
+                       stroke-linejoin="round"
+                       class="w-6 h-6 text-on-primary">
+                    <rect x="3" y="11" width="18" height="11" rx="2" />
+                    <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+                  </svg>
+                </div>
+            {% endmatch %}
           {% endblock %}
           <h1 class="font-headline-md text-headline-md text-on-surface">
             {% block card_title %}{{ chrome.brand.name }}{% endblock %}
@@ -73,6 +80,13 @@
           {% include "partials/_theme_toggle.html" %}
         </nav>
       </div>
+      {% match chrome.brand.operator_trust_anchor %}
+        {% when Some with (anchor) %}
+          <div class="px-margin-desktop max-w-container-max mx-auto mt-stack-sm text-center">
+            <span class="font-label-sm text-label-sm text-on-surface-variant opacity-80">{{ anchor }}</span>
+          </div>
+        {% when None %}
+      {% endmatch %}
     </footer>
     {# See base.html for rationale. Mirrored here because card.html is a
        separate root template. #}

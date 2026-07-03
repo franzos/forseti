@@ -10,7 +10,7 @@ use serde::Deserialize;
 use crate::csrf::CsrfForm;
 use crate::extractors::{Csrf, RequireSession};
 use crate::orgs::{self, Org, Role};
-use crate::page_chrome::PageChrome;
+use crate::page_chrome::{PageChrome, ThemedChrome};
 use crate::render::render;
 use crate::state::AppState;
 
@@ -63,10 +63,10 @@ pub(super) async fn overview(
     OrgSlug(slug): OrgSlug,
     headers: HeaderMap,
     sess: RequireSession,
-    csrf: Csrf,
     crate::page_chrome::ReqLocale(locale): crate::page_chrome::ReqLocale,
+    themed: ThemedChrome,
 ) -> Response {
-    let ctx = settings_ctx(&sess, &csrf, locale);
+    let ctx = settings_ctx(&sess, &themed.chrome.csrf_token, locale);
     let target = match resolve_org_or_404(&state, slug.as_deref()).await {
         Ok(t) => t,
         Err(r) => return r,
@@ -81,7 +81,15 @@ pub(super) async fn overview(
     if orgs::org_role(&state.db, &ctx.identity_id, &target.org.id).await != Some(Role::Owner) {
         return Redirect::to(&format!("{}/info", target.base_path)).into_response();
     }
-    render_overview(&state, &headers, &ctx, &target.org).await
+    render_overview(
+        &state,
+        &headers,
+        &ctx,
+        &target.org,
+        &themed.memberships,
+        themed.chrome,
+    )
+    .await
 }
 
 pub(super) async fn overview_info(
@@ -89,10 +97,10 @@ pub(super) async fn overview_info(
     OrgSlug(slug): OrgSlug,
     headers: HeaderMap,
     sess: RequireSession,
-    csrf: Csrf,
     crate::page_chrome::ReqLocale(locale): crate::page_chrome::ReqLocale,
+    themed: ThemedChrome,
 ) -> Response {
-    let ctx = settings_ctx(&sess, &csrf, locale);
+    let ctx = settings_ctx(&sess, &themed.chrome.csrf_token, locale);
     let target = match resolve_org_or_404(&state, slug.as_deref()).await {
         Ok(t) => t,
         Err(r) => return r,
@@ -100,7 +108,15 @@ pub(super) async fn overview_info(
     if let Err(r) = require_org_license(&state, &ctx.csrf_token, &ctx.user_email, &target.org.id) {
         return r;
     }
-    render_overview_info(&state, &headers, &ctx, target.org).await
+    render_overview_info(
+        &state,
+        &headers,
+        &ctx,
+        target.org,
+        &themed.memberships,
+        themed.chrome,
+    )
+    .await
 }
 
 /// Read-only mirror of [`render_overview`]. Same data, no edit form,
@@ -111,6 +127,8 @@ async fn render_overview_info(
     headers: &HeaderMap,
     ctx: &SettingsCtx,
     org: Org,
+    memberships: &[orgs::Membership],
+    chrome: PageChrome,
 ) -> Response {
     let members = orgs::list_members(&state.db, &org.id)
         .await
@@ -136,14 +154,9 @@ async fn render_overview_info(
     };
     owner_emails.sort();
     let sso = sso_status(state, &org).await;
-    let nav = build_nav(state, headers, &ctx.identity_id).await;
+    let nav = build_nav(state, headers, &ctx.identity_id, Some(memberships)).await;
     render(&OverviewInfoTemplate {
-        chrome: PageChrome::from_parts(
-            state,
-            ctx.user_email.clone(),
-            ctx.csrf_token.clone(),
-            ctx.locale.clone(),
-        ),
+        chrome,
         is_default: org.id == orgs::DEFAULT_ORG_ID,
         org,
         member_count: members.len(),
@@ -173,20 +186,17 @@ async fn render_overview(
     headers: &HeaderMap,
     ctx: &SettingsCtx,
     org: &Org,
+    memberships: &[orgs::Membership],
+    chrome: PageChrome,
 ) -> Response {
     let is_owner = orgs::org_role(&state.db, &ctx.identity_id, &org.id).await == Some(Role::Owner);
     let members = orgs::list_members(&state.db, &org.id)
         .await
         .unwrap_or_default();
     let sso = sso_status(state, org).await;
-    let nav = build_nav(state, headers, &ctx.identity_id).await;
+    let nav = build_nav(state, headers, &ctx.identity_id, Some(memberships)).await;
     render(&OverviewTemplate {
-        chrome: PageChrome::from_parts(
-            state,
-            ctx.user_email.clone(),
-            ctx.csrf_token.clone(),
-            ctx.locale.clone(),
-        ),
+        chrome,
         is_default: org.id == orgs::DEFAULT_ORG_ID,
         org: org.clone(),
         is_owner,
@@ -220,6 +230,16 @@ pub(super) async fn overview_save(
     {
         return r;
     }
+    let new_name = form.name.trim();
+    if new_name != target.org.name
+        && crate::oauth::register::reserved_names::reserved_name_hit(
+            &state.cfg.orgs.reserved_names,
+            new_name,
+        )
+        .is_some()
+    {
+        return (StatusCode::CONFLICT, "that name is not allowed").into_response();
+    }
     let new_slug = orgs::slugify(&form.slug);
     if new_slug != target.org.slug {
         // Second slug write-path (after create): guard here too so a rename
@@ -241,7 +261,7 @@ pub(super) async fn overview_save(
     if let Err(e) = orgs::update_branding(
         &state.db,
         org_id,
-        form.name.trim(),
+        new_name,
         &new_slug,
         target.org.logo_url.as_deref(),
         target.org.support_email.as_deref(),

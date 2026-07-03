@@ -24,6 +24,33 @@
       </header>
 
       <form method="POST"
+            enctype="multipart/form-data"
+            action="{% if is_default %}/settings/organization/logo{% else %}/settings/organizations/{{ org.slug }}/logo{% endif %}"
+            class="flex flex-col gap-stack-md bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg">
+        <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+        {% if org.has_logo == 1 %}
+        <div class="flex items-center gap-stack-sm">
+          <img src="/branding/{{ org.slug }}/logo" alt="" class="h-12 w-auto">
+          <label class="flex items-center gap-stack-sm">
+            <input type="checkbox" name="remove" value="1">
+            <span class="font-body-md text-body-md text-on-surface">{{ chrome.t("orgs-branding-logo-remove") }}</span>
+          </label>
+        </div>
+        {% endif %}
+        <label class="flex flex-col gap-1">
+          <span class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("orgs-branding-field-logo-file") }}</span>
+          <input type="file"
+                 name="logo"
+                 accept="image/png,image/jpeg,image/webp"
+                 class="border border-outline-variant rounded-lg px-3 py-2 bg-surface-container-low">
+        </label>
+        <div>
+          <button type="submit"
+                  class="bg-primary text-on-primary rounded-lg px-4 py-2 font-label-md text-label-md">{{ chrome.t("orgs-branding-logo-save") }}</button>
+        </div>
+      </form>
+
+      <form method="POST"
             action="{% if is_default %}/settings/organization/branding{% else %}/settings/organizations/{{ org.slug }}/branding{% endif %}"
             class="flex flex-col gap-stack-md bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg">
         <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">

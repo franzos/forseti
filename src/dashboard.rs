@@ -7,12 +7,12 @@ use axum::{extract::State, http::HeaderMap, response::Response};
 
 use crate::config::AppEntry;
 use crate::cookies;
-use crate::extractors::{Csrf, RequireSession};
-use crate::flow_view::{session_email, session_needs_verification};
+use crate::extractors::RequireSession;
+use crate::flow_view::session_needs_verification;
 use crate::format::{humanise_timestamp, humanise_user_agent};
 use crate::ory;
 use crate::page_chrome::PageChrome;
-use crate::page_chrome::ReqLocale;
+use crate::page_chrome::{ReqLocale, ThemedChrome};
 use crate::render::render;
 use crate::state::AppState;
 
@@ -52,8 +52,8 @@ pub(crate) async fn root(
     State(state): State<AppState>,
     headers: HeaderMap,
     sess: RequireSession,
-    csrf: Csrf,
     ReqLocale(locale): ReqLocale,
+    themed: ThemedChrome,
 ) -> Response {
     let cookie = cookies::cookie_header(&headers);
     let session = sess.session;
@@ -64,7 +64,7 @@ pub(crate) async fn root(
     );
 
     render(&DashboardTemplate {
-        chrome: PageChrome::from_parts(&state, session_email(&session), csrf.0, locale),
+        chrome: themed.chrome,
         needs_verification: session_needs_verification(&session),
         apps: state.cfg.apps.clone(),
         activity,

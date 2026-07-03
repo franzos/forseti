@@ -110,6 +110,7 @@ mod tests {
             brand_primary: None,
             brand_on_primary: None,
             brand_secondary: None,
+            operator_trust_anchor: None,
         }
     }
 
@@ -173,5 +174,39 @@ mod tests {
         let cookie = cookie.expect("brand-hint cookie set for enabled org");
         assert!(cookie.starts_with("forseti_brand_hint="));
         assert!(cookie.contains("Path=/registration"));
+        assert!(chrome.logo_slug.is_none());
+    }
+
+    #[tokio::test]
+    async fn enabled_slug_with_logo_sets_logo_slug() {
+        let db = test_pool().await;
+        crate::orgs::db::create_org(&db, "o1", "acme", "Acme Corp", None)
+            .await
+            .expect("create_org");
+        crate::orgs::db::update_theme(&db, "o1", Some("midnight"), Some("#123456"), None, None, 1)
+            .await
+            .expect("update_theme");
+        crate::orgs::logo::upsert(&db, "o1", b"fake-png".to_vec(), "image/png", "\"etag\"")
+            .await
+            .expect("upsert logo");
+
+        let (chrome, _, _) = resolve(&db, &brand(), SECRET, false, "acme", chrome()).await;
+
+        assert_eq!(chrome.logo_slug.as_deref(), Some("acme"));
+    }
+
+    #[tokio::test]
+    async fn enabled_slug_without_logo_leaves_logo_slug_none() {
+        let db = test_pool().await;
+        crate::orgs::db::create_org(&db, "o1", "acme", "Acme Corp", None)
+            .await
+            .expect("create_org");
+        crate::orgs::db::update_theme(&db, "o1", Some("midnight"), Some("#123456"), None, None, 1)
+            .await
+            .expect("update_theme");
+
+        let (chrome, _, _) = resolve(&db, &brand(), SECRET, false, "acme", chrome()).await;
+
+        assert!(chrome.logo_slug.is_none());
     }
 }

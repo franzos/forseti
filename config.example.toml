@@ -28,12 +28,23 @@ url = "http://localhost:3000"
 # THIS IN PRODUCTION.
 # [security]
 # cookie_secret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+#
+# CSP `frame-ancestors` on every public_app response (default "'self'"). Set to
+# a specific origin (or space-separated list) if Forseti is legitimately
+# framed by another site; "'none'" blocks framing entirely.
+# frame_ancestors = "'self'"
+# Also emit `X-Frame-Options: SAMEORIGIN` for older browsers (default true).
+# x_frame_options = true
 
 [brand]
 name          = "Forseti"
 support_email = "support@example.com"
 # logo_url    = "https://example.com/logo.svg"
 # consent_intro = "The application below is requesting access to your account."
+# Operator identity string shown on pre-auth cards (login, consent, device
+# verify). The strongest anti-phishing lever against a tenant impersonating
+# the operator brand — NEVER set this from tenant-controlled input.
+# operator_trust_anchor = "Forseti"
 
 # Dashboard "Your apps" cards. Empty list (or omitted section) hides the entire
 # section on the dashboard.
@@ -263,9 +274,21 @@ support_email = "support@example.com"
 # long the signed switcher cookie stays valid (default 30d).
 # `invite_ttl_days` is how long a fresh org invite can be redeemed
 # before it expires (default 7 days).
+#
+# `reserved_names` is the org-name denylist (create + rename), matched
+# case-insensitively/confusable-folded against the submitted name. When
+# omitted, falls back to the built-in operator-brand denylist (same list
+# as `[oauth] dcr_reserved_names`).
+#
+# `logo_ip_rate_per_minute` / `logo_ip_rate_per_hour` cap requests to
+# `GET /branding/{slug}/logo` from a single IP. Defaults are 60/min and
+# 600/hour. Set to 0 to disable that bucket.
 # [orgs]
 # active_org_cookie_ttl_seconds = 2592000   # 30 days
 # invite_ttl_days = 7
+# reserved_names = ["admin", "forseti", "portal", "system", "root"]
+# logo_ip_rate_per_minute = 60
+# logo_ip_rate_per_hour = 600
 
 # Commercial-tier knobs. The signed license blob itself is NOT set here — it is
 # pasted into `/admin/license` and stored in the `forseti_license` table. The

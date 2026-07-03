@@ -11,11 +11,9 @@ use crate::audit::{self, action, target_kind, AuditCtx, AuditEvent};
 use crate::audit_metadata;
 use crate::cookies;
 use crate::csrf::CsrfForm;
-use crate::extractors::Csrf;
 use crate::flash;
-use crate::flow_view::session_email;
 use crate::ory;
-use crate::page_chrome::PageChrome;
+use crate::page_chrome::{PageChrome, ThemedChrome};
 use crate::render::render;
 use crate::render_error_boundary;
 use crate::state::AppState;
@@ -36,9 +34,9 @@ pub(crate) async fn settings_sessions(
     State(state): State<AppState>,
     headers: HeaderMap,
     sess: crate::extractors::RequireSession,
-    csrf: Csrf,
     banner: crate::handoff::ReferrerBanner,
     crate::page_chrome::ReqLocale(locale): crate::page_chrome::ReqLocale,
+    themed: ThemedChrome,
 ) -> Response {
     let cookie = cookies::cookie_header(&headers);
     let session = sess.session;
@@ -76,7 +74,7 @@ pub(crate) async fn settings_sessions(
 
     let (flash_msg, clear_flash) = state.take_flash(&headers, "/settings/sessions");
     let body = render(&SettingsSessionsTemplate {
-        chrome: PageChrome::from_parts(&state, session_email(&session), csrf.0, locale),
+        chrome: themed.chrome,
         sessions: rows,
         has_other_sessions,
         flash: flash_msg,

@@ -15,7 +15,7 @@ use serde::Deserialize;
 use crate::audit::{self, action, target_kind, AuditCtx, AuditEvent};
 use crate::audit_metadata;
 use crate::flash;
-use crate::page_chrome::PageChrome;
+use crate::page_chrome::{PageChrome, ThemedChrome};
 use crate::posix::{db, offline};
 use crate::render::render;
 use crate::state::AppState;
@@ -40,9 +40,8 @@ pub(crate) async fn settings_offline_access(
     State(state): State<AppState>,
     headers: HeaderMap,
     sess: crate::extractors::RequireSession,
-    csrf: crate::extractors::Csrf,
     banner: crate::handoff::ReferrerBanner,
-    crate::page_chrome::ReqLocale(locale): crate::page_chrome::ReqLocale,
+    themed: ThemedChrome,
 ) -> Response {
     if !state.cfg.posix.offline_auth_enabled {
         return (axum::http::StatusCode::NOT_FOUND, "offline auth disabled").into_response();
@@ -58,7 +57,7 @@ pub(crate) async fn settings_offline_access(
 
     let (flash_msg, clear_flash) = state.take_flash(&headers, "/settings/offline-access");
     let body = render(&SettingsOfflineAccessTemplate {
-        chrome: PageChrome::from_parts(&state, sess.email, csrf.0, locale),
+        chrome: themed.chrome,
         has_secret,
         min_len: state.cfg.posix.offline_min_len,
         flash: flash_msg,

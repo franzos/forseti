@@ -1208,6 +1208,11 @@ mod tests {
                 slug: format!("org-{i}"),
                 name: format!("Org {i}"),
                 role: "member".to_string(),
+                theme_preset: None,
+                brand_primary: None,
+                brand_on_primary: None,
+                brand_secondary: None,
+                has_logo: 0,
             })
             .collect()
     }

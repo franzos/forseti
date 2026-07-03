@@ -13,7 +13,7 @@ use crate::commercial::license::Feature;
 use crate::commercial::upsell::render_upsell;
 use crate::extractors::{gate_orgs_feature_or_upsell, Csrf, RequireSession};
 use crate::orgs::{self, Membership, Role};
-use crate::page_chrome::PageChrome;
+use crate::page_chrome::{PageChrome, ThemedChrome};
 use crate::render::render;
 use crate::state::AppState;
 
@@ -41,13 +41,10 @@ pub(super) async fn orgs_list(
     State(state): State<AppState>,
     headers: HeaderMap,
     sess: RequireSession,
-    csrf: Csrf,
     crate::page_chrome::ReqLocale(locale): crate::page_chrome::ReqLocale,
+    themed: ThemedChrome,
 ) -> Response {
-    let ctx = settings_ctx(&sess, &csrf, locale);
-    let memberships = orgs::list_memberships(&state.db, &ctx.identity_id)
-        .await
-        .unwrap_or_default();
+    let ctx = settings_ctx(&sess, &themed.chrome.csrf_token, locale);
 
     // Upsell card rendered inline (not a 403) so the list page stays reachable.
     let feat = state.license.feature(Feature::Orgs);
@@ -59,10 +56,16 @@ pub(super) async fn orgs_list(
     let current = orgs::count_orgs(&state.db).await.unwrap_or(0);
     let can_create = matches!(feat, crate::commercial::FeatureStatus::Allowed)
         && crate::commercial::license::org_cap_allows(max_orgs, current);
-    let nav = build_nav(&state, &headers, &ctx.identity_id).await;
+    let nav = build_nav(
+        &state,
+        &headers,
+        &ctx.identity_id,
+        Some(&themed.memberships),
+    )
+    .await;
     render(&OrgsListTemplate {
-        chrome: PageChrome::from_parts(&state, ctx.user_email, ctx.csrf_token, ctx.locale),
-        memberships,
+        chrome: themed.chrome,
+        memberships: themed.memberships,
         can_create,
         required_tier_label: "Business".to_string(),
         has_license: state.license.status().license().is_some(),
@@ -111,6 +114,14 @@ pub(super) async fn orgs_create(
     let name = form.name.trim();
     if name.is_empty() {
         return (StatusCode::BAD_REQUEST, "name required").into_response();
+    }
+    if crate::oauth::register::reserved_names::reserved_name_hit(
+        &state.cfg.orgs.reserved_names,
+        name,
+    )
+    .is_some()
+    {
+        return (StatusCode::CONFLICT, "that name is not allowed").into_response();
     }
     let slug = match form
         .slug

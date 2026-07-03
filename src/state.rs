@@ -11,6 +11,7 @@ use tokio::sync::Mutex;
 use crate::commercial::LicenseHandle;
 use crate::config::AppConfig;
 use crate::db::DbPool;
+use crate::logo_cache::LogoCache;
 use crate::ory::discovery::OidcDiscovery;
 use crate::ory::OryClients;
 use crate::webhook::{SigningKey, WorkerHandle};
@@ -45,6 +46,8 @@ pub struct AppState {
     pub cookie_secret: Arc<[u8]>,
     /// Cached Hydra OIDC discovery doc; lazily fetched, falls back to config-derived paths on error.
     pub discovery: DiscoveryCache,
+    /// Bounded in-process cache of served org logo blobs; see [`crate::logo_cache`].
+    pub logo_cache: Arc<Mutex<LogoCache>>,
 }
 
 impl AppState {

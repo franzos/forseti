@@ -20,7 +20,7 @@ use crate::flow_view::{
 use crate::locale::LanguageIdentifier;
 use crate::ory::kratos::FlowOutcome;
 use crate::ory::{self, FlowFetch, FlowKind};
-use crate::page_chrome::{PageChrome, ReqLocale};
+use crate::page_chrome::{PageChrome, ThemedChrome};
 use crate::render::render;
 use crate::state::AppState;
 use crate::{render_error_boundary, FlowQuery};
@@ -96,10 +96,9 @@ async fn settings_hub(
     State(state): State<AppState>,
     Query(query): Query<FlowQuery>,
     headers: HeaderMap,
-    sess: crate::extractors::RequireSession,
-    csrf: crate::extractors::Csrf,
+    _sess: crate::extractors::RequireSession,
     banner: crate::handoff::ReferrerBanner,
-    ReqLocale(locale): ReqLocale,
+    themed: ThemedChrome,
 ) -> Response {
     // Kratos's `selfservice.flows.settings.ui_url` points at `/settings`, so
     // every settings flow lands here with `?flow=<id>`. Inspect the flow's
@@ -123,7 +122,7 @@ async fn settings_hub(
     }
 
     render(&SettingsHubTemplate {
-        chrome: PageChrome::from_parts(&state, sess.email, csrf.0, locale),
+        chrome: themed.chrome,
         referrer_banner: banner.0,
     })
 }
@@ -299,6 +298,7 @@ mod tests {
             brand_primary: None,
             brand_on_primary: None,
             brand_secondary: None,
+            operator_trust_anchor: None,
         };
 
         for locale_str in ["en", "de"] {
@@ -409,6 +409,9 @@ pub(crate) async fn settings_subpage(
             Ok(pair) => pair,
             Err(resp) => return resp,
         };
+    let memberships = crate::orgs::list_memberships(&state.db, &sess.identity_id)
+        .await
+        .unwrap_or_default();
     let is_profile = matches!(section, InlineRenderSection::Profile);
     // Load the Forseti-owned extended fields only for the profile section.
     let profile = if is_profile && state.cfg.profiles.enabled {
@@ -423,6 +426,8 @@ pub(crate) async fn settings_subpage(
     let extended_saved = is_profile && profile_saved;
     render_settings(
         state,
+        headers,
+        &memberships,
         csrf_token,
         &session,
         &flow,
@@ -437,6 +442,8 @@ pub(crate) async fn settings_subpage(
 #[allow(clippy::too_many_arguments)]
 fn render_settings(
     state: &AppState,
+    headers: &HeaderMap,
+    memberships: &[crate::orgs::Membership],
     csrf_token: &str,
     session: &ory::Session,
     flow: &serde_json::Value,
@@ -467,7 +474,14 @@ fn render_settings(
             let p = profile.unwrap_or_default();
             let links_text = crate::settings::profile::links_to_text(&p.links);
             render(&SettingsProfileTemplate {
-                chrome: PageChrome::from_parts(state, session_email(session), token, locale),
+                chrome: PageChrome::from_parts_themed(
+                    state,
+                    memberships,
+                    headers,
+                    session_email(session),
+                    token,
+                    locale,
+                ),
                 form_action,
                 form_method,
                 flow_messages: msgs,
@@ -493,7 +507,14 @@ fn render_settings(
                     return Redirect::to("/").into_response();
                 }
                 render(&SettingsPasswordHandoffTemplate {
-                    chrome: PageChrome::from_parts(state, String::new(), token, locale),
+                    chrome: PageChrome::from_parts_themed(
+                        state,
+                        memberships,
+                        headers,
+                        String::new(),
+                        token,
+                        locale,
+                    ),
                     form_action,
                     form_method,
                     flow_messages: msgs,
@@ -502,7 +523,14 @@ fn render_settings(
                 })
             } else {
                 render(&SettingsPasswordTemplate {
-                    chrome: PageChrome::from_parts(state, session_email(session), token, locale),
+                    chrome: PageChrome::from_parts_themed(
+                        state,
+                        memberships,
+                        headers,
+                        session_email(session),
+                        token,
+                        locale,
+                    ),
                     form_action,
                     form_method,
                     flow_messages: msgs,

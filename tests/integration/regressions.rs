@@ -256,3 +256,37 @@ async fn deviation4_consent_checkboxes_render_per_scope() {
     hydra_delete_client(&client_id).await;
     user.cleanup().await;
 }
+
+#[tokio::test]
+async fn public_response_carries_safe_security_headers() {
+    assert!(portal_reachable().await, "portal not reachable at {PORTAL}");
+    let client = browser_client();
+    let res = client
+        .get(format!("{PORTAL}/static/styles.css"))
+        .send()
+        .await
+        .expect("GET /static/styles.css");
+    assert!(res.status().is_success(), "status {}", res.status());
+
+    let headers = res.headers();
+    assert_eq!(
+        headers.get("x-content-type-options").map(|v| v.as_bytes()),
+        Some(b"nosniff".as_slice())
+    );
+    assert_eq!(
+        headers.get("x-frame-options").map(|v| v.as_bytes()),
+        Some(b"SAMEORIGIN".as_slice())
+    );
+    let csp = headers
+        .get("content-security-policy")
+        .and_then(|v| v.to_str().ok())
+        .expect("Content-Security-Policy header present");
+    assert!(csp.contains("object-src 'none'"));
+    assert!(csp.contains("base-uri 'self'"));
+    assert!(csp.contains("frame-ancestors 'self'"));
+    // WebAuthn/QR-safety guard: these directives must stay absent
+    assert!(!csp.contains("default-src"));
+    assert!(!csp.contains("script-src"));
+    assert!(!csp.contains("img-src"));
+    assert!(!csp.contains("form-action"));
+}

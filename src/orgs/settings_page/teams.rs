@@ -17,7 +17,7 @@ use crate::audit_metadata;
 use crate::csrf::CsrfForm;
 use crate::extractors::{gate_orgs_feature_or_upsell, Csrf, RequireSession};
 use crate::orgs::{self, teams, Org};
-use crate::page_chrome::PageChrome;
+use crate::page_chrome::{PageChrome, ThemedChrome};
 use crate::render::render;
 use crate::state::AppState;
 
@@ -81,10 +81,10 @@ pub(super) async fn teams(
     Query(sel): Query<TeamSelect>,
     headers: HeaderMap,
     sess: RequireSession,
-    csrf: Csrf,
     crate::page_chrome::ReqLocale(locale): crate::page_chrome::ReqLocale,
+    themed: ThemedChrome,
 ) -> Response {
-    let ctx = settings_ctx(&sess, &csrf, locale);
+    let ctx = settings_ctx(&sess, &themed.chrome.csrf_token, locale);
     let target = match resolve_org_or_404(&state, slug.as_deref()).await {
         Ok(t) => t,
         Err(r) => return r,
@@ -100,15 +100,27 @@ pub(super) async fn teams(
     {
         return r;
     }
-    render_teams(&state, &headers, &ctx, target.org, sel.team).await
+    render_teams(
+        &state,
+        &headers,
+        &ctx,
+        target.org,
+        sel.team,
+        &themed.memberships,
+        themed.chrome,
+    )
+    .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn render_teams(
     state: &AppState,
     headers: &HeaderMap,
     ctx: &SettingsCtx,
     org: Org,
     selected: Option<String>,
+    memberships: &[orgs::Membership],
+    chrome: PageChrome,
 ) -> Response {
     let org_id = &org.id;
     let counts = teams::list_teams_with_counts(&state.db, org_id)
@@ -156,14 +168,9 @@ async fn render_teams(
         }
     }
 
-    let nav = build_nav(state, headers, &ctx.identity_id).await;
+    let nav = build_nav(state, headers, &ctx.identity_id, Some(memberships)).await;
     let mut resp = render(&TeamsTemplate {
-        chrome: PageChrome::from_parts(
-            state,
-            ctx.user_email.clone(),
-            ctx.csrf_token.clone(),
-            ctx.locale.clone(),
-        ),
+        chrome,
         is_default: org.id == orgs::DEFAULT_ORG_ID,
         org,
         nav,
