@@ -94,14 +94,32 @@ fn is_blocked_v4(v4: Ipv4Addr) -> bool {
 }
 
 fn is_blocked_v6(v6: Ipv6Addr) -> bool {
-    if let Some(mapped) = v6.to_ipv4_mapped() {
-        return is_blocked_v4(mapped);
+    if let Some(embedded) = embedded_ipv4(v6) {
+        return is_blocked_v4(embedded);
     }
     v6.is_loopback()
         || v6.is_unspecified()
         || v6.is_multicast()
         || v6.is_unique_local()
         || v6.is_unicast_link_local()
+}
+
+/// IPv4-mapped (`::ffff:0:0/96`), NAT64 (`64:ff9b::/96`), and 6to4
+/// (`2002::/16`) addresses classify by their embedded IPv4 address, so a
+/// NAT64/6to4-capable egress can't smuggle a blocked v4 target through v6.
+fn embedded_ipv4(v6: Ipv6Addr) -> Option<Ipv4Addr> {
+    if let Some(mapped) = v6.to_ipv4_mapped() {
+        return Some(mapped);
+    }
+    let s = v6.segments();
+    let o = v6.octets();
+    if s[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+        return Some(Ipv4Addr::new(o[12], o[13], o[14], o[15]));
+    }
+    if s[0] == 0x2002 {
+        return Some(Ipv4Addr::new(o[2], o[3], o[4], o[5]));
+    }
+    None
 }
 
 /// Connect-time SSRF guard. Resolves names via the system resolver and
@@ -214,6 +232,30 @@ mod tests {
             assert!(is_blocked_ip(ip.parse().unwrap()), "should block: {ip}");
         }
         for ip in ["8.8.8.8", "1.1.1.1", "2606:4700:4700::1111"] {
+            assert!(!is_blocked_ip(ip.parse().unwrap()), "should allow: {ip}");
+        }
+    }
+
+    #[test]
+    fn is_blocked_ip_classifies_nat64_and_6to4_by_embedded_v4() {
+        for ip in [
+            // NAT64 well-known prefix wrapping 10.0.0.1
+            "64:ff9b::a00:1",
+            // NAT64 wrapping the IMDS address
+            "64:ff9b::a9fe:a9fe",
+            // 6to4 wrapping 127.0.0.1
+            "2002:7f00:0001::",
+            // 6to4 wrapping 192.168.1.1
+            "2002:c0a8:0101::",
+        ] {
+            assert!(is_blocked_ip(ip.parse().unwrap()), "should block: {ip}");
+        }
+        for ip in [
+            // NAT64 wrapping public 8.8.8.8
+            "64:ff9b::808:808",
+            // 6to4 wrapping public 8.8.8.8
+            "2002:808:808::",
+        ] {
             assert!(!is_blocked_ip(ip.parse().unwrap()), "should allow: {ip}");
         }
     }

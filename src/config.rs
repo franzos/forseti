@@ -256,6 +256,13 @@ pub struct HydraConfig {
 pub struct SelfConfig {
     /// Forseti's own externally reachable URL (used for `return_to` round-trips).
     pub url: String,
+    /// Public listener bind address.
+    #[serde(default = "default_self_bind")]
+    pub bind: String,
+}
+
+fn default_self_bind() -> String {
+    "0.0.0.0:3000".to_string()
 }
 
 impl SelfConfig {
@@ -289,6 +296,28 @@ pub struct BrandConfig {
     /// Operator identity string shown on pre-auth cards; never tenant-derived.
     #[serde(default)]
     pub operator_trust_anchor: Option<String>,
+}
+
+impl BrandConfig {
+    /// `logo_url` lands in a CSS `url("...")` sink; only absolute http/https
+    /// URLs are accepted so exotic schemes never reach the template.
+    pub fn validate_logo_url(&self) -> anyhow::Result<()> {
+        let Some(raw) = self
+            .logo_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
+            return Ok(());
+        };
+        let parsed = url::Url::parse(raw)
+            .map_err(|e| anyhow::anyhow!("[brand].logo_url {raw:?} is not a valid URL: {e}"))?;
+        anyhow::ensure!(
+            matches!(parsed.scheme(), "http" | "https"),
+            "[brand].logo_url {raw:?} must be an http:// or https:// URL"
+        );
+        Ok(())
+    }
 }
 
 fn default_brand_name() -> String {
@@ -919,6 +948,7 @@ impl AppConfig {
             .merge(Env::prefixed("FORSETI_").split("__"))
             .extract()?;
         cfg.clamp_rate_limits();
+        cfg.brand.validate_logo_url()?;
         Ok(cfg)
     }
 
@@ -1014,6 +1044,7 @@ impl AppConfig {
             },
             self_: SelfConfig {
                 url: "http://localhost:3000".into(),
+                bind: default_self_bind(),
             },
             brand: BrandConfig {
                 name: "Test".into(),
@@ -1188,6 +1219,7 @@ mod tests {
     fn is_https_true_for_https() {
         let c = SelfConfig {
             url: "https://forseti.example.com".into(),
+            bind: default_self_bind(),
         };
         assert!(c.is_https());
     }
@@ -1196,8 +1228,61 @@ mod tests {
     fn is_https_false_for_http() {
         let c = SelfConfig {
             url: "http://forseti.example.com".into(),
+            bind: default_self_bind(),
         };
         assert!(!c.is_https());
+    }
+
+    #[test]
+    fn self_bind_defaults_to_all_interfaces_port_3000() {
+        assert_eq!(default_self_bind(), "0.0.0.0:3000");
+        let c: SelfConfig = serde_json::from_str(r#"{"url": "http://localhost:3000"}"#).unwrap();
+        assert_eq!(c.bind, "0.0.0.0:3000");
+        let c: SelfConfig =
+            serde_json::from_str(r#"{"url": "http://localhost:3000", "bind": "127.0.0.1:8300"}"#)
+                .unwrap();
+        assert_eq!(c.bind, "127.0.0.1:8300");
+    }
+
+    // --- BrandConfig::validate_logo_url --------------------------------------
+
+    fn brand_with_logo(url: Option<&str>) -> BrandConfig {
+        let mut b = AppConfig::test_fixture().brand;
+        b.logo_url = url.map(str::to_string);
+        b
+    }
+
+    #[test]
+    fn logo_url_unset_or_blank_is_valid() {
+        assert!(brand_with_logo(None).validate_logo_url().is_ok());
+        assert!(brand_with_logo(Some("")).validate_logo_url().is_ok());
+        assert!(brand_with_logo(Some("  ")).validate_logo_url().is_ok());
+    }
+
+    #[test]
+    fn logo_url_http_and_https_are_valid() {
+        assert!(brand_with_logo(Some("https://example.com/logo.svg"))
+            .validate_logo_url()
+            .is_ok());
+        assert!(brand_with_logo(Some("http://example.com/logo.png"))
+            .validate_logo_url()
+            .is_ok());
+    }
+
+    #[test]
+    fn logo_url_rejects_non_http_schemes_and_garbage() {
+        assert!(brand_with_logo(Some("javascript:alert(1)"))
+            .validate_logo_url()
+            .is_err());
+        assert!(brand_with_logo(Some("data:image/svg+xml,<svg/>"))
+            .validate_logo_url()
+            .is_err());
+        assert!(brand_with_logo(Some("/static/logo.svg"))
+            .validate_logo_url()
+            .is_err());
+        assert!(brand_with_logo(Some("not a url"))
+            .validate_logo_url()
+            .is_err());
     }
 
     // --- PosixConfig -------------------------------------------------------

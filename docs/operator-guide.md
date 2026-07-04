@@ -1571,7 +1571,7 @@ Generate fresh values with `openssl rand -base64 64` (cookie/session secrets) or
 | Endpoint              | Service | Purpose                                                |
 |-----------------------|---------|--------------------------------------------------------|
 | `/healthz`            | Forseti | Liveness. Returns `ok` if the process is up.           |
-| `/readyz`             | Forseti | Readiness. Returns `ready` when Forseti will serve. Returns `503` if the background webhook worker has been silent for more than 20s (4× its tick) — surfaces a stuck worker before undelivered webhooks pile up. |
+| `/readyz`             | Forseti | Readiness. Returns `ready` (200) when Forseti will serve. If the background webhook worker has been silent for more than 4x `[webhook].tick_seconds` (floor 20s), it still returns 200 but the body reads `ready (degraded: webhook worker stale, ...)`; page serving is unaffected, so a stuck worker does not pull the instance out of rotation. Monitor the body (or logs) to catch a stale worker before undelivered webhooks pile up. |
 | `/health/alive`       | Kratos  | Liveness.                                              |
 | `/health/ready`       | Kratos  | Readiness (checks DB connectivity).                    |
 | `/health/alive`       | Hydra   | Liveness.                                              |

@@ -17,6 +17,10 @@ admin_url  = "http://localhost:4445"
 [self]
 # Forseti's own externally reachable URL. Used to build `return_to` round-trips.
 url = "http://localhost:3000"
+# Public listener bind address. Default binds all interfaces on port 3000;
+# narrow it (e.g. "127.0.0.1:3000") when a reverse proxy on the same host
+# is the only intended client.
+# bind = "0.0.0.0:3000"
 
 # Operator-supplied secret material. `cookie_secret` seeds the HMAC keys for
 # every Forseti-signed cookie (one-shot flash, active-org switcher, handoff
@@ -39,7 +43,7 @@ url = "http://localhost:3000"
 [brand]
 name          = "Forseti"
 support_email = "support@example.com"
-# logo_url    = "https://example.com/logo.svg"
+# logo_url    = "https://example.com/logo.svg"   # must be an absolute http(s) URL; anything else is a startup error
 # consent_intro = "The application below is requesting access to your account."
 # Operator identity string shown on pre-auth cards (login, consent, device
 # verify). The strongest anti-phishing lever against a tenant impersonating

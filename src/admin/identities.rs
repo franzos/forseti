@@ -170,6 +170,20 @@ pub(crate) async fn search_identities(
     // UUID-shaped query: single-identity admin GET, because Kratos's
     // `credentials_identifier` filter is name/email-only and won't match IDs.
     let identities = if looks_like_uuid(filter_q) {
+        // Org-scoped admins must not resolve identities outside their org;
+        // a non-member ID is an empty result, same as a lookup miss.
+        let in_scope = match scope.org_id() {
+            Some(org_id) => crate::orgs::is_member(&state.db, filter_q, org_id).await,
+            None => true,
+        };
+        if !in_scope {
+            tracing::info!("admin: org-scoped identity ID lookup outside scope");
+            return Ok(IdentitySearch {
+                rows: Vec::new(),
+                next_page_token: String::new(),
+                has_prev: page_token.is_some(),
+            });
+        }
         match ory::kratos::admin_get_identity_full(&state.ory, filter_q).await {
             Ok(id) => vec![id],
             // A 404 here is just an empty result, not a render error.

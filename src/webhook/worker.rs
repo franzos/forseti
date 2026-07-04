@@ -123,10 +123,20 @@ pub fn spawn_worker(
                 tracing::info!("webhook worker: shutdown received, exiting");
                 break;
             }
-            if let Err(e) = drain_once(&db, &http, &cfg).await {
-                tracing::warn!(error = %e, "webhook worker tick failed");
-            }
+            let full_batch = match drain_once(&db, &http, &cfg).await {
+                Ok(fetched) => fetched >= DRAIN_BATCH,
+                Err(e) => {
+                    tracing::warn!(error = %e, "webhook worker tick failed");
+                    false
+                }
+            };
             last_tick.store(Utc::now().timestamp(), Ordering::Relaxed);
+            // A full batch means there's likely backlog; drain again right
+            // away (the loop head re-checks the shutdown token) instead of
+            // capping throughput at one batch per tick.
+            if full_batch {
+                continue;
+            }
             // Sleep, but wake immediately on shutdown so we don't
             // linger up to `tick_seconds` after the signal.
             tokio::select! {
@@ -141,11 +151,15 @@ pub fn spawn_worker(
     handle
 }
 
+const DRAIN_BATCH: usize = 32;
+
+/// Returns the number of candidate rows fetched, so the caller can tell a
+/// full batch (likely more backlog) from a partial one (queue drained).
 async fn drain_once(
     db: &DbPool,
     http: &reqwest::Client,
     cfg: &crate::config::WebhookConfig,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<usize> {
     let now = Utc::now().to_rfc3339();
     let candidates: Vec<OutboxRow> = db_interact!(db, |conn| {
         webhook_outbox::table
@@ -153,10 +167,11 @@ async fn drain_once(
             .filter(webhook_outbox::delivered_at.is_null())
             .filter(webhook_outbox::next_attempt_at.le(&now))
             .order(webhook_outbox::next_attempt_at.asc())
-            .limit(32)
+            .limit(DRAIN_BATCH as i64)
             .select(OutboxRow::as_select())
             .load(conn)
     })?;
+    let fetched = candidates.len();
 
     const DRAIN_CONCURRENCY: usize = 6;
     futures_util::stream::iter(candidates)
@@ -164,7 +179,7 @@ async fn drain_once(
             process_outbox_row(db.clone(), http.clone(), row, cfg.clone())
         })
         .await;
-    Ok(())
+    Ok(fetched)
 }
 
 /// Claim and deliver a single outbox row. A lost claim race or a claim

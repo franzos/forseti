@@ -241,6 +241,20 @@ impl PageChrome {
             .collect()
     }
 
+    /// Defence-in-depth for the CSS `url("...")` sink in `base.html`: strip
+    /// backslash, quotes, `}`/`;` and control chars so the logo URL can't
+    /// escape the string or terminate the declaration.
+    pub(crate) fn logo_url_css(&self) -> String {
+        self.brand
+            .logo_url
+            .as_deref()
+            .unwrap_or_default()
+            .chars()
+            .filter(|c| !matches!(c, '\\' | '"' | '\'' | '}' | ';') && !c.is_control())
+            .take(2048)
+            .collect()
+    }
+
     pub(crate) fn t(&self, id: &str) -> String {
         crate::i18n::lookup(&self.locale, id)
     }
@@ -455,6 +469,33 @@ mod tests {
     fn brand_name_css_clamps_to_128_chars() {
         let long_name = "A".repeat(500);
         assert_eq!(chrome_named(&long_name).brand_name_css().len(), 128);
+    }
+
+    fn chrome_with_logo(url: &str) -> PageChrome {
+        let mut c = chrome("en");
+        c.brand.logo_url = Some(url.to_string());
+        c
+    }
+
+    #[test]
+    fn logo_url_css_strips_string_and_declaration_breakers() {
+        assert_eq!(
+            chrome_with_logo("https://ex.com/a\\\"b'};.png\n").logo_url_css(),
+            "https://ex.com/ab.png"
+        );
+    }
+
+    #[test]
+    fn logo_url_css_passes_plain_url_through() {
+        assert_eq!(
+            chrome_with_logo("https://example.com/logo.svg?v=2").logo_url_css(),
+            "https://example.com/logo.svg?v=2"
+        );
+    }
+
+    #[test]
+    fn logo_url_css_empty_when_unset() {
+        assert_eq!(chrome("en").logo_url_css(), "");
     }
 
     #[test]

@@ -21,8 +21,8 @@ pub(crate) struct RequireSession {
     pub(crate) email: String,
 }
 
-/// Why [`resolve_session`] couldn't hand back a usable session. Each variant carries the artefact a caller
-/// typically wants (a redirect, or the raw error), but callers may synthesise their own response.
+/// Why [`resolve_session_from_parts`] couldn't hand back a usable session. Each variant carries the artefact
+/// a caller typically wants (a redirect, or the raw error), but callers may synthesise their own response.
 pub(crate) enum SessionFailure {
     /// No session; embeds the `/login?return_to=<path>` redirect.
     NoSession(Redirect),
@@ -49,29 +49,24 @@ fn required_session_from_outcome(
     }
 }
 
-/// Single source of truth for the `match whoami` ladder: the resolved session or a [`SessionFailure`].
-pub(crate) async fn resolve_session(
+/// Single source of truth for the `match whoami` ladder, consulting the middleware-cached whoami first to
+/// avoid a second Kratos round-trip; on a cache miss the fresh outcome is written back for later extractors.
+pub(crate) async fn resolve_session_from_parts(
     state: &AppState,
-    cookie: &str,
-    path: &str,
-) -> Result<Box<ory::Session>, SessionFailure> {
-    let outcome = ory::kratos::whoami(&state.ory, (!cookie.is_empty()).then_some(cookie))
-        .await
-        .map_err(SessionFailure::KratosError)?;
-    required_session_from_outcome(outcome, path)
-}
-
-/// Extractor wrapper around [`resolve_session`] consulting the middleware-cached whoami first to avoid a second Kratos round-trip.
-async fn resolve_session_from_parts(
-    state: &AppState,
-    parts: &Parts,
+    parts: &mut Parts,
     path: &str,
 ) -> Result<Box<ory::Session>, SessionFailure> {
     if let Some(outcome) = cached_whoami(&parts.extensions) {
         return required_session_from_outcome(outcome, path);
     }
     let cookie = cookies::cookie_header(&parts.headers);
-    resolve_session(state, &cookie, path).await
+    let outcome = ory::kratos::whoami(&state.ory, (!cookie.is_empty()).then_some(cookie.as_str()))
+        .await
+        .map_err(SessionFailure::KratosError)?;
+    parts
+        .extensions
+        .insert(crate::orgs::middleware::CachedWhoami(outcome.clone()));
+    required_session_from_outcome(outcome, path)
 }
 
 impl<S> FromRequestParts<S> for RequireSession
@@ -248,11 +243,7 @@ where
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let app_state = app_state(parts, state).await;
         let path = parts.uri.path().to_string();
-        let mut ctx = require_admin(&app_state, &parts.headers, &path).await?;
-        let session = OptionalSession::from_request_parts(parts, state)
-            .await
-            .expect("OptionalSession extractor is infallible");
-        ctx.locale = crate::page_chrome::resolve_locale(parts, &session);
+        let ctx = require_admin(&app_state, parts, &path).await?;
         Ok(RequireAdmin { ctx })
     }
 }
@@ -285,18 +276,9 @@ where
             .get::<csrf::CsrfToken>()
             .map(|t| t.0.clone())
             .unwrap_or_default();
-        let (mut ctx, scope) = require_admin_with_scope(
-            &app_state,
-            &parts.headers,
-            &path,
-            org_slug.as_deref(),
-            &csrf_token,
-        )
-        .await?;
-        let session = OptionalSession::from_request_parts(parts, state)
-            .await
-            .expect("OptionalSession extractor is infallible");
-        ctx.locale = crate::page_chrome::resolve_locale(parts, &session);
+        let (ctx, scope) =
+            require_admin_with_scope(&app_state, parts, &path, org_slug.as_deref(), &csrf_token)
+                .await?;
         Ok(RequireAdminScoped { ctx, scope })
     }
 }

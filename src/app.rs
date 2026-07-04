@@ -6,7 +6,6 @@ use std::sync::Arc;
 
 use axum::{
     extract::State,
-    http::StatusCode,
     response::{IntoResponse, Response},
     routing::get,
     Router,
@@ -34,20 +33,22 @@ pub(crate) async fn healthz() -> &'static str {
     "ok"
 }
 
-/// Returns 503 when the background webhook worker has been silent too long. The
-/// threshold is generous (4x the 5-second tick) so a slow Postgres / paused VM
-/// doesn't trip a false unready.
+/// A stale webhook worker is reported as degraded info in the body but stays
+/// 200: page serving is unaffected, so it must not 503 the whole instance.
+/// The threshold scales with the operator-configured poll interval (4x
+/// `[webhook].tick_seconds`, floor 20s) so a slow tick can't trip a false stale.
 pub(crate) async fn readyz(State(state): State<AppState>) -> Response {
-    const WORKER_STALE_SECS: i64 = 20;
+    let threshold = worker_stale_threshold_secs(state.cfg.webhook.tick_seconds);
     let stale = state.webhook_worker.seconds_since_last_tick();
-    if stale > WORKER_STALE_SECS {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            format!("webhook worker stale: {stale}s since last tick"),
-        )
+    if stale > threshold {
+        return format!("ready (degraded: webhook worker stale, {stale}s since last tick)")
             .into_response();
     }
     "ready".into_response()
+}
+
+fn worker_stale_threshold_secs(tick_seconds: u64) -> i64 {
+    i64::try_from(tick_seconds.saturating_mul(4).max(20)).unwrap_or(i64::MAX)
 }
 
 pub(crate) async fn run() -> anyhow::Result<()> {
@@ -109,6 +110,10 @@ pub(crate) async fn run() -> anyhow::Result<()> {
     // Hourly POSIX reconcile for identities deleted out-of-band via the Kratos admin API; never purges on a Kratos lookup error.
     crate::posix::spawn_reconcile(db.clone(), ory.clone(), shutdown.clone());
 
+    // Sweeps stale per-IP entries out of every keyed rate limiter built below.
+    crate::rate_limit::spawn_retention(shutdown.clone());
+
+    let cfg_public_bind = cfg.self_.bind.clone();
     let cfg_internal_bind = cfg.internal.bind.clone();
 
     let state = AppState {
@@ -225,7 +230,9 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 
-    let public_addr: SocketAddr = "0.0.0.0:3000".parse()?;
+    let public_addr: SocketAddr = cfg_public_bind
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid [self].bind value '{cfg_public_bind}': {e}"))?;
     let internal_addr: SocketAddr = cfg_internal_bind
         .parse()
         .map_err(|e| anyhow::anyhow!("invalid [internal].bind value '{cfg_internal_bind}': {e}"))?;
@@ -295,8 +302,9 @@ fn warn_if_sqlite_in_production(db: &DbPool, self_url: &str) {
     );
 }
 
-/// Materialise the master cookie-signing secret. Hex string preferred (`openssl rand -hex 32`),
-/// otherwise raw UTF-8 bytes; under 32 bytes hard-fails boot. Missing config falls back to 32
+/// Materialise the master cookie-signing secret. Hex string preferred (`openssl rand -hex 32`);
+/// a 64-char value that isn't valid hex hard-fails boot (typo guard), other lengths fall back
+/// to raw UTF-8 bytes; under 32 bytes hard-fails boot. Missing config falls back to 32
 /// per-process random bytes with a warning (cookies won't survive restart) on dev URLs, but
 /// hard-fails on a production-shaped URL: a per-process key silently rejects peers' cookies
 /// across an HA fleet.
@@ -304,7 +312,27 @@ fn resolve_cookie_secret(configured: Option<&str>, self_url: &str) -> Arc<[u8]> 
     if let Some(raw) = configured.map(str::trim).filter(|s| !s.is_empty()) {
         let key: Box<[u8]> = match hex::decode(raw) {
             Ok(bytes) => bytes.into_boxed_slice(),
-            Err(_) => raw.as_bytes().to_vec().into_boxed_slice(),
+            // 64 chars is the `openssl rand -hex 32` shape; a silent raw-bytes
+            // fallback would yield a different key than intended (HA cookie mismatch).
+            Err(_) if raw.len() == 64 => {
+                eprintln!(
+                    "config error: [security].cookie_secret is 64 characters but is not valid \
+                     hex. A 64-char secret is always treated as hex (`openssl rand -hex 32`); \
+                     fix the typo (only 0-9a-f allowed), or use a different length to opt into \
+                     raw-byte interpretation, and restart."
+                );
+                std::process::exit(1);
+            }
+            Err(_) => {
+                static RAW_BYTES_WARN: std::sync::Once = std::sync::Once::new();
+                RAW_BYTES_WARN.call_once(|| {
+                    tracing::warn!(
+                        "[security].cookie_secret is not hex; interpreting it as raw UTF-8 \
+                         bytes. Prefer a hex secret from `openssl rand -hex 32`."
+                    );
+                });
+                raw.as_bytes().to_vec().into_boxed_slice()
+            }
         };
         if key.len() < 32 {
             eprintln!(
@@ -368,7 +396,37 @@ fn build_csp(frame_ancestors: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::build_csp;
+    use super::{build_csp, resolve_cookie_secret, worker_stale_threshold_secs};
+
+    #[test]
+    fn worker_stale_threshold_scales_with_tick_and_floors_at_20() {
+        assert_eq!(worker_stale_threshold_secs(1), 20);
+        assert_eq!(worker_stale_threshold_secs(5), 20);
+        assert_eq!(worker_stale_threshold_secs(6), 24);
+        assert_eq!(worker_stale_threshold_secs(60), 240);
+        assert_eq!(worker_stale_threshold_secs(u64::MAX), i64::MAX);
+    }
+
+    #[test]
+    fn cookie_secret_64_char_hex_decodes_to_32_bytes() {
+        let hex64 = "ab".repeat(32);
+        let key = resolve_cookie_secret(Some(&hex64), "http://localhost:3000");
+        assert_eq!(key.len(), 32);
+        assert!(key.iter().all(|b| *b == 0xab));
+    }
+
+    #[test]
+    fn cookie_secret_non_hex_other_length_uses_raw_bytes() {
+        let raw = "x".repeat(40);
+        let key = resolve_cookie_secret(Some(&raw), "http://localhost:3000");
+        assert_eq!(&*key, raw.as_bytes());
+    }
+
+    #[test]
+    fn cookie_secret_unset_on_dev_url_is_ephemeral_32_bytes() {
+        let key = resolve_cookie_secret(None, "http://localhost:3000");
+        assert_eq!(key.len(), 32);
+    }
 
     #[test]
     fn csp_contains_safe_directives() {

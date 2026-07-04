@@ -164,16 +164,16 @@ pub(crate) async fn serve(
         Some(logo) => logo,
         None => match get(&state.db, &org.id).await {
             Ok(Some(row)) => {
-                let logo = CachedLogo {
+                let logo = Arc::new(CachedLogo {
                     etag: row.etag,
                     content_type: row.content_type,
-                    bytes: Arc::new(row.bytes),
-                };
+                    bytes: axum::body::Bytes::from(row.bytes),
+                });
                 state
                     .logo_cache
                     .lock()
                     .await
-                    .insert(org.id.clone(), logo.clone());
+                    .insert(org.id.clone(), Arc::clone(&logo));
                 logo
             }
             Ok(None) => return shared_not_found(),
@@ -193,7 +193,7 @@ pub(crate) async fn serve(
         if inm.as_bytes() == logo.etag.as_bytes() {
             let mut builder = Response::builder()
                 .status(StatusCode::NOT_MODIFIED)
-                .header(header::ETAG, logo.etag.clone())
+                .header(header::ETAG, logo.etag.as_str())
                 .header(header::CACHE_CONTROL, cache_control);
             if !public {
                 builder = builder.header(header::VARY, "Cookie");
@@ -205,15 +205,15 @@ pub(crate) async fn serve(
     }
 
     let mut builder = Response::builder()
-        .header(header::CONTENT_TYPE, logo.content_type.clone())
-        .header(header::ETAG, logo.etag.clone())
+        .header(header::CONTENT_TYPE, logo.content_type.as_str())
+        .header(header::ETAG, logo.etag.as_str())
         .header("x-content-type-options", "nosniff")
         .header(header::CACHE_CONTROL, cache_control);
     if !public {
         builder = builder.header(header::VARY, "Cookie");
     }
     builder
-        .body(axum::body::Body::from((*logo.bytes).clone()))
+        .body(axum::body::Body::from(logo.bytes.clone()))
         .expect("logo response is well-formed")
 }
 

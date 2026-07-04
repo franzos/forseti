@@ -27,7 +27,7 @@
     <style>
       :root {
         --brand-name: "{{ chrome.brand_name_css() }}";
-        {% match chrome.brand.logo_url %}{% when Some with (url) %}--brand-logo-url: url("{{ url }}");{% when None %}{% endmatch %}
+        {% if chrome.brand.logo_url.is_some() %}--brand-logo-url: url("{{ chrome.logo_url_css() }}");{% endif %}
         {{ chrome.theme_css_root|safe }}
       }
       html.dark { {{ chrome.theme_css_dark|safe }} }

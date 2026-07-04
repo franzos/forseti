@@ -3,18 +3,19 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
+use axum::body::Bytes;
+
 pub(crate) const DEFAULT_MAX_ENTRIES: usize = 200;
 pub(crate) const DEFAULT_MAX_TOTAL_BYTES: usize = 64 * 1024 * 1024;
 
-#[derive(Clone)]
 pub(crate) struct CachedLogo {
     pub(crate) etag: String,
     pub(crate) content_type: String,
-    pub(crate) bytes: Arc<Vec<u8>>,
+    pub(crate) bytes: Bytes,
 }
 
 pub(crate) struct LogoCache {
-    entries: HashMap<String, CachedLogo>,
+    entries: HashMap<String, Arc<CachedLogo>>,
     order: VecDeque<String>,
     total_bytes: usize,
     max_entries: usize,
@@ -32,11 +33,11 @@ impl LogoCache {
         }
     }
 
-    pub(crate) fn get(&self, org_id: &str) -> Option<CachedLogo> {
+    pub(crate) fn get(&self, org_id: &str) -> Option<Arc<CachedLogo>> {
         self.entries.get(org_id).cloned()
     }
 
-    pub(crate) fn insert(&mut self, org_id: String, logo: CachedLogo) {
+    pub(crate) fn insert(&mut self, org_id: String, logo: Arc<CachedLogo>) {
         self.remove(&org_id);
         self.total_bytes += logo.bytes.len();
         self.order.push_back(org_id.clone());
@@ -71,12 +72,12 @@ impl Default for LogoCache {
 mod tests {
     use super::*;
 
-    fn logo(bytes: usize) -> CachedLogo {
-        CachedLogo {
+    fn logo(bytes: usize) -> Arc<CachedLogo> {
+        Arc::new(CachedLogo {
             etag: "\"e\"".to_string(),
             content_type: "image/png".to_string(),
-            bytes: Arc::new(vec![0u8; bytes]),
-        }
+            bytes: Bytes::from(vec![0u8; bytes]),
+        })
     }
 
     #[test]

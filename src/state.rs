@@ -18,10 +18,12 @@ use crate::webhook::{SigningKey, WorkerHandle};
 
 /// TTL for the cached Hydra discovery doc.
 const DISCOVERY_TTL: Duration = Duration::from_secs(3600);
+/// Backoff between refresh attempts while Hydra is down and a stale doc is served.
+const DISCOVERY_RETRY: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
 struct CachedDiscovery {
-    fetched_at: Instant,
+    next_refresh_at: Instant,
     doc: OidcDiscovery,
 }
 
@@ -36,7 +38,7 @@ pub struct AppState {
     pub cfg: Arc<AppConfig>,
     pub ory: Arc<OryClients>,
     pub db: DbPool,
-    /// Heartbeat for the background webhook worker; `/readyz` returns 503 when it hasn't ticked recently.
+    /// Heartbeat for the background webhook worker; `/readyz` reports degraded (still 200) when it hasn't ticked recently.
     pub webhook_worker: WorkerHandle,
     /// RSA signing key for outbound Security Event Tokens; public half served at `/.well-known/webhook-jwks.json`.
     pub signing_key: SigningKey,
@@ -58,7 +60,7 @@ impl AppState {
         {
             let guard = self.discovery.0.lock().await;
             if let Some(c) = guard.as_ref() {
-                if c.fetched_at.elapsed() < DISCOVERY_TTL {
+                if Instant::now() < c.next_refresh_at {
                     return (c.doc.clone(), true);
                 }
             }
@@ -67,7 +69,7 @@ impl AppState {
             Ok(doc) => {
                 let mut guard = self.discovery.0.lock().await;
                 *guard = Some(CachedDiscovery {
-                    fetched_at: Instant::now(),
+                    next_refresh_at: Instant::now() + DISCOVERY_TTL,
                     doc: doc.clone(),
                 });
                 (doc, true)
@@ -75,10 +77,15 @@ impl AppState {
             Err(e) => {
                 tracing::warn!(error = ?e, "hydra discovery fetch failed");
                 // Serve a stale value if we have one; otherwise an empty doc.
-                let guard = self.discovery.0.lock().await;
-                match guard.as_ref() {
-                    // Stale but valid (issuer/endpoints are stable); serve it without warning.
-                    Some(c) => (c.doc.clone(), true),
+                let mut guard = self.discovery.0.lock().await;
+                match guard.as_mut() {
+                    // Stale but valid (issuer/endpoints are stable); serve it without warning,
+                    // and push the next refresh out so a Hydra outage doesn't turn every
+                    // request into a failing network fetch.
+                    Some(c) => {
+                        c.next_refresh_at = Instant::now() + DISCOVERY_RETRY;
+                        (c.doc.clone(), true)
+                    }
                     None => (OidcDiscovery::default(), false),
                 }
             }

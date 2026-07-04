@@ -1,15 +1,41 @@
 //! Shared per-IP rate-limit helper wrapping `tower_governor::GovernorLayer`. The error handler is
 //! caller-supplied so JSON (RFC 7591 DCR) and HTML (`/claim-email`) endpoints render their own shapes.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use axum::response::Response;
 use axum::Router;
+use tokio_util::sync::CancellationToken;
 use tower_governor::governor::GovernorConfigBuilder;
 use tower_governor::key_extractor::{PeerIpKeyExtractor, SmartIpKeyExtractor};
 use tower_governor::GovernorLayer;
 
 use crate::state::AppState;
+
+/// Every keyed limiter registers a `retain_recent` closure here; without the
+/// periodic sweep the per-IP maps grow unboundedly (memory-exhaustion DoS).
+static RETAINERS: Mutex<Vec<Box<dyn Fn() + Send + Sync>>> = Mutex::new(Vec::new());
+
+/// Spawn the single background sweep that drops stale per-IP entries from all
+/// registered limiters. Wired to the same shutdown token as the other workers.
+pub(crate) fn spawn_retention(shutdown: CancellationToken) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            tokio::select! {
+                () = shutdown.cancelled() => break,
+                _ = tick.tick() => {
+                    let retainers = RETAINERS
+                        .lock()
+                        .expect("retainer registry mutex poisoned"); // registered closures never panic
+                    for retain in retainers.iter() {
+                        retain();
+                    }
+                }
+            }
+        }
+    });
+}
 
 /// Mount one `tower_governor` bucket onto `r`. The key extractor picks the trust model (`PeerIpKeyExtractor`
 /// strict, `SmartIpKeyExtractor` when a proxy is trusted). `total_ms` is the window, `per_window` the burst cap;
@@ -23,7 +49,7 @@ pub(crate) fn apply<K, F>(
 ) -> Router<AppState>
 where
     K: tower_governor::key_extractor::KeyExtractor + Send + Sync + 'static,
-    <K as tower_governor::key_extractor::KeyExtractor>::Key: Send + Sync,
+    <K as tower_governor::key_extractor::KeyExtractor>::Key: Send + Sync + 'static,
     F: Fn(tower_governor::GovernorError) -> Response + Send + Sync + 'static,
 {
     if per_window == 0 {
@@ -38,7 +64,13 @@ where
     else {
         return r;
     };
-    r.layer(GovernorLayer::new(Arc::new(cfg)).error_handler(error_handler))
+    let cfg = Arc::new(cfg);
+    let limiter = cfg.limiter().clone();
+    RETAINERS
+        .lock()
+        .expect("retainer registry mutex poisoned")
+        .push(Box::new(move || limiter.retain_recent()));
+    r.layer(GovernorLayer::new(cfg).error_handler(error_handler))
 }
 
 /// Plain-text `429` for browser-facing endpoints, with `Retry-After` when the
@@ -86,5 +118,20 @@ where
     } else {
         let r = apply(r, PeerIpKeyExtractor, 60_000, per_minute, error_handler);
         apply(r, PeerIpKeyExtractor, 3_600_000, per_hour, error_handler)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn apply_registers_retainer_only_for_active_buckets() {
+        let before = RETAINERS.lock().unwrap().len();
+        let r: Router<AppState> = Router::new();
+        let r = apply(r, PeerIpKeyExtractor, 60_000, 0, plain_text_error("test"));
+        assert_eq!(RETAINERS.lock().unwrap().len(), before);
+        let _r = apply(r, PeerIpKeyExtractor, 60_000, 5, plain_text_error("test"));
+        assert_eq!(RETAINERS.lock().unwrap().len(), before + 1);
     }
 }

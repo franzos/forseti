@@ -344,8 +344,8 @@ All admin pages require AAL2 + Forseti-admin allowlist or org ownership.
 - [ ] Delete the throwaway user
 - [ ] Watch `webhook_outbox`: `attempts` grows on the `60s × 2^attempt` schedule
 - [ ] Force `state=DEAD` via SQL once attempts maxed out → row surfaces on `/admin/webhooks`
-- [ ] Worker `seconds_since_last_tick` stays under the `WORKER_STALE_SECS` (20s) threshold → `/readyz` keeps returning 200
-- [ ] Kill the worker (or simulate stale) → `/readyz` returns 503 with a sensible message
+- [ ] Worker `seconds_since_last_tick` stays under the staleness threshold (4x `[webhook].tick_seconds`, floor 20s) → `/readyz` returns plain `ready`
+- [ ] Kill the worker (or simulate stale) → `/readyz` still returns 200 but the body reads `ready (degraded: webhook worker stale, ...)`
 
 ## 8. Commercial / licensing
 

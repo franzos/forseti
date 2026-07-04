@@ -14,7 +14,7 @@
 
 use askama::Template;
 use axum::{
-    http::{HeaderMap, StatusCode},
+    http::{request::Parts, HeaderMap, StatusCode},
     response::{IntoResponse, Redirect, Response},
     routing::{get, post},
     Router,
@@ -23,7 +23,6 @@ use serde::Deserialize;
 
 use crate::audit::{AuditCtx, AuditEvent};
 use crate::config::BrandConfig;
-use crate::cookies;
 use crate::locale::LanguageIdentifier;
 use crate::ory;
 use crate::page_chrome::PageChrome;
@@ -170,9 +169,8 @@ pub struct AdminCtx {
     /// True when the email is in `[admin].allowed_emails` (Tier 1). False for
     /// org-scoped owners, who don't get the Forseti-wide "Admin" top-nav link.
     pub is_forseti_admin: bool,
-    /// Negotiated request locale. Resolved by the `RequireAdmin` /
-    /// `RequireAdminScoped` extractors after the auth gate passes. Defaults to
-    /// `en` in the rare error-boundary path where no extractor is involved.
+    /// Negotiated request locale, resolved once by [`admin_success_locale`]
+    /// after the auth gate passes.
     pub locale: LanguageIdentifier,
 }
 
@@ -200,22 +198,22 @@ impl AdminCtx {
 
 /// Shared session+AAL2 prefix for both admin entry points. Returns the session
 /// plus (identity_id, email) so the caller can layer on the divergent tail
-/// (email allowlist, or org-scope resolution).
+/// (email allowlist, or org-scope resolution). Takes request `Parts` so the
+/// middleware-cached whoami is reused instead of a second Kratos round-trip.
 async fn gate_admin_prefix(
     state: &AppState,
-    headers: &HeaderMap,
+    parts: &mut Parts,
     path: &str,
-) -> Result<(ory::Session, String, String, LanguageIdentifier), Response> {
-    use crate::extractors::{resolve_session, SessionFailure};
-    let cookie = cookies::cookie_header(headers);
-    let session = match resolve_session(state, &cookie, path).await {
+) -> Result<(ory::Session, String, String), Response> {
+    use crate::extractors::{resolve_session_from_parts, SessionFailure};
+    let session = match resolve_session_from_parts(state, parts, path).await {
         Ok(s) => *s,
         Err(SessionFailure::InsufficientAal(r)) | Err(SessionFailure::NoSession(r)) => {
             return Err(r.into_response());
         }
         Err(SessionFailure::KratosError(e)) => {
             tracing::error!(error = ?e, path, "admin gate: whoami failed");
-            let locale = admin_gate_locale(headers);
+            let locale = admin_gate_locale(&parts.headers);
             return Err(render_forbidden(
                 state,
                 &locale,
@@ -231,8 +229,7 @@ async fn gate_admin_prefix(
         return Err(Redirect::to(&crate::auth::aal2_step_up_url(path)).into_response());
     }
 
-    let locale = admin_request_locale(headers, &session);
-    Ok((session, identity_id, email, locale))
+    Ok((session, identity_id, email))
 }
 
 /// Like `require_admin` but with the `?org=<slug>` org-scoping convention
@@ -249,19 +246,19 @@ async fn gate_admin_prefix(
 /// model"). If you change which tier requires what, update that section.
 pub async fn require_admin_with_scope(
     state: &AppState,
-    headers: &HeaderMap,
+    parts: &mut Parts,
     path: &str,
     org_slug: Option<&str>,
     csrf_token: &str,
 ) -> Result<(AdminCtx, crate::orgs::AdminScope), Response> {
     use crate::orgs::{AdminScope, AdminScopeOutcome};
-    let (_session, identity_id, email, locale) = gate_admin_prefix(state, headers, path).await?;
+    let (session, identity_id, email) = gate_admin_prefix(state, parts, path).await?;
 
     let scope = crate::orgs::resolve_admin_scope(&state.db, &identity_id, org_slug).await;
     let scope = match scope {
         AdminScopeOutcome::Resolved(AdminScope::Forseti) => {
             if !state.cfg.admin.is_admin(&email) {
-                let locale = admin_gate_locale(headers);
+                let locale = admin_gate_locale(&parts.headers);
                 return Err(render_forbidden(
                     state,
                     &locale,
@@ -280,7 +277,7 @@ pub async fn require_admin_with_scope(
             other
         }
         AdminScopeOutcome::UnknownOrg | AdminScopeOutcome::NotOwner => {
-            let locale = admin_gate_locale(headers);
+            let locale = admin_gate_locale(&parts.headers);
             return Err(render_forbidden(
                 state,
                 &locale,
@@ -291,6 +288,7 @@ pub async fn require_admin_with_scope(
     };
 
     let is_forseti_admin = matches!(scope, AdminScope::Forseti);
+    let locale = admin_success_locale(parts, session, &identity_id, &email);
     Ok((
         AdminCtx {
             identity_id,
@@ -308,10 +306,10 @@ pub async fn require_admin_with_scope(
 /// back on the target after re-authing.
 pub async fn require_admin(
     state: &AppState,
-    headers: &HeaderMap,
+    parts: &mut Parts,
     path: &str,
 ) -> Result<AdminCtx, Response> {
-    let (_session, identity_id, email, locale) = gate_admin_prefix(state, headers, path).await?;
+    let (session, identity_id, email) = gate_admin_prefix(state, parts, path).await?;
 
     if !state.cfg.admin.is_admin(&email) {
         tracing::warn!(
@@ -319,7 +317,7 @@ pub async fn require_admin(
             path,
             "admin gate: rejected non-admin"
         );
-        let locale = admin_gate_locale(headers);
+        let locale = admin_gate_locale(&parts.headers);
         return Err(render_forbidden(
             state,
             &locale,
@@ -328,6 +326,7 @@ pub async fn require_admin(
         ));
     }
 
+    let locale = admin_success_locale(parts, session, &identity_id, &email);
     Ok(AdminCtx {
         identity_id,
         email,
@@ -351,32 +350,23 @@ fn admin_gate_locale(headers: &HeaderMap) -> crate::locale::LanguageIdentifier {
     })
 }
 
-/// Request locale for an authenticated admin surface. The admin gate runs on a
-/// `HeaderMap` (no request `Parts`), so the live `?lang=` query is unavailable;
-/// the cookie it writes carries that choice forward. Ladder: `forseti_locale`
-/// cookie, then the `preferred_language` identity trait (off the already
-/// resolved session, no extra Kratos call), then `Accept-Language`, then `en`.
-fn admin_request_locale(
-    headers: &HeaderMap,
-    session: &ory::Session,
-) -> crate::locale::LanguageIdentifier {
-    if let Some(locale) = crate::locale::read_locale_cookie(headers) {
-        return locale;
-    }
-    let trait_locale = session
-        .identity
-        .as_ref()
-        .and_then(|id| id.traits.as_ref())
-        .and_then(|t| t.get("preferred_language"))
-        .and_then(|v| v.as_str())
-        .and_then(crate::locale::from_query_or_cookie);
-    if let Some(locale) = trait_locale {
-        return locale;
-    }
-    let accept = headers
-        .get(axum::http::header::ACCEPT_LANGUAGE)
-        .and_then(|v| v.to_str().ok());
-    crate::locale::from_accept_language(accept)
+/// Success-path locale for the admin surfaces, resolved once per request with
+/// the same ladder as the page extractors: `?lang=` query, then the
+/// `forseti_locale` cookie, then the `preferred_language` identity trait (off
+/// the already resolved session, no extra Kratos call), then `Accept-Language`,
+/// then `en`.
+fn admin_success_locale(
+    parts: &Parts,
+    session: ory::Session,
+    identity_id: &str,
+    email: &str,
+) -> LanguageIdentifier {
+    let session = crate::extractors::OptionalSession::Ok {
+        session: Box::new(session),
+        identity_id: identity_id.to_string(),
+        email: email.to_string(),
+    };
+    crate::page_chrome::resolve_locale(parts, &session)
 }
 
 fn render_forbidden(

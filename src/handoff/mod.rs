@@ -18,7 +18,9 @@
 //! URIs; without that gate anyone who can mint a client could phish (point
 //! the "Return to <App>" banner at an attacker-chosen URL). Banner data
 //! (`client_name`, `logo_uri`) is read from Hydra, not the URL, so the
-//! referrer URL can't become a brand-spoofing vector.
+//! referrer URL can't become a brand-spoofing vector. `logo_uri` is still
+//! client-controlled (dynamic registration), so [`safe_logo_uri`] gates it
+//! before it reaches the cookie and the banner `<img>`.
 //!
 //! ## Sibling endpoints
 //!
@@ -196,7 +198,7 @@ pub(crate) async fn handoff_enter(
         .clone()
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| referrer_id.to_string());
-    let logo_uri = client.logo_uri.clone().filter(|u| !u.is_empty());
+    let logo_uri = client.logo_uri.as_deref().and_then(safe_logo_uri);
 
     let payload = ReferrerPayload {
         client_id: referrer_id.to_string(),
@@ -353,6 +355,37 @@ fn parse_origin(url_str: &str) -> Option<String> {
     }
 }
 
+/// Static safety gate for the client-controlled `logo_uri` before it lands in
+/// the signed cookie and the banner's `<img src>`. Anonymous dynamic client
+/// registration makes it attacker-controllable, and the CSP has no `img-src`,
+/// so an unchecked URL is a tracking beacon / internal-host probe on an
+/// authenticated page. Requires https, no userinfo, and a public-looking
+/// DNS name: IP-literal hosts and obviously internal names (the same spirit
+/// as the webhook SSRF blocklist, without DNS resolution) are dropped.
+/// Returns `None` on any failure — the banner falls back to text-only.
+fn safe_logo_uri(raw: &str) -> Option<String> {
+    let parsed = url::Url::parse(raw).ok()?;
+    if parsed.scheme() != "https" {
+        return None;
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return None;
+    }
+    let host = match parsed.host()? {
+        url::Host::Domain(d) => d.trim_end_matches('.').to_ascii_lowercase(),
+        url::Host::Ipv4(_) | url::Host::Ipv6(_) => return None,
+    };
+    if host == "localhost"
+        || host.ends_with(".localhost")
+        || host.ends_with(".local")
+        || host.ends_with(".internal")
+        || !host.contains('.')
+    {
+        return None;
+    }
+    Some(raw.to_string())
+}
+
 /// Uniform 400 for every `/handoff` validation failure. One body for all
 /// branches keeps the endpoint from being a client-id existence oracle.
 fn invalid_referrer() -> Response {
@@ -488,6 +521,54 @@ mod tests {
     fn origin_match_rejects_empty_client() {
         let c = client_with(vec![], None);
         assert!(!client_origin_matches(&c, "https://bank.app/account"));
+    }
+
+    #[test]
+    fn safe_logo_uri_accepts_https_public_hosts() {
+        assert_eq!(
+            safe_logo_uri("https://cdn.bank.app/logo.png").as_deref(),
+            Some("https://cdn.bank.app/logo.png")
+        );
+        assert_eq!(
+            safe_logo_uri("https://bank.app:8443/logo.svg").as_deref(),
+            Some("https://bank.app:8443/logo.svg")
+        );
+    }
+
+    #[test]
+    fn safe_logo_uri_rejects_non_https_and_malformed() {
+        assert!(safe_logo_uri("http://bank.app/logo.png").is_none());
+        assert!(safe_logo_uri("javascript:alert(1)").is_none());
+        assert!(safe_logo_uri("file:///etc/passwd").is_none());
+        assert!(safe_logo_uri("/relative/logo.png").is_none());
+        assert!(safe_logo_uri("").is_none());
+    }
+
+    #[test]
+    fn safe_logo_uri_rejects_ip_literal_hosts() {
+        assert!(safe_logo_uri("https://127.0.0.1/logo.png").is_none());
+        assert!(safe_logo_uri("https://10.0.0.1/logo.png").is_none());
+        assert!(safe_logo_uri("https://169.254.169.254/latest/meta-data/").is_none());
+        assert!(safe_logo_uri("https://8.8.8.8/logo.png").is_none());
+        assert!(safe_logo_uri("https://[::1]/logo.png").is_none());
+        assert!(safe_logo_uri("https://[fe80::1]/logo.png").is_none());
+    }
+
+    #[test]
+    fn safe_logo_uri_rejects_internal_names() {
+        assert!(safe_logo_uri("https://localhost/logo.png").is_none());
+        assert!(safe_logo_uri("https://LOCALHOST/logo.png").is_none());
+        assert!(safe_logo_uri("https://foo.localhost/logo.png").is_none());
+        assert!(safe_logo_uri("https://printer.local/logo.png").is_none());
+        assert!(safe_logo_uri("https://vault.internal/logo.png").is_none());
+        assert!(safe_logo_uri("https://intranet/logo.png").is_none());
+        assert!(safe_logo_uri("https://localhost./logo.png").is_none());
+    }
+
+    #[test]
+    fn safe_logo_uri_rejects_userinfo() {
+        assert!(safe_logo_uri("https://user:pass@bank.app/logo.png").is_none());
+        assert!(safe_logo_uri("https://user@bank.app/logo.png").is_none());
     }
 
     #[test]
