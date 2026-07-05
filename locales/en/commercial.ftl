@@ -2,6 +2,7 @@
 
 # License page (license.html)
 license-page-title = License
+license-watermark = Licensed to
 license-intro = Activate a commercial-tier license to unlock organizations, SAML connectors, SCIM provisioning, and more. The open-source build runs everything else.
 license-status = Status
 license-deactivate = Deactivate

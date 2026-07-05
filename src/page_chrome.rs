@@ -21,6 +21,22 @@ use crate::locale::{dir_for, LanguageIdentifier};
 use crate::state::AppState;
 use crate::web::FORSETI_VERSION;
 
+/// Build the "<customer> · <email>" licensee watermark from the runtime
+/// license, or `None` when unlicensed. Shared by `with_license_watermark`
+/// (the `from_parts` path) and `AdminCtx` (which builds chrome via the
+/// stateless `from_brand_with_admin`), so every admin surface shows the same
+/// string regardless of which chrome path rendered it.
+pub(crate) fn license_watermark(state: &AppState) -> Option<String> {
+    match &*state.license.status() {
+        crate::commercial::LicenseStatus::Active(l)
+        | crate::commercial::LicenseStatus::Grace(l)
+        | crate::commercial::LicenseStatus::Expired(l) => {
+            Some(format!("{} · {}", l.customer, l.email))
+        }
+        crate::commercial::LicenseStatus::Unlicensed => None,
+    }
+}
+
 /// General locale precedence ladder: `?lang=` query param, then `forseti_locale`
 /// cookie, then the `preferred_language` identity trait from the session,
 /// then `Accept-Language`, then `en`. The `ui_locales` step for login/consent
@@ -144,6 +160,10 @@ pub(crate) struct PageChrome {
     /// the card icon then renders `/branding/{slug}/logo` instead of the
     /// operator default.
     pub(crate) logo_slug: Option<String>,
+    /// `Some("<customer> · <email>")` when a commercial license is present
+    /// (Active/Grace/Expired); the admin shell surfaces it so a leaked key
+    /// advertises the buyer. `None` for unlicensed installs.
+    pub(crate) license_watermark: Option<String>,
 }
 
 impl PageChrome {
@@ -165,6 +185,7 @@ impl PageChrome {
             is_admin,
             locale,
         )
+        .with_license_watermark(state)
     }
 
     /// Like [`Self::from_parts`] but themed by the caller's active org. The
@@ -213,6 +234,7 @@ impl PageChrome {
             theme_css_root: theme.css_root(),
             theme_css_dark: theme.css_dark(),
             logo_slug: None,
+            license_watermark: None,
         }
     }
 
@@ -228,6 +250,14 @@ impl PageChrome {
     /// operator default.
     pub(crate) fn with_logo_slug(mut self, slug: String) -> Self {
         self.logo_slug = Some(slug);
+        self
+    }
+
+    /// Stamp the licensee identity from the runtime license handle so the
+    /// admin shell can surface "Licensed to <customer> · <email>". `None`
+    /// when unlicensed.
+    pub(crate) fn with_license_watermark(mut self, state: &AppState) -> Self {
+        self.license_watermark = license_watermark(state);
         self
     }
 

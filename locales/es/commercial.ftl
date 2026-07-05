@@ -2,6 +2,7 @@
 
 # Página de licencia (license.html)
 license-page-title = Licencia
+license-watermark = Con licencia para
 license-intro = Active una licencia de nivel comercial para desbloquear organizaciones, conectores SAML, aprovisionamiento SCIM y más. La compilación de código abierto ejecuta todo lo demás.
 license-status = Estado
 license-deactivate = Desactivar

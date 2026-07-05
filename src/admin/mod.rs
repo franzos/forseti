@@ -172,18 +172,24 @@ pub struct AdminCtx {
     /// Negotiated request locale, resolved once by [`admin_success_locale`]
     /// after the auth gate passes.
     pub locale: LanguageIdentifier,
+    /// Precomputed licensee watermark ("<customer> · <email>", or `None` when
+    /// unlicensed), captured at gate time while `&AppState` is in scope so the
+    /// stateless [`AdminCtx::chrome`] path can surface it on every admin page.
+    pub(crate) license_watermark: Option<String>,
 }
 
 impl AdminCtx {
     /// Build a [`PageChrome`] from this admin context and a CSRF token.
     pub(crate) fn chrome(&self, csrf: &crate::extractors::Csrf) -> PageChrome {
-        PageChrome::from_brand_with_admin(
+        let mut chrome = PageChrome::from_brand_with_admin(
             self.brand.clone(),
             self.email.clone(),
             csrf.0.clone(),
             self.is_forseti_admin,
             self.locale.clone(),
-        )
+        );
+        chrome.license_watermark = self.license_watermark.clone();
+        chrome
     }
 
     /// Open an audit event already attributed to this admin and stamped with
@@ -296,6 +302,7 @@ pub async fn require_admin_with_scope(
             brand: state.cfg.brand.clone(),
             is_forseti_admin,
             locale,
+            license_watermark: crate::page_chrome::license_watermark(state),
         },
         scope,
     ))
@@ -333,6 +340,7 @@ pub async fn require_admin(
         brand: state.cfg.brand.clone(),
         is_forseti_admin: true,
         locale,
+        license_watermark: crate::page_chrome::license_watermark(state),
     })
 }
 

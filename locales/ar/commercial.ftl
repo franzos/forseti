@@ -2,6 +2,7 @@
 
 # صفحة الترخيص (license.html)
 license-page-title = الترخيص
+license-watermark = مرخّص لـ
 license-intro = فعّل ترخيصًا من الفئة التجارية لفتح المؤسسات وموصّلات SAML وتزويد SCIM والمزيد. الإصدار مفتوح المصدر يشغّل كل ما عدا ذلك.
 license-status = الحالة
 license-deactivate = إلغاء التفعيل

@@ -26,4 +26,10 @@
       {% block admin_content %}{% endblock %}
     </section>
   </div>
+
+  {% match chrome.license_watermark %}{% when Some with (w) %}
+    <p class="px-4 py-2 mt-stack-md font-label-sm text-label-sm text-outline">
+      {{ chrome.t("license-watermark") }} <bdi>{{ w }}</bdi>
+    </p>
+  {% when None %}{% endmatch %}
 {% endblock %}
