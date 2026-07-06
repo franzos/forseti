@@ -350,3 +350,9 @@ offline_auth_enabled = true       # master switch for offline auth
 offline_ttl_hours = 24            # TTL on each provisioned verifier; bounds the offline window since last poll
 offline_max_lifetime_hours = 168  # hard cap (from last successful online auth) regardless of TTL refreshes
 offline_min_len = 8               # passphrase length floor (never below the hard wall of 8)
+
+# Prometheus scrape gate for `/metrics` (internal listener only; requires a
+# license with the `observability` feature). Leave unset to keep the endpoint
+# disabled (404) even on a licensed deployment.
+# [metrics]
+# scrape_token = "change-me"

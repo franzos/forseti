@@ -21,6 +21,7 @@ mod identity;
 mod locale;
 mod logo_cache;
 mod mailer;
+mod metrics;
 mod oauth;
 mod oauth_client_metadata;
 mod orgs;

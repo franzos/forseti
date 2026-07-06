@@ -115,8 +115,10 @@ pub(crate) async fn run() -> anyhow::Result<()> {
 
     let cfg_public_bind = cfg.self_.bind.clone();
     let cfg_internal_bind = cfg.internal.bind.clone();
+    let metrics_handle = crate::metrics::install_metrics_recorder();
 
     let state = AppState {
+        metrics_scrape_token: cfg.metrics.scrape_token.clone(),
         cfg: Arc::new(cfg),
         ory,
         db,
@@ -128,6 +130,7 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         logo_cache: Arc::new(tokio::sync::Mutex::new(
             crate::logo_cache::LogoCache::default(),
         )),
+        metrics_handle,
     };
 
     // Forseti-owned CSRF-protected forms/POSTs. The middleware mints `forseti_csrf` and appends `Set-Cookie`;
@@ -195,6 +198,9 @@ pub(crate) async fn run() -> anyhow::Result<()> {
             state.clone(),
             audit::middleware,
         ))
+        .layer(axum::middleware::from_fn(
+            crate::metrics::track_http_metrics,
+        ))
         // No page here needs to leak its URL (often carrying tokens/state params) to a
         // third-party Location header via the Referer request header on outbound links.
         .layer(SetResponseHeaderLayer::overriding(
@@ -220,6 +226,7 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         .with_state(state.clone());
 
     // Internal listener: machine-to-machine endpoints only. No CSRF, no readiness probes (those stay on the public listener).
+    // `/metrics` is added AFTER the metrics/audit layers so scrapes aren't self-counted and don't generate audit noise.
     let internal_app = Router::new()
         .merge(audit::kratos_webhook::router())
         .merge(crate::posix::router())
@@ -227,7 +234,14 @@ pub(crate) async fn run() -> anyhow::Result<()> {
             state.clone(),
             audit::middleware,
         ))
+        .layer(axum::middleware::from_fn(
+            crate::metrics::track_http_metrics,
+        ))
         .layer(TraceLayer::new_for_http())
+        .route(
+            "/metrics",
+            axum::routing::get(crate::metrics::metrics_handler),
+        )
         .with_state(state);
 
     let public_addr: SocketAddr = cfg_public_bind

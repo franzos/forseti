@@ -116,6 +116,8 @@ lettre = { version = "0.11", default-features = false, features = ["smtp-transpo
 # identifiers; Accept-Language negotiation is done in locale.rs.
 fluent-templates = "0.14"
 unic-langid = { version = "0.9", features = ["macros"] }
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.16", default-features = false }
 [profile.release]
 strip = true
 lto = "thin"
@@ -156,6 +158,10 @@ totp-lite = "2"
 base32 = "0.5"
 
 fluent-syntax = "0.12.0"
+
+# Metrics middleware unit tests drive an in-memory axum app via `oneshot`.
+tower = { version = "0.5", features = ["util"] }
+futures = "0.3"
 
 [[test]]
 name = "integration"

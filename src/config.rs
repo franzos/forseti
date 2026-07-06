@@ -81,6 +81,9 @@ pub struct AppConfig {
     #[serde(default)]
     #[allow(dead_code)]
     pub posix: PosixConfig,
+    /// Prometheus scrape gate for `/metrics` (internal listener only, commercial `observability` feature).
+    #[serde(default)]
+    pub metrics: MetricsConfig,
 }
 
 /// Operator-supplied secrets. `cookie_secret` seeds the HMAC keys for every Forseti-signed cookie;
@@ -639,6 +642,15 @@ pub struct LicenseConfig {
     pub purchase_url: String,
 }
 
+/// `/metrics` scrape gate (internal listener only). Requires both a license with the
+/// `observability` feature AND this bearer token; `None` disables the endpoint (404).
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct MetricsConfig {
+    /// Bearer token a Prometheus scraper must present. When unset, /metrics is disabled (404).
+    pub scrape_token: Option<String>,
+}
+
 /// SAML SSO bridge (commercial, opt-in). Absent = `/sso/*` unmounted, zero SAML footprint. The bridge
 /// (Jackson / Ory Polis) is operator-deployed; Forseti only orchestrates against it. See `docs/commercial/saml.md`.
 #[derive(Debug, Clone, Deserialize)]
@@ -1077,6 +1089,7 @@ impl AppConfig {
             proxy: ProxyConfig::default(),
             security: SecurityConfig::default(),
             posix: PosixConfig::default(),
+            metrics: MetricsConfig::default(),
         }
     }
 }

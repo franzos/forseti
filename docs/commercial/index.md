@@ -10,9 +10,10 @@ A commercial license unlocks a small set of features. They all ship and work tod
 
 - **[Organizations](./organizations.md)** — run Forseti for more than one tenant: named orgs beyond the always-free default, per-org membership and invites, per-org branding, an org-scoped admin slice, and the OIDC `org` / `orgs` claims for org-aware authorization.
 - **[Enterprise SAML SSO](./saml.md)** — per-org SAML login (`/sso/{org-slug}`) against a customer's corporate identity provider, with just-in-time provisioning and verified-email linking. Your apps keep doing plain OIDC.
+- **[Observability](./observability.md)** - a Prometheus `/metrics` endpoint on the internal listener, token-gated, exposing HTTP RED metrics (request counts, latency) plus a couple of bridged operational gauges. A stock Prometheus, Grafana Agent, or OTel Collector scrapes it as-is.
 - **Linux authentication — higher seat cap.** The Linux-authentication core (back your Linux hosts' login accounts off the identity store) is **free**; a commercial license raises how many accounts you can provision. See [Linux authentication](#linux-authentication) below for exactly where the free/paid line sits.
 
-Nothing else is gated. Other capability names you might see referenced (SCIM provisioning, SIEM streaming, bulk admin) are **planned, not shipped** — they don't work yet, so don't plan around them.
+Other capability names you might see referenced (SCIM provisioning, SIEM streaming, bulk admin) are **planned, not shipped** — they don't work yet, so don't plan around them.
 
 ## How licensing works
 
@@ -46,6 +47,7 @@ The boundary is deliberately simple:
 | Org-scoped admin | n/a | Owners manage their own org |
 | `org` / `orgs` OIDC claims | Default-only | Full membership |
 | SAML SSO (`/sso/{slug}`) | Unavailable | Per-org connections |
+| Prometheus `/metrics` | Unavailable (404) | Internal listener, token-gated |
 | Linux auth core (resolver, host enrollment, SSH keys) | Full | Full |
 | Linux POSIX accounts | Up to the free seat cap | Up to the license's seat cap |
 | Team-scoped Linux host access | n/a (whole-org only) | Scope hosts to org teams |

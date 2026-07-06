@@ -50,6 +50,10 @@ pub struct AppState {
     pub discovery: DiscoveryCache,
     /// Bounded in-process cache of served org logo blobs; see [`crate::logo_cache`].
     pub logo_cache: Arc<Mutex<LogoCache>>,
+    /// Prometheus render handle backing `/metrics`; see [`crate::metrics`].
+    pub metrics_handle: metrics_exporter_prometheus::PrometheusHandle,
+    /// Bearer token a scraper must present at `/metrics`. `None` = endpoint disabled (404).
+    pub metrics_scrape_token: Option<String>,
 }
 
 impl AppState {

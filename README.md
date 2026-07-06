@@ -15,6 +15,10 @@
 
 Ory's engines are excellent, but headless — you get APIs, your users need pages. Forseti is the missing frontend: one binary that talks to Kratos (identity) and Hydra (OAuth2/OIDC) and gives your users real screens for every flow, plus an admin surface for operators.
 
+### Why Forseti
+
+Because it's backed by software the giants scale with — OpenAI self-hosts Ory Hydra to issue tokens for ChatGPT — so your auth load rides on the most battle-tested engine in this space, not on Forseti itself. And it doesn't lock you in: Ory is the contract, Forseti is just the face. You can move to [Ory Network](https://www.ory.sh/) (their cloud) later, or build your own frontend against the same Kratos and Hydra APIs and swap it in. That makes Forseti a low-risk stepping stone — and, since it's fully themeable, a fine permanent answer if it's all you ever need.
+
 <p align="center">
   <img src="docs/assets/screenshots/dashboard.png" alt="Self-service dashboard" width="32%" />
   <img src="docs/assets/screenshots/client-picker.png" alt="App template picker" width="32%" />
@@ -30,9 +34,22 @@ Ory's engines are excellent, but headless — you get APIs, your users need page
 | 🧩 **40+ app templates** | One-click, pre-filled OAuth2 client setup for popular self-hosted apps (GitLab, Nextcloud, Vaultwarden, Grafana, Immich, …) — redirect URIs and per-app OIDC quirks already filled in. [Full list →](docs/operator-guide.md#app-templates) |
 | 🛠️ **Admin console** | Manage identities, sessions, and OAuth2 clients; append-only audit log; live status dashboard; dynamic-client-registration tokens. |
 | 🏢 **Organizations** | Multi-tenant orgs with members, invites, per-org branding, and per-org OIDC claims. |
+| 📊 **Observability** *(licensed)* | Prometheus `/metrics` on the internal listener, token-gated: HTTP request counts and latency plus a couple of bridged operational gauges. [Setup →](docs/commercial/observability.md) |
 | 🐧 **Linux host auth** *(preview)* | Back your Linux logins off the identity store: NSS `passwd`/`group` + per-user SSH-key distribution, interactive `ssh`/console login via the OAuth Device Authorization Grant (RFC 8628), and offline passphrase login when the server's unreachable. [Setup →](docs/operator-guide.md#linux-authentication) |
 | 🌗 **Light & dark** | A built-in theme toggle (light / dark / follow-system) across every page. |
 | 🛡️ **Production-minded** | CSRF on every form, signed cookies, rate-limited DCR, and an account-deletion webhook saga with retries. |
+
+## OSS vs commercial
+
+| | OSS (unlicensed) | Commercial (licensed) |
+| --- | --- | --- |
+| Identity portal | Full self-service portal, single default org | Same, plus named orgs beyond Default |
+| Enterprise SAML SSO | Unavailable | Per-org connections at `/sso/{org-slug}` |
+| Linux (POSIX) auth accounts | Up to the free seat cap | Higher seat cap |
+| Observability | Unavailable | Prometheus `/metrics` on the internal listener, token-gated |
+| Health checks, JSON logs | Full | Full |
+
+See [Commercial features](docs/commercial/) for the licensing model, the grace period on expiry, and full detail on each feature.
 
 ## How Forseti compares
 
@@ -57,7 +74,7 @@ Legend: **✓** built-in · **◐** partial / via add-on / consumes-not-serves �
 | **License** | AGPL-3.0 + commercial gate | Apache-2.0 | MPL-2.0 | Apache-2.0 | GPLv3 |
 | **Maturity** | Young; built on mature Ory | Pre-1.0, audited | Stable 1.x | Very mature (CNCF/Red Hat) | Very mature (Red Hat) |
 
-¹ Forseti's own data. Kratos and Hydra each bring their own Postgres, so a full deployment runs several services — more moving parts than a single-binary Rauthy or Kanidm. † Organizations and SAML SSO are commercial features; the AGPL core runs as a fully working single tenant. SCIM, SIEM streaming and bulk-admin are on the roadmap, not shipped. ² Linux host auth (POSIX accounts, NSS, SSH-key distribution, PAM device-auth + offline login) ships as a **preview** — it backs POSIX hosts, but it's not an LDAP/RADIUS/Kerberos directory.
+¹ Forseti's own data. Kratos and Hydra each bring their own Postgres, so a full deployment runs several services — more moving parts than a single-binary Rauthy or Kanidm. † Organizations, SAML SSO, and the Prometheus `/metrics` endpoint are commercial features; the AGPL core runs as a fully working single tenant. SCIM, SIEM streaming and bulk-admin are on the roadmap, not shipped. ² Linux host auth (POSIX accounts, NSS, SSH-key distribution, PAM device-auth + offline login) ships as a **preview** — it backs POSIX hosts, but it's not an LDAP/RADIUS/Kerberos directory.
 
 **Where Forseti wins.** If you've already bet on Ory — or you want a certified OAuth2/OIDC engine rather than a bespoke one — nothing else gives Kratos and Hydra real screens *and* an admin console *and* first-class multi-tenant organizations (members, invites, per-org branding, `org`/`orgs` OIDC claims). Rauthy, Kanidm and FreeIPA have no organizations model at all; only Keycloak does, and it costs you a JVM and a couple of gigs of RAM. You also get governance the others don't bundle: an append-only audit log, RFC 7591 dynamic client registration, and an account-deletion webhook saga that emits signed RISC events.
 
@@ -145,7 +162,7 @@ For the full OAuth2 dance — register a Hydra client, run an auth-code flow, ex
 - [Operator guide — reverse proxy](docs/operator-guide-proxy.md) — proxy topology, cookies, CSRF, CORS
 - [Integration guide](docs/integration-guide.md) — consuming Forseti as an OIDC provider
 - [Linux authentication](docs/operator-guide.md#linux-authentication) — enroll hosts, provision POSIX accounts + SSH keys, PAM device-auth login, and offline access (preview)
-- [Commercial features](docs/commercial/) — licensing model, plus the [Organizations](docs/commercial/organizations.md) and [Enterprise SAML SSO](docs/commercial/saml.md) guides
+- [Commercial features](docs/commercial/) — licensing model, plus the [Organizations](docs/commercial/organizations.md), [Enterprise SAML SSO](docs/commercial/saml.md), and [Observability](docs/commercial/observability.md) guides
 
 ## License
 

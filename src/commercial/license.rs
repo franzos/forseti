@@ -25,6 +25,8 @@ pub enum Feature {
     BulkAdmin,
     /// Linux/Unix authentication (POSIX resolver + SSH keys).
     LinuxAuth,
+    /// Metrics/tracing export for observability stacks.
+    Observability,
 }
 
 impl Feature {
@@ -36,6 +38,7 @@ impl Feature {
             Feature::SiemStreaming => "siem_streaming",
             Feature::BulkAdmin => "bulk_admin",
             Feature::LinuxAuth => "linux_auth",
+            Feature::Observability => "observability",
         }
     }
 
@@ -50,6 +53,7 @@ impl Feature {
             "siem_streaming" => Some(Feature::SiemStreaming),
             "bulk_admin" => Some(Feature::BulkAdmin),
             "linux_auth" => Some(Feature::LinuxAuth),
+            "observability" => Some(Feature::Observability),
             _ => None,
         }
     }
@@ -63,6 +67,7 @@ impl Feature {
             Feature::SiemStreaming => "SIEM streaming",
             Feature::BulkAdmin => "Bulk admin operations",
             Feature::LinuxAuth => "Linux authentication",
+            Feature::Observability => "Observability",
         }
     }
 }
@@ -304,6 +309,36 @@ mod tests {
         );
         let s = classify(l, 14, Utc::now());
         assert!(matches!(s, LicenseStatus::Expired(_)));
+    }
+
+    #[test]
+    fn observability_active_is_allowed() {
+        let lic = license_with(
+            Some(Utc::now() + chrono::Duration::days(30)),
+            vec![Feature::Observability],
+        );
+        assert!(matches!(
+            evaluate_feature(&LicenseStatus::Active(lic), Feature::Observability),
+            FeatureStatus::Allowed
+        ));
+    }
+
+    #[test]
+    fn observability_absent_is_locked() {
+        let lic = license_with(Some(Utc::now() + chrono::Duration::days(30)), vec![]);
+        assert!(matches!(
+            evaluate_feature(&LicenseStatus::Active(lic), Feature::Observability),
+            FeatureStatus::Locked
+        ));
+    }
+
+    #[test]
+    fn observability_wire_roundtrips() {
+        assert_eq!(Feature::Observability.wire_name(), "observability");
+        assert_eq!(
+            Feature::from_wire("observability"),
+            Some(Feature::Observability)
+        );
     }
 
     #[test]

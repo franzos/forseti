@@ -1581,7 +1581,9 @@ Wire all three readiness probes into your load balancer / orchestrator.
 
 ### Metrics
 
-Hydra and Kratos expose Prometheus metrics on their admin ports. Forseti does not currently expose metrics; track its health via log-derived metrics and health checks.
+Forseti exposes a Prometheus `/metrics` endpoint on the internal listener (`[internal].bind`) as a commercial feature: it needs a license with the `observability` capability and a configured scrape token, and it 404s otherwise. It serves HTTP RED metrics (request counts, latency, by method/route/status) plus a couple of bridged operational gauges. See [Commercial: Observability](commercial/observability.md) for enabling it, what it exposes, and the scrape config.
+
+Hydra and Kratos expose their own Prometheus metrics on their admin ports, independent of this.
 
 ## Common gotchas
 
