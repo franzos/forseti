@@ -27,6 +27,8 @@ COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY templates ./templates
 COPY migrations ./migrations
+# i18n-embed loads locales/ at compile time.
+COPY locales ./locales
 # `include_dir!` captures static/ at compile time, so the freshly built CSS
 # must be in place before `cargo build`.
 COPY static ./static
