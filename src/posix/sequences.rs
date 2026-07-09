@@ -16,26 +16,25 @@ pub async fn next_in_band(db: &DbPool, band: &str, base: u32) -> anyhow::Result<
     let band = band.to_string();
     let val: i32 = db_interact!(db, |conn| {
         conn.transaction::<i32, diesel::result::Error, _>(|c| {
-            let current: Option<i32> = posix_sequences::table
+            // Write-first so SQLite takes the write lock up front (no
+            // reader->writer upgrade) and Postgres serialises concurrent
+            // bumps on the row lock.
+            diesel::insert_into(posix_sequences::table)
+                .values((
+                    posix_sequences::name.eq(&band),
+                    posix_sequences::next.eq(base as i32),
+                ))
+                .on_conflict(posix_sequences::name)
+                .do_nothing()
+                .execute(c)?;
+            diesel::update(posix_sequences::table.filter(posix_sequences::name.eq(&band)))
+                .set(posix_sequences::next.eq(posix_sequences::next + 1))
+                .execute(c)?;
+            let next: i32 = posix_sequences::table
                 .filter(posix_sequences::name.eq(&band))
                 .select(posix_sequences::next)
-                .first(c)
-                .optional()?;
-            let take = current.unwrap_or(base as i32);
-            let next = take + 1;
-            if current.is_some() {
-                diesel::update(posix_sequences::table.filter(posix_sequences::name.eq(&band)))
-                    .set(posix_sequences::next.eq(next))
-                    .execute(c)?;
-            } else {
-                diesel::insert_into(posix_sequences::table)
-                    .values((
-                        posix_sequences::name.eq(&band),
-                        posix_sequences::next.eq(next),
-                    ))
-                    .execute(c)?;
-            }
-            Ok(take)
+                .first(c)?;
+            Ok(next - 1)
         })
     })?;
     Ok(val as u32)
@@ -68,5 +67,22 @@ mod tests {
         // A different band starts at its own base independently.
         let u = next_in_band(&db, "uid", 1_000_000).await.unwrap();
         assert_eq!(u, 1_000_000);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn concurrent_allocations_never_duplicate() {
+        let db = temp_pool().await;
+        let mut handles = Vec::new();
+        for _ in 0..32 {
+            let db = db.clone();
+            handles.push(tokio::spawn(async move {
+                next_in_band(&db, "uid", 1_000_000).await.unwrap()
+            }));
+        }
+        let mut ids = std::collections::HashSet::new();
+        for h in handles {
+            assert!(ids.insert(h.await.unwrap()), "duplicate id allocated");
+        }
+        assert_eq!(ids.len(), 32);
     }
 }

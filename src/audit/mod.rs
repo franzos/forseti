@@ -734,6 +734,49 @@ pub async fn log(db: &DbPool, event: AuditEvent) -> anyhow::Result<()> {
     }
 }
 
+/// Persist `events` as one multi-row insert (all-or-nothing). Returns the
+/// number of rows written on success; on failure every row is emitted via the
+/// `audit_fallback` stream (like [`log`]) and the error is returned, meaning
+/// zero rows landed.
+#[must_use = "audit::log_batch returns Result; use `?` or handle the error"]
+pub async fn log_batch(db: &DbPool, events: Vec<AuditEvent>) -> anyhow::Result<usize> {
+    if events.is_empty() {
+        return Ok(0);
+    }
+    let rows: Vec<NewAuditEvent> = events
+        .into_iter()
+        .map(build_row)
+        .collect::<anyhow::Result<_>>()?;
+    let count = rows.len();
+    let outcome: anyhow::Result<(Vec<NewAuditEvent>, Result<(), diesel::result::Error>)> = async {
+        let pair = db_interact!(db, |conn| {
+            let res = diesel::insert_into(audit_events::table)
+                .values(&rows)
+                .execute(conn)
+                .map(|_| ());
+            Ok::<_, diesel::result::Error>((rows, res))
+        })?;
+        Ok(pair)
+    }
+    .await;
+    match outcome {
+        Ok((_, Ok(()))) => Ok(count),
+        Ok((rows, Err(e))) => {
+            AUDIT_WRITE_FAILURES.fetch_add(count as u64, Ordering::Relaxed);
+            tracing::error!(error = ?e, count, "audit batch write failed");
+            for row in &rows {
+                emit_audit_fallback(row);
+            }
+            Err(e.into())
+        }
+        Err(e) => {
+            AUDIT_WRITE_FAILURES.fetch_add(count as u64, Ordering::Relaxed);
+            tracing::error!(error = ?e, count, "audit batch write failed (pool/interact)");
+            Err(e)
+        }
+    }
+}
+
 /// Process-lifetime counter of audit rows that failed to land in the DB.
 /// Incremented inside the error branch of [`log`]; surfaced
 /// on `/admin/status` so operators have a single place to notice when

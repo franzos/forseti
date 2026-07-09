@@ -79,9 +79,9 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/posix/v1/offline_verifiers", get(offline_verifiers))
         .route("/posix/v1/offline_audit", post(offline_audit));
 
-    let r = rate_limit::apply(
+    let r = rate_limit::single_window(
         r,
-        tower_governor::key_extractor::SmartIpKeyExtractor,
+        state.cfg.proxy.trust_forwarded_for,
         60_000,
         RESOLVER_RATE_PER_MINUTE,
         rate_limit_error,
@@ -157,6 +157,25 @@ async fn accounts_in_teams(
     let mut out = Vec::new();
     for tid in teams {
         for a in db::accounts_in_team(&state.db, org, tid).await? {
+            if seen.insert(a.identity_id.clone()) {
+                out.push(a);
+            }
+        }
+    }
+    out.sort_by(|a, b| a.username.cmp(&b.username));
+    Ok(out)
+}
+
+/// Uncapped [`accounts_in_teams`]: offline-verifier projection only.
+async fn all_accounts_in_teams(
+    state: &AppState,
+    org: &str,
+    teams: &[String],
+) -> anyhow::Result<Vec<db::PosixAccount>> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for tid in teams {
+        for a in db::all_accounts_in_team(&state.db, org, tid).await? {
             if seen.insert(a.identity_id.clone()) {
                 out.push(a);
             }
@@ -406,16 +425,20 @@ async fn offline_verifiers(State(state): State<AppState>, host: RequirePosixHost
         return Json(OfflineVerifiersResponse { verifiers: vec![] }).into_response();
     }
 
-    // Candidates: accounts visible under the host's scope (both queries filter enabled=1).
+    // Candidates: accounts visible under the host's scope (both queries filter
+    // enabled=1). Uncapped: this is an auth-decision surface, so it must be
+    // complete (the NSS enumeration queries stay capped).
     let candidates = match resolve_scope(&state, &host).await {
-        Ok(HostScope::WholeOrg(org)) => match db::accounts_in_org(&state.db, &org).await {
+        Ok(HostScope::WholeOrg(org)) => match db::all_accounts_in_org(&state.db, &org).await {
             Ok(rows) => rows,
             Err(e) => return db_error(e, "offline_verifiers org query failed"),
         },
-        Ok(HostScope::Teams(org, teams)) => match accounts_in_teams(&state, &org, &teams).await {
-            Ok(rows) => rows,
-            Err(e) => return db_error(e, "offline_verifiers team query failed"),
-        },
+        Ok(HostScope::Teams(org, teams)) => {
+            match all_accounts_in_teams(&state, &org, &teams).await {
+                Ok(rows) => rows,
+                Err(e) => return db_error(e, "offline_verifiers team query failed"),
+            }
+        }
         Err(r) => return r,
     };
 
@@ -469,7 +492,8 @@ struct OfflineAuditEvent {
 /// Ingest a host's queued offline-auth events into the server audit log as
 /// `posix.offline.auth_{succeeded,failed}` rows (host_id + username + coarse
 /// reason; SafeMetadata blocks the passphrase/verifier regardless). Malformed
-/// entries are skipped; an oversized batch is rejected.
+/// entries are skipped; an oversized batch is rejected. `accepted` counts only
+/// rows that actually persisted, so the host retries anything that didn't.
 async fn offline_audit(
     State(state): State<AppState>,
     host: RequirePosixHost,
@@ -479,7 +503,7 @@ async fn offline_audit(
         return StatusCode::PAYLOAD_TOO_LARGE.into_response();
     }
 
-    let mut written = 0usize;
+    let mut events = Vec::new();
     for ev in batch.events {
         // No username means nothing auditable.
         if ev.username.trim().is_empty() {
@@ -506,9 +530,11 @@ async fn offline_audit(
         if !success {
             event = event.failed("offline auth failed");
         }
-        let _ = audit::log(&state.db, event).await;
-        written += 1;
+        events.push(event);
     }
+
+    // One insert; on failure zero rows landed and the host keeps its queue.
+    let written = audit::log_batch(&state.db, events).await.unwrap_or(0);
 
     Json(serde_json::json!({ "accepted": written })).into_response()
 }

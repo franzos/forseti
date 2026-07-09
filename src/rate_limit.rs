@@ -100,6 +100,25 @@ pub(crate) fn plain_text_error(
     }
 }
 
+/// Attach one bucket to `r`, picking the key extractor from `trust_xff`
+/// (`cfg.proxy.trust_forwarded_for`).
+pub(crate) fn single_window<F>(
+    r: Router<AppState>,
+    trust_xff: bool,
+    total_ms: u64,
+    per_window: u32,
+    error_handler: F,
+) -> Router<AppState>
+where
+    F: Fn(tower_governor::GovernorError) -> Response + Send + Sync + 'static,
+{
+    if trust_xff {
+        apply(r, SmartIpKeyExtractor, total_ms, per_window, error_handler)
+    } else {
+        apply(r, PeerIpKeyExtractor, total_ms, per_window, error_handler)
+    }
+}
+
 /// Attach paired per-minute + per-hour buckets to `r`, picking the key extractor from `trust_xff`
 /// (`cfg.proxy.trust_forwarded_for`).
 pub(crate) fn dual_window<F>(

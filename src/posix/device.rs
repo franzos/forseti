@@ -103,11 +103,11 @@ fn rate_limit_error(_err: tower_governor::GovernorError) -> Response {
     StatusCode::TOO_MANY_REQUESTS.into_response()
 }
 
-pub fn router() -> Router<AppState> {
+pub fn router(trust_xff: bool) -> Router<AppState> {
     let init = Router::new().route("/posix/v1/device/init", post(device_init));
-    let init = rate_limit::apply(
+    let init = rate_limit::single_window(
         init,
-        tower_governor::key_extractor::SmartIpKeyExtractor,
+        trust_xff,
         60_000,
         DEVICE_INIT_RATE_PER_MINUTE,
         rate_limit_error,

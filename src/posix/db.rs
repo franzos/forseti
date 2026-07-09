@@ -283,13 +283,33 @@ pub async fn find_or_create_team_gid(
     }
     let gid = crate::posix::sequences::next_in_band(db, "team_gid", group_gid_base).await? as i32;
     let id2 = team_id.to_string();
-    db_interact!(db, |conn| {
-        diesel::update(org_teams::table.filter(org_teams::id.eq(&id2)))
-            .set(org_teams::gid.eq(gid))
-            .execute(conn)
-            .map(|_| ())
+    // Guarded claim: only a still-null gid may be set, so a lost race can
+    // never flip a gid another host already observed.
+    let n: usize = db_interact!(db, |conn| {
+        diesel::update(
+            org_teams::table
+                .filter(org_teams::id.eq(&id2))
+                .filter(org_teams::gid.is_null()),
+        )
+        .set(org_teams::gid.eq(gid))
+        .execute(conn)
     })?;
-    Ok(gid)
+    if n == 1 {
+        return Ok(gid);
+    }
+    // Lost the race; return the winner's gid (ours is abandoned, never reused).
+    let id3 = team_id.to_string();
+    let current: Option<Option<i32>> = db_interact!(db, |conn| {
+        org_teams::table
+            .filter(org_teams::id.eq(&id3))
+            .select(org_teams::gid)
+            .first(conn)
+            .optional()
+    })?;
+    match current {
+        Some(Some(g)) => Ok(g),
+        _ => anyhow::bail!("team '{team_id}' not found while allocating gid"),
+    }
 }
 
 /// The team (within `org_id`) carrying `gid`, if any.
@@ -376,6 +396,61 @@ pub async fn accounts_in_org(db: &DbPool, org_id: &str) -> anyhow::Result<Vec<Po
             .filter(posix_accounts::enabled.eq(1))
             .order(posix_accounts::username.asc())
             .limit(MAX_ROWS_PER_LIST)
+            .select(PosixAccount::as_select())
+            .load(conn)
+    })?)
+}
+
+/// UNCAPPED [`accounts_in_team`] for the offline-verifier projection ONLY:
+/// the host wholesale-replaces its keystore, so a capped read would silently
+/// drop offline credentials for members past the cap.
+pub async fn all_accounts_in_team(
+    db: &DbPool,
+    org_id: &str,
+    team_id: &str,
+) -> anyhow::Result<Vec<PosixAccount>> {
+    use crate::schema::{org_team_members, org_teams, organization_members};
+    let (org, tid) = (org_id.to_string(), team_id.to_string());
+    Ok(db_interact!(db, |conn| {
+        posix_accounts::table
+            .inner_join(
+                org_team_members::table
+                    .on(org_team_members::identity_id.eq(posix_accounts::identity_id)),
+            )
+            .inner_join(
+                organization_members::table
+                    .on(organization_members::identity_id.eq(posix_accounts::identity_id)),
+            )
+            .filter(org_team_members::team_id.eq(&tid))
+            .filter(
+                org_team_members::team_id.eq_any(
+                    org_teams::table
+                        .filter(org_teams::org_id.eq(&org))
+                        .select(org_teams::id),
+                ),
+            )
+            .filter(organization_members::org_id.eq(&org))
+            .filter(posix_accounts::enabled.eq(1))
+            .order(posix_accounts::username.asc())
+            .select(PosixAccount::as_select())
+            .load(conn)
+    })?)
+}
+
+/// UNCAPPED [`accounts_in_org`] for the offline-verifier projection ONLY: it
+/// must be complete or members past the cap lose offline credentials.
+pub async fn all_accounts_in_org(db: &DbPool, org_id: &str) -> anyhow::Result<Vec<PosixAccount>> {
+    use crate::schema::organization_members;
+    let org = org_id.to_string();
+    Ok(db_interact!(db, |conn| {
+        posix_accounts::table
+            .inner_join(
+                organization_members::table
+                    .on(organization_members::identity_id.eq(posix_accounts::identity_id)),
+            )
+            .filter(organization_members::org_id.eq(&org))
+            .filter(posix_accounts::enabled.eq(1))
+            .order(posix_accounts::username.asc())
             .select(PosixAccount::as_select())
             .load(conn)
     })?)
@@ -1362,5 +1437,27 @@ mod tests {
         // disabled account → empty.
         set_account_enabled(&db, "alice", false).await.unwrap();
         assert!(hosts_reachable_by(&db, "alice").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn team_gid_is_allocated_once_and_never_flips() {
+        let db = temp_pool().await;
+        let t = teams::create_team(&db, "orgA", "Platform", None)
+            .await
+            .unwrap();
+
+        let first = find_or_create_team_gid(&db, &t.id, 3_000_000)
+            .await
+            .unwrap();
+        assert!(first >= 3_000_000);
+        let second = find_or_create_team_gid(&db, &t.id, 3_000_000)
+            .await
+            .unwrap();
+        assert_eq!(first, second);
+
+        // Unknown team must error, never hand out an unstored gid.
+        assert!(find_or_create_team_gid(&db, "no-such-team", 3_000_000)
+            .await
+            .is_err());
     }
 }

@@ -36,9 +36,9 @@ fn hasher() -> Argon2<'static> {
 
 /// Mint an Argon2id PHC string (`$argon2id$v=19$m=65536,t=3,p=1$<salt>$<hash>`)
 /// for `passphrase`, with a fresh random salt per call. Rejects passphrases
-/// shorter than [`OFFLINE_MIN_LEN`].
-pub fn mint_verifier(passphrase: &str) -> Result<String, SetSecretError> {
-    if passphrase.chars().count() < OFFLINE_MIN_LEN {
+/// shorter than `min_len`, clamped up to the [`OFFLINE_MIN_LEN`] hard floor.
+pub fn mint_verifier(passphrase: &str, min_len: usize) -> Result<String, SetSecretError> {
+    if passphrase.chars().count() < min_len.max(OFFLINE_MIN_LEN) {
         return Err(SetSecretError::TooShort);
     }
     let salt = SaltString::generate(&mut OsRng);
@@ -85,20 +85,20 @@ mod tests {
 
     #[test]
     fn correct_passphrase_verifies() {
-        let phc = mint_verifier("correct horse battery").unwrap();
+        let phc = mint_verifier("correct horse battery", OFFLINE_MIN_LEN).unwrap();
         assert!(verify("correct horse battery", &phc));
     }
 
     #[test]
     fn wrong_passphrase_fails() {
-        let phc = mint_verifier("correct horse battery").unwrap();
+        let phc = mint_verifier("correct horse battery", OFFLINE_MIN_LEN).unwrap();
         assert!(!verify("Tr0ub4dor&3xtra", &phc));
     }
 
     #[test]
     fn two_mints_differ_random_salt() {
-        let a = mint_verifier("samepassphrase").unwrap();
-        let b = mint_verifier("samepassphrase").unwrap();
+        let a = mint_verifier("samepassphrase", OFFLINE_MIN_LEN).unwrap();
+        let b = mint_verifier("samepassphrase", OFFLINE_MIN_LEN).unwrap();
         assert_ne!(
             a, b,
             "random per-call salt must make the PHC strings differ"
@@ -110,14 +110,28 @@ mod tests {
 
     #[test]
     fn seven_chars_rejected_too_short() {
-        assert_eq!(mint_verifier("1234567"), Err(SetSecretError::TooShort));
+        assert_eq!(
+            mint_verifier("1234567", OFFLINE_MIN_LEN),
+            Err(SetSecretError::TooShort)
+        );
         // Exactly the floor is accepted.
-        assert!(mint_verifier("12345678").is_ok());
+        assert!(mint_verifier("12345678", OFFLINE_MIN_LEN).is_ok());
+    }
+
+    #[test]
+    fn configured_min_len_enforced_above_floor() {
+        assert_eq!(
+            mint_verifier("123456789", 12),
+            Err(SetSecretError::TooShort)
+        );
+        assert!(mint_verifier("123456789012", 12).is_ok());
+        // A configured minimum below the hard floor is clamped up to it.
+        assert_eq!(mint_verifier("1234", 4), Err(SetSecretError::TooShort));
     }
 
     #[test]
     fn phc_carries_named_params() {
-        let phc = mint_verifier("correct horse battery").unwrap();
+        let phc = mint_verifier("correct horse battery", OFFLINE_MIN_LEN).unwrap();
         assert!(
             phc.contains("m=65536,t=3,p=1"),
             "PHC must carry the named Argon2id params, got: {phc}"

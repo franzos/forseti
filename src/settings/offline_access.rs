@@ -83,8 +83,13 @@ pub(crate) async fn settings_offline_access_save(
         .offline_min_len
         .max(offline::OFFLINE_MIN_LEN);
 
-    let msg = match offline::mint_verifier(&form.passphrase) {
-        Ok(verifier) => {
+    // Argon2id at m=64MiB/t=3 is too heavy to run on the async runtime.
+    let minted =
+        tokio::task::spawn_blocking(move || offline::mint_verifier(&form.passphrase, min_len))
+            .await;
+
+    let msg = match minted {
+        Ok(Ok(verifier)) => {
             match db::upsert_offline_secret(
                 &state.db,
                 &sess.identity_id,
@@ -113,7 +118,7 @@ pub(crate) async fn settings_offline_access_save(
                 }
             }
         }
-        Err(offline::SetSecretError::TooShort) => {
+        Ok(Err(offline::SetSecretError::TooShort)) => {
             let mut args: std::collections::HashMap<
                 std::borrow::Cow<'static, str>,
                 fluent_templates::fluent_bundle::FluentValue,
@@ -123,6 +128,10 @@ pub(crate) async fn settings_offline_access_save(
                 (min_len as i64).into(),
             );
             crate::i18n::lookup_args(&locale, "flash-offline-passphrase-too-short", &args)
+        }
+        Err(e) => {
+            tracing::error!(error = ?e, "settings_offline_access_save: mint task failed");
+            crate::i18n::lookup(&locale, "flash-offline-passphrase-save-failed")
         }
     };
 

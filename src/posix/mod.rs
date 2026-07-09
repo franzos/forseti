@@ -18,7 +18,8 @@ use crate::state::AppState;
 /// surface carries an extra `Feature::LinuxAuth` license gate (see
 /// [`resolver::router`]); device routes stay ungated.
 pub fn router(state: AppState) -> Router<AppState> {
-    resolver::router(state).merge(device::router())
+    let trust_xff = state.cfg.proxy.trust_forwarded_for;
+    resolver::router(state).merge(device::router(trust_xff))
 }
 
 use std::sync::Arc;
