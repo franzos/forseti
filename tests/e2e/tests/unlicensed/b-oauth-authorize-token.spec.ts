@@ -35,7 +35,7 @@ test('OAuth authorize → consent → token exchange end-to-end', async ({ page,
 
   // 1. Admin signs in (AAL2) and creates a fresh OAuth client. The
   //    show page renders the client secret in a `<pre>` block under
-  //    "Credentials — shown once".
+  //    "Credentials: shown once".
   await signInAdminAal2(page, adminCreds!);
 
   // The /admin/clients/new picker step is just navigation — go straight
@@ -61,7 +61,7 @@ test('OAuth authorize → consent → token exchange end-to-end', async ({ page,
   // Capture client_id from the URL and secret from the reveal banner.
   const clientId = page.url().match(/\/admin\/clients\/([a-f0-9-]+)/)?.[1];
   if (!clientId) throw new Error(`could not parse client_id from ${page.url()}`);
-  const revealHeader = page.getByText('Credentials — shown once');
+  const revealHeader = page.getByText('Credentials: shown once');
   await revealHeader.waitFor();
   // The secret lives in the first `<pre>` immediately after the header.
   const clientSecret = await page
