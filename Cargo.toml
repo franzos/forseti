@@ -117,10 +117,18 @@ ed25519-dalek = { version = "2", default-features = false, features = ["std", "z
 # entitlement policy (typed features, expiry/grace) on top of its claims.
 signetlib = "0.1"
 arc-swap = "1"
-# SMTP send for Forseti-originated mail (invite + claim-email). Kratos's
-# courier doesn't expose a one-off POST endpoint, so Forseti speaks
-# SMTP directly. `rustls-tls` keeps the dep tree native-tls-free.
-lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "tokio1", "tokio1-rustls-tls", "builder"] }
+# Provider-agnostic send for Forseti-originated mail (invite + claim-email).
+# Kratos's courier doesn't expose a one-off POST endpoint, so Forseti sends
+# directly. The `config` feature supplies the deserializable `ProviderConfig`
+# schema flattened under `[email]`; `lettermint-reqwest-013` matches our
+# reqwest 0.13 (enabling the `-012` backend too would be a compile error).
+polymail = { version = "0.1.6", default-features = false, features = [
+    "config",
+    "lettermint-reqwest-013",
+    "postmark",
+    "sendgrid",
+    "smtp",
+] }
 # i18n: Fluent loader (embeds locales/*.ftl at compile time) and language
 # identifiers; Accept-Language negotiation is done in locale.rs.
 fluent-templates = "0.14"

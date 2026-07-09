@@ -23,7 +23,6 @@ use axum::routing::get;
 use axum::Router;
 use rand::Rng;
 use serde::Deserialize;
-use std::str::FromStr;
 
 use crate::admin::actions::{delete_identity_audited, DeleteActor, DeleteReason};
 use crate::audit_metadata;
@@ -99,7 +98,7 @@ async fn claim_post(
     CsrfForm(form): CsrfForm<ClaimForm>,
 ) -> Response {
     let email = form.email.trim().to_lowercase();
-    if email.is_empty() || lettre::Address::from_str(&email).is_err() {
+    if !crate::mailer::is_valid_email(&email) {
         let msg = crate::i18n::lookup(&locale, "claim-error-invalid-email");
         return render_claim_error(&state, &csrf.0, locale, &msg);
     }
@@ -468,7 +467,7 @@ fn mint_six_digit_code() -> String {
     format!("{:06}", n)
 }
 
-/// Send the email-claim verification code over SMTP. Mirrors the org
+/// Send the email-claim verification code via polymail. Mirrors the org
 /// invite mailer — bypasses Kratos's courier because the admin API
 /// doesn't expose a one-off send endpoint.
 pub async fn send_claim_email_code(
@@ -481,5 +480,5 @@ pub async fn send_claim_email_code(
     let body = format!(
         "Hello,\n\nSomeone is trying to register an account on {brand_name} using this email address. The existing account that owns this address hasn't completed verification yet.\n\nIf this was you, enter the following code to claim the email:\n\n  {code}\n\nThe code expires in 15 minutes. If you didn't request this, ignore this email — the existing unverified account will remain in place.\n",
     );
-    crate::mailer::send_text(&cfg.smtp, &cfg.self_, recipient, &subject, &body).await
+    crate::mailer::send_text(cfg.email.as_ref(), &cfg.self_, recipient, &subject, &body).await
 }

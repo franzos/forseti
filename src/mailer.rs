@@ -1,112 +1,108 @@
-//! Forseti-owned SMTP transport for org-invite + claim-email mail (Kratos's courier handles its own
-//! self-service mail). Forseti speaks SMTP directly because Kratos v26 has no usable one-off
-//! `POST /admin/courier/messages` (returns 405).
-
-use std::time::Duration;
+//! Forseti-owned mail transport for org-invite + claim-email mail (Kratos's courier handles its own
+//! self-service mail). Forseti sends directly because Kratos v26 has no usable one-off
+//! `POST /admin/courier/messages` (returns 405). Provider selection + credentials come from
+//! polymail's `ProviderConfig`, flattened under `[email]`; see `config::EmailConfig`.
 
 use anyhow::Result;
-use lettre::message::Mailbox;
-use lettre::transport::smtp::authentication::Credentials;
-use lettre::transport::smtp::client::{Tls, TlsParameters};
-use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
+use polymail::{Address, Body, Email};
 
-use crate::config::{SelfConfig, SmtpConfig, SmtpScheme};
+use crate::config::{EmailConfig, SelfConfig};
 
-/// Send a plaintext mail. When `cfg.enabled` is false, logs the
-/// recipient/subject and returns Ok; callers proceed and the underlying
-/// token/code remains accessible via the DB for dev hand-delivery.
+/// Send a plaintext mail. When `cfg` is `None` (no `[email]` section) or
+/// `cfg.enabled` is false, logs the recipient/subject and returns Ok; callers
+/// proceed and the underlying token/code remains accessible via the DB for dev
+/// hand-delivery.
 pub async fn send_text(
-    cfg: &SmtpConfig,
+    cfg: Option<&EmailConfig>,
     self_cfg: &SelfConfig,
     recipient: &str,
     subject: &str,
     body: &str,
 ) -> Result<()> {
-    if !cfg.enabled {
+    let Some(cfg) = cfg.filter(|c| c.enabled) else {
         tracing::info!(
             recipient = recipient,
             subject = subject,
-            "smtp disabled; would-be mail dropped (token/code still valid via DB)"
+            "email disabled; would-be mail dropped (token/code still valid via DB)"
         );
         return Ok(());
-    }
+    };
 
-    let from_address = if cfg.from.is_empty() {
+    let from_address = cfg.from_address.clone().unwrap_or_else(|| {
         let host = url::Url::parse(&self_cfg.url)
             .ok()
             .and_then(|u| u.host_str().map(|h| h.to_string()))
             .unwrap_or_else(|| "localhost".to_string());
         format!("noreply@{host}")
-    } else {
-        cfg.from.clone()
+    });
+
+    let from = match cfg.from_name.as_deref().filter(|n| !n.is_empty()) {
+        Some(name) => Address::with_name(from_address, name),
+        None => Address::new(from_address),
     };
 
-    let from: Mailbox = from_address
-        .parse()
-        .map_err(|e| anyhow::anyhow!("invalid [smtp].from value '{from_address}': {e}"))?;
-    let to: Mailbox = recipient
-        .parse()
-        .map_err(|e| anyhow::anyhow!("invalid recipient '{recipient}': {e}"))?;
-
-    let message = Message::builder()
-        .from(from)
-        .to(to)
-        .subject(subject)
-        .body(body.to_string())
+    let email = Email::builder(from, subject, Body::Text(body.to_string()))
+        .to(recipient)
+        .build()
         .map_err(|e| anyhow::anyhow!("compose mail failed: {e}"))?;
 
-    let mut builder = match cfg.scheme {
-        SmtpScheme::Plaintext => {
-            AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&cfg.host).tls(Tls::None)
-        }
-        SmtpScheme::Starttls | SmtpScheme::Smtps => {
-            let mut tls = TlsParameters::builder(cfg.host.clone());
-            if cfg.skip_tls_verify {
-                warn_insecure_tls();
-                tls = tls
-                    .dangerous_accept_invalid_certs(true)
-                    .dangerous_accept_invalid_hostnames(true);
-            }
-            let tls = tls
-                .build()
-                .map_err(|e| anyhow::anyhow!("smtp tls params: {e}"))?;
-            // `builder_dangerous` (not `relay`) so host/port aren't forced to lettre's 25/465 defaults; TLS wired per scheme.
-            let kind = if matches!(cfg.scheme, SmtpScheme::Smtps) {
-                Tls::Wrapper(tls)
-            } else {
-                Tls::Required(tls)
-            };
-            AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&cfg.host).tls(kind)
-        }
-    };
-    builder = builder
-        .port(cfg.port)
-        .timeout(Some(Duration::from_secs(15)));
-    if !cfg.username.is_empty() {
-        builder = builder.credentials(Credentials::new(
-            cfg.username.clone(),
-            cfg.password.to_string(),
-        ));
-    }
-    let transport = builder.build();
+    let mailer = cfg
+        .provider
+        .clone()
+        .build()
+        .map_err(|e| anyhow::anyhow!("email provider build failed: {e}"))?;
 
-    transport
-        .send(message)
+    mailer
+        .send(&email)
         .await
         .map(|_| ())
-        .map_err(|e| anyhow::anyhow!("smtp send failed: {e}"))
+        .map_err(|e| anyhow::anyhow!("email send failed: {e}"))
 }
 
-/// Warn once (via `Once`) that TLS verification is disabled on a TLS scheme (`skip_tls_verify = true`).
-fn warn_insecure_tls() {
-    use std::sync::Once;
-    static WARNED: Once = Once::new();
-    WARNED.call_once(|| {
-        tracing::warn!(
-            "[smtp].skip_tls_verify is set on a TLS scheme: SMTP certificate and \
-             hostname verification are DISABLED. A MITM on the SMTP path can then \
-             capture credentials and the contents of invite / claim-email mail. \
-             Unset skip_tls_verify in production."
-        );
-    });
+/// Pragmatic addr-spec check for user-submitted addresses (replaces lettre's
+/// parser, which no longer sits in the tree). Requires exactly one `@`, a
+/// non-empty local part, a dotted domain with non-empty labels, and no
+/// whitespace or control characters. Not full RFC 5321, but enough to reject
+/// the obvious garbage a form can submit; the real bounce check is delivery.
+pub fn is_valid_email(addr: &str) -> bool {
+    let Some((local, domain)) = addr.split_once('@') else {
+        return false;
+    };
+    if local.is_empty() || domain.is_empty() || domain.contains('@') {
+        return false;
+    }
+    if addr.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return false;
+    }
+    let mut labels = domain.split('.').peekable();
+    let has_dot = domain.contains('.');
+    has_dot && labels.all(|l| !l.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_valid_email;
+
+    #[test]
+    fn accepts_ordinary_addresses() {
+        assert!(is_valid_email("user@example.com"));
+        assert!(is_valid_email("a.b+tag@sub.example.co.uk"));
+    }
+
+    #[test]
+    fn rejects_malformed_addresses() {
+        for bad in [
+            "",
+            "no-at-sign",
+            "@example.com",
+            "user@",
+            "user@localhost",
+            "user@@example.com",
+            "user@exa mple.com",
+            "user @example.com",
+            "user@example..com",
+        ] {
+            assert!(!is_valid_email(bad), "should reject {bad:?}");
+        }
+    }
 }

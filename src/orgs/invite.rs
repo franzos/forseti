@@ -12,7 +12,6 @@ use axum::routing::{get, post};
 use axum::Router;
 use rand::Rng;
 use serde::Deserialize;
-use std::str::FromStr;
 
 use crate::audit::{self, action, target_kind, AuditCtx, AuditEvent};
 use crate::audit_metadata;
@@ -108,7 +107,7 @@ async fn post_invite_for(
     }
 
     let email = form.email.trim().to_lowercase();
-    if email.is_empty() || lettre::Address::from_str(&email).is_err() {
+    if !crate::mailer::is_valid_email(&email) {
         return back_to_members(&state.db, &org_id, "Enter a valid email address")
             .await
             .into_response();
@@ -613,9 +612,9 @@ fn render_invalid_invite_themed(
     })
 }
 
-/// Send the invite mail over SMTP via `lettre`. Kratos's admin API has no
-/// one-off courier endpoint in v26+ (405), so Forseti mail uses its own
-/// `[smtp]` transport.
+/// Send the invite mail via polymail. Kratos's admin API has no one-off
+/// courier endpoint in v26+ (405), so Forseti mail uses its own `[email]`
+/// provider config.
 pub async fn send_invite_email(
     recipient: &str,
     accept_url: &str,
@@ -632,7 +631,7 @@ pub async fn send_invite_email(
         accept_url,
         cfg.orgs.invite_ttl_days,
     );
-    crate::mailer::send_text(&cfg.smtp, &cfg.self_, recipient, &subject, &body).await
+    crate::mailer::send_text(cfg.email.as_ref(), &cfg.self_, recipient, &subject, &body).await
 }
 
 /// Pure `(subject, body)` builder, split from [`send_invite_email`] so tests

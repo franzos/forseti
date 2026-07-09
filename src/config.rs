@@ -42,10 +42,10 @@ pub struct AppConfig {
     /// Identity-management knobs (today only the `unverified-prune` TTL).
     #[serde(default)]
     pub identity: IdentityConfig,
-    /// SMTP for Forseti-originated mail (invite + claim-email); Kratos's courier handles its own self-service mail.
-    /// When `enabled = false` the send sites log + skip, leaving the token/code in the DB for hand-delivery in dev.
+    /// Provider config for Forseti-originated mail (invite + claim-email); Kratos's courier handles its own self-service mail.
+    /// `None` (no `[email]` section) or `enabled = false` makes the send sites log + skip, leaving the token/code in the DB for hand-delivery in dev.
     #[serde(default)]
-    pub smtp: SmtpConfig,
+    pub email: Option<EmailConfig>,
     /// Forseti-owned member profiles. Off by default; leave off where org-mates shouldn't see each other's data.
     #[serde(default)]
     pub profiles: ProfilesConfig,
@@ -537,45 +537,49 @@ fn default_internal_bind() -> String {
     "127.0.0.1:8081".to_string()
 }
 
-/// SMTP connection scheme picking lettre's transport builder: plaintext via `builder_dangerous`,
-/// STARTTLS/SMTPS via the typed `relay`/`starttls_relay` so a TLS slip is an init error.
-#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum SmtpScheme {
-    #[default]
-    Plaintext,
-    Starttls,
-    Smtps,
+/// Forseti-originated mail (invite + claim-email). Wraps polymail's
+/// [`ProviderConfig`] (transport + credentials, flattened in so provider
+/// fields sit directly under `[email]`) and adds the sender identity plus an
+/// on/off switch. Kratos's courier handles its own self-service mail.
+///
+/// No `derive(Debug)`: `ProviderConfig` derives its own `Debug` that prints
+/// the token/pass verbatim, so the manual impl below masks the provider block.
+#[derive(Clone, Deserialize)]
+pub struct EmailConfig {
+    /// When false, the send sites log the would-be recipient/subject and
+    /// return without contacting the provider. Defaults true when the section
+    /// is present; the whole section being absent has the same log+skip effect.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// From address. Falls back to `noreply@<self.url host>` when unset.
+    #[serde(default, deserialize_with = "empty_string_as_none")]
+    pub from_address: Option<String>,
+    /// Optional display name paired with `from_address`.
+    #[serde(default, deserialize_with = "empty_string_as_none")]
+    pub from_name: Option<String>,
+    #[serde(flatten)]
+    pub provider: polymail::ProviderConfig,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct SmtpConfig {
-    /// When false, Forseti logs the would-be recipient/subject and
-    /// returns without contacting the SMTP server. Useful in tests and
-    /// for OSS deployments that don't have an SMTP relay handy.
-    #[serde(default)]
-    pub enabled: bool,
-    /// SMTP server hostname.
-    #[serde(default = "default_smtp_host")]
-    pub host: String,
-    /// SMTP server port. Plaintext SMTP defaults to 1025 (Mailcrab dev),
-    /// production deployments typically use 587 (STARTTLS) or 465 (SMTPS).
-    #[serde(default = "default_smtp_port")]
-    pub port: u16,
-    /// Connection scheme: `plaintext`, `starttls`, or `smtps`.
-    #[serde(default)]
-    pub scheme: SmtpScheme,
-    /// From address. Falls back to `noreply@<self.url host>` when empty.
-    #[serde(default)]
-    pub from: String,
-    /// Optional credentials. Empty username means no auth.
-    #[serde(default)]
-    pub username: String,
-    #[serde(default)]
-    pub password: Redacted,
-    /// Accept self-signed / invalid TLS certs. Set to false in production.
-    #[serde(default)]
-    pub skip_tls_verify: bool,
+impl std::fmt::Debug for EmailConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EmailConfig")
+            .field("enabled", &self.enabled)
+            .field("from_address", &self.from_address)
+            .field("from_name", &self.from_name)
+            .field("provider", &"[redacted]")
+            .finish()
+    }
+}
+
+/// serde helper: treat an empty string in TOML/env as `None` so a blank
+/// `from_address = ""` doesn't defeat the `noreply@<host>` fallback.
+fn empty_string_as_none<'de, D>(de: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt = Option::<String>::deserialize(de)?;
+    Ok(opt.filter(|s| !s.is_empty()))
 }
 
 /// String newtype whose `Debug` prints `[redacted]` so secrets can't leak
@@ -604,27 +608,6 @@ impl From<String> for Redacted {
     }
 }
 
-impl Default for SmtpConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            host: default_smtp_host(),
-            port: default_smtp_port(),
-            scheme: SmtpScheme::default(),
-            from: String::new(),
-            username: String::new(),
-            password: Redacted::default(),
-            skip_tls_verify: false,
-        }
-    }
-}
-
-fn default_smtp_host() -> String {
-    "127.0.0.1".to_string()
-}
-fn default_smtp_port() -> u16 {
-    1025
-}
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct ProfilesConfig {
     /// Gates the extended-profile form, the public `/users/{id}` view, the roster link, and the `extended_profile` scope.
@@ -1035,7 +1018,45 @@ impl AppConfig {
             .extract()?;
         cfg.clamp_rate_limits();
         cfg.brand.validate_logo_url()?;
+        cfg.validate_email()?;
         Ok(cfg)
+    }
+
+    /// Fail fast on a mis-wired `[email]` section. polymail already rejects
+    /// unknown providers at deserialize and credentials-over-plaintext in
+    /// `build()`; this covers the app-side gaps: an enabled API provider with a
+    /// blank token/api_key (serde accepts `""`, env is meant to fill it), a
+    /// missing `from_address`, and any transport/credential error surfaced by
+    /// building the mailer once here instead of on first send.
+    fn validate_email(&self) -> anyhow::Result<()> {
+        use polymail::ProviderConfig;
+        let Some(email) = self.email.as_ref() else {
+            return Ok(());
+        };
+        if !email.enabled {
+            return Ok(());
+        }
+        if email.from_address.is_none() {
+            anyhow::bail!("[email] enabled but from_address is unset");
+        }
+        let blank_secret = match &email.provider {
+            ProviderConfig::Lettermint { token } | ProviderConfig::Postmark { token } => {
+                token.is_empty()
+            }
+            ProviderConfig::Sendgrid { api_key } => api_key.is_empty(),
+            ProviderConfig::Smtp { .. } => false,
+        };
+        if blank_secret {
+            anyhow::bail!(
+                "[email] enabled but the provider token/api_key is empty; set it via FORSETI_EMAIL__TOKEN / FORSETI_EMAIL__API_KEY"
+            );
+        }
+        email
+            .provider
+            .clone()
+            .build()
+            .map_err(|e| anyhow::anyhow!("[email] provider misconfigured: {e}"))?;
+        Ok(())
     }
 
     /// Clamp every rate-limit-bearing knob to its sanity ceiling.
@@ -1207,7 +1228,7 @@ impl AppConfig {
             internal: InternalConfig::default(),
             license: LicenseConfig::default(),
             identity: IdentityConfig::default(),
-            smtp: SmtpConfig::default(),
+            email: None,
             profiles: ProfilesConfig::default(),
             webhook: WebhookConfig::default(),
             claim_email: ClaimEmailConfig::default(),
@@ -1475,5 +1496,74 @@ mod tests {
         assert_eq!(clamp_rate("x", 1_001, 1_000), 1_000);
         assert_eq!(clamp_rate("x", 1_000_000, 1_000), 1_000);
         assert_eq!(clamp_rate("x", u32::MAX, 10_000), 10_000);
+    }
+
+    // --- EmailConfig / validate_email --------------------------------------
+
+    fn email_cfg(json: &str) -> EmailConfig {
+        serde_json::from_str(json).expect("EmailConfig should deserialize")
+    }
+
+    #[test]
+    fn email_config_flattens_provider_and_defaults_enabled() {
+        let cfg = email_cfg(
+            r#"{"from_address":"no-reply@example.com","provider":"smtp","host":"127.0.0.1","port":1025,"tls":"none"}"#,
+        );
+        assert!(cfg.enabled, "enabled defaults true when section present");
+        assert_eq!(cfg.from_address.as_deref(), Some("no-reply@example.com"));
+        assert!(matches!(
+            cfg.provider,
+            polymail::ProviderConfig::Smtp { .. }
+        ));
+    }
+
+    #[test]
+    fn email_config_blank_from_address_is_none() {
+        let cfg = email_cfg(r#"{"from_address":"","provider":"lettermint","token":"lm_x"}"#);
+        assert!(cfg.from_address.is_none());
+    }
+
+    #[test]
+    fn email_config_debug_masks_provider() {
+        let cfg = email_cfg(r#"{"provider":"lettermint","token":"lm_supersecret"}"#);
+        let dump = format!("{cfg:?}");
+        assert!(!dump.contains("lm_supersecret"), "token leaked: {dump}");
+        assert!(dump.contains("[redacted]"));
+    }
+
+    fn cfg_with_email(email: Option<EmailConfig>) -> AppConfig {
+        let mut c = AppConfig::test_fixture();
+        c.email = email;
+        c
+    }
+
+    #[test]
+    fn validate_email_ok_when_absent_or_disabled() {
+        assert!(cfg_with_email(None).validate_email().is_ok());
+        let disabled = email_cfg(r#"{"enabled":false,"provider":"sendgrid","api_key":""}"#);
+        assert!(cfg_with_email(Some(disabled)).validate_email().is_ok());
+    }
+
+    #[test]
+    fn validate_email_rejects_enabled_with_blank_secret() {
+        let cfg = email_cfg(r#"{"from_address":"a@b.com","provider":"sendgrid","api_key":""}"#);
+        assert!(cfg_with_email(Some(cfg)).validate_email().is_err());
+    }
+
+    #[test]
+    fn validate_email_rejects_missing_from_address() {
+        let cfg = email_cfg(r#"{"provider":"lettermint","token":"lm_x"}"#);
+        assert!(cfg_with_email(Some(cfg)).validate_email().is_err());
+    }
+
+    // Under a runtime because building the SMTP provider spins up a lettre
+    // connection pool whose `Drop` needs one (production runs `load()` inside
+    // `#[tokio::main]`, so this mirrors reality).
+    #[tokio::test]
+    async fn validate_email_accepts_well_formed_smtp() {
+        let cfg = email_cfg(
+            r#"{"from_address":"a@b.com","provider":"smtp","host":"127.0.0.1","port":1025,"tls":"none"}"#,
+        );
+        assert!(cfg_with_email(Some(cfg)).validate_email().is_ok());
     }
 }

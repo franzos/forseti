@@ -60,7 +60,7 @@ The recommended shape is **path-prefixed on a single host**: Forseti at the root
 ## Prerequisites
 
 - **Postgres** (>= 13). One database per service: `kratos`, `hydra`, optionally `forseti`. The playground's `init-db.sh` shows the bootstrap pattern.
-- **SMTP provider.** Mailcrab (used in `infra/docker-compose.yml`) is a development sink. In production, use a real provider: Amazon SES, Postmark, Resend, SendGrid, or Mailgun. Two pieces of the stack speak SMTP independently: **Kratos** (verification, recovery, MFA-enrol mails) via `courier.smtp.connection_uri` in `kratos.yml`, and **Forseti** (org-invite + claim-email mails) via `[smtp]` in `config.toml`. Both can point at the same relay.
+- **Mail provider.** Mailcrab (used in `infra/docker-compose.yml`) is a development sink. In production, use a real provider. Two pieces of the stack send mail independently: **Kratos** (verification, recovery, MFA-enrol mails) speaks SMTP via `courier.smtp.connection_uri` in `kratos.yml`, and **Forseti** (org-invite + claim-email mails) sends via `[email]` in `config.toml`, which supports Lettermint, Postmark, SendGrid, or an SMTP relay. Both can point at the same SMTP relay.
 - **DNS** records pointing `accounts.example.com`, `kratos.example.com`, and `hydra.example.com` (or a single hostname with path-based routing) at the reverse proxy.
 - **TLS certificates.** Let's Encrypt via Caddy or `certbot`, or a managed cert solution.
 - **Container runtime** if running Forseti as a container, or a Linux host with a writable working directory if running the static binary.
@@ -156,20 +156,29 @@ FORSETI_DATABASE__URL="postgres://forseti:secret@localhost:5450/forseti" cargo r
 
 The `[posix]` table (uid/gid bases, default shell, home prefix, free-tier seat cap) is documented in [Linux authentication → `[posix]`](#posix).
 
-### `[smtp]`
+### `[email]`
 
-Forseti-owned outbound mail (org invites + claim-email). Kratos's courier handles its own self-service mail separately. Disabled by default — when off, send sites log + skip so dev still works with the token / code accessible via the DB.
+Forseti-owned outbound mail (org invites + claim-email). Kratos's courier handles its own self-service mail separately. Optional — omit the section (or set `enabled = false`) and the send sites log + skip so dev still works with the token / code accessible via the DB. Backed by [polymail](https://github.com/franzos/polymail-rs): `provider` selects the transport and the remaining fields are that provider's credentials, flattened in directly under `[email]`.
 
-| Key               | Type   | Default       | Description                                                                                                       |
-|-------------------|--------|---------------|-------------------------------------------------------------------------------------------------------------------|
-| `enabled`         | bool   | `false`       | Master switch. When `false`, Forseti logs the would-be recipient and returns without contacting the SMTP server. |
-| `host`            | string | `"127.0.0.1"` | SMTP server hostname.                                                                                             |
-| `port`            | u16    | `1025`        | SMTP server port. Plaintext defaults to `1025` (Mailcrab); production typically uses `587` or `465`.  |
-| `scheme`          | string | `"plaintext"` | Connection scheme: `plaintext`, `starttls`, or `smtps`.                                                           |
-| `from`            | string | `""`          | From address. Falls back to `noreply@<self.url host>` when empty.                                                 |
-| `username`        | string | `""`          | SMTP username. Empty means no auth.                                                                               |
-| `password`        | string | `""`          | SMTP password. Source from env (`FORSETI_SMTP__PASSWORD`) in prod.                                                 |
-| `skip_tls_verify` | bool   | `false`       | Accept self-signed / invalid TLS certs. Leave `false` in prod.    |
+Sender identity and switch:
+
+| Key            | Type   | Default | Description                                                                                     |
+|----------------|--------|---------|-------------------------------------------------------------------------------------------------|
+| `enabled`      | bool   | `true`  | Master switch. When `false` (or the section is absent), Forseti logs the would-be recipient and returns without sending. |
+| `from_address` | string | —       | From address. Falls back to `noreply@<self.url host>` when unset. Required when `enabled = true`. |
+| `from_name`    | string | —       | Optional display name paired with `from_address`.                                               |
+| `provider`     | string | —       | Transport: `lettermint`, `postmark`, `sendgrid`, or `smtp`.                                      |
+
+Provider fields (only those matching the chosen `provider`):
+
+| Provider     | Fields                                                                                                        |
+|--------------|--------------------------------------------------------------------------------------------------------------|
+| `lettermint` | `token` (source from `FORSETI_EMAIL__TOKEN` in prod)                                                          |
+| `postmark`   | `token` (source from `FORSETI_EMAIL__TOKEN` in prod)                                                          |
+| `sendgrid`   | `api_key` (note: not `token`; source from `FORSETI_EMAIL__API_KEY`)                                           |
+| `smtp`       | `host`; `port` (optional, defaults per `tls`: 465 implicit, 587 start_tls); `tls` one of `none`/`start_tls`/`implicit` (default `implicit`); `user`; `pass` (source from `FORSETI_EMAIL__PASS`) |
+
+Environment variables override TOML field by field (Figment, `FORSETI_` prefix, `__` for nesting), so leave secrets blank in the file and inject them at runtime. polymail refuses to send SMTP credentials over `tls = "none"`, and Forseti fails startup on an enabled provider with a blank token / missing `from_address`.
 
 ### `[webhook]`
 
@@ -1379,7 +1388,7 @@ If the MCP server caches introspection responses (defensible up to ~30s) or stor
 Two SMTP transports operate independently and can both point at the same relay:
 
 - **Kratos courier** — verification codes, recovery codes, MFA enrolment notifications, and any Kratos-template-driven mail. Configured under `courier.smtp` in `kratos.yml`.
-- **Forseti mailer** — org invites and the hand-rolled `/claim-email` verification code. Configured under `[smtp]` in `config.toml`. Forseti speaks SMTP directly (via `lettre`) because Kratos's admin API doesn't expose a one-off "send this message" endpoint in v26+.
+- **Forseti mailer** — org invites and the hand-rolled `/claim-email` verification code. Configured under `[email]` in `config.toml`. Forseti sends directly (via [polymail](https://github.com/franzos/polymail-rs)) because Kratos's admin API doesn't expose a one-off "send this message" endpoint in v26+.
 
 ### Kratos courier
 
@@ -1403,21 +1412,33 @@ For Postmark, substitute the connection URI: `smtps://<server-token>:<server-tok
 
 ### Forseti mailer
 
-Mirrors the Kratos config but lives Forseti-side. Without it, invite + claim-email mails are dropped (the underlying token / code stays valid in the DB so an operator can hand-deliver in dev, but end users won't see anything in their inbox).
+Lives Forseti-side. Without it, invite + claim-email mails are dropped (the underlying token / code stays valid in the DB so an operator can hand-deliver in dev, but end users won't see anything in their inbox). Pick a provider via `provider`; an SMTP relay (which can be the same one Kratos uses) looks like:
 
 ```toml
-[smtp]
-enabled         = true
-host            = "email-smtp.us-east-1.amazonaws.com"
-port            = 465
-scheme          = "smtps"           # plaintext | starttls | smtps
-username        = "AKIAIOSFODNN7EXAMPLE"
-password        = "secret"          # use FORSETI_SMTP__PASSWORD env var in prod
-from            = "no-reply@example.com"
-skip_tls_verify = false             # set true only for self-signed dev relays
+[email]
+enabled      = true
+from_address = "no-reply@example.com"
+provider     = "smtp"
+host         = "email-smtp.us-east-1.amazonaws.com"
+port         = 465
+tls          = "implicit"           # none | start_tls | implicit
+user         = "AKIAIOSFODNN7EXAMPLE"
+pass         = ""                    # set via FORSETI_EMAIL__PASS in prod
 ```
 
-Sanity-check: `enabled = false` leaves the section dormant — useful for OSS deployments that don't have a relay handy or for tests. Disabled-state callers `tracing::info!` the would-be recipient and continue without error, so the surrounding flow still completes.
+Or a transactional API provider (token injected via env):
+
+```toml
+[email]
+enabled      = true
+from_address = "no-reply@example.com"
+provider     = "postmark"           # or lettermint
+token        = ""                    # set via FORSETI_EMAIL__TOKEN
+```
+
+(SendGrid is the same shape but uses `api_key` instead of `token`, injected via `FORSETI_EMAIL__API_KEY`.)
+
+Sanity-check: omitting the section (or `enabled = false`) leaves the mailer dormant — useful for OSS deployments that don't have a provider handy or for tests. Disabled-state callers `tracing::info!` the would-be recipient and continue without error, so the surrounding flow still completes.
 
 ### Email templates
 

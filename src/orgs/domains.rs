@@ -530,7 +530,8 @@ pub async fn send_domain_challenge_emails(
     );
     for local in ["admin", "postmaster"] {
         let to = format!("{local}@{domain}");
-        if let Err(e) = crate::mailer::send_text(&cfg.smtp, &cfg.self_, &to, &subject, &body).await
+        if let Err(e) =
+            crate::mailer::send_text(cfg.email.as_ref(), &cfg.self_, &to, &subject, &body).await
         {
             tracing::warn!(error = ?e, recipient = %to, "domain verification courier dispatch failed");
         }

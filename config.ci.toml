@@ -42,15 +42,13 @@ allowed_emails = ["admin@example.com"]
 [internal]
 bind = "0.0.0.0:8081"
 
-[smtp]
+[email]
 enabled = true
+from_address = "no-reply@forseti.test"
+provider = "smtp"
 host = "127.0.0.1"
 port = 1025
-scheme = "plaintext"
-username = ""
-password = ""
-from = "no-reply@forseti.test"
-skip_tls_verify = true
+tls = "none"
 
 # Shared bearer with infra/kratos/kratos.yml (`auth.config.value`). Required —
 # Forseti refuses to boot with it empty.

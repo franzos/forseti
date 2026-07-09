@@ -185,18 +185,38 @@ support_email = "support@example.com"
 
 # Forseti-originated mail (invite + claim-email). Kratos's courier handles
 # its own self-service mail (verification, recovery, MFA) — this transport
-# is only for mails Forseti itself sends. Disabled by default; when
-# `enabled = false`, callers log + skip and the underlying token/code
-# remains in the DB for hand-delivery.
-# [smtp]
+# is only for mails Forseti itself sends. Omit the section (or set
+# `enabled = false`) to make callers log + skip, leaving the token/code in
+# the DB for hand-delivery.
+#
+# `provider` selects the transport: `lettermint`, `postmark`, `sendgrid`, or
+# `smtp`. Keep secrets out of this file — leave `token`/`api_key`/`pass`
+# blank and inject them via env (FORSETI_EMAIL__TOKEN, FORSETI_EMAIL__API_KEY,
+# FORSETI_EMAIL__PASS), which override the TOML field by field.
+#
+# API provider (Lettermint; token via env):
+# [email]
 # enabled = true
+# from_address = "noreply@example.com"
+# from_name = "Example"          # optional display name
+# provider = "lettermint"        # or "postmark"
+# token = ""                     # set via FORSETI_EMAIL__TOKEN
+#
+# SendGrid uses `api_key` rather than `token`:
+# [email]
+# provider = "sendgrid"
+# api_key = ""                   # set via FORSETI_EMAIL__API_KEY
+#
+# SMTP relay:
+# [email]
+# enabled = true
+# from_address = "noreply@example.com"
+# provider = "smtp"
 # host = "smtp.example.com"
-# port = 587
-# scheme = "starttls"   # one of: plaintext, starttls, smtps
-# username = ""
-# password = ""
-# from = "noreply@example.com"
-# skip_tls_verify = false
+# port = 587                     # omit to default per tls (465 implicit, 587 start_tls)
+# tls = "start_tls"              # one of: none, start_tls, implicit
+# user = ""
+# pass = ""                      # set via FORSETI_EMAIL__PASS
 
 # Append-only audit log. `webhook_token` is REQUIRED — Forseti refuses
 # to boot with it empty. Kratos's flow webhooks send this token in the

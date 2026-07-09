@@ -18,6 +18,7 @@
 ### Changed
 - Grouped the admin and settings navigation into labelled sections
 - Team slugs are now immutable after creation; renaming a team changes its display name only.
+- Outbound mail (org invites + claim-email) now goes through polymail: the `[smtp]` config section becomes `[email]` with a `provider` field, adding Lettermint, Postmark, and SendGrid alongside SMTP. Secrets inject via env (`FORSETI_EMAIL__TOKEN` / `__API_KEY` / `__PASS`). SMTP fields renamed (`scheme` to `tls` with `none`/`start_tls`/`implicit`, `username`/`password` to `user`/`pass`, `from` to `from_address`); the `skip_tls_verify` escape hatch is dropped.
 
 ### Security
 - Safe response headers: X-Content-Type-Options, X-Frame-Options, minimal CSP
