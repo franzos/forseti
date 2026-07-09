@@ -7,7 +7,7 @@ use axum::response::Response;
 use axum::Router;
 use tokio_util::sync::CancellationToken;
 use tower_governor::governor::GovernorConfigBuilder;
-use tower_governor::key_extractor::{PeerIpKeyExtractor, SmartIpKeyExtractor};
+use tower_governor::key_extractor::{GlobalKeyExtractor, PeerIpKeyExtractor, SmartIpKeyExtractor};
 use tower_governor::GovernorLayer;
 
 use crate::state::AppState;
@@ -121,17 +121,73 @@ where
     }
 }
 
+/// Layer a global (all-callers-share-one-bucket) pair on top of `dual_window`'s
+/// per-IP pair. Per-IP alone is bypassed by distributed signup and, when
+/// `trust_xff` trusts a spoofable header, by forged `X-Forwarded-For`; the
+/// global bucket bounds total traffic regardless of claimed source.
+pub(crate) fn dual_window_with_global<F>(
+    r: Router<AppState>,
+    trust_xff: bool,
+    per_minute: u32,
+    per_hour: u32,
+    global_per_minute: u32,
+    global_per_hour: u32,
+    error_handler: F,
+) -> Router<AppState>
+where
+    F: Fn(tower_governor::GovernorError) -> Response + Copy + Send + Sync + 'static,
+{
+    let r = dual_window(r, trust_xff, per_minute, per_hour, error_handler);
+    let r = apply(
+        r,
+        GlobalKeyExtractor,
+        60_000,
+        global_per_minute,
+        error_handler,
+    );
+    apply(
+        r,
+        GlobalKeyExtractor,
+        3_600_000,
+        global_per_hour,
+        error_handler,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    // RETAINERS is a process-global static; cargo runs tests in parallel
+    // threads by default, so two tests asserting on its length race each
+    // other (and a failing assert while a guard is alive poisons the mutex
+    // for the rest of the suite). Serialize the RETAINERS-touching tests here.
+    static TEST_SERIAL: Mutex<()> = Mutex::new(());
+
     #[test]
     fn apply_registers_retainer_only_for_active_buckets() {
+        let _guard = TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let before = RETAINERS.lock().unwrap().len();
         let r: Router<AppState> = Router::new();
         let r = apply(r, PeerIpKeyExtractor, 60_000, 0, plain_text_error("test"));
-        assert_eq!(RETAINERS.lock().unwrap().len(), before);
+        let after_noop = RETAINERS.lock().unwrap().len();
+        assert_eq!(after_noop, before);
         let _r = apply(r, PeerIpKeyExtractor, 60_000, 5, plain_text_error("test"));
-        assert_eq!(RETAINERS.lock().unwrap().len(), before + 1);
+        let after_active = RETAINERS.lock().unwrap().len();
+        assert_eq!(after_active, before + 1);
+    }
+
+    #[test]
+    fn dual_window_with_global_registers_four_retainers() {
+        let _guard = TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let before = RETAINERS.lock().unwrap().len();
+        let r: Router<AppState> = Router::new();
+        let _r = dual_window_with_global(r, false, 10, 60, 120, 1200, plain_text_error("test"));
+        let after = RETAINERS.lock().unwrap().len();
+        assert_eq!(after, before + 4);
     }
 }

@@ -20,6 +20,20 @@ use super::{
     settings_ctx, OrgSlug, SettingsCtx,
 };
 
+/// External orgs hard-enforce an admins-only member directory (spec §4); any
+/// other visibility is rejected for them. Internal orgs allow any policy.
+fn visibility_allowed(
+    mode: crate::orgs::AccessMode,
+    policy: crate::orgs::visibility::MemberVisibility,
+) -> bool {
+    match mode {
+        crate::orgs::AccessMode::External => {
+            policy == crate::orgs::visibility::MemberVisibility::AdminsOnly
+        }
+        crate::orgs::AccessMode::Internal => true,
+    }
+}
+
 #[derive(Serialize, Clone)]
 struct MemberView {
     identity_id: String,
@@ -329,6 +343,28 @@ pub(super) async fn members_visibility(
         )
             .into_response();
     }
+    let access_mode = crate::orgs::parse_access_mode(&target.org.access_mode);
+    if !visibility_allowed(access_mode, policy) {
+        let _ = audit::log(
+            &state.db,
+            AuditEvent::new(action::ORG_VISIBILITY_CHANGED)
+                .actor_user(actor.as_str(), actor_email.as_str())
+                .target(target_kind::ORG, org_id.clone())
+                .with_ctx(&actx)
+                .severity(audit::severity::WARNING)
+                .failed("visibility_loosening_blocked")
+                .metadata(audit_metadata!(
+                    "org_id" => org_id.as_str(),
+                    "attempted_visibility" => policy.as_str(),
+                )),
+        )
+        .await;
+        return (
+            StatusCode::BAD_REQUEST,
+            "external organizations keep the member directory administrators-only",
+        )
+            .into_response();
+    }
     if let Err(e) = orgs::set_member_visibility(&state.db, org_id, policy).await {
         tracing::error!(error = ?e, "set_member_visibility failed");
     } else {
@@ -444,6 +480,16 @@ pub(super) async fn members_remove(
         {
             tracing::error!(error = ?e, org_id = %org_id, identity_id = %target_identity, "failed to revoke team membership on org member removal");
         }
+        // Floor maintenance: leaving a genuine last non-default org re-homes the
+        // ex-member into Default (as Member). No-op for an operator who still
+        // holds a Default Owner row (the swallowed duplicate keeps Owner).
+        if org_id != orgs::DEFAULT_ORG_ID {
+            if let Err(e) =
+                crate::orgs::db::add_default_floor_member_txn(&state.db, &target_identity).await
+            {
+                tracing::error!(error = ?e, identity_id = %target_identity, "failed to re-add Default floor on member removal");
+            }
+        }
         let _ = audit::log(
             &state.db,
             AuditEvent::new(action::ORG_MEMBER_REMOVED)
@@ -457,4 +503,51 @@ pub(super) async fn members_remove(
         .await;
     }
     Redirect::to(&format!("{}/members", target.base_path)).into_response()
+}
+
+#[cfg(test)]
+mod visibility_allowed_tests {
+    use super::visibility_allowed;
+    use crate::orgs::visibility::MemberVisibility;
+    use crate::orgs::AccessMode;
+
+    #[test]
+    fn external_admins_only_allowed() {
+        assert!(visibility_allowed(
+            AccessMode::External,
+            MemberVisibility::AdminsOnly
+        ));
+    }
+
+    #[test]
+    fn external_all_rejected() {
+        assert!(!visibility_allowed(
+            AccessMode::External,
+            MemberVisibility::All
+        ));
+    }
+
+    #[test]
+    fn external_same_group_rejected() {
+        assert!(!visibility_allowed(
+            AccessMode::External,
+            MemberVisibility::SameGroup
+        ));
+    }
+
+    #[test]
+    fn internal_all_allowed() {
+        assert!(visibility_allowed(
+            AccessMode::Internal,
+            MemberVisibility::All
+        ));
+    }
+
+    #[test]
+    fn internal_admins_only_allowed() {
+        assert!(visibility_allowed(
+            AccessMode::Internal,
+            MemberVisibility::AdminsOnly
+        ));
+    }
 }

@@ -44,3 +44,5 @@ dashboard-activity-heading = النشاط الأخير
 dashboard-activity-empty-title = لا يوجد نشاط حديث
 dashboard-activity-empty-body = ستظهر أحداث تسجيل الدخول هنا.
 dashboard-activity-signin-title = تسجيل دخول ناجح
+dashboard-domain-join-prompt = لديك عنوان { $domain } مُتحقق منه. الانضمام إلى { $org }؟
+dashboard-domain-join-cta = الانضمام إلى { $org }

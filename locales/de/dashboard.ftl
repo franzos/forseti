@@ -36,3 +36,5 @@ dashboard-activity-heading = Letzte Aktivität
 dashboard-activity-empty-title = Keine aktuellen Aktivitäten
 dashboard-activity-empty-body = Anmeldeereignisse werden hier angezeigt.
 dashboard-activity-signin-title = Erfolgreiche Anmeldung
+dashboard-domain-join-prompt = Sie haben eine verifizierte { $domain }-Adresse. { $org } beitreten?
+dashboard-domain-join-cta = { $org } beitreten

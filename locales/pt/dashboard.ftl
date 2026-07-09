@@ -36,3 +36,5 @@ dashboard-activity-heading = Atividade recente
 dashboard-activity-empty-title = Sem atividade recente
 dashboard-activity-empty-body = Os eventos de início de sessão aparecerão aqui.
 dashboard-activity-signin-title = Início de sessão bem-sucedido
+dashboard-domain-join-prompt = Tem um endereço { $domain } verificado. Aderir a { $org }?
+dashboard-domain-join-cta = Aderir a { $org }

@@ -22,6 +22,7 @@ Three tables, defined once and mirrored across `migrations/sqlite/` and `migrati
 | `logo_url` | TEXT NULL. Per-org branding; overrides global `[brand]` when set. |
 | `support_email` | TEXT NULL. Per-org branding. |
 | `created_at`, `created_by` | provenance. |
+| `access_mode` | TEXT. `"internal"` (default) or `"external"`. See [Access modes](#access-modes). |
 
 The Default row is inserted by the migration itself (`migrations/postgres/20260517000000_initial_schema/up.sql`), so it always exists on a fresh install.
 
@@ -50,21 +51,33 @@ Indexed on `org_id` and `email`.
 
 Two roles only — `owner` and `member` (`Role` enum, `src/orgs/mod.rs:48-52`), stored as lowercase strings. Role strings round-trip through one vocabulary shared by form parsing, DB storage, and OIDC claim emission (`Role::as_str` / `FromStr`). Unknown strings fail closed — `is_owner_role()` logs a warning and returns `false` (`src/orgs/mod.rs:84-92`), so a constraint bypass can't silently grant owner.
 
-## Membership and auto-join
+## Membership: the Default floor and the three join doors
 
-Membership is **automatic on the first authenticated request** — users never "join" the Default org by hand.
+Placement is never silent. There are exactly three ways into an org, all explicit, and one auto-managed "floor" org for people who belong to none:
 
-A Tower middleware, `auto_join_default_org` (`src/orgs/middleware.rs`), runs on every request carrying a Kratos session cookie. It calls `ensure_default_membership()` (`src/orgs/mod.rs:188-216`), which does a cheap indexed `has_any_membership` probe and, if the user has no row yet, runs the race-safe `auto_join_default_txn()`.
+1. **Invite** — any org; the accepting identity's matching address must be `verified` (kept as a deliberate control, see [Invites](#invites)).
+2. **Domain auto-join** — internal orgs only, and only when the org set `domain_join_policy = auto_join`; a user with a **verified** address at an ownership-proven domain gets a profile prompt (see [Domain auto-join](#domain-auto-join-prompt-based)).
+3. **Public self-serve** — external orgs only; any user can self-serve join via `/o/{slug}` → `/join/confirm` (verify-later, see below).
 
-Role assignment happens *inside* that transaction so two concurrent first-registrations can't both observe the table as empty (`pick_default_role`, `src/orgs/mod.rs:225-237`):
+### The Default floor
 
-1. Email on `admin.allowed_emails` → **owner** (admin emails get governance in Default).
-2. First user on a fresh install (Default has zero members) → **owner**.
-3. Everyone else → **member**.
+The Default org is an auto-managed floor, not a first-request force-join. The invariant, split by operator status:
 
-Errors are swallowed and logged at `warn!` — a transient DB hiccup on the membership probe must not break the request that triggered it. The next request retries; the cost is one extra indexed lookup until the row lands.
+- **Allowlisted identities** (`admin.is_admin(email)`, i.e. on `admin.allowed_emails`) are always members of Default as **owner**, and are **exempt from the Default drop** — they may hold Default and tenant orgs at once (operators legitimately span both).
+- **Non-allowlisted identities** are members of Default **iff** they hold zero non-default org memberships, always as **member**.
 
-The middleware also caches the `whoami` result as `CachedWhoami` in request extensions, so extractors downstream don't pay a second Kratos round-trip.
+The floor is **verification-independent** — it grants nothing email-derived, so an unverified account still lands in Default. Default ownership is entirely allowlist-derived; the old "first user of an empty Default becomes owner" bootstrap is gone (it would re-fire under floor churn and promote an arbitrary user). A deployment with an empty `admin.allowed_emails` therefore has a Default with no owner — the same state in which the `/admin` panel is already inaccessible.
+
+The Tower middleware `auto_join_default_org` (`src/orgs/middleware.rs`) runs on every request carrying a Kratos session cookie and calls `ensure_default_floor()` (`src/orgs/mod.rs`). That reads both facts it needs — is-in-Default and non-default-count — in a single capped query (`floor_membership_facts`, `src/orgs/db.rs`), then, inside one serialized transaction, inserts the Default row only if the add-condition holds (owner for allowlisted, member for a non-default-less non-allowlisted identity). Errors are swallowed and logged at `warn!`; the next request retries. The middleware also caches the `whoami` result as `CachedWhoami` so downstream extractors skip a second Kratos round-trip.
+
+### Keeping the floor consistent on join and leave
+
+The invariant is maintained by every join and leave path, not just the middleware:
+
+- **Every non-default join** goes through `join_org_race_safe(db, identity_id, org_id, role, drop_default)` (`src/orgs/db.rs`): one serialized transaction that inserts the tenant row, then (for non-allowlisted identities only) deletes the Default row, insert-before-delete so a concurrent floor-add can't strand the user in both. Callers: org creation, invite finalize, the domain-join prompt, `/join/confirm`, and SAML SSO JIT-join (`src/saml/flow.rs`).
+- **Genuine single leave** (`members_remove`, `src/orgs/settings_page/members.rs`) re-adds Default as member when a non-allowlisted identity drops to zero non-default orgs.
+- **Identity deletion** (`remove_member_everywhere`, `src/orgs/db.rs`) is *not* a floor transition — it strips all rows and must leave no Default row (re-adding one would recreate a ghost membership for a deleted identity).
+- **Org deletion** (`delete_org`) relies on the lazy floor to re-home affected members on their next request.
 
 ### Removing members / changing roles
 
@@ -80,7 +93,7 @@ The cookie is never trusted on its own. `active_org()` (`src/orgs/mod.rs:137-153
 
 1. Read + verify the signed cookie. If valid **and** the identity is still a member of that org → use it.
 2. Otherwise fall back to the first membership in the list.
-3. Empty membership list → `None` (shouldn't happen — registration auto-joins Default).
+3. Empty membership list → `None`. This is now a valid transient state: a freshly-registered identity can hit a handler before the Default floor middleware has added its row, so callers must tolerate `None` (claim emission suppresses the `org` claim rather than defaulting).
 
 The cookie is only *written* by `POST /orgs/switch` (`src/orgs/settings_page/switch.rs`) — a CSRF-protected target behind the nav dropdown that re-verifies membership before emitting the `Set-Cookie`. Default TTL is 30 days (`[orgs].active_org_cookie_ttl_seconds`).
 
@@ -226,13 +239,58 @@ Host enrollment (`src/admin/hosts.rs`) is **Forseti-tier only** (`RequireAdmin`:
 
 A host belongs to exactly one org, chosen at enrollment and **immutable thereafter**. The edit form (`edit`/`update`) renders the org name read-only and never reads an `org_id` off the form: `update` resolves the host's org from `host_org_id` (the source of truth) and validates the submitted teams against *that* org's teams, so a tampered form can't move the host or scope it to a foreign org's team. The team scope therefore always follows the host's own org. Both `issue` and `update` allocate gids for the chosen teams (`find_or_create_team_gid`) before writing `host_allowed_groups` via `set_host_allowed_team_ids`. Empty team set → whole-org host.
 
+## Access modes
+
+Every org carries an `access_mode` column, modelled by the `AccessMode` enum (`src/orgs/mod.rs`) with two variants today (`Internal`, `External`) and room for a future `customer` variant (Model 2) without a schema change. `parse_access_mode()` **fails closed to `Internal`** on any unknown string, mirroring `parse_access_mode`'s siblings elsewhere in the module (`is_owner_role`, `parse_visibility`) — an unrecognised value never opens self-serve. The Default org can never be `External` (`require_external_mode_writable` hard-rejects it regardless of caller).
+
+### Switching to external
+
+Flipping a licensed, non-Default org to `External` (`orgs::db::set_access_mode`) runs `apply_external_defaults()` (`src/orgs/db.rs`) in the same call site, which sets two defaults in one update: `member_visibility = admins_only` and `public_login_enabled = 1`. Both the overview mode-change path (`src/orgs/settings_page/overview.rs::access_mode_save`) and the create-form path (`src/orgs/settings_page/list_create.rs::orgs_create`) call this pair and both audit the transition as `org.access_mode.changed` — the create path adds `via=create` to its metadata so the two call sites are distinguishable in the audit feed.
+
+### Hard enforcement: `visibility_allowed`
+
+`visibility_allowed(mode, policy)` (`src/orgs/settings_page/members.rs`) is the single predicate gating the member-visibility POST: for `External` orgs, only `admins_only` is accepted; `Internal` orgs accept any policy. It's a pure function, exhaustively unit-tested in-module (`visibility_allowed_tests`). Two audit paths cover this surface:
+
+- **Successful change** — `members_visibility` logs `org.visibility_changed` on any accepted policy write (unconditional on mode).
+- **Blocked loosening attempt** — when `visibility_allowed` rejects the requested policy, `members_visibility` logs `org.visibility_changed` at `warning` severity, marked `.failed(...)`, with `attempted_visibility` in the metadata, **before** returning the unchanged `400`. This is a rejected-write audit trail, not a state change.
+
+### Public self-serve join flow
+
+`GET /o/{slug}` (`src/orgs/public_landing.rs::landing`) renders the themed landing page for any slug; `register_href()` binds the CTA to `/join/confirm?org=<slug>` only when `resolve_signup_org()` (`src/orgs/join.rs`) resolves the slug live — `External` **and** `public_login_enabled = 1`, re-checked at render time. Unknown/internal/disabled slugs fall through to the byte-identical global-theme fallback (anti-enumeration).
+
+`/join/confirm` (`src/orgs/join.rs`) is a two-step GET-then-POST:
+
+1. `GET /join/confirm?org=<slug>` re-resolves the org (TOCTOU-safe against a mode/toggle flip since the landing page rendered), and branches on session state: anonymous → CTA into Kratos registration with `return_to=/join/confirm?org=<slug>`; already a member → redirect `/`; otherwise → CSRF-protected confirm form.
+2. `POST /join/confirm` re-resolves the org again, re-checks membership, then writes the row via `join_org_race_safe(.., Role::Member, drop_default)` (`src/orgs/db.rs`) — so the join also drops the Default floor for non-allowlisted users — and logs `org.member.added` with `via=self_serve`.
+
+**No verification gate (by design).** Public self-serve joins immediately on explicit CSRF-confirmed consent; there is no "verified email required" step. This is deliberate: verification only gates placement that is *derived from the email* (domain auto-join). Public self-serve derives membership from an explicit action for a specific org, not from the email, so the email is not the credential and verification adds nothing here. Operators who want verified-first public onboarding force it at the Kratos layer (`show_verification_ui` on the registration flow); see the [operator guide](../operator-guide.md#external-access-mode-public-self-serve).
+
+### Domain auto-join (prompt-based)
+
+Internal orgs can admit users whose **verified** email is at a domain the org has proven it owns — but the admission is an explicit prompt, never a silent join, and the org must opt in.
+
+- **Policy toggle.** `organizations.domain_join_policy` (`DomainJoinPolicy`, `src/orgs/mod.rs`) is `invite_only` (default) or `auto_join`. `parse_domain_join_policy()` **fails closed to `invite_only`** on any unknown string, so an unrecognised value never opens the door. Owners set it on the domains settings page (internal, non-Default only). External orgs ignore it — public orgs are open to all by design, so a domain prompt on top would be redundant.
+- **Eligibility.** `lookup_proven_org_for_email()` (`src/orgs/mod.rs`) returns an org only when: the address domain is not freemail, the org is internal and non-Default, a `verified_at` ownership row exists for the domain, and `domain_join_policy = auto_join`. All checks fail closed.
+- **The prompt.** The dashboard (`src/dashboard.rs`) computes, from a **verified** session address (matched with `eq_ignore_ascii_case`), whether such an org exists that the user is not already in, and renders a CSRF-protected "join `<Org>`?" prompt (`resolve_prompt`, `src/orgs/domain_prompt.rs`).
+- **The join.** `POST /orgs/domain-join` (`src/orgs/domain_prompt.rs`, in the CSRF router group) re-resolves the org from the session email at POST time (TOCTOU-safe — a form-supplied slug must match), re-checks the address is verified off the live session, then joins via `join_org_race_safe(.., Role::Member, drop_default)` and audits `via=domain_autojoin`. There is no user-controlled `return_to` (redirects to `/`).
+
+This is why scenario "unverified corporate registrant" resolves cleanly: the floor puts them in Default while unverified; once they verify, the prompt appears and one click moves them to their company org (dropping Default).
+
+### Rate limiting
+
+Both `GET /o/{slug}` (`orgs::public_landing::router`) and `GET /registration` (`auth::registration_router`) are wrapped in `rate_limit::dual_window_with_global` — a per-IP pair (`[orgs].landing_ip_rate_per_*` / `[auth].registration_ip_rate_per_*`) plus a `GlobalKeyExtractor`-keyed pair (`*_global_rate_*`) that bounds total traffic even when a spoofed `X-Forwarded-For` defeats the per-IP bucket. `/registration` has no per-org dimension in its URL (the target org lives inside the opaque Kratos flow), so a per-org key extractor was declined as a third dimension — it isn't cheaply buildable there, and adding it for only one of the two routes would be inconsistent.
+
+### CAPTCHA: deferred
+
+No CAPTCHA gates either surface. Forseti's `/registration` is GET-only — the browser POSTs registration straight to Kratos's own public endpoint, which Forseti never sees — so a server-enforced CAPTCHA would need a blocking Kratos `before` hook, a new Forseti verify webhook, a client-side widget, and org-conditional logic across all of them. That's a multi-system integration out of proportion to this phase, and a client-side-only widget with no server-side check would be a placebo. Deferred; see the [operator guide](../operator-guide.md#external-access-mode-public-self-serve) for the operator-facing note.
+
 ## Member visibility
 
 The member directory is gated per-org, so a tenant can decide how much its members can discover about each other. Two pieces of state plus one pure predicate.
 
 ### State
 
-- **`organizations.member_visibility`** (`src/schema.rs:82`) — TEXT, one of `all` / `same_group` / `admins_only`, modelled by the `MemberVisibility` enum (`src/orgs/visibility.rs`). `parse_visibility()` **fails closed to `admins_only`** on any unknown string (mirrors `is_owner_role`). The migration seeds the Default org as **`admins_only`** — the safe default for the shared OSS tenant where everyone is auto-joined.
+- **`organizations.member_visibility`** (`src/schema.rs:82`) — TEXT, one of `all` / `same_group` / `admins_only`, modelled by the `MemberVisibility` enum (`src/orgs/visibility.rs`). `parse_visibility()` **fails closed to `admins_only`** on any unknown string (mirrors `is_owner_role`). The migration seeds the Default org as **`admins_only`** — the safe default for the shared OSS tenant where everyone lands on the floor.
 - **`organization_members.hidden_from_directory`** (`src/schema.rs:93`) — INTEGER 0/1, the per-member opt-out. A member can remove themselves from their org's directory regardless of policy.
 
 ### The predicate

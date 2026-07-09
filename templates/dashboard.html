@@ -20,6 +20,23 @@
     </div>
   {% endif %}
 
+  {# Verified-domain auto-join prompt: the caller has a verified address whose
+     domain is proven for an auto_join org they aren't in yet. Explicit,
+     CSRF-protected POST; no silent placement. #}
+  {% if let Some(p) = domain_prompt %}
+    <div class="bg-surface-container border border-outline-variant rounded-xl p-4 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+      <p class="font-body-md text-body-md text-on-surface">{{ chrome.tv2("dashboard-domain-join-prompt", "domain", &p.domain, "org", &p.org.name) }}</p>
+      <form method="POST" action="/orgs/domain-join">
+        <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+        <input type="hidden" name="org" value="{{ p.org.slug }}">
+        <button type="submit"
+                class="font-label-md text-label-md text-on-primary bg-primary rounded-lg px-4 py-2 hover:opacity-90 transition-opacity focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2 whitespace-nowrap">
+          {{ chrome.tv1("dashboard-domain-join-cta", "org", &p.org.name) }}
+        </button>
+      </form>
+    </div>
+  {% endif %}
+
   {# Backstop reminder: a device factor is enrolled but no recovery codes
      exist, so losing the device locks the account out for good. Links to the
      2FA settings page where codes can be generated. #}

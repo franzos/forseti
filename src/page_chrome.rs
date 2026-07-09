@@ -304,6 +304,20 @@ impl PageChrome {
         crate::i18n::lookup_args(&self.locale, id, &args)
     }
 
+    // i18n helper: id plus two name/value pairs; a struct would obscure the call site.
+    pub(crate) fn tv2(&self, id: &str, n1: &str, v1: &str, n2: &str, v2: &str) -> String {
+        let mut args: HashMap<Cow<'static, str>, FluentValue<'_>> = HashMap::new();
+        args.insert(
+            Cow::Owned(n1.to_string()),
+            FluentValue::from(v1.to_string()),
+        );
+        args.insert(
+            Cow::Owned(n2.to_string()),
+            FluentValue::from(v2.to_string()),
+        );
+        crate::i18n::lookup_args(&self.locale, id, &args)
+    }
+
     // i18n helper: id plus three name/value pairs; a struct would obscure the call site.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn tv3(

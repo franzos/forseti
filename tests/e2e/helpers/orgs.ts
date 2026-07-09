@@ -64,21 +64,54 @@ async function getIdentity(request: APIRequestContext, email: string): Promise<K
 /**
  * Create a non-default (commercial) org via the multi-org settings form.
  * Caller must already be signed in as a user allowed to create orgs (admin /
- * licensed). Returns the slug the redirect landed on.
+ * licensed). Returns the slug the redirect landed on. `mode`, when set,
+ * selects the matching access-mode radio before submit.
  */
-export async function createOrg(page: Page, name: string, slug?: string): Promise<string> {
+export async function createOrg(
+  page: Page,
+  name: string,
+  slug?: string,
+  mode?: 'internal' | 'external',
+): Promise<string> {
   await page.goto('/settings/organizations');
-  await page.locator('form[action="/settings/organizations/create"] input[name="name"]').fill(name);
+  const form = page.locator('form[action="/settings/organizations/create"]');
+  await form.locator('input[name="name"]').fill(name);
   if (slug) {
-    await page.locator('form[action="/settings/organizations/create"] input[name="slug"]').fill(slug);
+    await form.locator('input[name="slug"]').fill(slug);
+  }
+  if (mode) {
+    await form.locator(`input[name="access_mode"][value="${mode}"]`).check();
   }
   await Promise.all([
     page.waitForURL((u) => /\/settings\/organizations\/[^/]+$/.test(u.pathname), { timeout: 15_000 }),
-    page.locator('form[action="/settings/organizations/create"] button[type="submit"]').click(),
+    form.locator('button[type="submit"]').click(),
   ]);
   const m = new URL(page.url()).pathname.match(/\/settings\/organizations\/([^/]+)$/);
   expect(m, `org create did not land on an org page: ${page.url()}`).toBeTruthy();
   return m![1];
+}
+
+/**
+ * Switch an org's access mode via the confirmed overview form and return the
+ * POST `Response`. `slug` null targets the Default org (though the Default
+ * org's switch form never renders since it's always internal).
+ */
+export async function setAccessMode(
+  page: Page,
+  mode: 'internal' | 'external',
+  slug?: string | null,
+): Promise<Response> {
+  const base = orgBase(slug);
+  await page.goto(base);
+  const form = page.locator(`form[action="${base}/access-mode"]`);
+  const [resp] = await Promise.all([
+    page.waitForResponse(
+      (r) => r.url().includes('/access-mode') && r.request().method() === 'POST',
+      { timeout: 15_000 },
+    ),
+    form.locator('button[type="submit"]').click(),
+  ]);
+  return resp;
 }
 
 /**

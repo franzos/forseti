@@ -23,7 +23,7 @@ If the user already has a session, the handler short-circuits to `safe_return_to
 - No `?flow=` → 302 to `<kratos_public>/self-service/registration/browser?return_to=...` (`browser_init_url`, `src/ory/kratos.rs:109`). Kratos creates the flow, sets the continuity cookie, and 303s back to `/registration?flow=<id>`.
 - `?flow=<id>` present → fetch the flow JSON (`get_flow`, `src/ory/kratos.rs:46`) and render `templates/registration.html` via `render_registration` (`src/auth/registration.rs:76`).
 
-The template renders a single form whose `action` is Kratos's `<kratos_public>/self-service/registration?flow=<id>` (extracted by `form_target` at `src/flow_view.rs:472`). Kratos's `selfservice.flows.registration.after.<method>.hooks: [session]` (`infra/kratos/kratos.yml`) auto-logs the new identity in for every method, so the browser lands on `/` immediately after a successful submit. Each method also ships a `web_hook` that fires Forseti's `/internal/audit/kratos?action=identity.created` receiver (on the internal listener — `[internal].bind`, defaults to `127.0.0.1:8081`) to record the event in the audit log. Default-org auto-join happens lazily on the user's first authenticated request — see "Auto-join on first authenticated request" below.
+The template renders a single form whose `action` is Kratos's `<kratos_public>/self-service/registration?flow=<id>` (extracted by `form_target` at `src/flow_view.rs:472`). Kratos's `selfservice.flows.registration.after.<method>.hooks: [session]` (`infra/kratos/kratos.yml`) auto-logs the new identity in for every method, so the browser lands on `/` immediately after a successful submit. Each method also ships a `web_hook` that fires Forseti's `/internal/audit/kratos?action=identity.created` receiver (on the internal listener — `[internal].bind`, defaults to `127.0.0.1:8081`) to record the event in the audit log. The Default-org floor is applied lazily on the user's first authenticated request — see "Default floor on first authenticated request" below.
 
 Kratos's progressive-registration mode means the form shape depends on which step the user is at — the first POST returns the same flow with additional method groups (password, passkey, webauthn). The template handles both shapes via `group_nodes`.
 
@@ -1874,22 +1874,18 @@ Module entry points:
 - `crate::orgs::cookie` (`src/orgs/cookie.rs`) — signed `active_org` cookie
 - `crate::orgs::db` (`src/orgs/db.rs`) — diesel queries
 
-### Auto-join on first authenticated request
+### Default floor on first authenticated request
 
-Default-org membership is established **lazily**, on the user's first authenticated request after registration — not via a Kratos webhook. The probe runs inside `crate::extractors::RequireSession` (`src/extractors.rs`); it fires once per request (cached in request extensions via a `AutoJoinChecked` sentinel) regardless of how many handlers extract the session.
+The Default org is an **auto-managed floor**: an identity is a member of it iff it holds zero non-default org memberships (allowlisted operators are always in it, as owner, and exempt from the drop). This is established **lazily**, on the user's first authenticated request after registration — not via a Kratos webhook. The Tower middleware `auto_join_default_org` (`src/orgs/middleware.rs`) runs on every request carrying a Kratos session cookie and caches the `whoami` result as `CachedWhoami` so downstream extractors skip a second round-trip.
 
-Flow inside `RequireSession::from_request_parts`:
+Flow inside `auto_join_default_org`:
 
-1. Resolve the session through `ory::kratos::whoami`.
-2. If `identity_id` is non-empty and the per-request sentinel is unset, call `crate::orgs::ensure_default_membership(&db, &cfg, identity_id, email)` (`src/orgs/mod.rs`).
-3. `ensure_default_membership` runs a cheap indexed probe `crate::orgs::db::has_any_membership(db, identity_id)` (`src/orgs/db.rs`). On a hit it returns immediately. On a miss it calls the race-safe `auto_join_default_txn` (`src/orgs/db.rs`).
-4. Transient DB errors are logged at `warn!` and **swallowed** — the user can still see Forseti; the next request retries the auto-join. Auth never breaks because the orgs table is temporarily slow.
+1. Resolve the session through `ory::kratos::whoami` (skipped for the `/join/confirm` carve-out, which is mid another join).
+2. Call `crate::orgs::ensure_default_floor(&db, &cfg.admin, identity_id, email)` (`src/orgs/mod.rs`). `email` is used only for the `admin.is_admin` check; the floor is otherwise verification-independent.
+3. `ensure_default_floor` reads both facts in one capped query `floor_membership_facts` (is-in-Default, non-default-count), then, inside one serialized transaction, inserts the Default row only if the add-condition holds: allowlisted → `owner` (always ensured); non-allowlisted with zero non-default orgs → `member` (insert guarded by the count inside the txn).
+4. Transient DB errors are logged at `warn!` and **swallowed** — the next request retries. Auth never breaks because the orgs table is temporarily slow.
 
-Role policy (unchanged, lives in `pick_default_role` in `src/orgs/mod.rs`):
-
-- First user on a fresh install (Default org has zero members at txn-start) → `owner` of Default.
-- Email in `admin.allowed_emails` (case-insensitive) → `owner` of Default.
-- Otherwise → `member` of Default.
+There is no "first user of an empty Default becomes owner" bootstrap any more (it would re-fire under floor churn); Default ownership is entirely allowlist-derived. Membership in a non-default org comes through one of the three explicit join doors (invite, domain-auto-join prompt, public self-serve) or SAML SSO, each of which drops the Default floor for non-allowlisted identities via `join_org_race_safe`; leaving one's last non-default org re-adds it. See [organizations internals](organizations-internals.md#membership-the-default-floor-and-the-three-join-doors).
 
 ```mermaid
 sequenceDiagram
@@ -1903,16 +1899,11 @@ sequenceDiagram
     Note over Kratos,Forseti: separately: Kratos fires the audit web_hook against<br/>:8081/internal/audit/kratos — see "Audit logging" in the operator guide
     Browser->>Forseti: GET / (with session cookie)
     Forseti->>Kratos: whoami
-    Forseti->>DB: SELECT 1 FROM organization_members WHERE identity_id=? LIMIT 1
-    alt no row
-        Forseti->>DB: BEGIN
-        Forseti->>DB: SELECT count(*) FROM organization_members WHERE org_id='default'
-        alt first user OR email in admin.allowed_emails
-            Forseti->>DB: INSERT organization_members (role=owner)
-        else
-            Forseti->>DB: INSERT organization_members (role=member)
-        end
-        Forseti->>DB: COMMIT
+    Forseti->>DB: SELECT org_id FROM organization_members WHERE identity_id=? (capped)
+    alt allowlisted operator and not already in Default
+        Forseti->>DB: serialized txn: INSERT organization_members (org=default, role=owner)
+    else non-allowlisted and zero non-default memberships and not in Default
+        Forseti->>DB: serialized txn: INSERT organization_members (org=default, role=member) if count==0
     end
     Forseti-->>Browser: 200 /
 ```
@@ -1921,9 +1912,9 @@ sequenceDiagram
 
 The signed `forseti_active_org` cookie (`src/orgs/cookie.rs`) carries the user's currently selected org id. Format: `<unix_seconds>.<hex_id>.<hex_mac>`. HMAC key derives from `sha256(b"forseti::active_org::v1" || self.url)` — distinct from the flash key, so neither cookie can be replayed against the other.
 
-`crate::orgs::active_org(db, portal_url, headers, identity_id)` reads the cookie, cross-checks it against the user's `organization_members` rows, and falls back to the first membership when the cookie is missing or names an org the user isn't in.
+`crate::orgs::active_org(memberships, cookie_secret, cookie_ttl_secs, headers)` (`src/orgs/mod.rs`) takes the caller's already-loaded `Membership` slice (so it adds no DB roundtrip), reads + verifies the cookie via `cookie::read_active_org_cookie`, and returns the matching membership; it falls back to the first membership when the cookie is missing or names an org the user isn't in, and `None` when the slice is empty.
 
-`POST /orgs/switch` (`src/orgs/settings_page.rs::switch_active_org`) accepts an `org_id` + CSRF, verifies membership, and writes the cookie before 303-ing back to `return_to`.
+`POST /orgs/switch` (`src/orgs/settings_page/switch.rs::switch_active_org`, routed in `src/orgs/settings_page/mod.rs`) accepts an `org_id` + CSRF, verifies membership, and writes the cookie before 303-ing back to `return_to`.
 
 ### Members page
 

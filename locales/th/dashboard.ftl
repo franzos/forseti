@@ -34,3 +34,5 @@ dashboard-activity-heading = กิจกรรมล่าสุด
 dashboard-activity-empty-title = ไม่มีกิจกรรมล่าสุด
 dashboard-activity-empty-body = เหตุการณ์การเข้าสู่ระบบจะแสดงที่นี่
 dashboard-activity-signin-title = เข้าสู่ระบบสำเร็จ
+dashboard-domain-join-prompt = คุณมีที่อยู่ { $domain } ที่ยืนยันแล้ว เข้าร่วม { $org } หรือไม่
+dashboard-domain-join-cta = เข้าร่วม { $org }

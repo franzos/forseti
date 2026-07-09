@@ -168,6 +168,7 @@ pub mod action {
     pub const ORG_MEMBER_REMOVED: &str = "org.member.removed";
     pub const ORG_MEMBER_ROLE_CHANGED: &str = "org.member.role_changed";
     pub const ORG_VISIBILITY_CHANGED: &str = "org.visibility_changed";
+    pub const ORG_ACCESS_MODE_CHANGED: &str = "org.access_mode.changed";
     pub const ORG_MEMBER_DIRECTORY_HIDDEN: &str = "org.member.directory_hidden";
     pub const ORG_MEMBER_DIRECTORY_UNHIDDEN: &str = "org.member.directory_unhidden";
     pub const ORG_LOGO_UPLOADED: &str = "org.logo.uploaded";
@@ -180,6 +181,10 @@ pub mod action {
     pub const ORG_TEAM_DELETED: &str = "org.team.deleted";
     pub const ORG_TEAM_MEMBER_ADDED: &str = "org.team.member_added";
     pub const ORG_TEAM_MEMBER_REMOVED: &str = "org.team.member_removed";
+    // org allowed domains (`src/orgs/domains.rs`), wired by the domains settings surface.
+    pub const ORG_DOMAIN_ADDED: &str = "org.domain.added";
+    pub const ORG_DOMAIN_VERIFIED: &str = "org.domain.verified";
+    pub const ORG_DOMAIN_REMOVED: &str = "org.domain.removed";
     // account-self (#1)
     pub const ACCOUNT_SELF_DELETED: &str = "account.self_deleted";
     pub const ACCOUNT_SWITCHED: &str = "account.switched";

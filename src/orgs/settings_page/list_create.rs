@@ -19,7 +19,7 @@ use crate::state::AppState;
 
 use crate::csrf::CsrfForm;
 
-use super::{build_nav, require_org_owner, settings_ctx};
+use super::{build_nav, require_external_mode_writable, require_org_owner, settings_ctx};
 
 #[derive(Template)]
 #[template(path = "orgs/list.html")]
@@ -78,6 +78,16 @@ pub(super) async fn orgs_list(
 pub(super) struct CreateOrgForm {
     name: String,
     slug: Option<String>,
+    access_mode: Option<String>,
+}
+
+/// Fail-closed like `orgs::parse_access_mode`: only the exact literal
+/// "external" from the create-form radio requests external.
+fn parse_create_mode_choice(raw: Option<&str>) -> orgs::AccessMode {
+    match raw {
+        Some("external") => orgs::AccessMode::External,
+        _ => orgs::AccessMode::Internal,
+    }
 }
 
 pub(super) async fn orgs_create(
@@ -155,14 +165,11 @@ pub(super) async fn orgs_create(
         tracing::error!(error = ?e, "create_org failed");
         return (StatusCode::INTERNAL_SERVER_ERROR, "create failed").into_response();
     }
-    if let Err(e) = orgs::add_member(
-        &state.db,
-        &id,
-        &identity_id,
-        Role::Owner,
-        Some(&identity_id),
-    )
-    .await
+    // Creator becomes owner of the new tenant org; drop their Default floor row
+    // in the same txn unless they are an allowlisted operator (who keep Default).
+    let drop_default = !state.cfg.admin.is_admin(&email);
+    if let Err(e) =
+        orgs::db::join_org_race_safe(&state.db, &identity_id, &id, Role::Owner, drop_default).await
     {
         tracing::warn!(error = ?e, "add_member owner failed");
     } else {
@@ -182,6 +189,39 @@ pub(super) async fn orgs_create(
                 )),
         )
         .await;
+    }
+    let requested_mode = parse_create_mode_choice(form.access_mode.as_deref());
+    if requested_mode.is_external() {
+        if require_external_mode_writable(&state, &csrf.0, &identity_id, &email, &id)
+            .await
+            .is_ok()
+        {
+            if let Err(e) =
+                orgs::db::set_access_mode(&state.db, &id, orgs::AccessMode::External).await
+            {
+                tracing::error!(error = ?e, "orgs_create: set_access_mode failed");
+            } else if let Err(e) = orgs::db::apply_external_defaults(&state.db, &id).await {
+                tracing::error!(error = ?e, "orgs_create: apply_external_defaults failed");
+            } else {
+                let _ = audit::log(
+                    &state.db,
+                    AuditEvent::new(action::ORG_ACCESS_MODE_CHANGED)
+                        .actor_user(identity_id.as_str(), actor_email.as_str())
+                        .target(target_kind::ORG, id.clone())
+                        .with_ctx(&actx)
+                        .metadata(audit_metadata!(
+                            "org_id" => id.as_str(),
+                            "org_slug" => slug.as_str(),
+                            "from" => "internal",
+                            "to" => "external",
+                            "via" => "create",
+                        )),
+                )
+                .await;
+            }
+        } else {
+            tracing::warn!(org_id = %id, "orgs_create: external requested but not writable; stays internal");
+        }
     }
     Redirect::to(&format!("/settings/organizations/{}", slug)).into_response()
 }
@@ -233,4 +273,34 @@ pub(super) async fn named_delete(
         return (StatusCode::INTERNAL_SERVER_ERROR, "delete failed").into_response();
     }
     Redirect::to("/settings/organizations").into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn create_mode_choice_defaults_internal() {
+        assert_eq!(parse_create_mode_choice(None), orgs::AccessMode::Internal);
+        assert_eq!(
+            parse_create_mode_choice(Some("internal")),
+            orgs::AccessMode::Internal
+        );
+        assert_eq!(
+            parse_create_mode_choice(Some("bogus")),
+            orgs::AccessMode::Internal
+        );
+    }
+
+    #[test]
+    fn create_mode_choice_external_only_on_exact_literal() {
+        assert_eq!(
+            parse_create_mode_choice(Some("external")),
+            orgs::AccessMode::External
+        );
+        assert_eq!(
+            parse_create_mode_choice(Some("External")),
+            orgs::AccessMode::Internal
+        );
+    }
 }

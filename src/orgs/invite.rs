@@ -514,12 +514,14 @@ async fn finalize_membership(
                 .into_response();
         }
     };
+    let drop_default = !state.cfg.admin.is_admin(session_email);
     match crate::orgs::db::finalize_invite_txn(
         &state.db,
         &invite.token,
         &invite.org_id,
         identity_id,
         role,
+        drop_default,
     )
     .await
     {

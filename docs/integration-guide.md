@@ -210,6 +210,14 @@ The id_token is a JWT signed with RS256 by Hydra's signing key. The claims depen
 | `email`          | string  | The user's primary email address.                                    |
 | `email_verified` | boolean | Whether Kratos has verified the address via the verification flow.   |
 
+#### Membership and verification are not the same
+
+Forseti will issue a token for a user whose email is **not** verified (`email_verified: false`), and that user can already be a member of an org: everyone belongs to at least the Default home org, and an external org's public signup admits anyone without a verification step. So:
+
+- **Never authorize on `email` without checking `email_verified == true`.** An unverified `email` claim only says "the user typed this address", not "the user controls it".
+- **A membership claim is not identity proof.** Do not treat an `org` claim — least of all `org.id = "default"` — as evidence of who the user is or that they belong to your organization in a trusted sense. Membership of the Default home org and of open external orgs is not gated on verification.
+- Membership that *is* email-gated (domain auto-join, invite acceptance) always requires a verified address, but you cannot tell from the token which door a user came through, so apply the two rules above uniformly.
+
 ### With `profile` scope
 
 | Claim         | Type   | Description                                                |
@@ -1112,7 +1120,7 @@ Forseti is not a single point of failure if your app degrades gracefully.
 | `email`   | Adds `email` and `email_verified` claims.                                 |
 | `profile` | Adds `name`, `given_name`, `family_name` (if present in the identity).    |
 | `offline_access` | Adds a `refresh_token` to the token response. Hydra also accepts the bare `offline` alias for back-compat — prefer `offline_access` (OIDC Core 1.0 §11). |
-| `org`     | Adds an `org` claim — `{ id, slug, role, name }` — for the user's currently-active organisation. Forseti resolves the active org from the user's signed `active_org` cookie (in-portal) or the `organization_id=<id>` auth-request parameter (downstream). |
+| `org`     | Adds an `org` claim — `{ id, slug, role, name }`. When the auth request carries `organization_id=<id>`, the claim is pinned to that org (or omitted entirely if the user isn't a member — see below); otherwise it reflects the user's currently-active org (the signed `active_org` cookie, else their first membership). |
 | `orgs`    | Adds an `orgs` claim — an array of `{ id, slug, role, name }` — listing every org the user belongs to. Capped at 32 entries. Apps that show a tenant picker request this. |
 | `groups`  | Adds a `groups` claim, a flat array of the user's team slugs in their active org, for apps that map group names to roles (Parseable, Grafana, Argo CD). Empty array when the user has no teams. Capped at 200 with a `groups_truncated` flag. Scoped to the active org. |
 | `profile` (extended) | When `[profiles].enabled = true` on Forseti, `profile` additionally surfaces `picture` (avatar URL) and `website` from the user's portal-owned profile. Standard OIDC slots — apps already requesting `profile` pick these up with no client-side change. Missing/empty fields are simply omitted. |
@@ -1120,10 +1128,12 @@ Forseti is not a single point of failure if your app degrades gracefully.
 
 #### Active-org selection (`org` scope)
 
-When a downstream app needs to scope an authentication to a specific org, it includes `organization_id=<id>` on the `/oauth2/auth` URL alongside the usual OAuth2 parameters. Forseti extracts it via Hydra's `oauth2_login_request.request_url` and:
+When a downstream app needs to scope an authentication to a specific org, it includes `organization_id=<id>` on the `/oauth2/auth` URL alongside the usual OAuth2 parameters. Forseti reads it from Hydra's `request_url` at both the login and consent steps, and:
 
-1. If the user is a member of the named org, Forseti pre-selects that org via the signed `active_org` cookie before accepting the login challenge.
-2. If the user is not a member, the param is silently ignored — the user's currently-active org (from the cookie or first membership) wins. This is per spec: no error UX for org mismatches, so a stale link from a deactivated org member doesn't break the login.
+1. If the user **is** a member of the named org, the `org` (and `groups`) claim is pinned to that org — regardless of which org the user last switched to in the portal. The login step also pre-selects it via the signed `active_org` cookie.
+2. If the user is **not** a member of the named org, Forseti emits **no** `org`/`groups` claim rather than falling back to a different org — asserting some other tenant to the relying party would be worse than asserting none. A stale link from a deactivated member therefore yields no org claim, not someone else's. There is still no error UX: the login itself proceeds.
+
+With no `organization_id` on the request, the claim reflects the user's currently-active org (the `active_org` cookie, else their first membership).
 
 Example auth URL:
 

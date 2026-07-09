@@ -308,9 +308,17 @@ pub async fn callback(
     match orgs::db::find_member(&state.db, &identity_id, &org_id).await {
         Ok(Some(_)) => {}
         Ok(None) => {
-            if let Err(e) =
-                orgs::db::add_member(&state.db, &org_id, &identity_id, orgs::Role::Member, None)
-                    .await
+            // Race-safe join that drops the Default floor for non-allowlisted
+            // identities in the same txn (H1 — SAML is a floor site).
+            let drop_default = !state.cfg.admin.is_admin(&email);
+            if let Err(e) = orgs::db::join_org_race_safe(
+                &state.db,
+                &identity_id,
+                &org_id,
+                orgs::Role::Member,
+                drop_default,
+            )
+            .await
             {
                 tracing::error!(error = ?e, "saml callback: org membership add failed");
             }

@@ -137,10 +137,12 @@ pub(crate) async fn run() -> anyhow::Result<()> {
     // `/healthz`, `/readyz`, the kratos webhook, and static assets stay outside the layer (no forms).
     let csrf_routes = Router::new()
         .route("/", get(dashboard::root))
-        .merge(auth::router())
+        .merge(auth::router(&state.cfg.proxy, &state.cfg.auth))
         .merge(settings::router())
         .merge(orgs::settings_page::router())
         .merge(orgs::invite::router())
+        .merge(orgs::join::router())
+        .merge(orgs::domain_prompt::router())
         .merge(identity::claim_email::router(
             &state.cfg.proxy,
             &state.cfg.claim_email,
@@ -170,7 +172,10 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         .merge(csrf_routes)
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
-        .route("/o/{slug}", get(orgs::public_landing::landing))
+        .merge(orgs::public_landing::router(
+            &state.cfg.orgs,
+            &state.cfg.proxy,
+        ))
         .merge(orgs::logo::router(&state.cfg.orgs, &state.cfg.proxy))
         // Public JWKS for outbound webhook signature verification (RFC 8417 SETs); outside the CSRF layer.
         .route(

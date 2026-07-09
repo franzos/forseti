@@ -10,8 +10,8 @@ use serde::Serialize;
 use crate::db::DbPool;
 use crate::db_interact;
 use crate::schema::{
-    host_allowed_groups, org_logos, org_team_members, org_teams, organization_invites,
-    organization_members, organizations, saml_connections, saml_links,
+    host_allowed_groups, org_allowed_domains, org_logos, org_team_members, org_teams,
+    organization_invites, organization_members, organizations, saml_connections, saml_links,
 };
 
 /// `support_email` + `logo_url` override the global `[brand]` config when set.
@@ -34,6 +34,8 @@ pub struct Org {
     pub brand_secondary: Option<String>,
     pub public_login_enabled: i32,
     pub has_logo: i32,
+    pub access_mode: String,
+    pub domain_join_policy: String,
 }
 
 // `added_by` is selected by `as_select()` but not read at runtime.
@@ -178,17 +180,29 @@ pub async fn list_memberships_limited(
     Ok(out)
 }
 
-/// Cheap "does this identity belong to ANY org?" probe for the auto-join path.
-pub async fn has_any_membership(db: &DbPool, identity_id: &str) -> anyhow::Result<bool> {
+/// Both facts the Default floor decision needs, in a single query: whether the
+/// identity already holds the Default membership, and how many non-default
+/// memberships it holds. Count is over `organization_members` only, never team
+/// membership. Capped read + in-memory split (this runs on every authenticated
+/// request for the whole Default-only population).
+pub async fn floor_membership_facts(
+    db: &DbPool,
+    identity_id: &str,
+) -> anyhow::Result<(bool, usize)> {
     let i = identity_id.to_string();
-    let row: Option<String> = db_interact!(db, |conn| {
+    let org_ids: Vec<String> = db_interact!(db, |conn| {
         organization_members::table
             .filter(organization_members::identity_id.eq(&i))
-            .select(organization_members::identity_id)
-            .first::<String>(conn)
-            .optional()
+            .limit(MAX_ROWS_PER_LIST)
+            .select(organization_members::org_id)
+            .load::<String>(conn)
     })?;
-    Ok(row.is_some())
+    let default_present = org_ids.iter().any(|id| id == super::DEFAULT_ORG_ID);
+    let non_default_count = org_ids
+        .iter()
+        .filter(|id| id.as_str() != super::DEFAULT_ORG_ID)
+        .count();
+    Ok((default_present, non_default_count))
 }
 
 pub async fn find_member(
@@ -379,6 +393,96 @@ pub async fn update_theme(
     Ok(())
 }
 
+pub async fn set_access_mode(
+    db: &DbPool,
+    org_id: &str,
+    mode: crate::orgs::AccessMode,
+) -> anyhow::Result<()> {
+    let id = org_id.to_string();
+    let mode = mode.as_str().to_string();
+    db_interact!(db, |conn| {
+        diesel::update(organizations::table.filter(organizations::id.eq(&id)))
+            .set(organizations::access_mode.eq(&mode))
+            .execute(conn)
+            .map(|_| ())
+    })?;
+    Ok(())
+}
+
+/// Sets the internal org's domain-join policy (`invite_only` | `auto_join`).
+/// Mirrors [`set_access_mode`]; the caller (settings page) gates it to
+/// non-Default Internal orgs.
+pub async fn set_domain_join_policy(
+    db: &DbPool,
+    org_id: &str,
+    policy: crate::orgs::DomainJoinPolicy,
+) -> anyhow::Result<()> {
+    let id = org_id.to_string();
+    let policy = policy.as_str().to_string();
+    db_interact!(db, |conn| {
+        diesel::update(organizations::table.filter(organizations::id.eq(&id)))
+            .set(organizations::domain_join_policy.eq(&policy))
+            .execute(conn)
+            .map(|_| ())
+    })?;
+    Ok(())
+}
+
+/// Test-only raw writer for an arbitrary `domain_join_policy` string, so the
+/// fail-closed parse can be exercised with a value the typed writer can't emit.
+#[cfg(test)]
+pub(crate) async fn set_domain_join_policy_raw(
+    db: &DbPool,
+    org_id: &str,
+    value: &str,
+) -> anyhow::Result<()> {
+    let id = org_id.to_string();
+    let v = value.to_string();
+    db_interact!(db, |conn| {
+        diesel::update(organizations::table.filter(organizations::id.eq(&id)))
+            .set(organizations::domain_join_policy.eq(&v))
+            .execute(conn)
+            .map(|_| ())
+    })?;
+    Ok(())
+}
+
+/// Sets the external-mode defaults (§4) at org creation and at the
+/// Internal->External switch: admins-only directory + public login on.
+/// Admins-only is subsequently hard-enforced in the member-visibility
+/// handler; public login stays togglable so an owner can pause signups.
+pub async fn apply_external_defaults(db: &DbPool, org_id: &str) -> anyhow::Result<()> {
+    let id = org_id.to_string();
+    let visibility = crate::orgs::visibility::MemberVisibility::AdminsOnly
+        .as_str()
+        .to_string();
+    db_interact!(db, |conn| {
+        diesel::update(organizations::table.filter(organizations::id.eq(&id)))
+            .set((
+                organizations::member_visibility.eq(&visibility),
+                organizations::public_login_enabled.eq(1),
+            ))
+            .execute(conn)
+            .map(|_| ())
+    })?;
+    Ok(())
+}
+
+pub async fn set_public_login_enabled(
+    db: &DbPool,
+    org_id: &str,
+    enabled: i32,
+) -> anyhow::Result<()> {
+    let id = org_id.to_string();
+    db_interact!(db, |conn| {
+        diesel::update(organizations::table.filter(organizations::id.eq(&id)))
+            .set(organizations::public_login_enabled.eq(enabled))
+            .execute(conn)
+            .map(|_| ())
+    })?;
+    Ok(())
+}
+
 /// Pre-auth-readable projection of an org's public branding. Excludes
 /// `support_email` and members; readers only return a row when the org
 /// has opted in (`public_login_enabled=1`). `slug` + `has_logo` let callers
@@ -392,6 +496,7 @@ pub struct PublicBranding {
     pub on_primary: Option<String>,
     pub secondary: Option<String>,
     pub has_logo: i32,
+    pub access_mode: String,
 }
 
 pub async fn public_branding_by_id(
@@ -411,6 +516,7 @@ pub async fn public_branding_by_id(
                 organizations::brand_on_primary,
                 organizations::brand_secondary,
                 organizations::has_logo,
+                organizations::access_mode,
             ))
             .first(conn)
             .optional()
@@ -435,6 +541,7 @@ pub async fn public_branding_by_slug(
                 organizations::brand_on_primary,
                 organizations::brand_secondary,
                 organizations::has_logo,
+                organizations::access_mode,
             ))
             .first(conn)
             .optional()
@@ -442,6 +549,10 @@ pub async fn public_branding_by_slug(
     Ok(row)
 }
 
+/// Bulk-deletes an org and its membership rows. Members whose only non-default
+/// org was this one are re-homed to the Default floor lazily on their next
+/// authenticated request (M1: this path relies on the lazy floor, not an inline
+/// re-add).
 pub async fn delete_org(db: &DbPool, org_id: &str) -> anyhow::Result<()> {
     let id = org_id.to_string();
     db_interact!(db, |conn| {
@@ -477,6 +588,11 @@ pub async fn delete_org(db: &DbPool, org_id: &str) -> anyhow::Result<()> {
                     .execute(c)?;
             }
             diesel::delete(org_logos::table.filter(org_logos::org_id.eq(&id))).execute(c)?;
+            // A surviving verified row would permanently occupy the global
+            // partial-unique index, blocking re-verification of that domain
+            // by any org.
+            diesel::delete(org_allowed_domains::table.filter(org_allowed_domains::org_id.eq(&id)))
+                .execute(c)?;
             diesel::delete(organizations::table.filter(organizations::id.eq(&id))).execute(c)?;
             Ok(())
         })
@@ -494,99 +610,159 @@ struct NewMember<'a> {
     added_by: Option<&'a str>,
 }
 
-/// Transactional auto-join for the Default org. Member-count check + insert
-/// in one transaction so two concurrent first-user registrations can't both
-/// be promoted to `owner`: only one observes an empty member set, the other
-/// sees the first writer's row and falls back to `member`.
-pub async fn auto_join_default_txn(
-    db: &DbPool,
-    admin_cfg: &crate::config::AdminConfig,
-    identity_id: &str,
-    email: &str,
-) -> anyhow::Result<()> {
-    let ident = identity_id.to_string();
-    let email = email.to_string();
-    let admin_cfg = admin_cfg.clone();
-    let now = Utc::now().to_rfc3339();
+/// Run `$body` (a `Result<_, diesel::result::Error>` block naming the
+/// connection `$c`) in one serialized transaction. SQLite uses BEGIN IMMEDIATE
+/// so a read-then-write txn grabs the write lock up front (a deferred BEGIN
+/// upgrades reader->writer and returns SQLITE_BUSY immediately, bypassing
+/// busy_timeout); Postgres (MVCC) uses a plain transaction.
+macro_rules! serialized_txn {
+    ($db:expr, $c:ident, $body:block) => {{
+        match $db {
+            DbPool::Sqlite(pool) => {
+                let conn = pool
+                    .get()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("sqlite pool: {e}"))?;
+                conn.interact(move |$c: &mut diesel::sqlite::SqliteConnection| {
+                    $c.immediate_transaction::<_, diesel::result::Error, _>(|$c| $body)
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("sqlite interact: {e}"))??;
+            }
+            DbPool::Postgres(pool) => {
+                let conn = pool
+                    .get()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("postgres pool: {e}"))?;
+                conn.interact(move |$c: &mut diesel::pg::PgConnection| {
+                    $c.transaction::<_, diesel::result::Error, _>(|$c| $body)
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("postgres interact: {e}"))??;
+            }
+        }
+    }};
+}
 
-    // Member count re-read inside the txn is the race guard: the loser sees the
-    // winner's row (count > 0 → member) or hits the unique constraint (already a
-    // member, idempotent). The txn reads then writes, so on sqlite it must start
-    // with BEGIN IMMEDIATE: a deferred BEGIN begins as a reader and the
-    // read->write upgrade returns SQLITE_BUSY *immediately* when another writer
-    // holds the lock (busy_timeout doesn't cover promotion deadlocks), which
-    // silently dropped fresh users' auto-join. IMMEDIATE grabs the write lock up
-    // front so busy_timeout waits. Postgres (MVCC) is unaffected.
-    macro_rules! join_default {
-        ($c:expr) => {{
-            let count: i64 = organization_members::table
-                .filter(organization_members::org_id.eq(super::DEFAULT_ORG_ID))
-                .count()
-                .get_result($c)?;
-            let role = super::pick_default_role(&admin_cfg, &email, count == 0);
-            diesel::insert_into(organization_members::table)
+/// Atomically add the non-allowlisted Default floor row: insert Default as
+/// `Member` iff the identity holds zero non-default memberships, checked inside
+/// the same serialized txn (H4 — the count and the insert must not interleave
+/// with a concurrent tenant join). Idempotent on a duplicate Default insert, so
+/// an allowlisted operator's existing Default `Owner` row survives unchanged.
+/// Also serves the leave path's re-add: a genuine last-leave leaves zero
+/// non-default rows, so the same "insert Default Member iff count==0" applies.
+pub async fn add_default_floor_member_txn(db: &DbPool, identity_id: &str) -> anyhow::Result<()> {
+    let ident = identity_id.to_string();
+    let now = Utc::now().to_rfc3339();
+    serialized_txn!(db, c, {
+        let non_default: i64 = organization_members::table
+            .filter(organization_members::identity_id.eq(&ident))
+            .filter(organization_members::org_id.ne(super::DEFAULT_ORG_ID))
+            .count()
+            .get_result(c)?;
+        if non_default == 0 {
+            match diesel::insert_into(organization_members::table)
                 .values(NewMember {
                     org_id: super::DEFAULT_ORG_ID,
                     identity_id: &ident,
-                    role: role.as_str(),
+                    role: super::Role::Member.as_str(),
                     added_at: now.clone(),
                     added_by: None,
                 })
-                .execute($c)?;
-            Ok(())
-        }};
-    }
-
-    match db {
-        DbPool::Sqlite(pool) => {
-            let conn = pool
-                .get()
-                .await
-                .map_err(|e| anyhow::anyhow!("sqlite pool: {e}"))?;
-            conn.interact(move |c: &mut diesel::sqlite::SqliteConnection| {
-                c.immediate_transaction::<_, diesel::result::Error, _>(|c| join_default!(c))
-            })
-            .await
-            .map_err(|e| anyhow::anyhow!("sqlite interact: {e}"))??;
+                .execute(c)
+            {
+                Ok(_) => {}
+                Err(diesel::result::Error::DatabaseError(
+                    diesel::result::DatabaseErrorKind::UniqueViolation,
+                    _,
+                )) => {}
+                Err(e) => return Err(e),
+            }
         }
-        DbPool::Postgres(pool) => {
-            let conn = pool
-                .get()
-                .await
-                .map_err(|e| anyhow::anyhow!("postgres pool: {e}"))?;
-            conn.interact(move |c: &mut diesel::pg::PgConnection| {
-                c.transaction::<_, diesel::result::Error, _>(|c| join_default!(c))
-            })
-            .await
-            .map_err(|e| anyhow::anyhow!("postgres interact: {e}"))??;
-        }
-    }
+        Ok(())
+    });
     Ok(())
 }
 
-pub async fn add_member(
+/// Race-safe non-default join that maintains the Default floor: in one
+/// serialized txn, insert the tenant membership then (for non-allowlisted
+/// identities: `drop_default = true`) delete the Default row, in that order
+/// (H4). Allowlisted operators pass `drop_default = false` and keep Default.
+/// Idempotent on a duplicate tenant insert. The delete is a no-op for a Default
+/// `org_id`, so this can never remove the very row it just inserted.
+pub async fn join_org_race_safe(
     db: &DbPool,
-    org_id: &str,
     identity_id: &str,
+    org_id: &str,
     role: super::Role,
-    added_by: Option<&str>,
+    drop_default: bool,
 ) -> anyhow::Result<()> {
-    let org = org_id.to_string();
     let ident = identity_id.to_string();
+    let org = org_id.to_string();
     let role_s = role.as_str();
-    let added_by = added_by.map(str::to_string);
     let now = Utc::now().to_rfc3339();
-    db_interact!(db, |conn| {
-        diesel::insert_into(organization_members::table)
+    serialized_txn!(db, c, {
+        match diesel::insert_into(organization_members::table)
             .values(NewMember {
                 org_id: &org,
                 identity_id: &ident,
                 role: role_s,
                 added_at: now.clone(),
-                added_by: added_by.as_deref(),
+                added_by: None,
+            })
+            .execute(c)
+        {
+            Ok(_) => {}
+            Err(diesel::result::Error::DatabaseError(
+                diesel::result::DatabaseErrorKind::UniqueViolation,
+                _,
+            )) => {}
+            Err(e) => return Err(e),
+        }
+        if drop_default && org != super::DEFAULT_ORG_ID {
+            diesel::delete(
+                organization_members::table
+                    .filter(organization_members::identity_id.eq(&ident))
+                    .filter(organization_members::org_id.eq(super::DEFAULT_ORG_ID)),
+            )
+            .execute(c)?;
+        }
+        Ok(())
+    });
+    Ok(())
+}
+
+/// Race-safe membership insert for any org (self-serve external join, and
+/// eventually domain auto-join). No owner-promotion — that stays Default-only
+/// (a first external joiner becoming owner would be a privilege bug) — so a
+/// single INSERT with the unique constraint as the race guard is enough.
+pub async fn add_member_race_safe(
+    db: &DbPool,
+    identity_id: &str,
+    org_id: &str,
+    role: super::Role,
+) -> anyhow::Result<()> {
+    let ident = identity_id.to_string();
+    let org = org_id.to_string();
+    let now = Utc::now().to_rfc3339();
+    db_interact!(db, |conn| {
+        match diesel::insert_into(organization_members::table)
+            .values(NewMember {
+                org_id: &org,
+                identity_id: &ident,
+                role: role.as_str(),
+                added_at: now.clone(),
+                added_by: None,
             })
             .execute(conn)
-            .map(|_| ())
+        {
+            Ok(_) => Ok(()),
+            Err(diesel::result::Error::DatabaseError(
+                diesel::result::DatabaseErrorKind::UniqueViolation,
+                _,
+            )) => Ok(()),
+            Err(e) => Err(e),
+        }
     })?;
     Ok(())
 }
@@ -848,6 +1024,7 @@ pub async fn finalize_invite_txn(
     org_id: &str,
     identity_id: &str,
     role: super::Role,
+    drop_default: bool,
 ) -> anyhow::Result<InviteFinalizeOutcome> {
     let token = token.to_string();
     let org = org_id.to_string();
@@ -876,6 +1053,17 @@ pub async fn finalize_invite_txn(
                     // Already a member; proceed to stamp the invite accepted.
                 }
                 Err(e) => return Err(e),
+            }
+
+            // Maintain the Default floor: a non-allowlisted invitee joining a
+            // tenant org drops Default in the same txn (insert-then-delete).
+            if drop_default && org != super::DEFAULT_ORG_ID {
+                diesel::delete(
+                    organization_members::table
+                        .filter(organization_members::identity_id.eq(&ident))
+                        .filter(organization_members::org_id.eq(super::DEFAULT_ORG_ID)),
+                )
+                .execute(c)?;
             }
 
             // Only the writer observing `accepted_at IS NULL` updates a row;
@@ -1006,7 +1194,88 @@ pub(crate) async fn test_pool() -> DbPool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::orgs::{Role, DEFAULT_ORG_ID};
     use chrono::TimeZone;
+
+    #[tokio::test]
+    async fn set_access_mode_persists_external() {
+        let db = test_pool().await;
+        create_org(&db, "o1", "acme", "Acme", None).await.unwrap();
+        set_access_mode(&db, "o1", crate::orgs::AccessMode::External)
+            .await
+            .unwrap();
+        let row = org_by_id(&db, "o1").await.unwrap().unwrap();
+        assert_eq!(row.access_mode, "external");
+    }
+
+    #[tokio::test]
+    async fn apply_external_defaults_enforces_admins_only_and_public_login() {
+        let db = test_pool().await;
+        create_org(&db, "o2", "acme2", "Acme2", None).await.unwrap();
+        apply_external_defaults(&db, "o2").await.unwrap();
+        let row = org_by_id(&db, "o2").await.unwrap().unwrap();
+        assert_eq!(row.member_visibility, "admins_only");
+        assert_eq!(row.public_login_enabled, 1);
+    }
+
+    #[tokio::test]
+    async fn set_public_login_enabled_toggles_flag() {
+        let db = test_pool().await;
+        create_org(&db, "o3", "acme3", "Acme3", None).await.unwrap();
+        set_public_login_enabled(&db, "o3", 1).await.unwrap();
+        assert_eq!(
+            org_by_id(&db, "o3")
+                .await
+                .unwrap()
+                .unwrap()
+                .public_login_enabled,
+            1
+        );
+        set_public_login_enabled(&db, "o3", 0).await.unwrap();
+        assert_eq!(
+            org_by_id(&db, "o3")
+                .await
+                .unwrap()
+                .unwrap()
+                .public_login_enabled,
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn internal_to_external_transition_applies_all_guardrails() {
+        let db = test_pool().await;
+        create_org(&db, "o4", "acme4", "Acme4", None).await.unwrap();
+        set_access_mode(&db, "o4", crate::orgs::AccessMode::External)
+            .await
+            .unwrap();
+        apply_external_defaults(&db, "o4").await.unwrap();
+        let row = org_by_id(&db, "o4").await.unwrap().unwrap();
+        assert_eq!(row.access_mode, "external");
+        assert_eq!(row.member_visibility, "admins_only");
+        assert_eq!(row.public_login_enabled, 1);
+    }
+
+    #[tokio::test]
+    async fn external_to_internal_leaves_member_visibility_alone() {
+        let db = test_pool().await;
+        create_org(&db, "o5", "acme5", "Acme5", None).await.unwrap();
+        set_access_mode(&db, "o5", crate::orgs::AccessMode::External)
+            .await
+            .unwrap();
+        apply_external_defaults(&db, "o5").await.unwrap();
+        set_access_mode(&db, "o5", crate::orgs::AccessMode::Internal)
+            .await
+            .unwrap();
+        set_public_login_enabled(&db, "o5", 0).await.unwrap();
+        let row = org_by_id(&db, "o5").await.unwrap().unwrap();
+        assert_eq!(row.access_mode, "internal");
+        assert_eq!(row.public_login_enabled, 0);
+        assert_eq!(
+            row.member_visibility, "admins_only",
+            "External->Internal must not loosen visibility"
+        );
+    }
 
     #[tokio::test]
     async fn public_branding_hidden_until_enabled() {
@@ -1036,12 +1305,14 @@ mod tests {
         assert_eq!(visible.preset.as_deref(), Some("classic"));
         assert_eq!(visible.primary.as_deref(), Some("#111827"));
         assert_eq!(visible.has_logo, 0);
+        assert_eq!(visible.access_mode, "internal");
 
         let by_id = public_branding_by_id(&db, "o1")
             .await
             .expect("query by_id")
             .expect("branding should be visible by id too");
         assert_eq!(by_id.name, "Acme");
+        assert_eq!(by_id.access_mode, "internal");
     }
 
     fn invite_with_expiry(expires_at: &str) -> OrgInvite {
@@ -1147,6 +1418,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn delete_org_purges_allowed_domains() {
+        let db = test_pool().await;
+        create_org(&db, "o1", "acme", "Acme", None).await.unwrap();
+        crate::orgs::domains::add_pending_domain(&db, "o1", "acme.com", "dns_txt", "tok", None)
+            .await
+            .unwrap();
+        crate::orgs::domains::mark_domain_verified(&db, "o1", "acme.com")
+            .await
+            .unwrap();
+
+        delete_org(&db, "o1").await.expect("delete_org");
+
+        // The verified row must not survive: it would otherwise hold the global
+        // partial-unique index and block any org from re-verifying acme.com.
+        create_org(&db, "o2", "acme-inc", "Acme Inc", None)
+            .await
+            .unwrap();
+        crate::orgs::domains::add_pending_domain(&db, "o2", "acme.com", "dns_txt", "tok2", None)
+            .await
+            .unwrap();
+        assert_eq!(
+            crate::orgs::domains::mark_domain_verified(&db, "o2", "acme.com")
+                .await
+                .unwrap(),
+            crate::orgs::domains::DomainVerifyOutcome::Verified
+        );
+    }
+
+    #[tokio::test]
+    async fn add_member_race_safe_inserts_member_role() {
+        let db = test_pool().await;
+        create_org(&db, "o1", "acme", "Acme", None).await.unwrap();
+        add_member_race_safe(&db, "ident-1", "o1", crate::orgs::Role::Member)
+            .await
+            .unwrap();
+        assert_eq!(
+            crate::orgs::org_role(&db, "ident-1", "o1").await,
+            Some(crate::orgs::Role::Member)
+        );
+    }
+
+    #[tokio::test]
+    async fn add_member_race_safe_swallows_duplicate_insert() {
+        let db = test_pool().await;
+        create_org(&db, "o1", "acme", "Acme", None).await.unwrap();
+        add_member_race_safe(&db, "ident-1", "o1", crate::orgs::Role::Member)
+            .await
+            .unwrap();
+        add_member_race_safe(&db, "ident-1", "o1", crate::orgs::Role::Member)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn suggest_slug_skips_reserved_words() {
         let db = test_pool().await;
         let slug = suggest_slug(&db, "Admin").await.expect("suggest_slug");
@@ -1155,5 +1480,241 @@ mod tests {
             "suggested a reserved slug: {slug}"
         );
         assert_eq!(slug, "admin-2");
+    }
+
+    // --- Default floor: single-query facts, atomic add, join+drop, leave ---
+
+    async fn in_default(db: &DbPool, ident: &str) -> bool {
+        crate::orgs::org_role(db, ident, DEFAULT_ORG_ID)
+            .await
+            .is_some()
+    }
+
+    #[tokio::test]
+    async fn floor_membership_facts_splits_default_from_tenant() {
+        let db = test_pool().await;
+        create_org(&db, "acme-id", "acme", "Acme", None)
+            .await
+            .unwrap();
+        add_member_race_safe(&db, "ident-1", DEFAULT_ORG_ID, Role::Member)
+            .await
+            .unwrap();
+        add_member_race_safe(&db, "ident-1", "acme-id", Role::Member)
+            .await
+            .unwrap();
+        let (default_present, non_default) = floor_membership_facts(&db, "ident-1").await.unwrap();
+        assert!(default_present);
+        assert_eq!(non_default, 1);
+    }
+
+    #[tokio::test]
+    async fn add_default_floor_member_txn_adds_when_member_less() {
+        let db = test_pool().await;
+        add_default_floor_member_txn(&db, "ident-1").await.unwrap();
+        assert_eq!(
+            crate::orgs::org_role(&db, "ident-1", DEFAULT_ORG_ID).await,
+            Some(Role::Member)
+        );
+    }
+
+    #[tokio::test]
+    async fn add_default_floor_member_txn_skips_when_holding_tenant() {
+        let db = test_pool().await;
+        create_org(&db, "acme-id", "acme", "Acme", None)
+            .await
+            .unwrap();
+        add_member_race_safe(&db, "ident-1", "acme-id", Role::Member)
+            .await
+            .unwrap();
+        add_default_floor_member_txn(&db, "ident-1").await.unwrap();
+        assert!(!in_default(&db, "ident-1").await);
+    }
+
+    #[tokio::test]
+    async fn join_org_race_safe_drops_default_when_flagged() {
+        let db = test_pool().await;
+        create_org(&db, "acme-id", "acme", "Acme", None)
+            .await
+            .unwrap();
+        add_member_race_safe(&db, "ident-1", DEFAULT_ORG_ID, Role::Member)
+            .await
+            .unwrap();
+        join_org_race_safe(&db, "ident-1", "acme-id", Role::Member, true)
+            .await
+            .unwrap();
+        assert!(!in_default(&db, "ident-1").await);
+        assert_eq!(
+            crate::orgs::org_role(&db, "ident-1", "acme-id").await,
+            Some(Role::Member)
+        );
+    }
+
+    #[tokio::test]
+    async fn join_org_race_safe_keeps_default_for_allowlisted() {
+        let db = test_pool().await;
+        create_org(&db, "acme-id", "acme", "Acme", None)
+            .await
+            .unwrap();
+        add_member_race_safe(&db, "ident-1", DEFAULT_ORG_ID, Role::Owner)
+            .await
+            .unwrap();
+        // Allowlisted operators call with drop_default=false and keep Default.
+        join_org_race_safe(&db, "ident-1", "acme-id", Role::Member, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            crate::orgs::org_role(&db, "ident-1", DEFAULT_ORG_ID).await,
+            Some(Role::Owner)
+        );
+        assert_eq!(
+            crate::orgs::org_role(&db, "ident-1", "acme-id").await,
+            Some(Role::Member)
+        );
+    }
+
+    #[tokio::test]
+    async fn org_creation_owner_not_left_in_default() {
+        let db = test_pool().await;
+        add_member_race_safe(&db, "ident-1", DEFAULT_ORG_ID, Role::Member)
+            .await
+            .unwrap();
+        create_org(&db, "acme-id", "acme", "Acme", None)
+            .await
+            .unwrap();
+        join_org_race_safe(&db, "ident-1", "acme-id", Role::Owner, true)
+            .await
+            .unwrap();
+        assert!(!in_default(&db, "ident-1").await);
+        assert_eq!(
+            crate::orgs::org_role(&db, "ident-1", "acme-id").await,
+            Some(Role::Owner)
+        );
+    }
+
+    #[tokio::test]
+    async fn leave_last_non_default_readds_default() {
+        let db = test_pool().await;
+        create_org(&db, "acme-id", "acme", "Acme", None)
+            .await
+            .unwrap();
+        // Joined a tenant org, Default already dropped.
+        join_org_race_safe(&db, "ident-1", "acme-id", Role::Member, true)
+            .await
+            .unwrap();
+        assert!(!in_default(&db, "ident-1").await);
+        remove_member(&db, "acme-id", "ident-1").await.unwrap();
+        add_default_floor_member_txn(&db, "ident-1").await.unwrap();
+        assert_eq!(
+            crate::orgs::org_role(&db, "ident-1", DEFAULT_ORG_ID).await,
+            Some(Role::Member)
+        );
+    }
+
+    #[tokio::test]
+    async fn leave_one_of_two_non_default_does_not_readd_default() {
+        let db = test_pool().await;
+        create_org(&db, "a-id", "a", "A", None).await.unwrap();
+        create_org(&db, "b-id", "b", "B", None).await.unwrap();
+        join_org_race_safe(&db, "ident-1", "a-id", Role::Member, true)
+            .await
+            .unwrap();
+        join_org_race_safe(&db, "ident-1", "b-id", Role::Member, true)
+            .await
+            .unwrap();
+        remove_member(&db, "a-id", "ident-1").await.unwrap();
+        add_default_floor_member_txn(&db, "ident-1").await.unwrap();
+        assert!(!in_default(&db, "ident-1").await);
+    }
+
+    #[tokio::test]
+    async fn remove_member_everywhere_leaves_no_default_row() {
+        let db = test_pool().await;
+        create_org(&db, "acme-id", "acme", "Acme", None)
+            .await
+            .unwrap();
+        add_member_race_safe(&db, "ident-1", DEFAULT_ORG_ID, Role::Member)
+            .await
+            .unwrap();
+        add_member_race_safe(&db, "ident-1", "acme-id", Role::Member)
+            .await
+            .unwrap();
+        remove_member_everywhere(&db, "ident-1").await.unwrap();
+        assert!(!in_default(&db, "ident-1").await);
+        assert_eq!(crate::orgs::org_role(&db, "ident-1", "acme-id").await, None);
+    }
+
+    #[tokio::test]
+    async fn floor_add_and_join_never_leave_both_rows() {
+        // SQLite serializes writers, so a genuine interleave can't occur; assert
+        // both sequential orderings converge to "tenant only, no Default".
+        let db = test_pool().await;
+        create_org(&db, "acme-id", "acme", "Acme", None)
+            .await
+            .unwrap();
+        // Order 1: floor-add then join.
+        add_default_floor_member_txn(&db, "ident-1").await.unwrap();
+        join_org_race_safe(&db, "ident-1", "acme-id", Role::Member, true)
+            .await
+            .unwrap();
+        assert!(!in_default(&db, "ident-1").await);
+
+        // Order 2: join then floor-add (floor sees a non-default org, no-ops).
+        join_org_race_safe(&db, "ident-2", "acme-id", Role::Member, true)
+            .await
+            .unwrap();
+        add_default_floor_member_txn(&db, "ident-2").await.unwrap();
+        assert!(!in_default(&db, "ident-2").await);
+    }
+
+    #[tokio::test]
+    async fn finalize_invite_txn_drops_default_for_non_allowlisted() {
+        let db = test_pool().await;
+        create_org(&db, "acme-id", "acme", "Acme", None)
+            .await
+            .unwrap();
+        add_member_race_safe(&db, "ident-1", DEFAULT_ORG_ID, Role::Member)
+            .await
+            .unwrap();
+        insert_invite(&db, "tok", "acme-id", "u@acme.com", Role::Member, None, 7)
+            .await
+            .unwrap();
+        let outcome = finalize_invite_txn(&db, "tok", "acme-id", "ident-1", Role::Member, true)
+            .await
+            .unwrap();
+        assert_eq!(outcome, InviteFinalizeOutcome::Accepted);
+        assert!(!in_default(&db, "ident-1").await);
+        assert_eq!(
+            crate::orgs::org_role(&db, "ident-1", "acme-id").await,
+            Some(Role::Member)
+        );
+    }
+
+    #[tokio::test]
+    async fn finalize_invite_txn_keeps_default_for_allowlisted() {
+        let db = test_pool().await;
+        create_org(&db, "acme-id", "acme", "Acme", None)
+            .await
+            .unwrap();
+        add_member_race_safe(&db, "ident-1", DEFAULT_ORG_ID, Role::Owner)
+            .await
+            .unwrap();
+        insert_invite(
+            &db,
+            "tok",
+            "acme-id",
+            "boss@acme.com",
+            Role::Member,
+            None,
+            7,
+        )
+        .await
+        .unwrap();
+        finalize_invite_txn(&db, "tok", "acme-id", "ident-1", Role::Member, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            crate::orgs::org_role(&db, "ident-1", DEFAULT_ORG_ID).await,
+            Some(Role::Owner)
+        );
     }
 }

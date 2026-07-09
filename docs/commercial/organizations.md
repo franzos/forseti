@@ -32,9 +32,19 @@ Every membership is one of two roles:
 
 ## Membership
 
-Users never have to "join" the Default org by hand — the first time someone signs in, Forseti adds them to it automatically. The first user on a fresh install (and anyone whose email is on the operator's admin allowlist) becomes an **owner** of Default; everyone else joins as a **member**.
+Placement is never silent. There are three explicit ways into an org, plus one automatic "home" org for people who belong to none:
 
-Membership in any *other* org happens by invitation only. A user can belong to several orgs at once and switch between them from the org dropdown in the nav.
+- **Invite** — into any org; the invitee must have a **verified** email (see [Invites](#invites)).
+- **Domain auto-join** — an internal org that has proven it owns an email domain and opted into auto-join will offer anyone with a **verified** address at that domain a one-click prompt to join. No invite needed, but it is a prompt, not a silent join.
+- **Public self-serve** — an external org's public page (`/o/<slug>`) lets anyone register and join it directly (see [Access modes](#access-modes)).
+
+The **Default org is the home floor**: a user who belongs to no other org is automatically a member of it, and is moved out of it once they join a real org (and back in if they later leave their last one). Anyone whose email is on the operator's admin allowlist is always an **owner** of Default; everyone else is a **member**. If the allowlist is empty, Default has no owner (the same state in which the operator admin panel is inaccessible).
+
+A user can belong to several orgs at once and switch between them from the org dropdown in the nav.
+
+### When is a verified email required?
+
+Only where membership is **derived from the email itself**. Domain auto-join trusts your email's domain, so it requires that specific address to be verified. Invite acceptance also requires verification (a deliberate belt-and-braces control, since an invite link is a secret that could leak). Public self-serve and the Default home floor do **not** require verification — you registered for that specific org explicitly, or it is just your catch-all home, so the email is not the credential. Operators who want stricter public onboarding can force email verification at the identity layer.
 
 ## Invites
 
@@ -67,6 +77,17 @@ Each org can carry its own **logo** and **support email**. When set, these overr
 
 The logo must be an **HTTPS URL** (private, loopback, and cloud-metadata addresses are rejected). The support email must be a single well-formed address.
 
+## Access modes
+
+Every non-Default org is **internal** by default: invite-only, no public presence. An owner can switch a named org to **external** (a licensed, Orgs-feature capability — the Default org can never be external), which unlocks self-serve public signup:
+
+- A public landing page at `/o/<slug>`, themed with the org's branding.
+- A `/join/confirm` flow: a visitor registers (or signs in) and explicitly confirms joining as a **member** — no invite needed.
+
+Switching to external automatically applies two defaults: the member directory is set to **administrators-only** and public login is turned on. The administrators-only directory is **hard-enforced** for external orgs — an owner cannot loosen it to a more open visibility policy while the org stays external, and an attempt to do so is rejected and recorded in the audit log. Switching back to internal lifts the restriction.
+
+Both the public landing page and the registration flow are per-IP and globally rate-limited (see the [operator guide](../operator-guide.md#external-access-mode-public-self-serve) for the specifics and their limitations).
+
 ## Org-scoped admin
 
 An org owner gets a scoped slice of the admin surface for **their own org** without being a Forseti-wide operator. That lets a tenant owner manage their org's OAuth clients, identities, sessions, and audit trail — filtered to that org, never anyone else's — while the global operator surface stays gated behind the operator's admin allowlist.
@@ -81,6 +102,8 @@ Two OIDC scopes surface org membership to your apps:
 - **`orgs`** — an array of every org the user belongs to, each with id, slug, role, and name. Request this when an app needs a tenant picker.
 
 Both also appear at the `userinfo` endpoint. Apps that don't request either scope get nothing extra, so plain `openid email` logins are unaffected. The full app-facing reference — including how to pin the active org at login and example tokens — is in the [integration guide's scope reference](../integration-guide.md#scope-reference).
+
+**A membership claim is not identity proof.** A user can be in the Default home org or in an open external org without a verified email, so relying apps must never treat an `org` claim (least of all `org.id = "default"`) as evidence of who the user is, and must never authorize on `email` without checking `email_verified`. See the [integration guide](../integration-guide.md#membership-and-verification-are-not-the-same).
 
 ## Enterprise SSO
 

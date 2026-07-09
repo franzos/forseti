@@ -1304,7 +1304,7 @@ mod tests {
     async fn hosts_reachable_by_intersects_org_and_team_scopes() {
         let db = temp_pool().await;
         provision(&db, "alice", "alice").await;
-        orgs::add_member(&db, "orgA", "alice", Role::Member, None)
+        orgs::db::add_member_race_safe(&db, "alice", "orgA", Role::Member)
             .await
             .unwrap();
 
@@ -1354,7 +1354,7 @@ mod tests {
         assert_eq!(reach, vec!["t1.example", "whole.example"]);
 
         // no posix account → empty.
-        orgs::add_member(&db, "orgA", "bob", Role::Member, None)
+        orgs::db::add_member_race_safe(&db, "bob", "orgA", Role::Member)
             .await
             .unwrap();
         assert!(hosts_reachable_by(&db, "bob").await.unwrap().is_empty());

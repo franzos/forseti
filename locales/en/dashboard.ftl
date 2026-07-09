@@ -36,3 +36,5 @@ dashboard-activity-heading = Recent Activity
 dashboard-activity-empty-title = No recent activity
 dashboard-activity-empty-body = Sign-in events will show up here.
 dashboard-activity-signin-title = Successful sign-in
+dashboard-domain-join-prompt = You have a verified { $domain } address. Join { $org }?
+dashboard-domain-join-cta = Join { $org }

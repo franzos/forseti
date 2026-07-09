@@ -1,0 +1,182 @@
+{% extends "base.html" %}
+
+{% block title %}{{ chrome.t("orgs-domains-page-heading") }} &middot; {{ org.name }} &middot; {{ chrome.brand.name }}{% endblock %}
+
+{% block nav_settings_class %}text-primary font-bold border-b-2 border-primary{% endblock %}
+
+{% block org_nav %}
+  {% include "partials/org_switcher.html" %}
+{% endblock %}
+
+{% block content %}
+  <div class="flex flex-col md:flex-row gap-stack-lg">
+    {% let active = "organization" %}
+    {% include "partials/settings_nav.html" %}
+
+    <section class="flex-1 flex flex-col gap-stack-lg">
+      <header class="mt-2 mb-stack-lg">
+        <h1 class="font-headline-lg-mobile md:font-headline-lg text-headline-lg-mobile md:text-headline-lg text-on-surface">
+          {{ chrome.t("orgs-domains-page-heading") }} &middot; <bdi>{{ org.name }}</bdi>
+        </h1>
+        <p class="font-body-md text-body-md text-on-surface-variant mt-1">{{ chrome.t("orgs-domains-subtitle") }}</p>
+      </header>
+
+      <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg">
+        <h2 class="font-headline-md text-headline-md text-on-surface mb-stack-md">{{ chrome.t("orgs-domains-add-heading") }}</h2>
+        <form method="POST"
+              action="{% if is_default %}/settings/organization/domains{% else %}/settings/organizations/{{ org.slug }}/domains{% endif %}"
+              class="flex flex-col md:flex-row gap-stack-md items-end">
+          <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+          <label class="flex flex-col gap-1 flex-1">
+            <span class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("orgs-domains-field-domain") }}</span>
+            <input type="text"
+                   name="domain"
+                   placeholder="example.com"
+                   required
+                   class="border border-outline-variant rounded-lg px-3 py-2 bg-surface-container-low">
+          </label>
+          <fieldset class="flex flex-col gap-1">
+            <legend class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("orgs-domains-field-method") }}</legend>
+            <div class="flex flex-col md:flex-row gap-stack-sm">
+              {% if http_file_enabled %}
+                <label class="inline-flex items-center gap-2">
+                  <input type="radio" name="method" value="http_file" checked>
+                  <span class="font-body-md text-body-md">{{ chrome.t("orgs-domains-method-http_file") }}</span>
+                </label>
+              {% endif %}
+              {% if dns_txt_enabled %}
+                <label class="inline-flex items-center gap-2">
+                  <input type="radio" name="method" value="dns_txt" {% if !http_file_enabled %}checked{% endif %}>
+                  <span class="font-body-md text-body-md">{{ chrome.t("orgs-domains-method-dns_txt") }}</span>
+                </label>
+              {% endif %}
+              {% if email_enabled %}
+                <label class="inline-flex items-center gap-2">
+                  <input type="radio" name="method" value="email" {% if !http_file_enabled && !dns_txt_enabled %}checked{% endif %}>
+                  <span class="font-body-md text-body-md">{{ chrome.t("orgs-domains-method-email") }}</span>
+                </label>
+              {% endif %}
+            </div>
+          </fieldset>
+          <button type="submit"
+                  class="bg-primary text-on-primary rounded-lg px-4 py-2 font-label-md text-label-md">
+            {{ chrome.t("orgs-domains-action-add") }}
+          </button>
+        </form>
+      </div>
+
+      <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg">
+        <h2 class="font-headline-md text-headline-md text-on-surface mb-stack-md">{{ chrome.t("orgs-domains-policy-heading") }}</h2>
+        <p class="font-body-md text-body-md text-on-surface-variant mb-stack-md">{{ chrome.t("orgs-domains-policy-subtitle") }}</p>
+        <form method="POST"
+              action="{% if is_default %}/settings/organization/domains/policy{% else %}/settings/organizations/{{ org.slug }}/domains/policy{% endif %}"
+              class="flex flex-col md:flex-row gap-stack-md items-end">
+          <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+          <label class="flex flex-col gap-1 flex-1">
+            <span class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("orgs-domains-policy-field") }}</span>
+            <select name="policy"
+                    class="border border-outline-variant rounded-lg px-3 py-2 bg-surface-container-low">
+              <option value="invite_only" {% if !auto_join %}selected{% endif %}>{{ chrome.t("orgs-domains-policy-invite-only") }}</option>
+              <option value="auto_join" {% if auto_join %}selected{% endif %}>{{ chrome.t("orgs-domains-policy-auto-join") }}</option>
+            </select>
+          </label>
+          <button type="submit"
+                  class="bg-primary text-on-primary rounded-lg px-4 py-2 font-label-md text-label-md">
+            {{ chrome.t("orgs-domains-policy-save") }}
+          </button>
+        </form>
+      </div>
+
+      <div class="bg-surface-container-lowest border border-outline-variant rounded-xl overflow-hidden">
+        <table class="w-full">
+          <thead class="bg-surface-container-low text-start">
+            <tr>
+              <th class="px-stack-md py-stack-sm font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("orgs-domains-col-domain") }}</th>
+              <th class="px-stack-md py-stack-sm font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("orgs-domains-col-method") }}</th>
+              <th class="px-stack-md py-stack-sm font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("orgs-domains-col-status") }}</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for d in domains %}
+              <tr class="border-t border-outline-variant">
+                <td class="px-stack-md py-stack-sm font-body-md text-body-md font-mono">{{ d.domain }}</td>
+                <td class="px-stack-md py-stack-sm font-body-md text-body-md">
+                  {% if d.method == "http_file" %}
+                    {{ chrome.t("orgs-domains-method-http_file") }}
+                  {% else if d.method == "dns_txt" %}
+                    {{ chrome.t("orgs-domains-method-dns_txt") }}
+                  {% else %}
+                    {{ chrome.t("orgs-domains-method-email") }}
+                  {% endif %}
+                </td>
+                <td class="px-stack-md py-stack-sm font-body-md text-body-md">
+                  {% if d.verified %}
+                    <span class="text-primary">{{ chrome.t("orgs-domains-status-verified") }}</span>
+                  {% else %}
+                    <span class="text-on-surface-variant">{{ chrome.t("orgs-domains-status-pending") }}</span>
+                  {% endif %}
+                </td>
+                <td class="px-stack-md py-stack-sm text-end">
+                  <div class="inline-flex items-center gap-3">
+                    <form method="POST"
+                          action="{% if is_default %}/settings/organization/domains/{{ d.domain }}/remove{% else %}/settings/organizations/{{ org.slug }}/domains/{{ d.domain }}/remove{% endif %}"
+                          onsubmit="return confirm('{{ chrome.tv1("orgs-confirm-remove-domain", "domain", &d.domain) }}');"
+                          class="inline">
+                      <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+                      <button type="submit" class="text-error font-label-sm">{{ chrome.t("orgs-domains-action-remove") }}</button>
+                    </form>
+                  </div>
+                </td>
+              </tr>
+              {% if !d.verified %}
+                <tr class="border-t border-outline-variant bg-surface-container-low">
+                  <td colspan="4" class="px-stack-md py-stack-sm font-body-md text-body-md">
+                    {% if d.method == "http_file" %}
+                      <p class="font-mono text-label-sm">{{ chrome.tv2("orgs-domains-instructions-http_file", "domain", &d.domain, "token", &d.token) }}</p>
+                      <form method="POST"
+                            action="{% if is_default %}/settings/organization/domains/{{ d.domain }}/verify{% else %}/settings/organizations/{{ org.slug }}/domains/{{ d.domain }}/verify{% endif %}"
+                            class="mt-stack-sm">
+                        <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+                        <button type="submit" class="border border-outline-variant rounded-lg px-4 py-2 font-label-md text-label-md">
+                          {{ chrome.t("orgs-domains-action-verify") }}
+                        </button>
+                      </form>
+                    {% else if d.method == "dns_txt" %}
+                      <p class="font-mono text-label-sm">{{ chrome.tv2("orgs-domains-instructions-dns_txt", "domain", &d.domain, "token", &d.token) }}</p>
+                      <form method="POST"
+                            action="{% if is_default %}/settings/organization/domains/{{ d.domain }}/verify{% else %}/settings/organizations/{{ org.slug }}/domains/{{ d.domain }}/verify{% endif %}"
+                            class="mt-stack-sm">
+                        <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+                        <button type="submit" class="border border-outline-variant rounded-lg px-4 py-2 font-label-md text-label-md">
+                          {{ chrome.t("orgs-domains-action-verify") }}
+                        </button>
+                      </form>
+                    {% else if d.method == "email" %}
+                      <p class="text-body-md">{{ chrome.tv1("orgs-domains-instructions-email", "domain", &d.domain) }}</p>
+                      <form method="POST"
+                            action="{% if is_default %}/settings/organization/domains/{{ d.domain }}/confirm-email{% else %}/settings/organizations/{{ org.slug }}/domains/{{ d.domain }}/confirm-email{% endif %}"
+                            class="flex gap-stack-sm items-end mt-stack-sm">
+                        <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+                        <label class="flex flex-col gap-1">
+                          <span class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("orgs-domains-field-token") }}</span>
+                          <input type="text"
+                                 name="token"
+                                 required
+                                 class="border border-outline-variant rounded-lg px-3 py-2 bg-surface-container-low font-mono">
+                        </label>
+                        <button type="submit" class="border border-outline-variant rounded-lg px-4 py-2 font-label-md text-label-md">
+                          {{ chrome.t("orgs-domains-action-confirm") }}
+                        </button>
+                      </form>
+                    {% endif %}
+                  </td>
+                </tr>
+              {% endif %}
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+{% endblock %}

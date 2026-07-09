@@ -43,7 +43,11 @@ serde_yaml_ng = "0.10"
 # across unrelated requests. Tests carry their own `cookies`-enabled
 # reqwest under `[dev-dependencies]` because they drive flows like a
 # browser would.
-reqwest = { version = "0.13", default-features = false, features = ["json", "form", "rustls"] }
+# `stream` powers the size-capped body read in the domain HTTP-file
+# verifier (`orgs::domains::verify_http_file`) — a bounded
+# `bytes_stream()` walk instead of an unbounded `.bytes()` buffer,
+# since the target is owner-submitted and attacker-influenceable.
+reqwest = { version = "0.13", default-features = false, features = ["json", "form", "rustls", "stream"] }
 # `ory_client` 1.22 pins reqwest 0.12 internally. To set a timeout on the
 # SDK's HTTP client we need a 0.12 client instance; rename the older
 # version under a distinct ident so the rest of the codebase keeps using
@@ -118,6 +122,11 @@ fluent-templates = "0.14"
 unic-langid = { version = "0.9", features = ["macros"] }
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.16", default-features = false }
+# DNS TXT ownership-proof method for internal-org email-domain auto-join
+# (`orgs::domains::verify_dns_txt`). Default features are already exactly
+# what's needed: async resolution over Tokio + reading the platform
+# resolver config — no TLS backend (dns-over-rustls/https/quic) pulled in.
+hickory-resolver = "0.26"
 [profile.release]
 strip = true
 lto = "thin"

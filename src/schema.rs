@@ -87,6 +87,8 @@ diesel::table! {
         brand_secondary -> Nullable<Text>,
         public_login_enabled -> Integer,
         has_logo -> Integer,
+        access_mode -> Text,
+        domain_join_policy -> Text,
     }
 }
 
@@ -312,10 +314,24 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    org_allowed_domains (org_id, domain) {
+        org_id -> Text,
+        domain -> Text,
+        method -> Text,
+        verification_token -> Text,
+        verified_at -> Nullable<Text>,
+        added_by -> Nullable<Text>,
+        added_at -> Text,
+    }
+}
+
 diesel::joinable!(organization_members -> organizations (org_id));
 diesel::joinable!(saml_connections -> organizations (org_id));
+diesel::joinable!(org_allowed_domains -> organizations (org_id));
 diesel::allow_tables_to_appear_in_same_query!(organizations, organization_members);
 diesel::allow_tables_to_appear_in_same_query!(organizations, saml_connections);
+diesel::allow_tables_to_appear_in_same_query!(organizations, org_allowed_domains);
 diesel::allow_tables_to_appear_in_same_query!(posix_group_members, posix_accounts);
 diesel::allow_tables_to_appear_in_same_query!(
     posix_accounts,

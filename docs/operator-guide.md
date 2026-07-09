@@ -223,6 +223,19 @@ Whether the per-IP limiter trusts forwarded-for headers is a single deployment-w
 
 Every rate-limit knob across `[oauth]`, `[claim_email]`, and `[handoff]` is clamped at config-load time to a sanity ceiling — `1_000` per minute, `10_000` per hour, `100_000` per day. A clamped value emits a `tracing::warn!` at boot so an operator typo (`per_minute = 1_000_000`) is loud rather than silent. `0` is preserved as the documented "disable this bucket" sentinel.
 
+### `[auth]` configuration
+
+Per-IP + global rate limiting on `GET /registration`. These knobs apply to **every** Kratos-flow registration, not just external-org self-serve joins — `/registration` carries no per-org dimension in the URL (the target org lives inside the opaque Kratos flow), so there's no cheap way to key a bucket per org.
+
+| Key                                    | Type | Default | Description                                                                                                    |
+|-----------------------------------------|------|---------|------------------------------------------------------------------------------------------------------------------|
+| `registration_ip_rate_per_minute`      | u32  | `10`    | Per-IP rate limit on `GET /registration`, requests per minute. `0` disables the bucket.                        |
+| `registration_ip_rate_per_hour`        | u32  | `60`    | Per-IP rate limit on `GET /registration`, requests per hour, in parallel with the per-minute bucket. `0` disables. |
+| `registration_global_rate_per_minute`  | u32  | `120`   | Global (all-callers-share-one-bucket) rate limit, requests per minute. Bounds total traffic even when a spoofed `X-Forwarded-For` defeats the per-IP bucket. `0` disables. |
+| `registration_global_rate_per_hour`    | u32  | `1200`  | Global rate limit, requests per hour, in parallel with the per-minute global bucket. `0` disables.             |
+
+These are clamped at load time under the same ceilings as `[oauth]`/`[orgs]`/`[claim_email]`/`[handoff]`. See [External access mode](#external-access-mode-public-self-serve) for what this limiter does and does not cover.
+
 ### `[proxy]` — reverse-proxy trust
 
 | Key                    | Type | Default | Description                                                                                                                                                                                                                              |
@@ -413,11 +426,11 @@ Two in-process counters surface the receiver's out-of-band failure signal. Both 
 - **Audit webhook rejected.** A payload was dropped before any row was written — either a malformed body or an unknown `?action=`. A non-zero count almost always means a Kratos hook or config mismatch (e.g. an `action` not in the receiver's vocabulary, or a template that emits a body the receiver can't parse). Check the `kratos audit webhook` `warn!` log lines for the specifics.
 - **Audit webhook freshness anomalies.** A row was written but its `issued_at` fell outside the 1h freshness window — stamped `stale` or `future` in `metadata.freshness`. Usually a slow flow finished after the window or the Kratos / Forseti clocks have drifted. The row is still recorded; the counter is a heads-up to check for clock skew (or, rarely, replay).
 
-#### Default-org auto-join
+#### Default-org floor
 
-Default-org membership used to be driven by a second `web_hook` on the registration flow. That endpoint is gone — Forseti now performs the check **lazily, inside `RequireSession`**, on the user's first authenticated request. No webhook wiring is required for org membership; only audit needs the webhook.
+Default-org membership used to be driven by a second `web_hook` on the registration flow. That endpoint is gone — Forseti now applies the Default floor **lazily, in the `auto_join_default_org` middleware**, on the user's first authenticated request. No webhook wiring is required for org membership; only audit needs the webhook.
 
-The lazy probe is one indexed lookup (`SELECT 1 FROM organization_members WHERE identity_id = ? LIMIT 1`) cached per request. When it misses, Forseti runs the same race-safe `auto_join_default_txn` (txn-wrapped, role decided inside the txn) that the old webhook called.
+The Default org is a floor, not a permanent auto-join: a user is a member of it only while they hold no other org (allowlisted operators are always in it, as owner). The lazy check is one capped lookup that returns whether the identity is already in Default and how many non-default orgs it holds; when the floor is missing it runs a serialized transaction that inserts the Default row (owner for an allowlisted email, member for a non-default-less non-allowlisted one). Joining any other org drops the floor; leaving one's last other org restores it. See [organizations internals](./dev/organizations-internals.md#membership-the-default-floor-and-the-three-join-doors).
 
 The `audit_metadata` column is operator-readable but goes through a `SafeMetadata` newtype that refuses sensitive-looking keys (`password`, `secret`, `token`, `cookie`, `authorization`, `otp`, `recovery`). Debug builds panic on offending keys; release builds drop them and `warn!` so a stray credential never reaches disk silently.
 
@@ -1730,6 +1743,45 @@ When an org sets `logo_url` / `support_email` on its settings page, those values
 | `reserved_names`                  | string[] | (code-baked set) | Org-name denylist (create + rename), case-insensitive/confusable-folded substring match. When absent, falls back to the same built-in operator-brand denylist as `oauth.dcr_reserved_names`. |
 | `logo_ip_rate_per_minute`         | u32      | `60`      | Per-IP rate limit on `GET /branding/{slug}/logo`, requests per minute. `0` disables the bucket. |
 | `logo_ip_rate_per_hour`           | u32      | `600`     | Per-IP rate limit on `GET /branding/{slug}/logo`, requests per hour, in parallel with the per-minute bucket. `0` disables the bucket. |
+| `landing_ip_rate_per_minute`      | u32      | `60`      | Per-IP rate limit on `GET /o/{slug}` (the public landing page), requests per minute. `0` disables the bucket. |
+| `landing_ip_rate_per_hour`        | u32      | `600`     | Per-IP rate limit on `GET /o/{slug}`, requests per hour, in parallel with the per-minute bucket. `0` disables the bucket. |
+| `landing_global_rate_per_minute`  | u32      | `300`     | Global (all-callers-share-one-bucket) rate limit on `GET /o/{slug}`, requests per minute, shared across every slug. `0` disables the bucket. |
+| `landing_global_rate_per_hour`    | u32      | `3000`    | Global rate limit on `GET /o/{slug}`, requests per hour, in parallel with the per-minute global bucket. `0` disables the bucket. |
+| `domain_verify_http_file_enabled` | bool     | `true`    | Offer the HTTP well-known-file domain-ownership method on the domains page. `false` disables it deployment-wide. |
+| `domain_verify_dns_txt_enabled`   | bool     | `true`    | Offer the DNS TXT domain-ownership method. |
+| `domain_verify_email_enabled`     | bool     | `true`    | Offer the email (`admin@`/`postmaster@`) domain-ownership method. |
+| `domain_verify_http_timeout_seconds` | u64  | `10`      | Total timeout for the HTTP well-known-file fetch. |
+| `domain_max_per_org`              | u32      | `100`     | Ceiling on registered domains (pending + verified) per org; bounds row growth and challenge-email fan-out. |
+
+### External access mode (public self-serve)
+
+A licensed, non-Default org can switch from **internal** (invite-only, the default) to **external**, which stands up a public landing page at `/o/<slug>` and a self-serve `/join/confirm` flow. Only an org owner with an active Orgs license can flip the switch (`require_external_mode_writable`); the Default org can never be external.
+
+**Admins-only directory, hard-enforced.** Switching to external automatically sets the member-directory visibility to administrators-only and turns public login on. Unlike other visibility settings, administrators-only is **not** just a default for external orgs — it's enforced: an owner cannot loosen it to a more open policy while the org stays external. The attempt is rejected with a `400` and recorded in the audit log (`org.visibility_changed`, `warning` severity, marked failed) so a misconfigured or coerced owner leaves a trail. Switching the org back to internal lifts the restriction.
+
+**No verification gate on join, by design.** `/join/confirm` joins the visitor as a **member** immediately on explicit CSRF-confirmed consent — there's no "verify your email first" step. This is deliberate: verification only gates placement that is *derived from the email* (domain auto-join, below). Public self-serve derives membership from an explicit action for a specific org, not from the email, so the email isn't the credential and a verification gate would add nothing. If your threat model needs verified-first public onboarding, force it at the identity layer by adding a Kratos `show_verification_ui` hook to the registration flow, and keep the [unverified-account reaper](#unverified-account-reaper) running as the backstop against unverified squatters.
+
+**`trust_forwarded_for` prerequisite.** The rate limits on `/o/{slug}` and `/registration` are per-IP; they're only meaningful when `[proxy].trust_forwarded_for` is `true` **and** your reverse proxy actually strips inbound `X-Forwarded-For` before re-adding its own (see the [proxy guide](./operator-guide-proxy.md)). Behind a proxy that doesn't strip it, a caller can forge the header and dodge the per-IP bucket entirely — the global bucket (`[auth]`/`[orgs]` `*_global_rate_*`) is the backstop either way.
+
+**Rate-limit posture and its limit.** `GET /o/{slug}` and `GET /registration` both carry paired per-IP + global buckets (see [`[orgs]` configuration](#orgs-configuration) and [`[auth]` configuration](#auth-configuration) above). The known gap: the actual registration **POST** goes straight from the browser to Kratos's own public endpoint — Forseti never sees it — so Forseti's `/registration` limit only bounds page *renders*, not submissions. Rate-limit Kratos's own public API at the reverse-proxy layer if you need to bound the POST itself.
+
+**CAPTCHA: not implemented, by design.** Forseti doesn't own the registration POST (see above), so a server-enforced CAPTCHA would need a blocking Kratos `before` hook plus a new Forseti verify webhook plus a client-side widget plus org-conditional logic — a multi-system integration disproportionate to what this phase covers. A client-side-only widget with no server-side check would be a placebo, so none was built. If you need bot-resistant signup today, put a CAPTCHA-capable WAF or reverse-proxy rule in front of Kratos's public registration endpoint.
+
+### Internal domain auto-join
+
+The complement to external mode, for **internal** orgs: an owner registers email domains the org controls, and a user whose **verified** email matches an ownership-proven domain is offered a one-click prompt to join that org (as a `member`) — the workforce equivalent of "anyone with an `@acme.com` address can join the Acme org". Managed at `/settings/organization(s)/{slug}/domains`; owner-only, licensed, non-Default, and internal-only (external orgs use the self-serve path above instead).
+
+**Opt-in and prompt-based, never silent.** Domain auto-join only happens when the owner sets the org's join policy to **auto-join** (the default is invite-only); an internal org with proven domains but the invite-only policy stays invite-only. Even with auto-join on, the user is *prompted* on their dashboard ("You have a verified `<domain>` address, join `<Org>`?") and joins only on explicit confirmation. The proven domain replaces the admin invite as the authorization, but the join is still an explicit act.
+
+**Ownership must be proven** — a domain is not honoured until the org demonstrates control via one of three methods, each individually disableable in `[orgs]` config:
+
+- **HTTP well-known file** (`domain_verify_http_file_enabled`) — Forseti fetches `https://<domain>/.well-known/forseti-domain-verify` and checks it contains the minted token. The fetch runs through the same SSRF guard as outbound webhooks (HTTPS-only, internal/loopback/link-local/IMDS addresses rejected, DNS-rebinding re-checked at connect, no redirects, size-capped, `domain_verify_http_timeout_seconds` timeout), so an owner cannot point a "domain" at an internal host.
+- **DNS TXT** (`domain_verify_dns_txt_enabled`) — a TXT record at `_forseti-verify.<domain>` must contain the token.
+- **Email** (`domain_verify_email_enabled`) — the token is mailed to `admin@<domain>` and `postmaster@<domain>`; the owner pastes it back. The confirmation is a constant-time compare, and the mail names the requesting org and actor so abuse of a paid account is attributable.
+
+**Guardrails.** A domain can be verified under **at most one org** globally (a partial unique index, not just app logic), so no org can claim a domain another already owns or absorb its users. Freemail/public domains (gmail, outlook, proton, …) are rejected at add time. Eligibility is gated on the user's **specific** verified address (never the raw trait email), re-checked at the moment they confirm the prompt — so an unverified `ceo@victimcorp.com` registration is never offered or joined, and the prompt appears only once the user has clicked their verification link. `domain_max_per_org` caps how many domains an org can register.
+
+**Prerequisite.** Because the join requires a genuinely verified address, this feature only works if Kratos email verification is enabled and identities are not created pre-verified (the playground default). Removing a domain stops future auto-join but does not remove members who already joined under it.
 
 ### `[identity]` configuration
 

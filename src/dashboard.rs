@@ -26,6 +26,9 @@ struct DashboardTemplate {
     /// Empty when the admin API call fails.
     activity: Vec<ActivityEvent>,
     health: AccountHealth,
+    /// `Some` when a verified-domain address resolves to a proven `auto_join`
+    /// org the caller isn't a member of: renders the explicit join prompt.
+    domain_prompt: Option<crate::orgs::domain_prompt::ProvenJoin>,
 }
 
 struct ActivityEvent {
@@ -57,10 +60,13 @@ pub(crate) async fn root(
 ) -> Response {
     let cookie = cookies::cookie_header(&headers);
     let session = sess.session;
+    let identity_id = sess.identity_id;
+    let email = sess.email;
 
-    let (activity, health) = tokio::join!(
+    let (activity, health, domain_prompt) = tokio::join!(
         build_activity_feed(&state, &session, &locale),
-        build_account_health(&state, &session, &cookie)
+        build_account_health(&state, &session, &cookie),
+        crate::orgs::domain_prompt::resolve_prompt(&state.db, &session, &identity_id, &email),
     );
 
     render(&DashboardTemplate {
@@ -69,6 +75,7 @@ pub(crate) async fn root(
         apps: state.cfg.apps.clone(),
         activity,
         health,
+        domain_prompt,
     })
 }
 

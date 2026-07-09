@@ -176,6 +176,10 @@ pub(crate) async fn oauth_consent(
                 }
             }
         }
+        let requested_org_id = crate::oauth::login::parse_organization_id_param(
+            req.request_url.as_deref().unwrap_or_default(),
+        )
+        .filter(|s| !s.is_empty());
         return finalize_consent(
             &state,
             &challenge,
@@ -184,6 +188,7 @@ pub(crate) async fn oauth_consent(
             requested_audience,
             false,
             &headers,
+            requested_org_id.as_deref(),
             locale,
         )
         .await
@@ -411,6 +416,8 @@ pub(crate) async fn oauth_consent_submit(
         crate::page_chrome::resolve_locale_for_flow(&p, &session, ui_locales.as_deref())
     };
 
+    let requested_org_id =
+        crate::oauth::login::parse_organization_id_param(&request_url).filter(|s| !s.is_empty());
     let outcome = finalize_consent(
         &state,
         &form.consent_challenge,
@@ -419,6 +426,7 @@ pub(crate) async fn oauth_consent_submit(
         requested_audience,
         remember,
         &headers,
+        requested_org_id.as_deref(),
         consent_locale,
     )
     .await;
@@ -631,8 +639,28 @@ impl FinalizeOutcome {
     }
 }
 
+/// Resolve the active-org membership for the id_token claims. A pinned
+/// `requested_org_id` (from the auth request's `organization_id`) wins: the
+/// matching membership if the subject has one, else `None` (suppress the
+/// `org`/`groups` claims rather than assert a different tenant). Without a
+/// pin, `cookie_choice` (active-org cookie ∩ memberships, else first) is used.
+fn resolve_claim_active_org(
+    requested_org_id: Option<&str>,
+    memberships: &[crate::orgs::Membership],
+    cookie_choice: Option<&crate::orgs::Membership>,
+) -> Option<crate::orgs::Membership> {
+    match requested_org_id {
+        Some(req_org) if !req_org.is_empty() => {
+            memberships.iter().find(|m| m.org_id == req_org).cloned()
+        }
+        _ => cookie_choice.cloned(),
+    }
+}
+
 /// Build the id_token claims from identity traits + granted scopes, then
 /// accept the consent challenge. Shared by the auto-grant and Allow paths.
+/// `requested_org_id` (the auth request's `organization_id`, if any) pins the
+/// `org`/`groups` claims to that org; see `resolve_claim_active_org`.
 // Cohesive consent-finalization inputs; splitting into a struct adds no clarity.
 #[allow(clippy::too_many_arguments)]
 async fn finalize_consent(
@@ -643,6 +671,7 @@ async fn finalize_consent(
     grant_audience: Vec<String>,
     remember: bool,
     headers: &axum::http::HeaderMap,
+    requested_org_id: Option<&str>,
     consent_locale: LanguageIdentifier,
 ) -> FinalizeOutcome {
     // Fan out identity + org memberships in parallel; the membership fetch
@@ -682,13 +711,23 @@ async fn finalize_consent(
             None
         }
     };
-    let active = crate::orgs::cookie::read_active_org_cookie(
+    let cookie_choice = crate::orgs::cookie::read_active_org_cookie(
         headers,
         &state.cookie_secret,
         state.cfg.orgs.active_org_cookie_ttl_seconds,
     )
     .and_then(|id| memberships.iter().find(|m| m.org_id == id).cloned())
     .or_else(|| memberships.first().cloned());
+    let active = resolve_claim_active_org(requested_org_id, &memberships, cookie_choice.as_ref());
+    if let Some(req_org) = requested_org_id.filter(|s| !s.is_empty()) {
+        if active.is_none() {
+            tracing::info!(
+                subject,
+                organization_id = %req_org,
+                "consent: requested organization_id is not a membership; suppressing org claim",
+            );
+        }
+    }
 
     // Pre-fetch the Forseti-owned profile only when the feature is on and a
     // consuming scope is granted; skips the DB hit otherwise.
@@ -888,7 +927,9 @@ fn build_id_token_claims(
             // verified; falls back to `false` when unclear.
             let email = traits.and_then(|t| t.get("email")).and_then(|v| v.as_str());
             let verified = match email {
-                Some(e) => addrs.iter().any(|a| a.value == e && a.verified),
+                Some(e) => addrs
+                    .iter()
+                    .any(|a| a.value.eq_ignore_ascii_case(e) && a.verified),
                 None => addrs.iter().any(|a| a.verified),
             };
             claims.insert(
@@ -984,7 +1025,8 @@ fn build_id_token_claims(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_id_token_claims, extract_resource_url, project_group_slugs, with_prompt_login,
+        build_id_token_claims, extract_resource_url, project_group_slugs, resolve_claim_active_org,
+        with_prompt_login,
     };
     use crate::ory;
 
@@ -1215,6 +1257,69 @@ mod tests {
                 has_logo: 0,
             })
             .collect()
+    }
+
+    fn mem(org_id: &str) -> crate::orgs::Membership {
+        crate::orgs::Membership {
+            org_id: org_id.to_string(),
+            slug: org_id.to_string(),
+            name: org_id.to_string(),
+            role: "member".to_string(),
+            theme_preset: None,
+            brand_primary: None,
+            brand_on_primary: None,
+            brand_secondary: None,
+            has_logo: 0,
+        }
+    }
+
+    #[test]
+    fn pinned_org_selects_matching_membership() {
+        let ms = vec![mem("a"), mem("b")];
+        let got = resolve_claim_active_org(Some("b"), &ms, Some(&ms[0]));
+        assert_eq!(got.map(|m| m.org_id), Some("b".to_string()));
+    }
+
+    #[test]
+    fn pinned_org_not_a_member_suppresses_claim() {
+        let ms = vec![mem("a"), mem("b")];
+        // requested "z": not a member -> None, even though a cookie_choice exists.
+        assert!(resolve_claim_active_org(Some("z"), &ms, Some(&ms[0])).is_none());
+    }
+
+    #[test]
+    fn no_pin_uses_cookie_choice() {
+        let ms = vec![mem("a"), mem("b")];
+        let got = resolve_claim_active_org(None, &ms, Some(&ms[1]));
+        assert_eq!(got.map(|m| m.org_id), Some("b".to_string()));
+    }
+
+    #[test]
+    fn empty_pin_uses_cookie_choice() {
+        let ms = vec![mem("a")];
+        let got = resolve_claim_active_org(Some(""), &ms, Some(&ms[0]));
+        assert_eq!(got.map(|m| m.org_id), Some("a".to_string()));
+    }
+
+    #[test]
+    fn member_less_identity_suppresses_org_claim() {
+        // A brand-new identity can hit consent before the floor middleware adds
+        // Default: zero memberships must suppress `org`, not default or panic.
+        let active = resolve_claim_active_org(None, &[], None);
+        assert!(active.is_none());
+        let v = build_id_token_claims(
+            None,
+            &["openid".to_string(), "org".to_string(), "orgs".to_string()],
+            &[],
+            active.as_ref(),
+            None,
+            &[],
+            false,
+            false,
+            &en(),
+        );
+        assert!(v.get("org").is_none());
+        assert_eq!(v.get("orgs").unwrap(), &serde_json::json!([]));
     }
 
     #[test]

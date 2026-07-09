@@ -231,11 +231,13 @@ These are the classic spec-violation bugs custom IdPs ship. Drive each via Chrom
 - [ ] Invalid / reused invite token rejected with a friendly error
 - [ ] Audit rows: `org.member.added`, `org.member.role_changed`, `org.member.removed`, `org.invite.created`, `org.invite.accepted`
 
-### 6.2 Auto-join on first authenticated request
+### 6.2 Default floor on first authenticated request
 
-- [ ] Fresh registrant lands as `member` of Default (or `owner` if first user / admin-allowlisted)
-- [ ] Auto-join is idempotent (re-login doesn't insert a second row)
+- [ ] Fresh registrant lands as `member` of Default (or `owner` if admin-allowlisted; no first-user-owner bootstrap any more)
+- [ ] Floor add is idempotent (re-login doesn't insert a second row)
 - [ ] DB unique-constraint race on simultaneous first-requests doesn't crash the request
+- [ ] Joining any non-default org drops the Default membership (non-allowlisted); allowlisted operator keeps Default
+- [ ] Leaving one's last non-default org re-adds Default; deleting an identity leaves no Default row
 
 ### 6.3 Multi-org (license-gated)
 

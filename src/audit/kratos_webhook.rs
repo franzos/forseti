@@ -138,8 +138,8 @@ pub struct ActionQuery {
 
 /// Bearer-token auth + payload → audit event.
 ///
-/// Default-org auto-join is no longer driven by a webhook — see
-/// `crate::orgs::ensure_default_membership` and its caller in
+/// Default-org floor placement is no longer driven by a webhook — see
+/// `crate::orgs::ensure_default_floor` and its caller in
 /// `crate::orgs::middleware::auto_join_default_org`. This receiver is purely the
 /// audit-write side.
 pub async fn receive(

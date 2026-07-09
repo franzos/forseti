@@ -71,6 +71,29 @@
       </div>
 
       <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg">
+        <h2 class="font-headline-md text-headline-md text-on-surface mb-stack-md">{{ chrome.t("orgs-access-mode-heading") }}</h2>
+        <dl class="grid grid-cols-2 gap-stack-md">
+          <dt class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("orgs-access-mode-label") }}</dt>
+          <dd class="font-body-md text-body-md">{% if is_external %}{{ chrome.t("orgs-access-mode-external") }}{% else %}{{ chrome.t("orgs-access-mode-internal") }}{% endif %}</dd>
+        </dl>
+        <p class="font-body-sm text-body-sm text-on-surface-variant mt-2">
+          {% if is_default %}{{ chrome.t("orgs-access-mode-note-default") }}
+          {% else if is_external %}{{ chrome.t("orgs-access-mode-note-external") }}
+          {% else %}{{ chrome.t("orgs-access-mode-note-internal") }}{% endif %}
+        </p>
+        {% if !is_default %}
+          <form method="POST" action="/settings/organizations/{{ org.slug }}/access-mode" class="mt-stack-md"
+                onsubmit="return confirm('{% if is_external %}{{ chrome.t("orgs-confirm-switch-internal") }}{% else %}{{ chrome.t("orgs-confirm-switch-external") }}{% endif %}');">
+            <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+            <input type="hidden" name="access_mode" value="{% if is_external %}internal{% else %}external{% endif %}">
+            <button type="submit" class="border border-outline-variant rounded-lg px-4 py-2 font-label-md text-label-md">
+              {% if is_external %}{{ chrome.t("orgs-access-mode-action-switch-internal") }}{% else %}{{ chrome.t("orgs-access-mode-action-switch-external") }}{% endif %}
+            </button>
+          </form>
+        {% endif %}
+      </div>
+
+      <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg">
         <h2 class="font-headline-md text-headline-md text-on-surface mb-stack-md">{{ chrome.t("orgs-overview-quicklinks-heading") }}</h2>
         <ul class="flex flex-col gap-stack-sm">
           <li>
@@ -85,6 +108,12 @@
             <a href="{% if is_default %}/settings/organization/teams{% else %}/settings/organizations/{{ org.slug }}/teams{% endif %}"
                class="text-primary font-label-md">{{ chrome.t("orgs-link-teams") }} <span class="dir-flip">&rarr;</span></a>
           </li>
+          {% if !is_default && !is_external %}
+            <li>
+              <a href="{% if is_default %}/settings/organization/domains{% else %}/settings/organizations/{{ org.slug }}/domains{% endif %}"
+                 class="text-primary font-label-md">{{ chrome.t("orgs-link-domains") }} <span class="dir-flip">&rarr;</span></a>
+            </li>
+          {% endif %}
         </ul>
       </div>
 

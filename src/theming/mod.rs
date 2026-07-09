@@ -290,6 +290,7 @@ mod tests {
             on_primary: None,
             secondary: Some("red;}".to_string()),
             has_logo: 0,
+            access_mode: "internal".to_string(),
         };
         let overrides = overrides_from_public(&pb);
         assert_eq!(overrides.preset.as_deref(), Some("midnight"));
@@ -389,6 +390,8 @@ mod tests {
             brand_secondary: Some("red;}".to_string()),
             public_login_enabled: 0,
             has_logo: 0,
+            access_mode: "internal".to_string(),
+            domain_join_policy: "invite_only".to_string(),
         };
         let o = overrides_from_org(&org);
         assert_eq!(o.preset.as_deref(), Some("midnight"));

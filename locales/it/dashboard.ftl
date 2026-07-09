@@ -36,3 +36,5 @@ dashboard-activity-heading = Attività recente
 dashboard-activity-empty-title = Nessuna attività recente
 dashboard-activity-empty-body = Gli eventi di accesso appariranno qui.
 dashboard-activity-signin-title = Accesso riuscito
+dashboard-domain-join-prompt = Hai un indirizzo { $domain } verificato. Entrare in { $org }?
+dashboard-domain-join-cta = Entra in { $org }

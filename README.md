@@ -33,7 +33,7 @@ Because it's backed by software the giants scale with — OpenAI self-hosts Ory 
 | 🪪 **OAuth2 / OIDC bridge** | Login, consent, and logout screens for Hydra's authorization-code flow — turn Forseti into a drop-in OIDC provider for your own apps. |
 | 🧩 **40+ app templates** | One-click, pre-filled OAuth2 client setup for popular self-hosted apps (GitLab, Nextcloud, Vaultwarden, Grafana, Immich, …) — redirect URIs and per-app OIDC quirks already filled in. [Full list →](docs/operator-guide.md#app-templates) |
 | 🛠️ **Admin console** | Manage identities, sessions, and OAuth2 clients; append-only audit log; live status dashboard; dynamic-client-registration tokens. |
-| 🏢 **Organizations** | Multi-tenant orgs with members, invites, per-org branding, and per-org OIDC claims. |
+| 🏢 **Organizations** | Multi-tenant orgs with members, invites, per-org branding, and per-org OIDC claims. Each org runs **internal** (invite-only) or **external** — a public self-serve signup page at `/o/{slug}` — plus optional email-domain auto-join for workforce orgs. |
 | 📊 **Observability** *(licensed)* | Prometheus `/metrics` on the internal listener, token-gated: HTTP request counts and latency plus a couple of bridged operational gauges. [Setup →](docs/commercial/observability.md) |
 | 🐧 **Linux host auth** *(preview)* | Back your Linux logins off the identity store: NSS `passwd`/`group` + per-user SSH-key distribution, interactive `ssh`/console login via the OAuth Device Authorization Grant (RFC 8628), and offline passphrase login when the server's unreachable. [Setup →](docs/operator-guide.md#linux-authentication) |
 | 🌗 **Light & dark** | A built-in theme toggle (light / dark / follow-system) across every page. |

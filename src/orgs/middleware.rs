@@ -1,5 +1,5 @@
-//! Tower middleware firing the lazy Default-org auto-join once per request
-//! when a Kratos session is present, kept out of `RequireSession` so session
+//! Tower middleware firing the lazy Default-org floor once per request when a
+//! Kratos session is present, kept out of `RequireSession` so session
 //! resolution stays a pure read.
 //!
 //! Caches the resolved session in request extensions so the extractors skip a
@@ -16,6 +16,14 @@ use crate::state::AppState;
 
 const KRATOS_SESSION_COOKIE: &str = "ory_kratos_session";
 
+/// A request to this exact path is mid external-self-serve join; force-
+/// joining Default here first would strand the user in the wrong org.
+const JOIN_CONFIRM_PATH: &str = "/join/confirm";
+
+fn is_join_confirm_path(path: &str) -> bool {
+    path == JOIN_CONFIRM_PATH
+}
+
 pub async fn auto_join_default_org(
     State(state): State<AppState>,
     mut req: Request,
@@ -28,10 +36,12 @@ pub async fn auto_join_default_org(
             Ok(outcome) => {
                 if let ory::kratos::WhoamiOutcome::Ok(session) = &outcome {
                     let (identity_id, email) = crate::flow_view::session_principal(session);
-                    if !identity_id.is_empty() {
-                        super::ensure_default_membership(
+                    if !identity_id.is_empty() && !is_join_confirm_path(req.uri().path()) {
+                        // The floor is verification-independent; email is used
+                        // only for the operator allowlist check.
+                        super::ensure_default_floor(
                             &state.db,
-                            &state.cfg,
+                            &state.cfg.admin,
                             &identity_id,
                             &email,
                         )
@@ -50,3 +60,14 @@ pub async fn auto_join_default_org(
 
 #[derive(Clone)]
 pub(crate) struct CachedWhoami(pub(crate) ory::kratos::WhoamiOutcome);
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn join_confirm_path_matches_exactly() {
+        assert!(super::is_join_confirm_path("/join/confirm"));
+        assert!(!super::is_join_confirm_path("/join/confirm/"));
+        assert!(!super::is_join_confirm_path("/"));
+        assert!(!super::is_join_confirm_path("/join/confirmx"));
+    }
+}

@@ -7,6 +7,8 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use serde::Deserialize;
 
+use crate::audit::{self, action, target_kind, AuditCtx, AuditEvent};
+use crate::audit_metadata;
 use crate::csrf::CsrfForm;
 use crate::extractors::{Csrf, RequireSession};
 use crate::orgs::{self, Org, Role};
@@ -15,8 +17,8 @@ use crate::render::render;
 use crate::state::AppState;
 
 use super::{
-    build_nav, require_org_license, require_org_owner_with_license, resolve_org_or_404,
-    settings_ctx, OrgSlug, SettingsCtx,
+    build_nav, require_external_mode_writable, require_org_license, require_org_owner_with_license,
+    resolve_org_or_404, settings_ctx, OrgSlug, SettingsCtx,
 };
 
 #[derive(Template)]
@@ -26,6 +28,7 @@ struct OverviewTemplate {
     org: Org,
     is_owner: bool,
     is_default: bool,
+    is_external: bool,
     member_count: usize,
     /// Read-only SSO status (operator-managed at `/admin/saml`). `None` when
     /// `[saml]` is unconfigured or the org has no connection.
@@ -154,10 +157,12 @@ async fn render_overview_info(
     };
     owner_emails.sort();
     let sso = sso_status(state, &org).await;
+    let is_external = orgs::parse_access_mode(&org.access_mode).is_external();
     let nav = build_nav(state, headers, &ctx.identity_id, Some(memberships)).await;
     render(&OverviewInfoTemplate {
         chrome,
         is_default: org.id == orgs::DEFAULT_ORG_ID,
+        is_external,
         org,
         member_count: members.len(),
         owner_emails,
@@ -172,6 +177,7 @@ struct OverviewInfoTemplate {
     chrome: PageChrome,
     org: Org,
     is_default: bool,
+    is_external: bool,
     member_count: usize,
     /// Sorted, unique. Lets members know who to contact without exposing the
     /// full roster.
@@ -194,10 +200,12 @@ async fn render_overview(
         .await
         .unwrap_or_default();
     let sso = sso_status(state, org).await;
+    let is_external = orgs::parse_access_mode(&org.access_mode).is_external();
     let nav = build_nav(state, headers, &ctx.identity_id, Some(memberships)).await;
     render(&OverviewTemplate {
         chrome,
         is_default: org.id == orgs::DEFAULT_ORG_ID,
+        is_external,
         org: org.clone(),
         is_owner,
         member_count: members.len(),
@@ -279,6 +287,82 @@ pub(super) async fn overview_save(
     Redirect::to(&redirect_to).into_response()
 }
 
+#[derive(Debug, Deserialize)]
+pub(super) struct AccessModeForm {
+    access_mode: String,
+}
+
+/// Only an actual change produces an audit action, so a same-mode resubmit
+/// is a silent no-op.
+fn access_mode_change_action(from: orgs::AccessMode, to: orgs::AccessMode) -> Option<&'static str> {
+    (from != to).then_some(action::ORG_ACCESS_MODE_CHANGED)
+}
+
+pub(super) async fn access_mode_save(
+    State(state): State<AppState>,
+    OrgSlug(slug): OrgSlug,
+    sess: RequireSession,
+    csrf: Csrf,
+    actx: AuditCtx,
+    CsrfForm(form): CsrfForm<AccessModeForm>,
+) -> Response {
+    let target = match resolve_org_or_404(&state, slug.as_deref()).await {
+        Ok(t) => t,
+        Err(r) => return r,
+    };
+    let org_id = &target.org.id;
+    if let Err(r) =
+        require_external_mode_writable(&state, &csrf.0, &sess.identity_id, &sess.email, org_id)
+            .await
+    {
+        return r;
+    }
+    let requested = match form.access_mode.as_str() {
+        "external" => orgs::AccessMode::External,
+        "internal" => orgs::AccessMode::Internal,
+        _ => return (StatusCode::BAD_REQUEST, "invalid access_mode").into_response(),
+    };
+    let current = orgs::parse_access_mode(&target.org.access_mode);
+    if requested != current {
+        let write = match requested {
+            orgs::AccessMode::External => {
+                match orgs::db::set_access_mode(&state.db, org_id, orgs::AccessMode::External).await
+                {
+                    Ok(()) => orgs::db::apply_external_defaults(&state.db, org_id).await,
+                    Err(e) => Err(e),
+                }
+            }
+            orgs::AccessMode::Internal => {
+                match orgs::db::set_access_mode(&state.db, org_id, orgs::AccessMode::Internal).await
+                {
+                    Ok(()) => orgs::db::set_public_login_enabled(&state.db, org_id, 0).await,
+                    Err(e) => Err(e),
+                }
+            }
+        };
+        if let Err(e) = write {
+            tracing::error!(error = ?e, "access_mode_save: failed");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "save failed").into_response();
+        }
+        if let Some(act) = access_mode_change_action(current, requested) {
+            let _ = audit::log(
+                &state.db,
+                AuditEvent::new(act)
+                    .actor_user(sess.identity_id.as_str(), sess.email.as_str())
+                    .target(target_kind::ORG, org_id.clone())
+                    .with_ctx(&actx)
+                    .metadata(audit_metadata!(
+                        "org_id" => org_id.as_str(),
+                        "from" => current.as_str(),
+                        "to" => requested.as_str(),
+                    )),
+            )
+            .await;
+        }
+    }
+    Redirect::to(&target.base_path).into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use crate::orgs;
@@ -291,5 +375,23 @@ mod tests {
         assert!(orgs::is_reserved_slug(&orgs::slugify("Admin")));
         assert!(orgs::is_reserved_slug(&orgs::slugify("login")));
         assert!(!orgs::is_reserved_slug(&orgs::slugify("Acme Corp")));
+    }
+
+    #[test]
+    fn access_mode_change_action_fires_on_change() {
+        use crate::orgs::AccessMode;
+        assert_eq!(
+            super::access_mode_change_action(AccessMode::Internal, AccessMode::External),
+            Some(crate::audit::action::ORG_ACCESS_MODE_CHANGED)
+        );
+    }
+
+    #[test]
+    fn access_mode_change_action_silent_when_unchanged() {
+        use crate::orgs::AccessMode;
+        assert_eq!(
+            super::access_mode_change_action(AccessMode::Internal, AccessMode::Internal),
+            None
+        );
     }
 }

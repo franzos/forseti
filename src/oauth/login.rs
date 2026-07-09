@@ -184,7 +184,7 @@ fn anonymous_login_redirect_url(self_login_url: &str, lang: &str, request_url: &
 
 /// Pull `organization_id=<id>` out of Hydra's `request_url` (the verbatim
 /// `/oauth2/auth` URL the downstream app called).
-fn parse_organization_id_param(request_url: &str) -> Option<String> {
+pub(crate) fn parse_organization_id_param(request_url: &str) -> Option<String> {
     url::Url::parse(request_url)
         .ok()?
         .query_pairs()

@@ -467,7 +467,7 @@ async fn last_owner_demotion_guard() {
     let identity_id = owner.identity_id.clone();
 
     // Snapshot the current Default owners so we can restore them after
-    // the destructive sole-owner step. `ensure_default_membership` lands
+    // the destructive sole-owner step. `ensure_membership_or_domain_join` lands
     // fresh registrants as `member`, so the test user has *a* row but
     // is not currently an owner.
     let default_id = "default";
@@ -643,7 +643,7 @@ async fn last_owner_demotion_guard() {
 /// Self-delete (the saga in `src/settings/account.rs::delete`) must
 /// drop the deleted identity's row from `organization_members`. The
 /// freshly-registered user is auto-joined to the Default org via
-/// `ensure_default_membership`; after a self-delete that row must be
+/// `ensure_membership_or_domain_join`; after a self-delete that row must be
 /// gone.
 #[tokio::test]
 async fn self_delete_cascades_to_org_members() {
@@ -655,7 +655,7 @@ async fn self_delete_cascades_to_org_members() {
     let identity_id = user.identity_id.clone();
     let email = user.email.clone();
 
-    // Hit the dashboard once so `ensure_default_membership` definitely
+    // Hit the dashboard once so `ensure_membership_or_domain_join` definitely
     // fires and the row is in the DB at the start of the test.
     let _ = user
         .client

@@ -84,6 +84,9 @@ pub struct AppConfig {
     /// Prometheus scrape gate for `/metrics` (internal listener only, commercial `observability` feature).
     #[serde(default)]
     pub metrics: MetricsConfig,
+    /// Per-IP + global rate limits for `/registration`, applying to every Kratos-flow registration (not just external orgs).
+    #[serde(default)]
+    pub auth: AuthConfig,
 }
 
 /// Operator-supplied secrets. `cookie_secret` seeds the HMAC keys for every Forseti-signed cookie;
@@ -889,6 +892,31 @@ fn default_known_accounts_cookie_ttl_seconds() -> u64 {
     60 * 60 * 24 * 90
 }
 
+/// Per-IP + global rate limits for `/registration` (`src/auth/mod.rs`). Applies to every
+/// Kratos-flow registration, not just external-org self-serve joins — `/registration` has
+/// no per-org dimension in the URL, so a per-org bucket isn't cheaply buildable here.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct AuthConfig {
+    /// Per-IP rate limit on `GET /registration`, max requests per minute. `None`
+    /// falls back to the code-side default. Set to `0` to disable the bucket.
+    #[serde(default)]
+    pub registration_ip_rate_per_minute: Option<u32>,
+    /// Per-IP rate limit on `GET /registration`, max requests per hour, in parallel
+    /// with the per-minute bucket. `None` falls back to the code-side default.
+    #[serde(default)]
+    pub registration_ip_rate_per_hour: Option<u32>,
+    /// Global (all-callers-share-one-bucket) rate limit on `GET /registration`,
+    /// max requests per minute. Bounds total traffic even when `trust_xff` trusts
+    /// a spoofable header. `None` falls back to the code-side default.
+    #[serde(default)]
+    pub registration_global_rate_per_minute: Option<u32>,
+    /// Global rate limit on `GET /registration`, max requests per hour, in
+    /// parallel with the per-minute global bucket. `None` falls back to the
+    /// code-side default.
+    #[serde(default)]
+    pub registration_global_rate_per_hour: Option<u32>,
+}
+
 /// Organizations subsystem TTLs: `active_org_cookie_ttl_seconds` (signed `forseti_active_org` cookie validity)
 /// and `invite_ttl_days` (how long a minted invitation stays claimable).
 #[derive(Debug, Clone, Deserialize)]
@@ -910,6 +938,39 @@ pub struct OrgsConfig {
     /// `crate::oauth::register::RESERVED_NAMES_DEFAULT`.
     #[serde(default)]
     pub reserved_names: Option<Vec<String>>,
+    /// Per-IP rate limit on `GET /o/{slug}`, max requests per minute. `None`
+    /// falls back to the code-side default. Set to `0` to disable the bucket.
+    #[serde(default)]
+    pub landing_ip_rate_per_minute: Option<u32>,
+    /// Per-IP rate limit on `GET /o/{slug}`, max requests per hour, in parallel
+    /// with the per-minute bucket. `None` falls back to the code-side default.
+    #[serde(default)]
+    pub landing_ip_rate_per_hour: Option<u32>,
+    /// Global rate limit on `GET /o/{slug}`, max requests per minute, shared
+    /// across every slug and caller. `None` falls back to the code-side default.
+    #[serde(default)]
+    pub landing_global_rate_per_minute: Option<u32>,
+    /// Global rate limit on `GET /o/{slug}`, max requests per hour, in parallel
+    /// with the per-minute global bucket. `None` falls back to the code-side default.
+    #[serde(default)]
+    pub landing_global_rate_per_hour: Option<u32>,
+    /// Individually operator-disableable domain-ownership proof methods for
+    /// internal-org email-domain auto-join. All default to enabled.
+    #[serde(default = "default_true")]
+    pub domain_verify_http_file_enabled: bool,
+    #[serde(default = "default_true")]
+    pub domain_verify_dns_txt_enabled: bool,
+    #[serde(default = "default_true")]
+    pub domain_verify_email_enabled: bool,
+    /// Total timeout for the HTTP well-known-file fetch. `None` falls back
+    /// to the code-side default (10s).
+    #[serde(default)]
+    pub domain_verify_http_timeout_seconds: Option<u64>,
+    /// Per-org ceiling on `org_allowed_domains` rows (pending + verified
+    /// combined), so an owner can't grow an unbounded row set or fan out
+    /// unbounded challenge emails via the email method.
+    #[serde(default = "default_domain_max_per_org")]
+    pub domain_max_per_org: u32,
 }
 
 impl Default for OrgsConfig {
@@ -920,6 +981,15 @@ impl Default for OrgsConfig {
             logo_ip_rate_per_minute: None,
             logo_ip_rate_per_hour: None,
             reserved_names: None,
+            landing_ip_rate_per_minute: None,
+            landing_ip_rate_per_hour: None,
+            landing_global_rate_per_minute: None,
+            landing_global_rate_per_hour: None,
+            domain_verify_http_file_enabled: true,
+            domain_verify_dns_txt_enabled: true,
+            domain_verify_email_enabled: true,
+            domain_verify_http_timeout_seconds: None,
+            domain_max_per_org: default_domain_max_per_org(),
         }
     }
 }
@@ -930,6 +1000,10 @@ fn default_active_org_cookie_ttl_seconds() -> u64 {
 
 fn default_invite_ttl_days() -> i64 {
     7
+}
+
+fn default_domain_max_per_org() -> u32 {
+    100
 }
 
 /// Sanity ceilings for rate-limit knobs: a typo like `per_window = 1_000_000` is clamped at load with a warn, so it can't silently disable protection.
@@ -1036,6 +1110,62 @@ impl AppConfig {
                 RATE_LIMIT_PER_HOUR_CEILING,
             ));
         }
+        if let Some(v) = self.orgs.landing_ip_rate_per_minute {
+            self.orgs.landing_ip_rate_per_minute = Some(clamp_rate(
+                "orgs.landing_ip_rate_per_minute",
+                v,
+                RATE_LIMIT_PER_MINUTE_CEILING,
+            ));
+        }
+        if let Some(v) = self.orgs.landing_ip_rate_per_hour {
+            self.orgs.landing_ip_rate_per_hour = Some(clamp_rate(
+                "orgs.landing_ip_rate_per_hour",
+                v,
+                RATE_LIMIT_PER_HOUR_CEILING,
+            ));
+        }
+        if let Some(v) = self.orgs.landing_global_rate_per_minute {
+            self.orgs.landing_global_rate_per_minute = Some(clamp_rate(
+                "orgs.landing_global_rate_per_minute",
+                v,
+                RATE_LIMIT_PER_MINUTE_CEILING,
+            ));
+        }
+        if let Some(v) = self.orgs.landing_global_rate_per_hour {
+            self.orgs.landing_global_rate_per_hour = Some(clamp_rate(
+                "orgs.landing_global_rate_per_hour",
+                v,
+                RATE_LIMIT_PER_HOUR_CEILING,
+            ));
+        }
+        if let Some(v) = self.auth.registration_ip_rate_per_minute {
+            self.auth.registration_ip_rate_per_minute = Some(clamp_rate(
+                "auth.registration_ip_rate_per_minute",
+                v,
+                RATE_LIMIT_PER_MINUTE_CEILING,
+            ));
+        }
+        if let Some(v) = self.auth.registration_ip_rate_per_hour {
+            self.auth.registration_ip_rate_per_hour = Some(clamp_rate(
+                "auth.registration_ip_rate_per_hour",
+                v,
+                RATE_LIMIT_PER_HOUR_CEILING,
+            ));
+        }
+        if let Some(v) = self.auth.registration_global_rate_per_minute {
+            self.auth.registration_global_rate_per_minute = Some(clamp_rate(
+                "auth.registration_global_rate_per_minute",
+                v,
+                RATE_LIMIT_PER_MINUTE_CEILING,
+            ));
+        }
+        if let Some(v) = self.auth.registration_global_rate_per_hour {
+            self.auth.registration_global_rate_per_hour = Some(clamp_rate(
+                "auth.registration_global_rate_per_hour",
+                v,
+                RATE_LIMIT_PER_HOUR_CEILING,
+            ));
+        }
     }
 }
 
@@ -1090,6 +1220,7 @@ impl AppConfig {
             security: SecurityConfig::default(),
             posix: PosixConfig::default(),
             metrics: MetricsConfig::default(),
+            auth: AuthConfig::default(),
         }
     }
 }

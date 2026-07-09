@@ -46,6 +46,14 @@
       </div>
 
       <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg">
+        <h2 class="font-headline-md text-headline-md text-on-surface mb-stack-md">{{ chrome.t("orgs-access-mode-heading") }}</h2>
+        <dl class="grid grid-cols-2 gap-stack-md">
+          <dt class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("orgs-access-mode-label") }}</dt>
+          <dd class="font-body-md text-body-md">{% if is_external %}{{ chrome.t("orgs-access-mode-external") }}{% else %}{{ chrome.t("orgs-access-mode-internal") }}{% endif %}</dd>
+        </dl>
+      </div>
+
+      <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg">
         <h2 class="font-headline-md text-headline-md text-on-surface mb-stack-md">{{ chrome.t("orgs-overview-quicklinks-heading") }}</h2>
         <ul class="flex flex-col gap-stack-sm">
           <li>

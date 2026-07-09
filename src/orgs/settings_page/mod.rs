@@ -17,6 +17,7 @@ use crate::orgs::{self, Org, Role};
 use crate::state::AppState;
 
 mod branding;
+mod domains;
 mod list_create;
 mod members;
 mod overview;
@@ -47,6 +48,10 @@ pub(crate) fn router() -> Router<AppState> {
         .route(
             "/settings/organization",
             get(overview::overview).post(overview::overview_save),
+        )
+        .route(
+            "/settings/organization/access-mode",
+            post(overview::access_mode_save),
         )
         .route("/settings/organization/info", get(overview::overview_info))
         .route(
@@ -92,6 +97,27 @@ pub(crate) fn router() -> Router<AppState> {
             "/settings/organization/teams/{team_id}/members/{identity_id}/remove",
             post(teams::teams_member_remove),
         )
+        // Allowed domains (commercial, Internal-only) — Default-org singular routes.
+        .route(
+            "/settings/organization/domains",
+            get(domains::domains).post(domains::domains_add),
+        )
+        .route(
+            "/settings/organization/domains/policy",
+            post(domains::domains_set_policy),
+        )
+        .route(
+            "/settings/organization/domains/{domain}/verify",
+            post(domains::domains_verify),
+        )
+        .route(
+            "/settings/organization/domains/{domain}/confirm-email",
+            post(domains::domains_confirm_email),
+        )
+        .route(
+            "/settings/organization/domains/{domain}/remove",
+            post(domains::domains_remove),
+        )
         // Multi-org (commercial)
         .route("/settings/organizations", get(list_create::orgs_list))
         .route(
@@ -101,6 +127,10 @@ pub(crate) fn router() -> Router<AppState> {
         .route(
             "/settings/organizations/{slug}",
             get(overview::overview).post(overview::overview_save),
+        )
+        .route(
+            "/settings/organizations/{slug}/access-mode",
+            post(overview::access_mode_save),
         )
         .route(
             "/settings/organizations/{slug}/info",
@@ -150,6 +180,27 @@ pub(crate) fn router() -> Router<AppState> {
         .route(
             "/settings/organizations/{slug}/teams/{team_id}/members/{identity_id}/remove",
             post(teams::teams_member_remove),
+        )
+        // Allowed domains (commercial, Internal-only) — multi-org plural twins.
+        .route(
+            "/settings/organizations/{slug}/domains",
+            get(domains::domains).post(domains::domains_add),
+        )
+        .route(
+            "/settings/organizations/{slug}/domains/policy",
+            post(domains::domains_set_policy),
+        )
+        .route(
+            "/settings/organizations/{slug}/domains/{domain}/verify",
+            post(domains::domains_verify),
+        )
+        .route(
+            "/settings/organizations/{slug}/domains/{domain}/confirm-email",
+            post(domains::domains_confirm_email),
+        )
+        .route(
+            "/settings/organizations/{slug}/domains/{domain}/remove",
+            post(domains::domains_remove),
         )
         .route(
             "/settings/organizations/{slug}/delete",
@@ -262,6 +313,28 @@ pub(super) async fn require_org_owner_with_license(
     if org_id != orgs::DEFAULT_ORG_ID {
         gate_orgs_feature_or_upsell(state, csrf_token, email)?;
     }
+    Ok(())
+}
+
+/// Gate for setting an org to external mode. Owner + `Feature::Orgs`, and the
+/// Default org can never be external (it is the operator's internal org; see
+/// spec §7). Locked licenses render the upsell page, not a hard 403.
+pub(super) async fn require_external_mode_writable(
+    state: &AppState,
+    csrf_token: &str,
+    identity_id: &str,
+    email: &str,
+    org_id: &str,
+) -> Result<(), Response> {
+    require_org_owner(state, identity_id, org_id).await?;
+    if org_id == orgs::DEFAULT_ORG_ID {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Default organization is always internal",
+        )
+            .into_response());
+    }
+    gate_orgs_feature_or_upsell(state, csrf_token, email)?;
     Ok(())
 }
 
