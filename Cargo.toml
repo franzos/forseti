@@ -6,7 +6,9 @@ description = "Self-service UI and Hydra login/consent bridge for Ory Kratos + H
 # Forseti is dual-licensed: everything outside `src/commercial/` is
 # AGPL-3.0-or-later (LICENSE), and `src/commercial/` is proprietary
 # source-available under the Forseti Commercial License 1.0
-# (LICENSE-COMMERCIAL). The crate-level `license` field below names the
+# (LICENSE-COMMERCIAL). The license wire-format decode/verify itself lives
+# in the MIT `signetlib` crate; `src/commercial/` holds only the entitlement
+# policy layered on top. The crate-level `license` field below names the
 # AGPL portion because Forseti is an application, not a library on
 # crates.io; the commercial subdirectory is documented in README.md
 # and enforced at runtime by `LicenseHandle::feature`.
@@ -103,14 +105,17 @@ unicode-normalization = "0.1"
 unicode-security = "0.1"
 # Ed25519 powers two unrelated surfaces:
 #   - Commercial-tier license verify (`src/commercial/`) — verify-only,
-#     pubkey baked in via `include_bytes!`.
+#     supplies the `VerifyingKey` handed to `signetlib`; pubkey baked in
+#     via `include_bytes!`.
 #   - Outbound webhook SET signing (`src/webhook/signing.rs`) —
 #     generate + PKCS#8 PEM I/O + sign.
 # `pkcs8` + `pem` give us PKCS#8 PEM read/write for the on-disk key;
 # `rand_core` exposes `SigningKey::generate` for fresh-key minting.
 ed25519-dalek = { version = "2", default-features = false, features = ["std", "zeroize", "fast", "pkcs8", "pem", "rand_core"] }
-ciborium = "0.2"
-serde_bytes = "0.11"
+# Commercial license wire-format decode/verify (OPLB envelope + CBOR claims
+# + Ed25519). MIT-licensed, same author; `src/commercial/` keeps only the
+# entitlement policy (typed features, expiry/grace) on top of its claims.
+signetlib = "0.1"
 arc-swap = "1"
 # SMTP send for Forseti-originated mail (invite + claim-email). Kratos's
 # courier doesn't expose a one-off POST endpoint, so Forseti speaks
