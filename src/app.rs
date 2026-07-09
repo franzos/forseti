@@ -234,7 +234,7 @@ pub(crate) async fn run() -> anyhow::Result<()> {
     // `/metrics` is added AFTER the metrics/audit layers so scrapes aren't self-counted and don't generate audit noise.
     let internal_app = Router::new()
         .merge(audit::kratos_webhook::router())
-        .merge(crate::posix::router())
+        .merge(crate::posix::router(state.clone()))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             audit::middleware,

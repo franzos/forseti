@@ -14,9 +14,11 @@ use axum::Router;
 use crate::state::AppState;
 
 /// Internal-listener POSIX router: NSS/SSH resolver plus host-authenticated
-/// device-auth endpoints, both gated by `RequirePosixHost`.
-pub fn router() -> Router<AppState> {
-    resolver::router().merge(device::router())
+/// device-auth endpoints, both gated by `RequirePosixHost`. The resolver
+/// surface carries an extra `Feature::LinuxAuth` license gate (see
+/// [`resolver::router`]); device routes stay ungated.
+pub fn router(state: AppState) -> Router<AppState> {
+    resolver::router(state).merge(device::router())
 }
 
 use std::sync::Arc;
