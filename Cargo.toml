@@ -1,6 +1,6 @@
 [package]
 name = "forseti"
-version = "0.1.8"
+version = "0.1.9"
 edition = "2021"
 description = "Self-service UI and Hydra login/consent bridge for Ory Kratos + Hydra"
 # Forseti is dual-licensed: everything outside `src/commercial/` is

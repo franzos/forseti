@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.1.9] - 2026-07-09
 
 ### Added
 - POSIX provisioning: searchable identity picker, accept a UUID or an email
@@ -24,16 +24,16 @@
 - Safe response headers: X-Content-Type-Options, X-Frame-Options, minimal CSP
 - Reserved and lookalike organization-name denylist on create and rename
 - Operator trust-anchor on themed pre-auth pages; audit log for public-login and logo changes
-- The configured `[posix].offline_min_len` passphrase floor is now actually enforced when minting offline verifiers (previously only the built-in minimum of 8 applied)
-- POSIX resolver and device-flow rate limiters no longer trust `X-Forwarded-For` unless `[proxy].trust_forwarded_for` is set, closing a rate-limit bypass on the internal listener
+- Enforce the configured `[posix].offline_min_len` when minting offline verifiers
+- POSIX rate limiters no longer trust `X-Forwarded-For` behind an untrusted proxy
 
 ### Fixed
 - Login-screen sign-out hit a CSRF 403 on the account-switch path
 - "Revoke access" on Authorized apps failed against Hydra v2 (it sent a client id and the revoke-all flag together, which Hydra rejects with a 400)
-- Offline-passphrase hashing no longer blocks the async runtime while computing Argon2
-- POSIX uid/gid allocation is now atomic on both SQLite and Postgres; concurrent allocations could previously collide or fail, and a team's gid can no longer change after a host has seen it
-- Offline verifier sync no longer silently drops accounts past 500 per org; hosts now receive the complete keystore
-- Offline audit uploads only acknowledge events that were actually persisted, so hosts retry failed batches instead of dropping them; batches are written in a single insert
+- Offline-passphrase hashing blocked the async runtime while computing Argon2
+- Concurrent POSIX uid/gid allocation could collide; a team's gid could change after being served
+- Offline verifier sync silently dropped accounts past 500 per org
+- Offline audit uploads acknowledged events that failed to persist
 
 ## [0.1.8] - 2026-06-24
 
