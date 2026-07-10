@@ -19,6 +19,8 @@ pub(crate) struct InitInputs {
     kratos_db_dsn: Option<String>,
     hydra_db_dsn: Option<String>,
     smtp_uri: Option<String>,
+    smtp_from_address: Option<String>,
+    smtp_from_name: Option<String>,
 }
 
 /// A required connection value: either the operator's flag, or a loud
@@ -64,6 +66,8 @@ pub(crate) fn validate_inputs(inputs: &InitInputs) -> Result<(), String> {
         ("--kratos-db-dsn", &inputs.kratos_db_dsn),
         ("--hydra-db-dsn", &inputs.hydra_db_dsn),
         ("--smtp-uri", &inputs.smtp_uri),
+        ("--smtp-from-address", &inputs.smtp_from_address),
+        ("--smtp-from-name", &inputs.smtp_from_name),
     ];
     for (label, opt) in checks {
         if let Some(v) = opt {
@@ -136,6 +140,8 @@ pub(crate) fn render_configs(inputs: &InitInputs) -> (String, String, Vec<String
         cookie_secret: &kratos_cookie,
         cipher_secret: &kratos_cipher,
         rp_id: &rp_id,
+        from_address: inputs.smtp_from_address.as_deref(),
+        from_name: inputs.smtp_from_name.as_deref(),
     });
 
     let hydra = render_hydra(HydraTemplate {
@@ -159,6 +165,8 @@ struct KratosTemplate<'a> {
     cookie_secret: &'a str,
     cipher_secret: &'a str,
     rp_id: &'a str,
+    from_address: Option<&'a str>,
+    from_name: Option<&'a str>,
 }
 
 fn render_kratos(t: KratosTemplate) -> String {
@@ -178,18 +186,11 @@ fn render_kratos(t: KratosTemplate) -> String {
     let cookie_secret = yaml_scalar(t.cookie_secret);
     let cipher_secret = yaml_scalar(t.cipher_secret);
     let rp_id = yaml_scalar(t.rp_id);
-    format!(
+    let mut out = format!(
         r#"version: v1.3.0
 
 dsn: {dsn}
 
-# `highest_available` forces any identity with a second factor enrolled to
-# complete AAL2 before whoami returns a session — Kratos answers 403, which
-# Forseti maps to a `/login?aal=aal2` step-up. Settings ALSO requires AAL2
-# (see `selfservice.flows.settings.required_aal` below) so an AAL1 session
-# (password-only login, or an email-recovery session) can't strip a second
-# factor and defeat 2FA. Lost-device users step up with a `lookup_secret`
-# recovery code (which satisfies AAL2) to manage their factors.
 session:
   whoami:
     required_aal: highest_available
@@ -228,9 +229,6 @@ selfservice:
     webauthn:
       enabled: true
       config:
-        # `passwordless: false` keeps WebAuthn as a SECOND factor (AAL2).
-        # Flipping it to true makes it a first-factor login and it will NOT
-        # satisfy the AAL2 step-up.
         passwordless: false
         rp:
           id: {rp_id}
@@ -245,13 +243,6 @@ selfservice:
     settings:
       ui_url: {forseti_settings}
       privileged_session_max_age: 15m
-      # AAL2 required for settings changes once the identity has a second
-      # factor. Otherwise an AAL1 session (password-only login, or an email
-      # recovery session) could open the settings flow and REMOVE the second
-      # factor, defeating 2FA entirely. With enforcement on, the user is
-      # already AAL2 by the time they reach settings (they stepped up at
-      # login), so this adds no extra prompt for normal use — it only blocks
-      # an un-stepped-up session from touching credentials.
       required_aal: highest_available
 
     recovery:
@@ -311,7 +302,14 @@ courier:
   smtp:
     connection_uri: {smtp_uri}
 "#,
-    )
+    );
+    if let Some(addr) = t.from_address {
+        let _ = writeln!(out, "    from_address: {}", yaml_scalar(addr));
+    }
+    if let Some(name) = t.from_name {
+        let _ = writeln!(out, "    from_name: {}", yaml_scalar(name));
+    }
+    out
 }
 
 struct HydraTemplate<'a> {
@@ -343,9 +341,6 @@ serve:
 
 urls:
   self:
-    # Issuer must be reachable under the same hostname from BOTH the browser
-    # and any resource servers so the `iss` claim in id_tokens validates
-    # everywhere.
     issuer: {public_url}
   consent: {forseti_consent}
   login:   {forseti_login}
@@ -363,9 +358,6 @@ oidc:
     pairwise:
       salt: {pairwise_salt}
 
-  # Dynamic Client Registration (RFC 7591). The portal advertises *itself* as
-  # the registration_endpoint and gates inbound requests with an Initial
-  # Access Token before forwarding to Hydra. See `src/oauth/register.rs`.
   dynamic_client_registration:
     enabled: true
     default_scope:
@@ -375,19 +367,13 @@ oidc:
 
 webfinger:
   oidc_discovery:
-    # Points at the portal, not Hydra — the portal validates an Initial
-    # Access Token before forwarding to Hydra.
     client_registration_url: {forseti_register}
 
 oauth2:
   expose_internal_errors: false
-  # MCP 2025-06-18 requires PKCE with S256 for public clients.
   pkce:
     enforced_for_public_clients: true
 
-# Access tokens are JWTs by default. Resource servers validate locally against
-# Hydra's JWKS. Flip to `opaque` if you need immediate revocation (and route
-# every RS to the admin API on :4445).
 strategies:
   access_token: jwt
 
@@ -430,6 +416,8 @@ pub(crate) fn init(args: &InitArgs) -> i32 {
         kratos_db_dsn: args.kratos_db_dsn.clone(),
         hydra_db_dsn: args.hydra_db_dsn.clone(),
         smtp_uri: args.smtp_uri.clone(),
+        smtp_from_address: args.smtp_from_address.clone(),
+        smtp_from_name: args.smtp_from_name.clone(),
     };
 
     if let Err(e) = validate_inputs(&inputs) {
@@ -503,6 +491,8 @@ mod tests {
             kratos_db_dsn: Some("postgres://k:secret@db:5432/kratos".to_string()),
             hydra_db_dsn: Some("postgres://h:secret@db:5432/hydra".to_string()),
             smtp_uri: Some("smtps://user:pass@smtp.example.com:465".to_string()),
+            smtp_from_address: Some("no-reply@example.com".to_string()),
+            smtp_from_name: Some("Example Accounts".to_string()),
         };
 
         let (kratos_yaml, hydra_yaml, missing) = render_configs(&inputs);
@@ -562,6 +552,8 @@ mod tests {
             cookie_secret: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             cipher_secret: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             rp_id: "f",
+            from_address: None,
+            from_name: None,
         });
         let v: Value = serde_yaml_ng::from_str(&kratos).expect("yaml parses");
         assert_eq!(
@@ -612,6 +604,31 @@ mod tests {
         assert_eq!(mode, 0o600);
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn generated_configs_are_comment_free() {
+        let (k, h, _) = render_configs(&InitInputs::default());
+        for (name, body) in [("kratos", &k), ("hydra", &h)] {
+            assert!(
+                !body.lines().any(|l| l.trim_start().starts_with('#')),
+                "{name} still has comments"
+            );
+        }
+    }
+
+    #[test]
+    fn from_address_rendered_when_supplied() {
+        let inputs = InitInputs {
+            smtp_from_address: Some("no-reply@example.com".into()),
+            ..Default::default()
+        };
+        let (k, _, _) = render_configs(&inputs);
+        let root: Value = serde_yaml_ng::from_str(&k).unwrap();
+        assert_eq!(
+            dig_str(&root, &["courier", "smtp", "from_address"]),
+            Some("no-reply@example.com")
+        );
     }
 
     #[test]

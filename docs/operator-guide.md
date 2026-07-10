@@ -845,12 +845,14 @@ forseti config-init \
   --kratos-db-dsn 'postgres://kratos:...@db/kratos' \
   --hydra-db-dsn  'postgres://hydra:...@db/hydra' \
   --smtp-uri      'smtps://user:pass@smtp.example.com:465' \
+  --smtp-from-address 'no-reply@example.com' \
+  --smtp-from-name    'Example Accounts' \
   --kratos-out kratos.yml --hydra-out hydra.yml
 ```
 
-It refuses to clobber an existing file unless you pass `--force`. Anything you don't supply via a flag is written as a loud `CHANGEME_*` placeholder, and the command prints exactly which ones are still outstanding — so a half-filled config can't masquerade as complete. `config-check` then **FAILs on any leftover `CHANGEME_*`**, anywhere in either file. The WebAuthn `rp.id` is derived from the host of `--forseti-url` (e.g. `accounts.example.com`), which is correct for a single-host deployment; narrow it to a registrable parent domain by hand if you serve several subdomains. With `--forseti-url` absent it stays `CHANGEME_RP_ID` and `config-check` FAILs on it like any other placeholder.
+It refuses to clobber an existing file unless you pass `--force`. Anything you don't supply via a flag is written as a loud `CHANGEME_*` placeholder, and the command prints exactly which ones are still outstanding — so a half-filled config can't masquerade as complete. `config-check` then **FAILs on any leftover `CHANGEME_*`**, anywhere in either file. The WebAuthn `rp.id` is derived from the host of `--forseti-url` (e.g. `accounts.example.com`), which is correct for a single-host deployment; narrow it to a registrable parent domain by hand if you serve several subdomains. With `--forseti-url` absent it stays `CHANGEME_RP_ID` and `config-check` FAILs on it like any other placeholder. `--smtp-from-address` / `--smtp-from-name` are optional and, when supplied, are written under `courier.smtp` in `kratos.yml` alongside `connection_uri`.
 
-The explanatory comments survive into the output — including the two `required_aal` comment blocks that explain *why* they're set the way they are. After writing, run the linter over what it produced to confirm the round-trip:
+The generated files carry no comments — `config-init` and the other `config` subcommands round-trip these files through `serde_yaml_ng`, which would silently drop any comments on the next parse/write, so keeping prose in the file would be misleading. See [Configuration rationale](#configuration-rationale) for why each baked-in recommendation is set the way it is. After writing, run the linter over what it produced to confirm the round-trip:
 
 ```bash
 forseti config-init ... --kratos-out kratos.yml --hydra-out hydra.yml
@@ -858,6 +860,26 @@ forseti config-check --kratos kratos.yml --hydra hydra.yml   # should be 0 FAIL,
 ```
 
 A note on the generated secrets: they're embedded directly in the files and grant full session/token control, so treat the output the way you'd treat any secret material — review it, lock down the file permissions, and don't commit it.
+
+## Configuration rationale
+
+Why `config-init`'s baked-in recommendations are set the way they are. This used to live as inline comments in the generated `kratos.yml` / `hydra.yml`, but those files are CLI-owned artifacts that round-trip through `serde_yaml_ng` on every later `config` subcommand, which drops comments on write — so the prose moved here instead.
+
+**Kratos `session.whoami.required_aal: highest_available`.** `highest_available` forces any identity with a second factor enrolled to complete AAL2 before `whoami` returns a session — Kratos answers 403, which Forseti maps to a `/login?aal=aal2` step-up. Settings also requires AAL2 (see below) so an AAL1 session (password-only login, or an email-recovery session) can't strip a second factor and defeat 2FA. Lost-device users step up with a `lookup_secret` recovery code (which satisfies AAL2) to manage their factors.
+
+**Kratos `selfservice.methods.webauthn.config.passwordless: false`.** This keeps WebAuthn as a second factor (AAL2). Flipping it to `true` makes it a first-factor login and it will not satisfy the AAL2 step-up.
+
+**Kratos `selfservice.flows.settings.required_aal: highest_available`.** AAL2 is required for settings changes once the identity has a second factor. Otherwise an AAL1 session (password-only login, or an email-recovery session) could open the settings flow and remove the second factor, defeating 2FA entirely. With enforcement on, the user is already AAL2 by the time they reach settings (they stepped up at login), so this adds no extra prompt for normal use — it only blocks an un-stepped-up session from touching credentials.
+
+**Hydra `urls.self.issuer`.** The issuer must be reachable under the same hostname from both the browser and any resource servers so the `iss` claim in id_tokens validates everywhere.
+
+**Hydra `oidc.dynamic_client_registration`.** This is Dynamic Client Registration (RFC 7591). The portal advertises itself as the `registration_endpoint` and gates inbound requests with an Initial Access Token before forwarding to Hydra. See `src/oauth/register.rs`.
+
+**Hydra `webfinger.oidc_discovery.client_registration_url`.** Points at the portal, not Hydra — the portal validates an Initial Access Token before forwarding to Hydra.
+
+**Hydra `oauth2.pkce.enforced_for_public_clients: true`.** MCP 2025-06-18 requires PKCE with S256 for public clients.
+
+**Hydra `strategies.access_token: jwt`.** Access tokens are JWTs by default. Resource servers validate locally against Hydra's JWKS. Flip to `opaque` if you need immediate revocation (and route every RS to the admin API on `:4445`).
 
 ## Kratos configuration
 
