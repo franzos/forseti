@@ -62,13 +62,17 @@ pub(crate) async fn run() -> anyhow::Result<()> {
 
     let cfg = AppConfig::load()?;
 
-    // Empty token means the audit webhook endpoint boots silently closed; always a deployment bug.
-    if cfg.audit.webhook_token.is_empty() {
+    // Unset (empty string or empty list) means the audit webhook endpoint boots silently closed; always a deployment bug.
+    if cfg.audit.webhook_token.is_unset() {
         eprintln!(
             "config error: audit.webhook_token must be set; the audit webhook endpoint \
              requires bearer authentication. Set it in config.toml (or via \
              FORSETI_AUDIT__WEBHOOK_TOKEN env var) and restart."
         );
+        std::process::exit(1);
+    }
+    if let Err(msg) = cfg.audit.webhook_token.validate() {
+        eprintln!("config error: {msg}");
         std::process::exit(1);
     }
 

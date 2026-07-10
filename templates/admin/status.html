@@ -123,6 +123,16 @@
       </p>
     {% endif %}
   </div>
+  <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4 mt-stack-md">
+    <p class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-status-audit-webhook-accept-list") }}</p>
+    <p class="font-headline-md text-headline-md text-on-surface mt-1">{{ audit_webhook_accept_list_len }}</p>
+  </div>
+  <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4 mt-stack-md">
+    <p class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-status-audit-webhook-last-matched") }}</p>
+    <p class="font-headline-md text-headline-md text-on-surface mt-1">
+      {% match audit_webhook_last_matched %}{% when Some with (n) %}{{ n }}{% when None %}{{ chrome.t("admin-status-audit-webhook-last-matched-none") }}{% endmatch %}
+    </p>
+  </div>
 </section>
 
 <section class="mb-stack-lg">

@@ -519,15 +519,67 @@ impl DatabaseConfig {
     }
 }
 
+/// One token (string) or an accept list (array) during rotation. The
+/// receiver in `audit::kratos_webhook` accepts a request when the presented
+/// bearer matches any entry, so an operator can add a new token, roll it
+/// out, then drop the old one with no window where valid tokens 401.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum WebhookTokens {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl WebhookTokens {
+    pub fn entries(&self) -> &[String] {
+        match self {
+            WebhookTokens::One(s) => std::slice::from_ref(s),
+            WebhookTokens::Many(v) => v.as_slice(),
+        }
+    }
+
+    /// True for the unconfigured default (`""` or `[]`); boot refuses to start in this state.
+    pub fn is_unset(&self) -> bool {
+        match self {
+            WebhookTokens::One(s) => s.is_empty(),
+            WebhookTokens::Many(v) => v.is_empty(),
+        }
+    }
+
+    /// Rejects an empty entry or a duplicate. Called from boot validation
+    /// once `is_unset` has already passed. Error text never echoes the
+    /// token value.
+    pub fn validate(&self) -> Result<(), String> {
+        let entries = self.entries();
+        if entries.iter().any(|t| t.is_empty()) {
+            return Err("audit.webhook_token contains an empty entry".to_string());
+        }
+        let mut seen = std::collections::HashSet::with_capacity(entries.len());
+        for t in entries {
+            if !seen.insert(t) {
+                return Err("audit.webhook_token contains a duplicate entry".to_string());
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Default for WebhookTokens {
+    fn default() -> Self {
+        WebhookTokens::One(String::new())
+    }
+}
+
 /// Audit log configuration.
 ///
 /// `webhook_token` gates the `/internal/audit/kratos` receiver and must match the Kratos config;
-/// Forseti refuses to boot when empty. `ip_salt` is optional (derived from `self.url` via `audit::ip_salt()`
-/// when unset). `audit_retention_days` is the `audit-prune` default.
+/// a single string or an array of strings (accept-list, for zero-loss rotation) — see
+/// [`WebhookTokens`]. Forseti refuses to boot when unset. `ip_salt` is optional (derived from
+/// `self.url` via `audit::ip_salt()` when unset). `audit_retention_days` is the `audit-prune` default.
 #[derive(Debug, Clone, Deserialize)]
 pub struct AuditConfig {
     #[serde(default)]
-    pub webhook_token: String,
+    pub webhook_token: WebhookTokens,
     #[serde(default)]
     pub ip_salt: Option<String>,
     #[serde(default = "default_audit_retention_days")]
@@ -537,7 +589,7 @@ pub struct AuditConfig {
 impl Default for AuditConfig {
     fn default() -> Self {
         Self {
-            webhook_token: String::new(),
+            webhook_token: WebhookTokens::default(),
             ip_salt: None,
             audit_retention_days: default_audit_retention_days(),
         }
@@ -1594,5 +1646,60 @@ mod tests {
             r#"{"from_address":"a@b.com","provider":"smtp","host":"127.0.0.1","port":1025,"tls":"none"}"#,
         );
         assert!(cfg_with_email(Some(cfg)).validate_email().is_ok());
+    }
+
+    // --- WebhookTokens -------------------------------------------------
+
+    #[derive(Deserialize)]
+    struct W {
+        webhook_token: WebhookTokens,
+    }
+
+    // Exercises the real load path (figment + toml), not just serde, since
+    // `AppConfig::load()` goes through `Figment::new().merge(Toml::file(..))`.
+    #[test]
+    fn webhook_tokens_deserializes_single_string() {
+        let w: W = Figment::new()
+            .merge(Toml::string(r#"webhook_token = "a""#))
+            .extract()
+            .expect("single string should deserialize as One");
+        assert_eq!(w.webhook_token.entries(), ["a"]);
+    }
+
+    #[test]
+    fn webhook_tokens_deserializes_array() {
+        let w: W = Figment::new()
+            .merge(Toml::string(r#"webhook_token = ["a", "b"]"#))
+            .extract()
+            .expect("array should deserialize as Many");
+        assert_eq!(w.webhook_token.entries(), ["a", "b"]);
+    }
+
+    #[test]
+    fn webhook_tokens_default_is_unset() {
+        assert!(WebhookTokens::default().is_unset());
+        assert!(WebhookTokens::One(String::new()).is_unset());
+        assert!(WebhookTokens::Many(Vec::new()).is_unset());
+        assert!(!WebhookTokens::One("a".into()).is_unset());
+        assert!(!WebhookTokens::Many(vec!["a".into()]).is_unset());
+    }
+
+    #[test]
+    fn webhook_tokens_validate_rejects_empty_entry() {
+        let t = WebhookTokens::Many(vec!["a".into(), String::new()]);
+        assert!(t.validate().is_err());
+    }
+
+    #[test]
+    fn webhook_tokens_validate_rejects_duplicate_entries() {
+        let t = WebhookTokens::Many(vec!["a".into(), "a".into()]);
+        assert!(t.validate().is_err());
+    }
+
+    #[test]
+    fn webhook_tokens_validate_accepts_distinct_nonempty_entries() {
+        let t = WebhookTokens::Many(vec!["a".into(), "b".into()]);
+        assert!(t.validate().is_ok());
+        assert!(WebhookTokens::One("a".into()).validate().is_ok());
     }
 }

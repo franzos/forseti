@@ -53,7 +53,7 @@
 pub mod kratos_webhook;
 
 use std::convert::Infallible;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 use axum::{
     extract::{Request, State},
@@ -840,6 +840,27 @@ pub fn record_kratos_webhook_rejected() {
 /// [`KRATOS_WEBHOOK_REJECTED`].
 pub fn kratos_webhook_rejected_total() -> u64 {
     KRATOS_WEBHOOK_REJECTED.load(Ordering::Relaxed)
+}
+
+/// In-process index of the `[audit].webhook_token` accept-list entry that
+/// last authenticated a Kratos webhook request; `-1` = never matched since
+/// boot. Surfaced on `/admin/status` so an operator mid-rotation can see
+/// whether traffic has moved off the old entry yet.
+static KRATOS_WEBHOOK_LAST_MATCHED_INDEX: AtomicI64 = AtomicI64::new(-1);
+
+/// Record which accept-list entry matched. Called from
+/// `src/audit/kratos_webhook.rs::receive` on successful auth.
+pub fn record_kratos_webhook_matched(idx: usize) {
+    KRATOS_WEBHOOK_LAST_MATCHED_INDEX.store(idx as i64, Ordering::Relaxed);
+}
+
+/// Index of the accept-list entry that last matched, or `None` if none has
+/// matched since boot. See [`KRATOS_WEBHOOK_LAST_MATCHED_INDEX`].
+pub fn kratos_webhook_last_matched_index() -> Option<usize> {
+    match KRATOS_WEBHOOK_LAST_MATCHED_INDEX.load(Ordering::Relaxed) {
+        n if n < 0 => None,
+        n => Some(n as usize),
+    }
 }
 
 /// In-process count of Kratos-webhook rows written with a freshness flag

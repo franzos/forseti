@@ -50,6 +50,12 @@ struct StatusTemplate {
     /// Kratos-webhook rows flagged stale/future since boot; usually a slow flow
     /// or clock skew.
     audit_webhook_freshness_anomalies: u64,
+    /// `[audit].webhook_token` accept-list size; >1 means a rotation is in
+    /// flight (see `WebhookTokens` in `config.rs`).
+    audit_webhook_accept_list_len: usize,
+    /// Index of the accept-list entry that last authenticated a request;
+    /// `None` renders "none since boot".
+    audit_webhook_last_matched: Option<usize>,
     /// One-word license state: "Unlicensed" / "Active" / "Grace" / "Expired".
     license_state: &'static str,
     /// Tier + customer label when a license is present; `None` for OSS-tier.
@@ -157,6 +163,8 @@ pub async fn show(State(state): State<AppState>, admin: RequireAdmin) -> Respons
     let audit_webhook_rejected = crate::audit::kratos_webhook_rejected_total();
     let audit_webhook_freshness_anomalies =
         crate::audit::kratos_webhook_freshness_anomalies_total();
+    let audit_webhook_accept_list_len = state.cfg.audit.webhook_token.entries().len();
+    let audit_webhook_last_matched = crate::audit::kratos_webhook_last_matched_index();
 
     let (license_state, license_detail) = match &*state.license.status() {
         crate::commercial::LicenseStatus::Unlicensed => ("Unlicensed", None),
@@ -189,6 +197,8 @@ pub async fn show(State(state): State<AppState>, admin: RequireAdmin) -> Respons
         audit_write_failures,
         audit_webhook_rejected,
         audit_webhook_freshness_anomalies,
+        audit_webhook_accept_list_len,
+        audit_webhook_last_matched,
         license_state,
         license_detail,
         issuer: disc.issuer,

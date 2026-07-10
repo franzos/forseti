@@ -150,12 +150,11 @@ pub async fn receive(
 ) -> Response {
     let action_str_opt = map_action(&q.action);
 
-    // `app::run` refuses to boot with an empty token, so this is never
-    // empty at runtime. Keep the explicit check anyway as defence in
+    // `app::run` refuses to boot with an unset accept-list, so this is
+    // never empty at runtime. Keep the explicit check anyway as defence in
     // depth against a future code path that constructs `AuditConfig`
     // outside the boot path.
-    let configured = state.cfg.audit.webhook_token.as_str();
-    if configured.is_empty() {
+    if state.cfg.audit.webhook_token.is_unset() {
         return (
             StatusCode::UNAUTHORIZED,
             "audit webhook token not configured",
@@ -174,18 +173,11 @@ pub async fn receive(
     else {
         return (StatusCode::UNAUTHORIZED, "missing bearer token").into_response();
     };
-    // Hash both sides before ct_eq: subtle's slice impl short-circuits on
-    // unequal lengths, which would leak a length oracle for the configured
-    // token. Fixed-length digests dodge that.
-    use sha2::Digest;
-    let presented_hash = sha2::Sha256::digest(presented.as_bytes());
-    let configured_hash = sha2::Sha256::digest(configured.as_bytes());
-    if !bool::from(subtle::ConstantTimeEq::ct_eq(
-        presented_hash.as_slice(),
-        configured_hash.as_slice(),
-    )) {
+    let Some(matched_idx) = match_webhook_token(state.cfg.audit.webhook_token.entries(), presented)
+    else {
         return (StatusCode::UNAUTHORIZED, "bad token").into_response();
-    }
+    };
+    audit::record_kratos_webhook_matched(matched_idx);
 
     // Unknown action / malformed body are a Kratos contract or config
     // mismatch, not an auth failure. Count them and return 204 — never a
@@ -253,6 +245,28 @@ pub async fn receive(
     StatusCode::NO_CONTENT.into_response()
 }
 
+/// Index of the first accept-list entry the presented bearer matches, or
+/// `None`. Hashes both sides before `ct_eq`: subtle's slice impl
+/// short-circuits on unequal lengths, which would leak a length oracle for
+/// the configured token; fixed-length digests dodge that. Every entry is
+/// checked (no early break), so the accept-list size isn't observable via
+/// timing.
+fn match_webhook_token(entries: &[String], presented: &str) -> Option<usize> {
+    use sha2::Digest;
+    let presented_hash = sha2::Sha256::digest(presented.as_bytes());
+    let mut matched: Option<usize> = None;
+    for (i, tok) in entries.iter().enumerate() {
+        let configured_hash = sha2::Sha256::digest(tok.as_bytes());
+        if bool::from(subtle::ConstantTimeEq::ct_eq(
+            presented_hash.as_slice(),
+            configured_hash.as_slice(),
+        )) {
+            matched.get_or_insert(i);
+        }
+    }
+    matched
+}
+
 /// Map an inbound action string onto the typed vocabulary. Unknown values
 /// are rejected at the receiver rather than leaked through `Box::leak` —
 /// keeps the action column tightly scoped to the agreed set and avoids
@@ -304,5 +318,44 @@ fn build_safe_metadata(value: serde_json::Value) -> SafeMetadata {
     match value {
         serde_json::Value::Object(map) => SafeMetadata::from_json_object(map),
         other => SafeMetadata::from_pairs(&[("value", other)]),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::match_webhook_token;
+
+    fn entries(strs: &[&str]) -> Vec<String> {
+        strs.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn webhook_token_single_entry_matches() {
+        let e = entries(&["secret"]);
+        assert_eq!(match_webhook_token(&e, "secret"), Some(0));
+    }
+
+    #[test]
+    fn webhook_token_accept_list_matches_old_entry() {
+        // Rotation in flight: ["new", "old"] still accepts the old token.
+        let e = entries(&["new", "old"]);
+        assert_eq!(match_webhook_token(&e, "old"), Some(1));
+    }
+
+    #[test]
+    fn webhook_token_accept_list_matches_new_entry() {
+        let e = entries(&["new", "old"]);
+        assert_eq!(match_webhook_token(&e, "new"), Some(0));
+    }
+
+    #[test]
+    fn webhook_token_unknown_is_rejected() {
+        let e = entries(&["new", "old"]);
+        assert_eq!(match_webhook_token(&e, "unknown"), None);
+    }
+
+    #[test]
+    fn webhook_token_empty_list_never_matches() {
+        assert_eq!(match_webhook_token(&[], "anything"), None);
     }
 }
