@@ -29,38 +29,73 @@
         </div>
       {% endif %}
 
-      {% if oidc_nodes.is_empty() %}
+      {% if rows.is_empty() %}
         <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg">
           <p class="font-body-md text-body-md text-on-surface">{{ chrome.t("settings-providers-empty-heading") }}</p>
           <p class="font-body-sm text-body-sm text-on-surface-variant mt-2">{{ chrome.t("settings-providers-empty-desc") }}</p>
         </div>
       {% else %}
-        <form method="{{ form_method }}"
-              action="{{ form_action }}"
-              class="bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg flex flex-col gap-stack-md">
-          {% for node in hidden_defaults %}
-            {% include "partials/flow_node.html" %}
-          {% endfor %}
-          {% for node in oidc_nodes %}
-            {% if node.input_type == "hidden" %}
-              {% include "partials/flow_node.html" %}
-            {% else %}
-              <div class="flex items-center justify-between gap-stack-md">
-                <span class="font-label-md text-label-md text-on-surface">
-                  {% match node.label %}{% when Some with (l) %}<bdi>{{ l }}</bdi>{% when None %}{{ node.name }}{% endmatch %}
+        <div class="bg-surface-container-lowest border border-outline-variant rounded-xl divide-y divide-outline-variant">
+          {% for row in rows %}
+            <div class="flex items-center gap-4 p-4">
+              <span class="w-9 h-9 rounded-full flex items-center justify-center shrink-0 {% if row.linked %}bg-tertiary-fixed text-on-tertiary-fixed{% else %}bg-surface-container text-on-surface-variant{% endif %}">
+                {{ row.icon_svg|safe }}
               </span>
-              {% include "partials/flow_node.html" %}
+              <div class="flex-1 min-w-0">
+                <p class="font-label-md text-label-md text-on-surface"><bdi>{{ row.display_name }}</bdi></p>
+                <p class="font-body-sm text-body-sm text-on-surface-variant">
+                  {% if row.linked %}
+                    {% match row.connected_at %}
+                    {% when Some with (d) %}{{ chrome.tv1("settings-providers-status-connected", "date", d) }}
+                    {% when None %}{{ chrome.t("settings-providers-status-connected-plain") }}
+                    {% endmatch %}
+                  {% else %}
+                    {{ chrome.t("settings-providers-status-not-connected") }}
+                  {% endif %}
+                </p>
+              </div>
+              <div class="shrink-0">
+                {% match row.action %}
+                {% when RowAction::Unlink %}
+                  <form method="{{ form_method }}"
+                        action="{{ form_action }}"
+                        onsubmit="return confirm('{{ chrome.tv1("settings-providers-confirm-unlink", "provider", row.display_name.as_str()) }}');">
+                    {% for node in hidden_defaults %}
+                      {% include "partials/flow_node.html" %}
+                    {% endfor %}
+                    <input type="hidden" name="{{ row.action_name }}" value="{{ row.action_value }}">
+                    <input type="hidden" name="method" value="oidc">
+                    <button type="submit"
+                            class="font-label-md text-label-md text-error border border-error rounded-lg px-4 py-2 hover:bg-error-container hover:text-on-error-container transition-colors focus:outline-none focus:ring-2 focus:ring-error focus:ring-offset-2">
+                      {{ chrome.t("settings-providers-unlink") }}
+                    </button>
+                  </form>
+                {% when RowAction::Link %}
+                  <form method="{{ form_method }}" action="{{ form_action }}">
+                    {% for node in hidden_defaults %}
+                      {% include "partials/flow_node.html" %}
+                    {% endfor %}
+                    <input type="hidden" name="method" value="oidc">
+                    {% let oidc_btn_name = row.action_name.as_str() %}
+                    {% let oidc_btn_value = row.action_value.as_str() %}
+                    {% let oidc_icon = row.icon_svg %}
+                    {% let oidc_label = chrome.t("settings-providers-link") %}
+                    {% include "partials/oidc_button.html" %}
+                  </form>
+                {% when RowAction::UnlinkBlockedSoleCredential %}
+                  <p class="font-body-sm text-body-sm text-on-surface-variant max-w-xs">{{ chrome.t("settings-providers-unlink-blocked") }}</p>
+                {% when RowAction::None %}
+                {% endmatch %}
+              </div>
             </div>
-          {% endif %}
-        {% endfor %}
-        <input type="hidden" name="method" value="oidc">
-      </form>
-    {% endif %}
+          {% endfor %}
+        </div>
+      {% endif %}
 
-    <div>
-      <a href="/settings"
-         class="font-label-md text-label-md text-on-surface-variant hover:text-primary transition-colors"><span class="dir-flip">&larr;</span> {{ chrome.t("settings-providers-back") }}</a>
-    </div>
-  </section>
-</div>
+      <div>
+        <a href="/settings"
+           class="font-label-md text-label-md text-on-surface-variant hover:text-primary transition-colors"><span class="dir-flip">&larr;</span> {{ chrome.t("settings-providers-back") }}</a>
+      </div>
+    </section>
+  </div>
 {% endblock %}

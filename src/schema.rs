@@ -326,6 +326,14 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    oidc_links (identity_id, provider) {
+        identity_id -> Text,
+        provider -> Text,
+        first_seen_at -> Text,
+    }
+}
+
 diesel::joinable!(organization_members -> organizations (org_id));
 diesel::joinable!(saml_connections -> organizations (org_id));
 diesel::joinable!(org_allowed_domains -> organizations (org_id));

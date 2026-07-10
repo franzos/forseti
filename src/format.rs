@@ -105,6 +105,17 @@ pub fn humanise_timestamp(locale: &crate::locale::LanguageIdentifier, iso: &str)
     crate::i18n::lookup_n(locale, key, n)
 }
 
+/// Format an RFC3339 timestamp as a short absolute date ("Jul 10, 2026").
+/// Month names stay English; used where a relative "3mo ago" reads worse than
+/// an on-record date (e.g. when a provider was first connected). Falls back to
+/// the original string on parse failure.
+pub fn short_date(iso: &str) -> String {
+    match chrono::DateTime::parse_from_rfc3339(iso) {
+        Ok(dt) => dt.format("%b %-d, %Y").to_string(),
+        Err(_) => iso.to_string(),
+    }
+}
+
 /// True when `s` has the canonical 8-4-4-4-12 UUID shape (not validated semantically).
 /// Lets admin search decide between an ID lookup and a name/email filter.
 pub fn looks_like_uuid(s: &str) -> bool {

@@ -35,9 +35,27 @@ export async function registerUser(page: Page, prefix: string): Promise<Register
   return registerUserWithEmail(page, email);
 }
 
+/** Options for {@link registerUserWithEmail}. */
+export interface RegisterOptions {
+  /**
+   * Skip the initial `page.goto('/registration')`. Set this when the caller
+   * has already navigated to a registration flow that carries a `return_to`
+   * (e.g. an org landing-page CTA) — a fresh `goto` would start a new flow and
+   * silently drop that `return_to`, so the after-registration hook would land
+   * on the dashboard instead of the intended destination.
+   */
+  skipInitialGoto?: boolean;
+}
+
 /** As `registerUser`, with a caller-supplied email. */
-export async function registerUserWithEmail(page: Page, email: string): Promise<RegisteredUser> {
-  await page.goto('/registration');
+export async function registerUserWithEmail(
+  page: Page,
+  email: string,
+  opts: RegisterOptions = {},
+): Promise<RegisteredUser> {
+  if (!opts.skipInitialGoto) {
+    await page.goto('/registration');
+  }
 
   // Step 1: profile fields. Kratos's `traits.*` inputs are rendered by
   // the portal directly; the form posts cross-origin to Kratos at :4433

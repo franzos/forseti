@@ -317,6 +317,72 @@ html.dark {
   --tw-ring-offset-color: #131314;
 }
 
+/* Operator-authored legal pages (privacy/terms/imprint). Tailwind's preflight
+   resets headings/lists/quotes, and no typography plugin is installed, so the
+   rendered markdown needs explicit prose styling. Driven from design tokens so
+   it tracks light/dark and the brand. */
+.legal-content {
+  color: var(--color-on-surface);
+  font-family: var(--font-body-md);
+  font-size: var(--text-body-md);
+  line-height: var(--text-body-md--line-height);
+}
+.legal-content > :first-child { margin-top: 0; }
+.legal-content h1 {
+  font-family: var(--font-headline-lg);
+  font-size: var(--text-headline-lg);
+  line-height: var(--text-headline-lg--line-height);
+  font-weight: 600;
+  letter-spacing: var(--text-headline-lg--letter-spacing);
+  margin: 0 0 var(--spacing-stack-lg);
+}
+.legal-content h2 {
+  font-family: var(--font-headline-md);
+  font-size: var(--text-headline-md);
+  line-height: var(--text-headline-md--line-height);
+  font-weight: 600;
+  margin: var(--spacing-stack-xl) 0 var(--spacing-stack-md);
+}
+.legal-content h3 {
+  font-size: var(--text-body-lg);
+  line-height: var(--text-body-lg--line-height);
+  font-weight: 600;
+  margin: var(--spacing-stack-lg) 0 var(--spacing-stack-sm);
+}
+.legal-content p { margin: 0 0 var(--spacing-stack-md); }
+.legal-content ul,
+.legal-content ol {
+  margin: 0 0 var(--spacing-stack-md);
+  padding-inline-start: var(--spacing-stack-lg);
+}
+.legal-content ul { list-style: disc; }
+.legal-content ol { list-style: decimal; }
+.legal-content li { margin: var(--spacing-stack-sm) 0; }
+.legal-content a {
+  color: var(--color-primary);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.legal-content strong { font-weight: 600; }
+.legal-content code {
+  font-family: var(--font-code-md);
+  font-size: var(--text-code-md);
+  background: var(--color-surface-container);
+  padding: 0.1em 0.35em;
+  border-radius: var(--radius-sm);
+}
+.legal-content blockquote {
+  border-inline-start: 3px solid var(--color-outline-variant);
+  padding: var(--spacing-stack-xs) 0 var(--spacing-stack-xs) var(--spacing-stack-md);
+  margin: 0 0 var(--spacing-stack-md);
+  color: var(--color-on-surface-variant);
+}
+.legal-content hr {
+  border: 0;
+  border-top: 1px solid var(--color-outline-variant);
+  margin: var(--spacing-stack-lg) 0;
+}
+
 /* Autofilled inputs otherwise paint a light background in both modes. Drive
    them from theme tokens so they track light/dark. */
 input:-webkit-autofill,

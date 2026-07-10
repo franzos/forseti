@@ -157,6 +157,13 @@ settings-providers-subtitle = سجّل الدخول إلى حسابك باستخ
 settings-providers-empty-heading = لم يُهيّئ مسؤولك أي مزوّدين أعلى المصدر.
 settings-providers-empty-desc = تواصل مع مسؤولك لتفعيل Google أو GitHub أو مزوّدي تسجيل دخول آخرين.
 settings-providers-back = العودة إلى الإعدادات
+settings-providers-status-connected = متصل بتاريخ { $date }
+settings-providers-status-connected-plain = متصل
+settings-providers-status-not-connected = غير متصل
+settings-providers-link = ربط
+settings-providers-unlink = إلغاء الربط
+settings-providers-unlink-blocked = هذه طريقة تسجيل الدخول الوحيدة لديك. أضف كلمة مرور أو مفتاح مرور قبل أن تتمكن من إلغاء ربطها.
+settings-providers-confirm-unlink = هل تريد إلغاء ربط { $provider }؟ لن تتمكن بعد ذلك من تسجيل الدخول باستخدامه.
 
 # تقسيمات الشيفرة المضمّنة (البند 8: عنصرا شيفرة أو أكثر لكل سلسلة)
 

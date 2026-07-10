@@ -157,6 +157,13 @@ settings-providers-subtitle = Inicie sessão na sua conta utilizando um forneced
 settings-providers-empty-heading = Nenhum fornecedor upstream configurado pelo seu administrador.
 settings-providers-empty-desc = Contacte o seu administrador para ativar o Google, o GitHub ou outros fornecedores de início de sessão.
 settings-providers-back = Voltar às definições
+settings-providers-status-connected = Associado em { $date }
+settings-providers-status-connected-plain = Associado
+settings-providers-status-not-connected = Não associado
+settings-providers-link = Associar
+settings-providers-unlink = Dissociar
+settings-providers-unlink-blocked = Este é o seu único método de início de sessão. Adicione uma palavra-passe ou chave de acesso antes de o poder dissociar.
+settings-providers-confirm-unlink = Dissociar { $provider }? Deixará de poder iniciar sessão com este método.
 
 # Divisões de código inline (item 8: 2+ elementos de código por string)
 

@@ -2232,6 +2232,22 @@ pub async fn portal_reachable() -> bool {
         .unwrap_or(false)
 }
 
+/// The device-grant flow needs the `forseti-linux-pam` OAuth client provisioned
+/// in Hydra by `forseti posix-init-client`. `make stack-up` / `seed-admin` don't
+/// do that, so tests that reach Hydra's `device/auth` skip cleanly when it's
+/// absent rather than failing on a 502 from `device/init`. CI provisions it (see
+/// `make seed-posix-client`).
+pub async fn pam_device_client_ready() -> bool {
+    let client = browser_client();
+    client
+        .get(format!("{HYDRA_ADMIN}/admin/clients/forseti-linux-pam"))
+        .timeout(Duration::from_secs(2))
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
+}
+
 /// Pull the `value` of a hidden `_csrf` input from an HTML form body.
 pub fn extract_csrf_form_token(html: &str) -> Option<String> {
     let idx = html.find("name=\"_csrf\"")?;

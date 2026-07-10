@@ -23,6 +23,17 @@
         </p>
       </header>
 
+      {% if !error.is_empty() %}
+        <div class="bg-error-container border border-error rounded-lg p-stack-md" role="alert">
+          <p class="font-body-sm text-body-sm text-on-error-container">{{ error }}</p>
+        </div>
+      {% endif %}
+      {% if !flash.is_empty() %}
+        <div class="bg-tertiary-container border border-outline-variant rounded-lg p-stack-md">
+          <p class="font-body-sm text-body-sm text-on-tertiary-container">{{ flash }}</p>
+        </div>
+      {% endif %}
+
       <form method="POST"
             enctype="multipart/form-data"
             action="{% if is_default %}/settings/organization/logo{% else %}/settings/organizations/{{ org.slug }}/logo{% endif %}"
@@ -56,36 +67,22 @@
         <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
         <label class="flex flex-col gap-1">
           <span class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("orgs-branding-field-logo-url") }}</span>
-          {% match org.logo_url %}{% when Some with (v) %}
           <input type="url"
                  name="logo_url"
-                 value="{{ v }}"
+                 value="{{ values.logo_url }}"
                  class="border border-outline-variant rounded-lg px-3 py-2 bg-surface-container-low">
-          {% when None %}
-          <input type="url"
-                 name="logo_url"
-                 value=""
-                 class="border border-outline-variant rounded-lg px-3 py-2 bg-surface-container-low">
-        {% endmatch %}
       </label>
       <label class="flex flex-col gap-1">
         <span class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("orgs-branding-field-support-email") }}</span>
-        {% match org.support_email %}{% when Some with (v) %}
         <input type="email"
                name="support_email"
-               value="{{ v }}"
+               value="{{ values.support_email }}"
                class="border border-outline-variant rounded-lg px-3 py-2 bg-surface-container-low">
-        {% when None %}
-        <input type="email"
-               name="support_email"
-               value=""
-               class="border border-outline-variant rounded-lg px-3 py-2 bg-surface-container-low">
-      {% endmatch %}
     </label>
 
     <hr class="border-outline-variant">
 
-    {% let current_preset = org.theme_preset.as_deref().unwrap_or("") %}
+    {% let current_preset = values.theme_preset.as_str() %}
     <label class="flex flex-col gap-1">
       <span class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("orgs-branding-theme-preset") }}</span>
       <select name="theme_preset" id="theme_preset"
@@ -100,9 +97,9 @@
       </select>
     </label>
 
-    {% let primary_hex = org.brand_primary.as_deref().unwrap_or("#000000") %}
-    {% let on_primary_hex = org.brand_on_primary.as_deref().unwrap_or("#ffffff") %}
-    {% let secondary_hex = org.brand_secondary.as_deref().unwrap_or("#555f73") %}
+    {% let primary_hex = values.brand_primary.as_str() %}
+    {% let on_primary_hex = values.brand_on_primary.as_str() %}
+    {% let secondary_hex = values.brand_secondary.as_str() %}
     <div class="grid grid-cols-1 sm:grid-cols-3 gap-stack-md">
       <label class="flex flex-col gap-1">
         <span class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("orgs-branding-primary") }}</span>
@@ -131,7 +128,7 @@
       <input type="checkbox"
              name="request_public_login"
              value="on"
-             {% if org.public_login_enabled == 1 %}checked{% endif %}>
+             {% if values.public_login_enabled %}checked{% endif %}>
       <span class="font-body-md text-body-md text-on-surface">{{ chrome.t("orgs-branding-request-public") }}</span>
     </label>
 

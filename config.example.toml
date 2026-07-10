@@ -50,6 +50,15 @@ support_email = "support@example.com"
 # the operator brand — NEVER set this from tenant-controlled input.
 # operator_trust_anchor = "Forseti"
 
+# Operator-editable legal pages: /privacy, /terms, /imprint. Forseti ships short
+# English defaults; to override, point `dir` at a directory and drop markdown
+# files named `{doc}.{locale}.md` in it (doc = privacy|terms|imprint). Resolution
+# per request: `{doc}.{locale}.md` -> `{doc}.en.md` -> the shipped default. So
+# `privacy.de.md` serves German visitors, `privacy.en.md` everyone else.
+# A set-but-missing directory is a startup error (fail fast, not silent fallback).
+# [legal]
+# dir = "/etc/forseti/legal"
+
 # Dashboard "Your apps" cards. Empty list (or omitted section) hides the entire
 # section on the dashboard.
 # [[apps]]
@@ -135,6 +144,21 @@ support_email = "support@example.com"
 # "formshive:forms:read"  = "Read your forms and submissions"
 # "formshive:forms:write" = "Create and modify your forms"
 # "formshive:mcp:invoke"  = "Call your formshive MCP tools on your behalf"
+
+# Registration page-render rate limiter. `GET /registration` is throttled per
+# source IP AND by a global all-callers bucket to blunt signup-page grinding.
+# NOTE this bounds page renders, not account creation — the browser POSTs
+# registration straight to Kratos, which Forseti never sees. Per-IP defaults are
+# 30/min + 300/hour; because many legitimate users share one egress IP behind a
+# corporate NAT / CGNAT, keep the per-IP window generous and lean on the global
+# bucket (120/min + 1200/hour) as the real abuse backstop. Values are clamped to
+# the same ceilings as the DCR limiter (per-minute 1_000, per-hour 10_000). Set
+# any bucket to 0 to disable it.
+# [auth]
+# registration_ip_rate_per_minute     = 30
+# registration_ip_rate_per_hour        = 300
+# registration_global_rate_per_minute  = 120
+# registration_global_rate_per_hour    = 1200
 
 # Admin surface (M3). `/admin/*` requires AAL2 + a session email in this list.
 # Empty list (or omitted section) = `/admin/*` is closed to everyone.

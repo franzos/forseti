@@ -157,6 +157,13 @@ settings-providers-subtitle = Melden Sie sich über einen externen Identitätsan
 settings-providers-empty-heading = Keine Upstream-Anbieter von Ihrem Administrator konfiguriert.
 settings-providers-empty-desc = Wenden Sie sich an Ihren Administrator, um Google, GitHub oder andere Anmeldeanbieter zu aktivieren.
 settings-providers-back = Zurück zu den Einstellungen
+settings-providers-status-connected = Verbunden am { $date }
+settings-providers-status-connected-plain = Verbunden
+settings-providers-status-not-connected = Nicht verbunden
+settings-providers-link = Verknüpfen
+settings-providers-unlink = Trennen
+settings-providers-unlink-blocked = Dies ist Ihre einzige Anmeldemethode. Fügen Sie ein Passwort oder einen Passkey hinzu, bevor Sie sie trennen können.
+settings-providers-confirm-unlink = { $provider } trennen? Sie können sich dann nicht mehr damit anmelden.
 
 # Inline-Code-Aufteilungen (Punkt 8: 2+ Code-Elemente pro Zeichenkette)
 

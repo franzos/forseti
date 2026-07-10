@@ -1401,7 +1401,7 @@ async fn poll_until_terminal(host_id: &str, secret: &str, device_code: &str, max
 /// (single-use is asserted via the negative tests below).
 #[tokio::test]
 async fn device_auth_happy_path_binds_and_approves() {
-    if !portal_reachable().await {
+    if !portal_reachable().await || !pam_device_client_ready().await {
         return;
     }
     let approver = register_test_user("dev-ok").await;
@@ -1461,7 +1461,7 @@ async fn device_auth_happy_path_binds_and_approves() {
 /// user) approves → `denied{binding}`.
 #[tokio::test]
 async fn device_auth_wrong_user_denied() {
-    if !portal_reachable().await {
+    if !portal_reachable().await || !pam_device_client_ready().await {
         return;
     }
     let alice = register_test_user("dev-alice").await;
@@ -1506,7 +1506,7 @@ async fn device_auth_wrong_user_denied() {
 /// here is exactly the AAL1 case a force_mfa host must reject.
 #[tokio::test]
 async fn device_auth_force_mfa_aal1_denied() {
-    if !portal_reachable().await {
+    if !portal_reachable().await || !pam_device_client_ready().await {
         return;
     }
     let approver = register_test_user("dev-mfa").await;

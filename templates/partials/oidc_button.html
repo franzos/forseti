@@ -1,0 +1,13 @@
+{# Branded OIDC submit button (secondary styling). Caller sets in scope:
+   - oidc_btn_name  : submit node name  (Kratos field, e.g. `provider` / `link`)
+   - oidc_btn_value : submit node value (raw provider id, e.g. `github`)
+   - oidc_icon      : inline brand-mark SVG markup (rendered raw)
+   - oidc_label     : already-localized label string
+   The enclosing <form> (action/method + CSRF) is the caller's responsibility. #}
+<button type="submit"
+        name="{{ oidc_btn_name }}"
+        value="{{ oidc_btn_value }}"
+        formnovalidate
+        class="w-full flex items-center justify-center gap-stack-md bg-surface-container-lowest border border-outline-variant text-on-surface font-label-md text-label-md py-stack-md px-stack-lg rounded-lg hover:bg-surface-container-low focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2 transition-colors">
+  {{ oidc_icon|safe }}<bdi>{{ oidc_label }}</bdi>
+</button>

@@ -29,6 +29,15 @@ dcr_ip_rate_per_minute = 1000
 dcr_ip_rate_per_hour   = 10000
 dcr_iat_daily_limit    = 2
 
+# The integration suite inits 140+ registration flows from one loopback IP in
+# a few seconds, so the production per-IP 300/hour default would 429 mid-run.
+# Relaxed here the same way DCR + claim_email are.
+[auth]
+registration_ip_rate_per_minute     = 1000
+registration_ip_rate_per_hour        = 10000
+registration_global_rate_per_minute  = 1000
+registration_global_rate_per_hour    = 10000
+
 # `make seed-admin` plants this identity (password + TOTP) so admin-gated
 # integration + Playwright tests run unattended. Keep this list in sync with
 # SEED_ADMIN_EMAIL in infra/seed-admin.sh.
@@ -75,3 +84,11 @@ enabled = true
 jackson_url = "http://127.0.0.1:5225"
 jackson_api_key = "dev-jackson-api-key"
 client_secret_verifier = "dev-client-secret-verifier"
+
+# POSIX/Linux-auth device grant. The device-auth integration tests need the
+# forseti-linux-pam client provisioned in Hydra (`make seed-posix-client` runs
+# `forseti posix-init-client`, wired into CI). Fixed secret so the seed + tests
+# are deterministic; without a provisioned client those tests skip cleanly.
+[posix]
+pam_client_id = "forseti-linux-pam"
+pam_client_secret = "dev-posix-pam-secret-change-me"

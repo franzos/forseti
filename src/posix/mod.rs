@@ -14,9 +14,9 @@ use axum::Router;
 use crate::state::AppState;
 
 /// Internal-listener POSIX router: NSS/SSH resolver plus host-authenticated
-/// device-auth endpoints, both gated by `RequirePosixHost`. The resolver
-/// surface carries an extra `Feature::LinuxAuth` license gate (see
-/// [`resolver::router`]); device routes stay ungated.
+/// device-auth endpoints, both gated by `RequirePosixHost`. Neither is
+/// license-gated: `Feature::LinuxAuth` only caps provisioning (see
+/// [`crate::admin::posix`]), never resolution or login.
 pub fn router(state: AppState) -> Router<AppState> {
     let trust_xff = state.cfg.proxy.trust_forwarded_for;
     resolver::router(state).merge(device::router(trust_xff))

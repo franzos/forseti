@@ -11,6 +11,7 @@ auth-login-create-account = Создать аккаунт
 
 # Общий разделитель (вход + регистрация)
 auth-or-continue-with = Или продолжить через
+auth-oidc-signin = Войти через { $provider }
 
 # Страница регистрации
 auth-registration-page-title = Создать аккаунт

@@ -140,6 +140,11 @@ metrics-exporter-prometheus = { version = "0.16", default-features = false }
 # what's needed: async resolution over Tokio + reading the platform
 # resolver config — no TLS backend (dns-over-rustls/https/quic) pulled in.
 hickory-resolver = "0.26"
+# Markdown -> HTML for the operator-authored legal pages (privacy/terms/imprint).
+# Rendered with `unsafe_ = false` (comrak's default): raw HTML in the operator's
+# markdown is dropped, never emitted, so the output is safe to `|safe` into the
+# themed page even though this app ships no CSP `script-src` backstop.
+comrak = { version = "0.53", default-features = false }
 [profile.release]
 strip = true
 lto = "thin"

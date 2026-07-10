@@ -84,7 +84,8 @@
     <footer class="bg-surface-container-low border-t border-outline-variant py-stack-lg mt-auto w-full">
       <div class="flex flex-col md:flex-row justify-between items-center px-margin-desktop max-w-container-max mx-auto gap-stack-md">
         <span class="font-label-sm text-label-sm text-on-surface font-bold">&copy; {{ chrome.brand.name }}</span>
-        <nav class="flex flex-wrap gap-stack-lg justify-center">
+        <nav class="flex flex-wrap items-center gap-stack-lg justify-center">
+          {% include "partials/_legal_footer_links.html" %}
           <span class="font-label-sm text-label-sm text-on-surface-variant opacity-80">v{{ chrome.version }}</span>
         </nav>
       </div>

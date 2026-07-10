@@ -153,6 +153,12 @@ orgs-branding-secondary = Акцентный цвет
 orgs-branding-request-public = Включить публичную страницу входа (/o/ваш-slug)
 orgs-branding-preview = Предпросмотр
 
+# Flash notices (post-save banners)
+flash-org-updated = Организация обновлена.
+flash-branding-saved = Брендинг сохранён.
+flash-logo-updated = Логотип обновлён.
+flash-logo-removed = Логотип удалён.
+
 # Публичная целевая страница (public_landing.html)
 orgs-public-landing-note = Чтобы войти, откройте приложение, предоставленное вашей командой. Вход выполняется оттуда.
 orgs-public-landing-register = Создать аккаунт

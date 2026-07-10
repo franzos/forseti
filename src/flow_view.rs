@@ -41,6 +41,11 @@ pub(crate) struct InputView {
     /// Kratos `meta.label.context` — arg bag for the label translation
     /// (e.g. `{"provider": "Google"}` for OIDC buttons). `Null` when absent.
     pub(crate) label_context: serde_json::Value,
+    /// Resolved provider display name for OIDC submit nodes (e.g. `GitHub`).
+    /// Empty for non-OIDC nodes; populated by [`enrich_oidc_branding`].
+    pub(crate) provider_display: String,
+    /// Inline brand-mark SVG for OIDC submit nodes; empty for others.
+    pub(crate) provider_icon_svg: &'static str,
 }
 
 /// A flash/validation message, with a coarse severity used to pick styling.
@@ -123,6 +128,7 @@ impl FlowFormView {
         let (form_action, form_method) = form_target(flow);
         let mut groups = group_nodes(flow);
         mark_primary_submits(&mut groups, kind);
+        enrich_oidc_branding(&mut groups.oidc);
         let has_visible_default = has_visible_default_inputs(&groups);
         translate_all_groups(&mut groups, locale);
         let mut msgs = flow_messages(flow);
@@ -259,7 +265,21 @@ pub(crate) fn node_to_input(node: &serde_json::Value) -> Option<InputView> {
         messages,
         label_id,
         label_context,
+        provider_display: String::new(),
+        provider_icon_svg: "",
     })
+}
+
+/// Resolve provider branding onto OIDC submit/button nodes: `provider_display`
+/// (registry name from the raw provider id in `value`) and `provider_icon_svg`.
+/// Left untouched for hidden nodes, whose `value` isn't a provider id.
+pub(crate) fn enrich_oidc_branding(nodes: &mut [InputView]) {
+    for n in nodes {
+        if n.input_type == "submit" || n.input_type == "button" {
+            n.provider_display = crate::oidc_providers::display_name(&n.value);
+            n.provider_icon_svg = crate::oidc_providers::icon_svg(&n.value);
+        }
+    }
 }
 
 /// The flow's `ui.nodes` array, or an empty slice on any miss. Lets callers

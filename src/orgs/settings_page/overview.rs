@@ -34,6 +34,8 @@ struct OverviewTemplate {
     /// `[saml]` is unconfigured or the org has no connection.
     sso: Option<SsoStatus>,
     nav: orgs::nav::OrgNav,
+    /// Non-empty after a successful save (PRG flash); drives the success banner.
+    flash: String,
 }
 
 struct SsoStatus {
@@ -84,15 +86,18 @@ pub(super) async fn overview(
     if orgs::org_role(&state.db, &ctx.identity_id, &target.org.id).await != Some(Role::Owner) {
         return Redirect::to(&format!("{}/info", target.base_path)).into_response();
     }
-    render_overview(
+    let (flash, clear_flash) = state.take_flash(&headers, &target.base_path);
+    let resp = render_overview(
         &state,
         &headers,
         &ctx,
         &target.org,
         &themed.memberships,
         themed.chrome,
+        flash,
     )
-    .await
+    .await;
+    crate::flash::attach_set_cookie(resp, clear_flash)
 }
 
 pub(super) async fn overview_info(
@@ -194,6 +199,7 @@ async fn render_overview(
     org: &Org,
     memberships: &[orgs::Membership],
     chrome: PageChrome,
+    flash: String,
 ) -> Response {
     let is_owner = orgs::org_role(&state.db, &ctx.identity_id, &org.id).await == Some(Role::Owner);
     let members = orgs::list_members(&state.db, &org.id)
@@ -211,6 +217,7 @@ async fn render_overview(
         member_count: members.len(),
         sso,
         nav,
+        flash,
     })
 }
 
@@ -225,6 +232,7 @@ pub(super) async fn overview_save(
     OrgSlug(slug): OrgSlug,
     sess: RequireSession,
     csrf: Csrf,
+    crate::page_chrome::ReqLocale(locale): crate::page_chrome::ReqLocale,
     CsrfForm(form): CsrfForm<OverviewForm>,
 ) -> Response {
     let target = match resolve_org_or_404(&state, slug.as_deref()).await {
@@ -284,7 +292,8 @@ pub(super) async fn overview_save(
         Some(_) => format!("/settings/organizations/{new_slug}"),
         None => target.base_path,
     };
-    Redirect::to(&redirect_to).into_response()
+    let msg = crate::i18n::lookup(&locale, "flash-org-updated");
+    state.flash_redirect(&redirect_to, &msg)
 }
 
 #[derive(Debug, Deserialize)]

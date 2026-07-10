@@ -11,6 +11,7 @@ auth-login-create-account = Créer un compte
 
 # Séparateur partagé (connexion + inscription)
 auth-or-continue-with = Ou continuer avec
+auth-oidc-signin = Se connecter avec { $provider }
 
 # Page d'inscription
 auth-registration-page-title = Créer un compte

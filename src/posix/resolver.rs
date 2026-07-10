@@ -14,15 +14,13 @@
 //! `kind = "user"` group is served single-member, but only when its owning
 //! account is visible on the host. UPGs are never enumerated.
 
-use axum::extract::{Json as JsonBody, Path, Request, State};
+use axum::extract::{Json as JsonBody, Path, State};
 use axum::http::StatusCode;
-use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 
 use crate::audit::{self, action, target_kind, AuditEvent, SafeMetadata};
-use crate::commercial::license::{Feature, FeatureStatus};
 use crate::posix::db;
 use crate::posix::host_auth::RequirePosixHost;
 use crate::posix::offline::{OfflineVerifier, OfflineVerifiersResponse};
@@ -79,33 +77,17 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/posix/v1/offline_verifiers", get(offline_verifiers))
         .route("/posix/v1/offline_audit", post(offline_audit));
 
-    let r = rate_limit::single_window(
+    // Resolution is never license-gated: the free tier resolves up to
+    // `free_seats` accounts, and an already-provisioned account keeps resolving
+    // whatever the license state. `Feature::LinuxAuth` only caps *provisioning*
+    // (src/admin/posix.rs), never reads.
+    rate_limit::single_window(
         r,
         state.cfg.proxy.trust_forwarded_for,
         60_000,
         RESOLVER_RATE_PER_MINUTE,
         rate_limit_error,
-    );
-
-    r.layer(middleware::from_fn_with_state(state, license_gate))
-}
-
-/// Data-plane resolution follows the SAML-login rule: only a hard Locked
-/// blocks. Active and the grace window keep NSS/SSH working so a present
-/// (even lapsed-within-grace) license never locks people out of their hosts.
-fn linux_auth_resolve_allowed(status: FeatureStatus) -> bool {
-    !matches!(status, FeatureStatus::Locked)
-}
-
-/// Gates the whole resolver surface on `Feature::LinuxAuth`. A Locked install
-/// answers 404 so the daemon degrades to "no such entry" rather than erroring.
-async fn license_gate(State(state): State<AppState>, req: Request, next: Next) -> Response {
-    if !linux_auth_resolve_allowed(state.license.feature(Feature::LinuxAuth)) {
-        // No host_id here: this runs before RequirePosixHost, so there is no
-        // host context to attach. The admin-side gate covers provisioning audit.
-        return StatusCode::NOT_FOUND.into_response();
-    }
-    next.run(req).await
+    )
 }
 
 /// 500, not 404: a db error must not look like a miss to the daemon.
@@ -537,18 +519,4 @@ async fn offline_audit(
     let written = audit::log_batch(&state.db, events).await.unwrap_or(0);
 
     Json(serde_json::json!({ "accepted": written })).into_response()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::commercial::FeatureStatus::*;
-
-    #[test]
-    fn only_locked_blocks_resolution() {
-        // Mirrors the SAML-login rule: grace still resolves.
-        assert!(linux_auth_resolve_allowed(Allowed));
-        assert!(linux_auth_resolve_allowed(GraceReadOnly));
-        assert!(!linux_auth_resolve_allowed(Locked));
-    }
 }

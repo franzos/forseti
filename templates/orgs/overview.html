@@ -27,6 +27,12 @@
         </p>
       </header>
 
+      {% if !flash.is_empty() %}
+        <div class="bg-tertiary-container border border-outline-variant rounded-lg p-stack-md">
+          <p class="font-body-sm text-body-sm text-on-tertiary-container">{{ flash }}</p>
+        </div>
+      {% endif %}
+
       <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg">
         <h2 class="font-headline-md text-headline-md text-on-surface mb-stack-md">{{ chrome.t("orgs-overview-identity-heading") }}</h2>
         {% if is_owner %}

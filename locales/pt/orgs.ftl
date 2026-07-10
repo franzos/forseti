@@ -153,6 +153,12 @@ orgs-branding-secondary = Cor de destaque
 orgs-branding-request-public = Ativar uma página de início de sessão pública (/o/o-seu-slug)
 orgs-branding-preview = Pré-visualização
 
+# Flash notices (post-save banners)
+flash-org-updated = Organização atualizada.
+flash-branding-saved = Identidade visual guardada.
+flash-logo-updated = Logótipo atualizado.
+flash-logo-removed = Logótipo removido.
+
 # Página de destino pública (public_landing.html)
 orgs-public-landing-note = Para iniciar sessão, abra a aplicação que a sua equipa forneceu. O início de sessão acontece a partir daí.
 orgs-public-landing-register = Criar uma conta

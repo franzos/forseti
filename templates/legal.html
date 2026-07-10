@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+
+{% block title %}{{ title }} · {{ chrome.brand.name }}{% endblock %}
+
+{% block content %}
+  <article class="legal-content w-full max-w-3xl mx-auto">
+    {{ body_html|safe }}
+  </article>
+{% endblock %}

@@ -53,11 +53,21 @@
         {% endif %}
       {% endfor %}
 
-      {# OIDC upstream provider buttons. Empty when no providers are enabled. #}
+      {# OIDC upstream provider buttons. Empty when no providers are enabled.
+       Submit nodes render branded via the shared partial; hidden nodes stay
+       plain so their name/value/CSRF still post unchanged. #}
       {% if !form.groups.oidc.is_empty() %}
         <div class="flex flex-col gap-stack-sm">
           {% for node in form.groups.oidc %}
-            {% include "partials/flow_node.html" %}
+            {% if node.input_type == "hidden" %}
+              {% include "partials/flow_node.html" %}
+            {% else %}
+              {% let oidc_btn_name = node.name.as_str() %}
+              {% let oidc_btn_value = node.value.as_str() %}
+              {% let oidc_icon = node.provider_icon_svg %}
+              {% let oidc_label = chrome.tv1("auth-oidc-signin", "provider", node.provider_display.as_str()) %}
+              {% include "partials/oidc_button.html" %}
+            {% endif %}
           {% endfor %}
         </div>
       {% endif %}

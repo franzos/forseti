@@ -3,7 +3,7 @@
 use askama::Template;
 use axum::extract::{Multipart, State};
 use axum::http::{HeaderMap, StatusCode};
-use axum::response::{IntoResponse, Redirect, Response};
+use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 
 use crate::audit::{self, action, target_kind, AuditCtx, AuditEvent};
@@ -30,6 +30,69 @@ struct BrandingTemplate {
     is_default: bool,
     nav: orgs::nav::OrgNav,
     presets: Vec<PresetView>,
+    /// Echoed form fields: stored values on GET, just-submitted values on a
+    /// validation-error re-render so nothing the user typed is lost.
+    values: BrandingFormValues,
+    /// Non-empty on a validation-error re-render; drives the red error banner.
+    error: String,
+    /// Non-empty after a successful save (PRG flash); drives the success banner.
+    flash: String,
+}
+
+/// Form-field values the branding template echoes back into the inputs.
+struct BrandingFormValues {
+    logo_url: String,
+    support_email: String,
+    theme_preset: String,
+    brand_primary: String,
+    brand_on_primary: String,
+    brand_secondary: String,
+    public_login_enabled: bool,
+}
+
+impl BrandingFormValues {
+    fn from_org(org: &Org) -> Self {
+        Self {
+            logo_url: org.logo_url.clone().unwrap_or_default(),
+            support_email: org.support_email.clone().unwrap_or_default(),
+            theme_preset: org.theme_preset.clone().unwrap_or_default(),
+            brand_primary: org
+                .brand_primary
+                .clone()
+                .unwrap_or_else(|| "#000000".to_string()),
+            brand_on_primary: org
+                .brand_on_primary
+                .clone()
+                .unwrap_or_else(|| "#ffffff".to_string()),
+            brand_secondary: org
+                .brand_secondary
+                .clone()
+                .unwrap_or_else(|| "#555f73".to_string()),
+            public_login_enabled: org.public_login_enabled == 1,
+        }
+    }
+
+    // Colour inputs require a valid hex; an empty submitted value falls back to
+    // the same defaults the GET path uses.
+    fn from_form(form: &BrandingForm) -> Self {
+        let color = |v: &str, default: &str| {
+            let v = v.trim();
+            if v.is_empty() {
+                default.to_string()
+            } else {
+                v.to_string()
+            }
+        };
+        Self {
+            logo_url: form.logo_url.trim().to_string(),
+            support_email: form.support_email.trim().to_string(),
+            theme_preset: form.theme_preset.trim().to_string(),
+            brand_primary: color(&form.brand_primary, "#000000"),
+            brand_on_primary: color(&form.brand_on_primary, "#ffffff"),
+            brand_secondary: color(&form.brand_secondary, "#555f73"),
+            public_login_enabled: form.request_public_login.is_some(),
+        }
+    }
 }
 
 struct PresetView {
@@ -55,17 +118,25 @@ pub(super) async fn branding(
     if let Err(r) = require_org_license(&state, &ctx.csrf_token, &ctx.user_email, &target.org.id) {
         return r;
     }
-    render_branding(
+    let (flash, clear_flash) =
+        state.take_flash(&headers, &format!("{}/branding", target.base_path));
+    let values = BrandingFormValues::from_org(&target.org);
+    let resp = render_branding(
         &state,
         &headers,
         &ctx,
         target.org,
         &themed.memberships,
         themed.chrome,
+        values,
+        String::new(),
+        flash,
     )
-    .await
+    .await;
+    crate::flash::attach_set_cookie(resp, clear_flash)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn render_branding(
     state: &AppState,
     headers: &HeaderMap,
@@ -73,6 +144,9 @@ async fn render_branding(
     org: Org,
     memberships: &[orgs::Membership],
     chrome: PageChrome,
+    values: BrandingFormValues,
+    error: String,
+    flash: String,
 ) -> Response {
     let nav = build_nav(state, headers, &ctx.identity_id, Some(memberships)).await;
     render(&BrandingTemplate {
@@ -80,6 +154,9 @@ async fn render_branding(
         is_default: org.id == orgs::DEFAULT_ORG_ID,
         org,
         nav,
+        values,
+        error,
+        flash,
         presets: theming::preset::ALL
             .iter()
             .map(|&n| {
@@ -198,14 +275,19 @@ fn public_login_toggle_action(old: i32, new: i32) -> Option<&'static str> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn branding_save(
     State(state): State<AppState>,
     OrgSlug(slug): OrgSlug,
+    headers: HeaderMap,
     sess: RequireSession,
     csrf: Csrf,
     actx: AuditCtx,
+    crate::page_chrome::ReqLocale(locale): crate::page_chrome::ReqLocale,
+    themed: ThemedChrome,
     CsrfForm(form): CsrfForm<BrandingForm>,
 ) -> Response {
+    let ctx = settings_ctx(&sess, &themed.chrome.csrf_token, locale);
     let target = match resolve_org_or_404(&state, slug.as_deref()).await {
         Ok(t) => t,
         Err(r) => return r,
@@ -218,54 +300,66 @@ pub(super) async fn branding_save(
     {
         return r;
     }
+
     let logo_url = form.logo_url.trim();
     let support_email = form.support_email.trim();
 
-    // logo_url renders as `<img src>`, so reject internal targets (loopback /
-    // RFC1918 / cloud metadata) that would leak referer/cookies. Reuses
-    // `validate_webhook_url`'s private-IP filter to stay in lockstep with the
-    // outbound-webhook SSRF guard.
-    if !logo_url.is_empty() {
-        if logo_url.len() > 2048 {
-            return (
-                StatusCode::BAD_REQUEST,
-                "logo_url is too long (max 2048 chars)",
-            )
-                .into_response();
+    // Validate all user input up front. On the first failure re-render the
+    // branding page with an error banner and the just-submitted values echoed
+    // back, rather than a raw 400 text page that loses the user's input.
+    let validated: Result<ThemeUpdate, String> = (|| {
+        // logo_url renders as `<img src>`, so reject internal targets (loopback
+        // / RFC1918 / cloud metadata) that would leak referer/cookies. Reuses
+        // `validate_webhook_url`'s private-IP filter to stay in lockstep with
+        // the outbound-webhook SSRF guard.
+        if !logo_url.is_empty() {
+            if logo_url.len() > 2048 {
+                return Err("logo_url is too long (max 2048 chars)".to_string());
+            }
+            if let Err(e) = crate::webhook::validate_webhook_url(logo_url) {
+                return Err(format!("logo_url rejected: {e}"));
+            }
         }
-        if let Err(e) = crate::webhook::validate_webhook_url(logo_url) {
-            return (StatusCode::BAD_REQUEST, format!("logo_url rejected: {e}")).into_response();
+        // Basic shape check (one `@`, non-empty parts, <= 254). The control-char
+        // rejection closes a header-injection shape if the value ever lands in a
+        // `mailto:` or email header.
+        if !support_email.is_empty() {
+            let bytes = support_email.as_bytes();
+            let at_count = bytes.iter().filter(|b| **b == b'@').count();
+            let has_bad_chars = support_email
+                .chars()
+                .any(|c| c.is_control() || c.is_whitespace());
+            let valid = at_count == 1
+                && support_email.len() <= 254
+                && !has_bad_chars
+                && support_email
+                    .split_once('@')
+                    .map(|(local, domain)| !local.is_empty() && !domain.is_empty())
+                    .unwrap_or(false);
+            if !valid {
+                return Err("support_email is not a valid email".to_string());
+            }
         }
-    }
-
-    // Basic shape check (one `@`, non-empty parts, <= 254). The control-char
-    // rejection closes a header-injection shape if the value ever lands in a
-    // `mailto:` or email header.
-    if !support_email.is_empty() {
-        let bytes = support_email.as_bytes();
-        let at_count = bytes.iter().filter(|b| **b == b'@').count();
-        let has_bad_chars = support_email
-            .chars()
-            .any(|c| c.is_control() || c.is_whitespace());
-        let valid = at_count == 1
-            && support_email.len() <= 254
-            && !has_bad_chars
-            && support_email
-                .split_once('@')
-                .map(|(local, domain)| !local.is_empty() && !domain.is_empty())
-                .unwrap_or(false);
-        if !valid {
-            return (
-                StatusCode::BAD_REQUEST,
-                "support_email is not a valid email",
-            )
-                .into_response();
-        }
-    }
-
-    let theme = match validate_theme_form(&form, &state.cfg.brand) {
+        validate_theme_form(&form, &state.cfg.brand).map_err(str::to_string)
+    })();
+    let theme = match validated {
         Ok(t) => t,
-        Err(msg) => return (StatusCode::BAD_REQUEST, msg).into_response(),
+        Err(msg) => {
+            let mut resp = render_branding(
+                &state,
+                &headers,
+                &ctx,
+                existing,
+                &themed.memberships,
+                themed.chrome,
+                BrandingFormValues::from_form(&form),
+                msg,
+                String::new(),
+            )
+            .await;
+            *resp.status_mut() = StatusCode::BAD_REQUEST;
+            return resp;
+        }
     };
 
     let logo_opt = if logo_url.is_empty() {
@@ -317,7 +411,9 @@ pub(super) async fn branding_save(
         )
         .await;
     }
-    Redirect::to(&format!("{}/branding", target.base_path)).into_response()
+    let target_url = format!("{}/branding", target.base_path);
+    let msg = crate::i18n::lookup(&ctx.locale, "flash-branding-saved");
+    state.flash_redirect(&target_url, &msg)
 }
 
 const MAX_LOGO_BYTES: usize = 256 * 1024;
@@ -329,6 +425,7 @@ fn validate_logo(bytes: &[u8]) -> Result<&'static str, &'static str> {
     image::detect(bytes).ok_or("unsupported image type")
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn logo_upload(
     State(state): State<AppState>,
     OrgSlug(slug): OrgSlug,
@@ -336,6 +433,7 @@ pub(super) async fn logo_upload(
     csrf: Csrf,
     actx: AuditCtx,
     headers: HeaderMap,
+    crate::page_chrome::ReqLocale(locale): crate::page_chrome::ReqLocale,
     mut multipart: Multipart,
 ) -> Response {
     let target = match resolve_org_or_404(&state, slug.as_deref()).await {
@@ -412,7 +510,9 @@ pub(super) async fn logo_upload(
                 .with_ctx(&actx),
         )
         .await;
-        return Redirect::to(&format!("{}/branding", target.base_path)).into_response();
+        let target_url = format!("{}/branding", target.base_path);
+        let msg = crate::i18n::lookup(&locale, "flash-logo-removed");
+        return state.flash_redirect(&target_url, &msg);
     }
 
     let Some(bytes) = logo_bytes else {
@@ -438,7 +538,9 @@ pub(super) async fn logo_upload(
     )
     .await;
 
-    Redirect::to(&format!("{}/branding", target.base_path)).into_response()
+    let target_url = format!("{}/branding", target.base_path);
+    let msg = crate::i18n::lookup(&locale, "flash-logo-updated");
+    state.flash_redirect(&target_url, &msg)
 }
 
 #[cfg(test)]

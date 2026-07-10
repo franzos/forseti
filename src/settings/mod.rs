@@ -29,6 +29,7 @@ pub(crate) mod account;
 pub(crate) mod authorized_apps;
 pub(crate) mod linked_providers;
 pub(crate) mod offline_access;
+pub(crate) mod oidc_links_db;
 pub(crate) mod password;
 pub(crate) mod profile;
 pub(crate) mod sessions;

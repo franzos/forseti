@@ -153,6 +153,12 @@ orgs-branding-secondary = Accent color
 orgs-branding-request-public = Enable a public login page (/o/your-slug)
 orgs-branding-preview = Preview
 
+# Flash notices (post-save banners)
+flash-org-updated = Organization updated.
+flash-branding-saved = Branding saved.
+flash-logo-updated = Logo updated.
+flash-logo-removed = Logo removed.
+
 # Public landing page (public_landing.html)
 orgs-public-landing-note = To sign in, open the application your team provided. Sign-in happens from there.
 orgs-public-landing-register = Create an account

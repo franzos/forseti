@@ -157,6 +157,13 @@ settings-providers-subtitle = Connectez-vous à votre compte à l'aide d'un four
 settings-providers-empty-heading = Aucun fournisseur en amont configuré par votre administrateur.
 settings-providers-empty-desc = Contactez votre administrateur pour activer Google, GitHub ou d'autres fournisseurs de connexion.
 settings-providers-back = Retour aux paramètres
+settings-providers-status-connected = Connecté le { $date }
+settings-providers-status-connected-plain = Connecté
+settings-providers-status-not-connected = Non connecté
+settings-providers-link = Associer
+settings-providers-unlink = Dissocier
+settings-providers-unlink-blocked = C'est votre seule méthode de connexion. Ajoutez un mot de passe ou une clé d'accès avant de pouvoir la dissocier.
+settings-providers-confirm-unlink = Dissocier { $provider } ? Vous ne pourrez plus vous connecter avec.
 
 # Découpages de code en ligne (élément 8 : 2 éléments de code ou plus par chaîne)
 

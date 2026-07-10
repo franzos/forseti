@@ -153,6 +153,12 @@ orgs-branding-secondary = Akzentfarbe
 orgs-branding-request-public = Öffentliche Anmeldeseite aktivieren (/o/ihr-slug)
 orgs-branding-preview = Vorschau
 
+# Flash notices (post-save banners)
+flash-org-updated = Organisation aktualisiert.
+flash-branding-saved = Branding gespeichert.
+flash-logo-updated = Logo aktualisiert.
+flash-logo-removed = Logo entfernt.
+
 # Öffentliche Landingpage (public_landing.html)
 orgs-public-landing-note = Zum Anmelden öffnen Sie die Anwendung, die Ihr Team bereitgestellt hat. Die Anmeldung erfolgt dort.
 orgs-public-landing-register = Konto erstellen

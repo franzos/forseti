@@ -153,6 +153,12 @@ orgs-branding-secondary = لون التمييز
 orgs-branding-request-public = تفعيل صفحة تسجيل دخول عامة (/o/your-slug)
 orgs-branding-preview = معاينة
 
+# Flash notices (post-save banners)
+flash-org-updated = تم تحديث المؤسسة.
+flash-branding-saved = تم حفظ الهوية البصرية.
+flash-logo-updated = تم تحديث الشعار.
+flash-logo-removed = تمت إزالة الشعار.
+
 # صفحة الهبوط العامة (public_landing.html)
 orgs-public-landing-note = لتسجيل الدخول، افتح التطبيق الذي وفّره فريقك. يتم تسجيل الدخول من هناك.
 orgs-public-landing-register = إنشاء حساب

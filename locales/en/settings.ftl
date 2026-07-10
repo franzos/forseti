@@ -154,9 +154,17 @@ settings-handoff-expired-link = Start again
 # Linked providers sub-page
 settings-providers-heading = Linked providers
 settings-providers-subtitle = Sign in to your account using a third-party identity provider.
+# Empty panel: only shown when genuinely zero providers are configured.
 settings-providers-empty-heading = No upstream providers configured by your administrator.
 settings-providers-empty-desc = Contact your administrator to enable Google, GitHub, or other sign-in providers.
 settings-providers-back = Back to settings
+settings-providers-status-connected = Connected { $date }
+settings-providers-status-connected-plain = Connected
+settings-providers-status-not-connected = Not connected
+settings-providers-link = Link
+settings-providers-unlink = Unlink
+settings-providers-unlink-blocked = This is your only sign-in method. Add a password or passkey before you can unlink it.
+settings-providers-confirm-unlink = Unlink { $provider }? You will no longer be able to sign in with it.
 
 # Inline-code splits (item 8: 2+ code elements per string)
 

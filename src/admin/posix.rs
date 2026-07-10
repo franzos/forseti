@@ -1,13 +1,11 @@
 //! `/admin/posix/*`: provision a Kratos identity into a POSIX account,
 //! manage its SSH keys, and enable / disable / delete it.
 //!
-//! This is where the license-aware seat cap is enforced on new provisioning:
-//! the gated write, see [`seat_available`].
-//!
-//! The NSS resolver data plane is gated too, but only on a hard `Locked`
-//! (see `posix::resolver::license_gate`): an active license and the grace
-//! window still resolve, so only an unlicensed or past-grace install loses
-//! Linux logins. A license lapsed within grace never locks anyone out.
+//! This is the ONLY place `Feature::LinuxAuth` is enforced: the license-aware
+//! seat cap on new provisioning (the gated write, see [`seat_available`]).
+//! The NSS resolver data plane is never license-gated — an already-provisioned
+//! account keeps resolving whatever the license state; a missing or lapsed
+//! license only stops you *adding* accounts beyond the free cap.
 //!
 //! ## Scope
 //!

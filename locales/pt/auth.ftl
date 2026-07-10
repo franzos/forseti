@@ -11,6 +11,7 @@ auth-login-create-account = Criar conta
 
 # Separador partilhado (início de sessão + registo)
 auth-or-continue-with = Ou continue com
+auth-oidc-signin = Iniciar sessão com { $provider }
 
 # Página de registo
 auth-registration-page-title = Criar conta

@@ -11,6 +11,7 @@ auth-login-create-account = Konto erstellen
 
 # Geteilter Trenner (Anmeldung + Registrierung)
 auth-or-continue-with = Oder weiter mit
+auth-oidc-signin = Mit { $provider } anmelden
 
 # Registrierungsseite
 auth-registration-page-title = Konto erstellen

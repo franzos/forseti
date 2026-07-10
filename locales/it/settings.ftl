@@ -157,6 +157,13 @@ settings-providers-subtitle = Accedi al tuo account usando un provider di identi
 settings-providers-empty-heading = Nessun provider upstream configurato dal tuo amministratore.
 settings-providers-empty-desc = Contatta il tuo amministratore per abilitare Google, GitHub o altri provider di accesso.
 settings-providers-back = Torna alle impostazioni
+settings-providers-status-connected = Connesso il { $date }
+settings-providers-status-connected-plain = Connesso
+settings-providers-status-not-connected = Non connesso
+settings-providers-link = Collega
+settings-providers-unlink = Scollega
+settings-providers-unlink-blocked = Questo è il tuo unico metodo di accesso. Aggiungi una password o una passkey prima di poterlo scollegare.
+settings-providers-confirm-unlink = Scollegare { $provider }? Non potrai più accedere con questo metodo.
 
 # Suddivisioni inline-code (punto 8: 2+ elementi di codice per stringa)
 

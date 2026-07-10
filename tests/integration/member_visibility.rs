@@ -42,7 +42,16 @@ fn extract_form_csrf(html: &str) -> Option<String> {
 /// exact-substring match scopes the assertion to the chips and never matches
 /// the nav dropdown.
 fn chip_present(body: &str, org_name: &str) -> bool {
-    body.contains(&format!(">{org_name}</span>"))
+    // Scope to the profile's shared-orgs chip block (templates/profiles/view.html:
+    // `<div class="flex flex-wrap gap-stack-sm mt-stack-md"> ... <bdi>NAME</bdi> ...`).
+    // The page chrome's org-switcher also `<bdi>`-wraps the viewer's OWN org
+    // names, but those aren't chips and aren't a visibility leak — matching the
+    // whole body would mistake the nav for a chip.
+    let Some((_, rest)) = body.split_once(r#"flex flex-wrap gap-stack-sm mt-stack-md""#) else {
+        return false;
+    };
+    let block = rest.split("</div>").next().unwrap_or(rest);
+    block.contains(&format!("<bdi>{org_name}</bdi>"))
 }
 
 fn uniq(tag: &str) -> String {

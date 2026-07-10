@@ -86,6 +86,11 @@ jobs:
           done
           echo "Forseti failed to become healthy:"; cat forseti.log; exit 1
 
+      # Provision the forseti-linux-pam device-grant client in Hydra so the
+      # device-auth tests exercise the real flow instead of skipping.
+      - name: Provision the PAM device-grant client
+        run: FORSETI_CONFIG_PATH=config.ci.toml make seed-posix-client
+
       - name: Run integration tests
         run: make test-integration
 

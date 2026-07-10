@@ -153,6 +153,12 @@ orgs-branding-secondary = สีเน้น
 orgs-branding-request-public = เปิดใช้งานหน้าเข้าสู่ระบบสาธารณะ (/o/slug-ของคุณ)
 orgs-branding-preview = ตัวอย่าง
 
+# Flash notices (post-save banners)
+flash-org-updated = อัปเดตองค์กรแล้ว
+flash-branding-saved = บันทึกแบรนด์แล้ว
+flash-logo-updated = อัปเดตโลโก้แล้ว
+flash-logo-removed = ลบโลโก้แล้ว
+
 # หน้า Landing สาธารณะ (public_landing.html)
 orgs-public-landing-note = หากต้องการเข้าสู่ระบบ ให้เปิดแอปพลิเคชันที่ทีมของคุณจัดเตรียมไว้ การเข้าสู่ระบบจะทำจากที่นั่น
 orgs-public-landing-register = สร้างบัญชี

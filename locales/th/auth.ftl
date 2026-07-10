@@ -11,6 +11,7 @@ auth-login-create-account = สร้างบัญชี
 
 # เส้นแบ่งที่ใช้ร่วมกัน (เข้าสู่ระบบ + ลงทะเบียน)
 auth-or-continue-with = หรือดำเนินการต่อด้วย
+auth-oidc-signin = เข้าสู่ระบบด้วย { $provider }
 
 # หน้าลงทะเบียน
 auth-registration-page-title = สร้างบัญชี

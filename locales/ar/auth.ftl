@@ -11,6 +11,7 @@ auth-login-create-account = إنشاء حساب
 
 # فاصل مشترك (تسجيل الدخول + التسجيل)
 auth-or-continue-with = أو تابع باستخدام
+auth-oidc-signin = تسجيل الدخول باستخدام { $provider }
 
 # صفحة التسجيل
 auth-registration-page-title = إنشاء حساب

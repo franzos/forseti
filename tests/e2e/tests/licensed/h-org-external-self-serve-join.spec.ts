@@ -47,12 +47,15 @@ test('external landing signup: register → /join/confirm → member of target o
     expect(href, 'register CTA missing href').toBeTruthy();
     expect(href!).toContain(encodeURIComponent(`/join/confirm?org=${slug}`));
 
-    // 3. Click through to Kratos registration and complete it.
+    // 3. Click through to Kratos registration and complete it. The CTA click
+    //    already landed us on a registration flow carrying the
+    //    return_to=/join/confirm, so complete THAT flow — skipInitialGoto keeps
+    //    the helper from re-navigating to a fresh flow and dropping return_to.
     await Promise.all([
       joinerPage.waitForURL((u) => u.pathname.startsWith('/registration'), { timeout: 15_000 }),
       registerLink.click(),
     ]);
-    await registerUserWithEmail(joinerPage, joinerEmail);
+    await registerUserWithEmail(joinerPage, joinerEmail, { skipInitialGoto: true });
 
     // 4. Registration's after-hook return_to lands the joiner on
     //    /join/confirm?org=<slug>, signed in. No email-verification step —

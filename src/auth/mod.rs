@@ -16,9 +16,13 @@ pub(crate) mod registration;
 pub(crate) mod verification;
 
 /// Per-IP rate-limit defaults for `GET /registration`, used when
-/// `[auth].registration_ip_rate_per_*` is unset.
-const DEFAULT_REGISTRATION_IP_RATE_PER_MINUTE: u32 = 10;
-const DEFAULT_REGISTRATION_IP_RATE_PER_HOUR: u32 = 60;
+/// `[auth].registration_ip_rate_per_*` is unset. This bounds signup-page
+/// renders, not account creation (the browser POSTs straight to Kratos), so
+/// the per-IP window has to tolerate many legitimate users sharing one egress
+/// IP behind a corporate NAT / CGNAT; the global bucket below is the real
+/// abuse backstop.
+const DEFAULT_REGISTRATION_IP_RATE_PER_MINUTE: u32 = 30;
+const DEFAULT_REGISTRATION_IP_RATE_PER_HOUR: u32 = 300;
 /// Global (all-callers-share-one-bucket) defaults, bounding total traffic
 /// regardless of claimed source IP.
 const DEFAULT_REGISTRATION_GLOBAL_RATE_PER_MINUTE: u32 = 120;

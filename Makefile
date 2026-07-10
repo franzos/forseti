@@ -107,6 +107,13 @@ stack-logs: ## Follow playground container logs
 seed-admin: ## Seed a deterministic admin (password + planted TOTP) into the playground Kratos
 	COMPOSE="$(COMPOSE)" COMPOSE_FILE="$(COMPOSE_FILE)" $(SEED_RUN)
 
+# Provision the forseti-linux-pam device-grant OAuth client in Hydra so the
+# device-auth integration tests run (they skip cleanly if it's absent). Needs a
+# built ./target/debug/forseti + the playground up. Reads [posix].pam_client_secret
+# from FORSETI_CONFIG_PATH (default config.toml; CI sets config.ci.toml).
+seed-posix-client: ## Provision the forseti-linux-pam device-grant client in Hydra
+	./target/debug/forseti posix-init-client
+
 # --- Playwright e2e --------------------------------------------------------
 #
 # Runs `tests/e2e/` inside Microsoft's Playwright Docker image. Same wrapper
@@ -127,9 +134,9 @@ PLAYWRIGHT_VOL   ?= forseti-e2e-node-modules
 # before invoking the target.
 FORSETI_DB ?= forseti.db
 
-# Issuer lives in a sibling repo. Override with `LICENSE_ISSUER_DIR=...`
+# Signet issuer lives in a sibling repo. Override with `LICENSE_ISSUER_DIR=...`
 # if you keep it elsewhere.
-LICENSE_ISSUER_DIR ?= $(HOME)/git/ory-frontend-license
+LICENSE_ISSUER_DIR ?= $(HOME)/git/signet
 
 # `--network host` so the container shares the host's loopback +
 # /etc/hosts. This matters for two reasons:
@@ -197,7 +204,7 @@ e2e-expired: ## Run expired-bucket Playwright e2e (requires expired license acti
 
 e2e-licensed: ## Run licensed-bucket Playwright e2e (requires active license activated)
 	$(call FORSETI_HEALTH_CHECK)
-	@row=$$(sqlite3 $(FORSETI_DB) "SELECT COALESCE(expires_at,'lifetime') FROM forseti_license LIMIT 1" 2>/dev/null); \
+	@row=$$(sqlite3 $(FORSETI_DB) "SELECT COALESCE(NULLIF(expires_at,''),'lifetime') FROM forseti_license LIMIT 1" 2>/dev/null); \
 	now=$$(date -u +%Y-%m-%dT%H:%M:%S+00:00); \
 	if [ -z "$$row" ]; then \
 		echo "ERROR: no license row in $(FORSETI_DB)."; \
@@ -212,19 +219,25 @@ e2e-licensed: ## Run licensed-bucket Playwright e2e (requires active license act
 	fi
 	$(call PLAYWRIGHT_RUN,licensed)
 
-# Mint the two test blobs by shelling out to the issuer CLI. First run
-# compiles the issuer (release profile, takes a moment); subsequent runs
-# are instant. The blobs are sensitive — anyone with one can paste it into
-# any Forseti sharing the same pubkey — so `tests/fixtures/license/` is
-# .gitignored.
-license-fixtures: ## Mint tests/fixtures/license/{active,expired}.blob via the issuer CLI
+# Mint the two test blobs via the signet issuer CLI (`--product forseti` selects
+# the signing key under signet's keys/forseti/). First run compiles the issuer
+# (release profile, takes a moment); subsequent runs are instant. Diagnostics go
+# to stderr, so `>` captures only the blob. The blobs are sensitive — anyone with
+# one can paste it into any Forseti sharing the same pubkey — so
+# `tests/fixtures/license/` is .gitignored. `--max-seats` on the active blob lifts
+# the POSIX seat cap above `[posix].free_seats` so the licensed bucket exercises
+# the raise. Each run also appends a row to signet's ledger/forseti.jsonl.
+license-fixtures: ## Mint tests/fixtures/license/{active,expired}.blob via the signet issuer
 	@mkdir -p tests/fixtures/license
-	cd $(LICENSE_ISSUER_DIR) && cargo run --release --quiet -- \
-		issue --tier business --feature orgs --feature saml --feature linux_auth \
+	cd $(LICENSE_ISSUER_DIR) && cargo run -p signet-issuer --release --quiet -- \
+		issue --product forseti --tier business \
+		--feature orgs --feature saml --feature linux_auth \
+		--max-seats 100 \
 		--customer "E2E Test" --email "e2e@example.com" \
 		> $(CURDIR)/tests/fixtures/license/active.blob
-	cd $(LICENSE_ISSUER_DIR) && cargo run --release --quiet -- \
-		issue --tier business --feature orgs --feature saml --feature linux_auth \
+	cd $(LICENSE_ISSUER_DIR) && cargo run -p signet-issuer --release --quiet -- \
+		issue --product forseti --tier business \
+		--feature orgs --feature saml --feature linux_auth \
 		--customer "E2E Test" --email "e2e@example.com" \
 		--expires 2024-01-01 \
 		> $(CURDIR)/tests/fixtures/license/expired.blob

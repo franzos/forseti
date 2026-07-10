@@ -87,6 +87,33 @@ pub struct AppConfig {
     /// Per-IP + global rate limits for `/registration`, applying to every Kratos-flow registration (not just external orgs).
     #[serde(default)]
     pub auth: AuthConfig,
+    /// Operator-editable legal pages (privacy/terms/imprint). Optional; unset serves the shipped English defaults.
+    #[serde(default)]
+    pub legal: LegalConfig,
+}
+
+/// Legal-pages override. `dir`, when set, is a directory the operator drops
+/// `{doc}.{locale}.md` files into (e.g. `privacy.de.md`); unset serves the
+/// embedded English defaults. Validated at boot: a set-but-missing directory
+/// hard-fails rather than silently falling through to the defaults.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct LegalConfig {
+    pub dir: Option<String>,
+}
+
+impl LegalConfig {
+    fn validate(&self) -> anyhow::Result<()> {
+        let Some(dir) = self.dir.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
+            return Ok(());
+        };
+        let meta = std::fs::metadata(dir)
+            .map_err(|e| anyhow::anyhow!("[legal].dir {dir:?} is not readable: {e}"))?;
+        if !meta.is_dir() {
+            anyhow::bail!("[legal].dir {dir:?} exists but is not a directory");
+        }
+        Ok(())
+    }
 }
 
 /// Operator-supplied secrets. `cookie_secret` seeds the HMAC keys for every Forseti-signed cookie;
@@ -1019,6 +1046,7 @@ impl AppConfig {
         cfg.clamp_rate_limits();
         cfg.brand.validate_logo_url()?;
         cfg.validate_email()?;
+        cfg.legal.validate()?;
         Ok(cfg)
     }
 
@@ -1242,6 +1270,7 @@ impl AppConfig {
             posix: PosixConfig::default(),
             metrics: MetricsConfig::default(),
             auth: AuthConfig::default(),
+            legal: LegalConfig::default(),
         }
     }
 }

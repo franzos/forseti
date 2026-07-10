@@ -153,6 +153,12 @@ orgs-branding-secondary = Couleur d'accentuation
 orgs-branding-request-public = Activer une page de connexion publique (/o/votre-slug)
 orgs-branding-preview = Aperçu
 
+# Flash notices (post-save banners)
+flash-org-updated = Organisation mise à jour.
+flash-branding-saved = Image de marque enregistrée.
+flash-logo-updated = Logo mis à jour.
+flash-logo-removed = Logo supprimé.
+
 # Page de destination publique (public_landing.html)
 orgs-public-landing-note = Pour vous connecter, ouvrez l'application fournie par votre équipe. La connexion se fait depuis celle-ci.
 orgs-public-landing-register = Créer un compte

@@ -11,6 +11,7 @@ auth-login-create-account = Create account
 
 # Shared divider (login + registration)
 auth-or-continue-with = Or continue with
+auth-oidc-signin = Sign in with { $provider }
 
 # Registration page
 auth-registration-page-title = Create account

@@ -157,6 +157,13 @@ settings-providers-subtitle = Входите в аккаунт с помощью
 settings-providers-empty-heading = Ваш администратор не настроил внешних провайдеров.
 settings-providers-empty-desc = Обратитесь к администратору, чтобы включить Google, GitHub или других провайдеров входа.
 settings-providers-back = Назад к настройкам
+settings-providers-status-connected = Подключено { $date }
+settings-providers-status-connected-plain = Подключено
+settings-providers-status-not-connected = Не подключено
+settings-providers-link = Привязать
+settings-providers-unlink = Отвязать
+settings-providers-unlink-blocked = Это ваш единственный способ входа. Добавьте пароль или ключ доступа, прежде чем отвязать его.
+settings-providers-confirm-unlink = Отвязать { $provider }? Вы больше не сможете входить с его помощью.
 
 # Разбиение строк со встроенным кодом (пункт 8: 2+ элемента кода в строке)
 
