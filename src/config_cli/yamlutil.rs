@@ -2,7 +2,7 @@ use std::path::Path;
 
 use rand::distr::Alphanumeric;
 use rand::Rng;
-use serde_yaml_ng::Value;
+use serde_yaml_ng::{Mapping, Value};
 
 // ---------------------------------------------------------------------------
 // YAML navigation helpers (mirror how the codebase walks serde_json::Value).
@@ -22,6 +22,33 @@ pub(crate) fn dig_str<'a>(root: &'a Value, path: &[&str]) -> Option<&'a str> {
 
 pub(crate) fn dig_bool(root: &Value, path: &[&str]) -> Option<bool> {
     dig(root, path).and_then(Value::as_bool)
+}
+
+/// Mutable sibling of `dig`: walk `path` through nested mappings, returning the
+/// leaf slot. `None` if any segment is missing or not a mapping.
+pub(crate) fn dig_mut<'a>(root: &'a mut Value, path: &[&str]) -> Option<&'a mut Value> {
+    let mut cur = root;
+    for key in path {
+        cur = cur.as_mapping_mut()?.get_mut(*key)?;
+    }
+    Some(cur)
+}
+
+/// Like `dig_mut`, but creates intermediate mappings (replacing any non-mapping
+/// segment) as it descends, so the leaf slot always exists. Fresh leaves start
+/// as `Value::Null` for the caller to overwrite.
+pub(crate) fn dig_mut_or_insert<'a>(root: &'a mut Value, path: &[&str]) -> &'a mut Value {
+    let mut cur = root;
+    for key in path {
+        if !cur.is_mapping() {
+            *cur = Value::Mapping(Mapping::new());
+        }
+        let map = cur.as_mapping_mut().expect("just ensured a mapping");
+        cur = map
+            .entry(Value::String((*key).to_string()))
+            .or_insert(Value::Null);
+    }
+    cur
 }
 
 /// A YAML string that is empty, missing, or an obvious placeholder isn't a

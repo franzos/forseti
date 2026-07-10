@@ -7,13 +7,14 @@ use crate::cli::{CheckArgs, PathArgs};
 
 use super::catalog;
 use super::init::is_dev_smtp;
+use super::io::fingerprint;
 use super::yamlutil::{dig, dig_bool, dig_str, is_placeholder, load_yaml, secret_entries};
 
-const DEFAULT_KRATOS: &str = "infra/kratos/kratos.yml";
-const DEFAULT_HYDRA: &str = "infra/hydra/hydra.yml";
+pub(crate) const DEFAULT_KRATOS: &str = "infra/kratos/kratos.yml";
+pub(crate) const DEFAULT_HYDRA: &str = "infra/hydra/hydra.yml";
 
-const ENV_KRATOS: &str = "FORSETI_KRATOS_CONFIG";
-const ENV_HYDRA: &str = "FORSETI_HYDRA_CONFIG";
+pub(crate) const ENV_KRATOS: &str = "FORSETI_KRATOS_CONFIG";
+pub(crate) const ENV_HYDRA: &str = "FORSETI_HYDRA_CONFIG";
 
 /// Known-bad literal shipped in the playground `kratos.yml`'s `web_hook`
 /// auth values. Shared with the `rotate` subcommand (a later task).
@@ -491,13 +492,13 @@ pub(crate) fn check_oidc_providers(root: &Value, config_dir: &Path) -> Vec<Findi
             }
         }
 
-        findings.extend(check_mapper_url(provider, &base, config_dir));
+        findings.extend(check_mapper_url(provider, id, &base, config_dir));
     }
 
     findings
 }
 
-fn check_mapper_url(provider: &Value, base: &str, config_dir: &Path) -> Vec<Finding> {
+fn check_mapper_url(provider: &Value, id: &str, base: &str, config_dir: &Path) -> Vec<Finding> {
     let mut findings = Vec::new();
     let mapper_key = format!("{base}.mapper_url");
 
@@ -532,6 +533,16 @@ fn check_mapper_url(provider: &Value, base: &str, config_dir: &Path) -> Vec<Find
                     "emits `email` without `email_verified`",
                     "guard the trait with `claims.email_verified`",
                     "an upstream provider that allows unverified emails lets an attacker claim any address and take over the matching Forseti account — this is a real account-takeover vector, not a cosmetic one.",
+                ));
+            }
+            if super::modify::known_pinned_provider(id)
+                && fingerprint(&content) != fingerprint(super::modify::pinned_mapper(id))
+            {
+                findings.push(Finding::warn(
+                    &format!("{mapper_key}.pinned"),
+                    "differs from Forseti's pinned mapper",
+                    "regenerate with `forseti config oidc enable`, or restore the pinned body",
+                    "this provider's mapper doesn't match Forseti's reviewed pinned body; if it emits `email` without gating on `email_verified` it's an account-takeover vector — review it against the pinned mapper.",
                 ));
             }
         }
@@ -1640,9 +1651,11 @@ selfservice:
     fn mapper_with_email_verified_guard_is_clean() {
         let dir = unique_tmp_dir("mapper-safe");
         std::fs::create_dir_all(&dir).unwrap();
+        // The pinned body gates the email trait on email_verified, so it draws
+        // neither the email_verified WARN nor the mapper-vs-pinned WARN.
         std::fs::write(
             dir.join("oidc.google.jsonnet"),
-            "local claims = std.extVar('claims');\n{ identity: { traits: { email: if claims.email_verified then claims.email else null } } }\n",
+            super::super::modify::MAPPER_GOOGLE,
         )
         .unwrap();
         let v = parse(

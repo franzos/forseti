@@ -6,9 +6,11 @@ mod catalog;
 mod check;
 mod init;
 mod io;
+mod modify;
 mod yamlutil;
 
 pub(crate) use check::check;
 pub(crate) use check::redact_uri;
 pub(crate) use check::status;
 pub(crate) use init::init;
+pub(crate) use modify::run_oidc;
