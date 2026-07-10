@@ -237,11 +237,20 @@ pub(crate) fn check_hydra(root: &Value) -> Vec<Finding> {
     findings
 }
 
-/// Prefix of every key the generic scan must stay off — `check_oidc_providers`
-/// already walks this subtree (client_id/client_secret/mapper_url/etc.) and
-/// FAILs on both empty and placeholder credentials, so the generic scan would
-/// otherwise double-report the same scalar.
+/// Prefix path to OIDC providers; `check_oidc_providers` validates specific
+/// fields within this subtree (client_id, client_secret, microsoft_tenant,
+/// mapper_url), so the generic scan must skip only those to avoid double-reporting.
 const OIDC_PROVIDERS_PATH: &str = "selfservice.methods.oidc.config.providers";
+
+/// Fields within each OIDC provider that `check_oidc_providers` validates.
+/// The generic placeholder scan must skip only these, allowing it to catch
+/// other placeholder-bearing fields (e.g. hand-filled issuer_url).
+const OIDC_PROVIDER_FIELDS: &[&str] = &[
+    "client_id",
+    "client_secret",
+    "microsoft_tenant",
+    "mapper_url",
+];
 
 /// Scan every scalar for a leftover `CHANGEME` placeholder (case-insensitive
 /// — `config-init` always emits it upper-case, but a hand-edited file might
@@ -249,13 +258,19 @@ const OIDC_PROVIDERS_PATH: &str = "selfservice.methods.oidc.config.providers";
 /// covers keys the specific checks handled; a specific finding whose key is a
 /// prefix of the scalar's path (e.g. `secrets.cipher` vs the scalar at
 /// `secrets.cipher[0]`) suppresses the generic one so we don't double-report.
-/// The OIDC providers subtree is skipped outright — `check_oidc_providers` is
-/// the sole source of truth for it, called separately at the `check()` level.
+/// Within the OIDC providers subtree, only the four fields that
+/// `check_oidc_providers` explicitly validates are skipped; other fields are
+/// checked generically (e.g. issuer_url).
 pub(crate) fn placeholder_findings(root: &Value, already: &[Finding]) -> Vec<Finding> {
     let mut out = Vec::new();
     walk_placeholders(root, &mut String::new(), &mut |path, value| {
-        if path == OIDC_PROVIDERS_PATH || path.starts_with(&format!("{OIDC_PROVIDERS_PATH}[")) {
-            return;
+        // Skip only OIDC provider fields that check_oidc_providers handles.
+        if path.starts_with(&format!("{OIDC_PROVIDERS_PATH}[")) {
+            if let Some(last_field) = path.rsplit('.').next() {
+                if OIDC_PROVIDER_FIELDS.contains(&last_field) {
+                    return;
+                }
+            }
         }
         let covered = already
             .iter()
@@ -1289,6 +1304,54 @@ selfservice:
             "expected exactly one finding for client_id, got: {matches:?}"
         );
         assert_eq!(matches[0].severity, Severity::Fail);
+    }
+
+    #[test]
+    fn oidc_provider_issuer_url_and_client_id_placeholders_produce_one_each() {
+        // issuer_url is NOT handled by check_oidc_providers, so the generic
+        // placeholder walk must catch it. The fix narrows the skip to only the
+        // four fields check_oidc_providers validates (client_id, client_secret,
+        // microsoft_tenant, mapper_url), allowing issuer_url to be checked.
+        // A provider with both should yield exactly one finding per field.
+        let v = parse(
+            r#"
+selfservice:
+  methods:
+    oidc:
+      config:
+        providers:
+          - id: custom
+            provider: generic
+            client_id: CHANGEME_CUSTOM_CLIENT_ID
+            client_secret: real-secret
+            issuer_url: CHANGEME_ISSUER
+            mapper_url: file:///etc/config/kratos/oidc.custom.jsonnet
+"#,
+        );
+        let mut findings = check_kratos(&v);
+        findings.extend(check_oidc_providers(&v, Path::new("/nonexistent")));
+
+        let issuer_matches: Vec<_> = findings
+            .iter()
+            .filter(|f| f.key == "selfservice.methods.oidc.config.providers[0].issuer_url")
+            .collect();
+        assert_eq!(
+            issuer_matches.len(),
+            1,
+            "expected exactly one finding for issuer_url, got: {issuer_matches:?}"
+        );
+        assert_eq!(issuer_matches[0].severity, Severity::Fail);
+
+        let client_id_matches: Vec<_> = findings
+            .iter()
+            .filter(|f| f.key == "selfservice.methods.oidc.config.providers[0].client_id")
+            .collect();
+        assert_eq!(
+            client_id_matches.len(),
+            1,
+            "expected exactly one finding for client_id, got: {client_id_matches:?}"
+        );
+        assert_eq!(client_id_matches[0].severity, Severity::Fail);
     }
 
     #[test]
