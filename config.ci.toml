@@ -92,3 +92,8 @@ client_secret_verifier = "dev-client-secret-verifier"
 [posix]
 pam_client_id = "forseti-linux-pam"
 pam_client_secret = "dev-posix-pam-secret-change-me"
+# Hydra stamps id_tokens with iss=http://host.containers.internal:4444 (see
+# infra/hydra/hydra.yml). The device-auth binding validates that iss, so it must
+# match here; without it we fall back to [hydra].public_url (localhost:4444) and
+# every device approval is denied as token_invalid.
+hydra_issuer = "http://host.containers.internal:4444"
