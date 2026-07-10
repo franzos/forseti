@@ -45,6 +45,13 @@ name          = "Forseti"
 support_email = "support@example.com"
 # logo_url    = "https://example.com/logo.svg"   # must be an absolute http(s) URL; anything else is a startup error
 # consent_intro = "The application below is requesting access to your account."
+# Global theming. `theme_preset` is one of default|midnight|cyberpunk (each with
+# an auto-derived dark mode); the brand_* colours override the preset. A per-org
+# theme overrides all of this within that org's scope.
+# theme_preset    = "default"
+# brand_primary   = "#3057e1"   # #rrggbb
+# brand_on_primary = "#ffffff"  # foreground on top of brand_primary
+# brand_secondary = "#555f73"
 # Operator identity string shown on pre-auth cards (login, consent, device
 # verify). The strongest anti-phishing lever against a tenant impersonating
 # the operator brand — NEVER set this from tenant-controlled input.
@@ -337,6 +344,25 @@ support_email = "support@example.com"
 # reserved_names = ["admin", "forseti", "portal", "system", "root"]
 # logo_ip_rate_per_minute = 60
 # logo_ip_rate_per_hour = 600
+# Public per-org landing page `GET /o/{slug}` (external orgs). Per-IP + a shared
+# global bucket; set any to 0 to disable it.
+# landing_ip_rate_per_minute = 60
+# landing_ip_rate_per_hour = 600
+# landing_global_rate_per_minute = 300
+# landing_global_rate_per_hour = 3000
+# Domain-ownership verification methods offered on the org domains page, and the
+# HTTP-file fetch timeout. Turn a method off deployment-wide by setting it false.
+# domain_verify_http_file_enabled = true
+# domain_verify_dns_txt_enabled = true
+# domain_verify_email_enabled = true
+# domain_verify_http_timeout_seconds = 10
+# domain_max_per_org = 100                   # ceiling on registered domains (pending + verified) per org
+
+# Accounts subsystem. `known_accounts_cookie_ttl_seconds` is the validity of the
+# signed device-chooser cookie (`forseti_known_accounts`) that remembers which
+# accounts have signed in on this browser. Default 90 days.
+# [accounts]
+# known_accounts_cookie_ttl_seconds = 7776000
 
 # Commercial-tier knobs. The signed license blob itself is NOT set here — it is
 # pasted into `/admin/license` and stored in the `forseti_license` table. The

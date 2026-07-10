@@ -115,6 +115,10 @@ CSRF protection uses a double-submit token (`src/csrf.rs`) keyed off the same se
 | `support_email` | string | none               | Support address rendered in footer / error pages.                      |
 | `logo_url`      | string | none               | Optional logo URL. When omitted, the brand name is rendered as text.   |
 | `consent_intro` | string | (generic sentence) | Intro paragraph rendered on `/oauth/consent` above the scope list.     |
+| `theme_preset`  | string | none               | Global theme preset applied to every page: `default`, `midnight`, or `cyberpunk`. Each derives its own dark-mode variant automatically. A per-org preset overrides this within that org's scope. |
+| `brand_primary` | string | none               | Global primary brand colour (`#rrggbb`). Overrides the preset's primary. |
+| `brand_on_primary` | string | none            | Foreground colour used on top of `brand_primary` (`#rrggbb`); set it to keep text legible on a custom primary. |
+| `brand_secondary`  | string | none            | Secondary / accent brand colour (`#rrggbb`). |
 | `operator_trust_anchor` | string | none | Operator identity shown on pre-auth cards (login, consent, device verify). The strongest anti-phishing lever against a tenant impersonating the operator brand — never set this from tenant-controlled input. |
 
 ### `[[apps]]`
@@ -279,6 +283,51 @@ Branded deployments: the dark palette flips the brand colour to a light tone by
 default. A single brand colour that passes contrast checks on a light
 background usually won't on the dark one, so set a dark-mode brand override
 under the `html.dark` scope if you ship custom brand colours.
+
+### Language
+
+The UI ships with nine locales: English (`en`, default), German (`de`), French
+(`fr`), Spanish (`es`), Italian (`it`), Portuguese (`pt`), Russian (`ru`), Thai
+(`th`), and Arabic (`ar`). Arabic renders right-to-left. Kratos's own error and
+prompt messages are translated too, so a login failure reads in the visitor's
+language rather than falling back to Kratos English.
+
+A visitor picks a language from the footer switcher, which appends `?lang=<code>`
+and persists the choice in a per-browser cookie (`forseti_locale`, one year,
+`HttpOnly`, `SameSite=Lax`). With no cookie set, Forseti negotiates against the
+browser's `Accept-Language` header and falls back to English. The set is
+compile-time (translations live in `locales/`, embedded into the binary); there's
+no config knob to add or restrict locales at runtime.
+
+## Legal pages
+
+Forseti serves three public, themed legal pages — `/privacy`, `/terms`, and
+`/imprint` — linked from the footer on every page. These are **instance-level**
+(the operator is the GDPR data controller), not per-org. Out of the box each
+serves a short English stub embedded in the binary, meant to be replaced.
+
+To override them, point `[legal].dir` at a directory and drop Markdown files
+named `{doc}.{locale}.md` into it, where `doc` is `privacy`, `terms`, or
+`imprint` and `locale` is one of the supported subtags (`en`, `de`, `fr`, …).
+Resolution per request is `{doc}.{locale}.md` → `{doc}.en.md` → the shipped
+default, so `privacy.de.md` serves German visitors while `privacy.en.md` covers
+everyone else. You don't have to provide every doc or every language; anything
+missing falls back down that chain.
+
+```toml
+[legal]
+dir = "/etc/forseti/legal"
+```
+
+Notes:
+
+- A **set-but-missing or unreadable** `dir` is a startup error (fail fast, not a
+  silent fallback). Omit the section entirely to keep the built-in defaults.
+- The Markdown is rendered with raw HTML **stripped** (`<script>`, embedded
+  `<div>`, etc. are dropped, not emitted), so style the pages with Markdown, not
+  inline HTML.
+- Files are read on each request (off the async runtime), so editing a file
+  takes effect without a restart.
 
 ## Admin surface
 
@@ -541,6 +590,8 @@ A host has to identify itself to the resolver before it can resolve anything.
 3. Put that credential into the host client's config — the `host-id` / `host-secret` fields of the `forseti-unix-configuration` (see [Connecting a host](#connecting-a-host)). For a manual check, it's the HTTP Basic username:password the resolver expects.
 
 **Rotating** a host's secret: **Admin → Hosts → the host → Rotate** (`/admin/hosts/{id}/rotate`). This mints a fresh secret, reveals it once, and invalidates the old one immediately — so the host is locked out until you update its config. Rotate on a schedule, or right away if a host's credential might have leaked.
+
+**Editing** a host: **Admin → Hosts → the host → Edit** (`/admin/hosts/{id}/edit`). Change the display name, the `force_mfa` flag, or the team scope (which of the org's teams the host resolves, covered below) after enrollment. A host's **organisation is fixed at enrollment** and can't be changed here; re-enroll under the right org if that has to change.
 
 **Revoking** a host: **Admin → Hosts → the host → Revoke** (`/admin/hosts/{id}/revoke`). The host can no longer resolve anything. Use this when you're decommissioning a box.
 
@@ -1753,7 +1804,14 @@ Identities whose email matches `admin.allowed_emails` are also auto-promoted to 
 
 ### Per-org branding
 
-When an org sets `logo_url` / `support_email` on its settings page, those values override `[brand]` in `config.toml` for any request resolved into that org's scope. Unset fields fall back to `[brand]`. The Default org is treated like any other org for this resolution — operators who want a single brand for everyone leave the Default org's branding empty.
+An org owner sets branding on the org's settings page (`/settings/organization/branding`), and those values override `[brand]` in `config.toml` for any request resolved into that org's scope; unset fields fall back to `[brand]`. Branding covers:
+
+- **Theme preset** — `default`, `midnight`, or `cyberpunk`, each with an auto-derived dark-mode variant.
+- **Brand colours** — primary, on-primary (foreground on the primary), and secondary, entered as hex; the derived dark-mode palette is contrast-checked.
+- **Logo** — either a `logo_url` (absolute HTTPS; private, loopback, and cloud-metadata addresses are rejected) or an **uploaded** image (PNG/JPEG/WebP, ≤256 KB, validated by magic bytes and served from Forseti at `/branding/{slug}/logo`).
+- **Support email**, and the **public-login** toggle that exposes the org's landing page at `/o/{slug}`.
+
+The active org's theme white-labels the whole authenticated app, not just the login screen. The Default org is treated like any other org for this resolution — operators who want a single brand for everyone leave the Default org's branding empty.
 
 ### `[orgs]` configuration
 

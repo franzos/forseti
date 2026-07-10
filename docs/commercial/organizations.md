@@ -73,9 +73,12 @@ A member's public profile page surfaces the teams they belong to, so people can 
 
 ## Branding
 
-Each org can carry its own **logo** and **support email**. When set, these override the global brand: the org's logo shows in the nav header and its support email appears on help and error pages, so each tenant sees their own branding.
+Each org can carry its own **theme, logo, and support email**. When set, these override the global `[brand]`, and the active org's theme white-labels the whole authenticated app — not just its login screen — so each tenant sees their own look. Owners edit this at `/settings/organization/branding`.
 
-The logo must be an **HTTPS URL** (private, loopback, and cloud-metadata addresses are rejected). The support email must be a single well-formed address.
+- **Theme** — a preset (`default`, `midnight`, or `cyberpunk`, each with an auto-derived dark mode) plus optional **brand colours** (primary, on-primary, secondary) entered as hex. The dark-mode palette is contrast-checked.
+- **Logo** — either an **HTTPS URL** (private, loopback, and cloud-metadata addresses are rejected) or an **uploaded** image: PNG, JPEG, or WebP, up to 256 KB, validated by its magic bytes (not the declared type) and served by Forseti at `/branding/{slug}/logo`.
+- **Support email** — a single well-formed address, shown on help and error pages.
+- **Public login** — a toggle that publishes the org's landing page at `/o/{slug}` (see Access modes below).
 
 ## Access modes
 
@@ -111,13 +114,15 @@ Organizations are also the tenancy unit for commercial **SAML SSO**: each org ca
 
 ## Configuration
 
-The optional `[orgs]` table tunes two timeouts (both have defaults, so the table can be omitted):
+The optional `[orgs]` table tunes cookie/invite timeouts, the landing-page and logo rate limits, the domain-verification methods, and the per-org domain ceiling (every key has a default, so the table can be omitted). The two you'll reach for most:
 
 ```toml
 [orgs]
 active_org_cookie_ttl_seconds = 2592000   # 30 days — how long the active-org selection is remembered per browser
 invite_ttl_days = 7                        # how long a minted invite stays redeemable
 ```
+
+The full key list (rate limits, domain-verification toggles, `domain_max_per_org`, and the rest) is in the [operator guide's `[orgs]` reference](../operator-guide.md#orgs-configuration).
 
 The maximum number of orgs (`max_orgs`) is **not** a config knob — it comes from the license blob. There are no org-specific CLI commands: invites simply expire in place, and deleting an identity automatically removes all of its memberships.
 

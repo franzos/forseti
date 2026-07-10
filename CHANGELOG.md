@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.10] - 2026-07-10
+
+### Added
+- Operator-editable legal pages: `/privacy`, `/terms`, `/imprint`, with per-locale overrides
+- Social login and linked-providers page show provider names and brand icons
+
+### Fixed
+- Translated UI was broken in the container image: locales weren't bundled
+
 ## [0.1.9] - 2026-07-09
 
 ### Added
