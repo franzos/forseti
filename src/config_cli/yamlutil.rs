@@ -46,12 +46,14 @@ pub(crate) fn is_placeholder(s: &str) -> bool {
     TELLS.iter().any(|t| lower.contains(t))
 }
 
-/// Kratos `secrets.*` are sequences of strings. Pull the first entry.
-pub(crate) fn first_secret<'a>(root: &'a Value, path: &[&str]) -> Option<&'a str> {
+/// Every entry of a `secrets.*`-shaped node, in document order. Accepts
+/// either the normal sequence form or a bare string (treated as a
+/// single-entry list) so callers don't need to special-case malformed input.
+pub(crate) fn secret_entries<'a>(root: &'a Value, path: &[&str]) -> Vec<&'a str> {
     match dig(root, path) {
-        Some(Value::Sequence(seq)) => seq.first().and_then(Value::as_str),
-        Some(Value::String(s)) => Some(s.as_str()),
-        _ => None,
+        Some(Value::Sequence(seq)) => seq.iter().filter_map(Value::as_str).collect(),
+        Some(Value::String(s)) => vec![s.as_str()],
+        _ => Vec::new(),
     }
 }
 

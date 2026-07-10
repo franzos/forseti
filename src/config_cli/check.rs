@@ -1,17 +1,23 @@
 use std::path::{Path, PathBuf};
 
 use serde_yaml_ng::Value;
+use toml_edit::DocumentMut;
 
-use crate::cli::CheckArgs;
+use crate::cli::{CheckArgs, PathArgs};
 
+use super::catalog;
 use super::init::is_dev_smtp;
-use super::yamlutil::{dig_bool, dig_str, first_secret, is_placeholder, load_yaml};
+use super::yamlutil::{dig, dig_bool, dig_str, is_placeholder, load_yaml, secret_entries};
 
 const DEFAULT_KRATOS: &str = "infra/kratos/kratos.yml";
 const DEFAULT_HYDRA: &str = "infra/hydra/hydra.yml";
 
 const ENV_KRATOS: &str = "FORSETI_KRATOS_CONFIG";
 const ENV_HYDRA: &str = "FORSETI_HYDRA_CONFIG";
+
+/// Known-bad literal shipped in the playground `kratos.yml`'s `web_hook`
+/// auth values. Shared with the `rotate` subcommand (a later task).
+pub(crate) const PLACEHOLDER_TOKENS: &[&str] = &["dev-playground-token-change-me"];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Severity {
@@ -184,37 +190,9 @@ pub(crate) fn check_kratos(root: &Value) -> Vec<Finding> {
         )),
     }
 
-    // secrets.cookie
-    match first_secret(root, &["secrets", "cookie"]) {
-        Some(s) if !is_placeholder(s) && s.len() >= 16 => {
-            findings.push(Finding::ok("secrets.cookie", "<set>"));
-        }
-        _ => findings.push(Finding::fail(
-            "secrets.cookie",
-            "<unset/placeholder>",
-            ">=16 random chars",
-            "Kratos secrets missing/placeholder/invalid length — sessions/encryption are insecure.",
-        )),
-    }
-
-    // secrets.cipher: must be exactly 32 chars.
-    match first_secret(root, &["secrets", "cipher"]) {
-        Some(s) if !is_placeholder(s) && s.len() == 32 => {
-            findings.push(Finding::ok("secrets.cipher", "<set, 32 chars>"));
-        }
-        Some(s) if s.len() != 32 => findings.push(Finding::fail(
-            "secrets.cipher",
-            format!("<set, {} chars>", s.len()),
-            "exactly 32 chars",
-            "Kratos secrets missing/placeholder/invalid length — sessions/encryption are insecure.",
-        )),
-        _ => findings.push(Finding::fail(
-            "secrets.cipher",
-            "<unset/placeholder>",
-            "exactly 32 chars",
-            "Kratos secrets missing/placeholder/invalid length — sessions/encryption are insecure.",
-        )),
-    }
+    findings.extend(check_secret_lists(root, false));
+    findings.extend(check_flow_hooks(root));
+    findings.extend(check_hook_tokens(root));
 
     findings.extend(placeholder_findings(root, &findings));
     findings
@@ -223,18 +201,7 @@ pub(crate) fn check_kratos(root: &Value) -> Vec<Finding> {
 pub(crate) fn check_hydra(root: &Value) -> Vec<Finding> {
     let mut findings = Vec::new();
 
-    // secrets.system
-    match first_secret(root, &["secrets", "system"]) {
-        Some(s) if !is_placeholder(s) && s.len() >= 16 => {
-            findings.push(Finding::ok("secrets.system", "<set>"));
-        }
-        _ => findings.push(Finding::fail(
-            "secrets.system",
-            "<unset/placeholder>",
-            ">=16 random chars",
-            "Hydra system secret missing/placeholder — token signing/encryption are insecure.",
-        )),
-    }
+    findings.extend(check_secret_lists(root, true));
 
     // urls.issuer or urls.self.issuer
     let issuer =
@@ -270,9 +237,11 @@ pub(crate) fn check_hydra(root: &Value) -> Vec<Finding> {
     findings
 }
 
-/// Scan every scalar for a leftover `CHANGEME` placeholder and FAIL on each.
-/// `already` covers keys the specific checks handled; a specific finding whose
-/// key is a prefix of the scalar's path (e.g. `secrets.cipher` vs the scalar at
+/// Scan every scalar for a leftover `CHANGEME` placeholder (case-insensitive
+/// — `config-init` always emits it upper-case, but a hand-edited file might
+/// not) or the literal dev-playground hook token, and FAIL on each. `already`
+/// covers keys the specific checks handled; a specific finding whose key is a
+/// prefix of the scalar's path (e.g. `secrets.cipher` vs the scalar at
 /// `secrets.cipher[0]`) suppresses the generic one so we don't double-report.
 pub(crate) fn placeholder_findings(root: &Value, already: &[Finding]) -> Vec<Finding> {
     let mut out = Vec::new();
@@ -280,7 +249,9 @@ pub(crate) fn placeholder_findings(root: &Value, already: &[Finding]) -> Vec<Fin
         let covered = already
             .iter()
             .any(|f| path == f.key || path.starts_with(&format!("{}[", f.key)));
-        if value.contains("CHANGEME") && !covered {
+        let is_changeme = value.to_ascii_uppercase().contains("CHANGEME");
+        let is_dev_token = PLACEHOLDER_TOKENS.iter().any(|t| value.contains(t));
+        if (is_changeme || is_dev_token) && !covered {
             out.push(Finding::fail(
                 path,
                 value,
@@ -318,6 +289,442 @@ fn walk_placeholders(value: &Value, path: &mut String, emit: &mut impl FnMut(&st
         }
         _ => {}
     }
+}
+
+// ---------------------------------------------------------------------------
+// Secrets: full-list checks (every entry, not just the first).
+// ---------------------------------------------------------------------------
+
+enum SecretRule {
+    MinLen(usize),
+    ExactLen(usize),
+}
+
+impl SecretRule {
+    fn recommended(&self) -> String {
+        match self {
+            SecretRule::MinLen(n) => format!(">={n} random chars"),
+            SecretRule::ExactLen(n) => format!("exactly {n} chars"),
+        }
+    }
+
+    fn satisfied(&self, s: &str) -> bool {
+        match self {
+            SecretRule::MinLen(n) => s.len() >= *n,
+            SecretRule::ExactLen(n) => s.len() == *n,
+        }
+    }
+}
+
+/// Kratos ships `secrets.cookie` (>=16 chars) and `secrets.cipher` (exactly
+/// 32 — the xchacha20-poly1305 key size); Hydra ships `secrets.system`
+/// (>=16). Every entry is checked, not just the first, since a stale or
+/// short entry anywhere in the rotation list is still a live weakness. A
+/// list longer than 3 gets a WARN nudging the operator to prune it.
+pub(crate) fn check_secret_lists(root: &Value, hydra: bool) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    if hydra {
+        findings.extend(check_secret_list(
+            root,
+            &["secrets", "system"],
+            "secrets.system",
+            SecretRule::MinLen(16),
+            "Hydra system secret",
+        ));
+    } else {
+        findings.extend(check_secret_list(
+            root,
+            &["secrets", "cookie"],
+            "secrets.cookie",
+            SecretRule::MinLen(16),
+            "Kratos secrets",
+        ));
+        findings.extend(check_secret_list(
+            root,
+            &["secrets", "cipher"],
+            "secrets.cipher",
+            SecretRule::ExactLen(32),
+            "Kratos secrets",
+        ));
+    }
+    findings
+}
+
+fn check_secret_list(
+    root: &Value,
+    path: &[&str],
+    base_key: &str,
+    rule: SecretRule,
+    label: &str,
+) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    let entries = secret_entries(root, path);
+    let impact =
+        format!("{label} missing/placeholder/invalid length — sessions/encryption are insecure.");
+
+    if entries.is_empty() {
+        findings.push(Finding::fail(
+            base_key,
+            "<unset/placeholder>",
+            &rule.recommended(),
+            &impact,
+        ));
+        return findings;
+    }
+
+    for (idx, s) in entries.iter().enumerate() {
+        let key = if idx == 0 {
+            base_key.to_string()
+        } else {
+            format!("{base_key}[{idx}]")
+        };
+        if is_placeholder(s) {
+            findings.push(Finding::fail(
+                &key,
+                "<unset/placeholder>",
+                &rule.recommended(),
+                &impact,
+            ));
+        } else if !rule.satisfied(s) {
+            findings.push(Finding::fail(
+                &key,
+                format!("<set, {} chars>", s.len()),
+                &rule.recommended(),
+                &impact,
+            ));
+        } else {
+            let current = match rule {
+                SecretRule::ExactLen(n) => format!("<set, {n} chars>"),
+                SecretRule::MinLen(_) => "<set>".to_string(),
+            };
+            findings.push(Finding::ok(&key, current));
+        }
+    }
+
+    if entries.len() > 3 {
+        findings.push(Finding::warn(
+            &format!("{base_key}.count"),
+            format!("<{} entries>", entries.len()),
+            "<=3 entries",
+            "a long rotation list makes bookkeeping harder and raises the odds a stale or compromised entry lingers; prune old entries once rotation completes.",
+        ));
+    }
+
+    findings
+}
+
+// ---------------------------------------------------------------------------
+// OIDC upstream providers.
+// ---------------------------------------------------------------------------
+
+/// `client_id`/`client_secret` placeholders, `microsoft_tenant: common`
+/// (accepts any tenant, not just yours), and `mapper_url` shape/existence,
+/// per configured provider. `config_dir` is the directory `kratos.yml`
+/// lives in on disk — `mapper_url` is a `file://` path as Kratos's
+/// container sees it; the mapper file itself lives alongside kratos.yml.
+pub(crate) fn check_oidc_providers(root: &Value, config_dir: &Path) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    let Some(providers) = dig(
+        root,
+        &["selfservice", "methods", "oidc", "config", "providers"],
+    )
+    .and_then(Value::as_sequence) else {
+        return findings;
+    };
+
+    for (idx, provider) in providers.iter().enumerate() {
+        let id = dig_str(provider, &["id"]).unwrap_or("<unnamed>");
+        let base = format!("selfservice.methods.oidc.config.providers[{idx}]");
+
+        for field in ["client_id", "client_secret"] {
+            let key = format!("{base}.{field}");
+            match dig_str(provider, &[field]) {
+                Some(v) if !is_placeholder(v) => findings.push(Finding::ok(&key, "<set>")),
+                other => findings.push(Finding::fail(
+                    &key,
+                    other.unwrap_or("<unset>"),
+                    "a real value from the provider's OAuth app",
+                    &format!(
+                        "provider `{id}` has no usable `{field}` — sign-in with {id} will fail at the OAuth handshake."
+                    ),
+                )),
+            }
+        }
+
+        if let Some(tenant) = dig_str(provider, &["microsoft_tenant"]) {
+            let key = format!("{base}.microsoft_tenant");
+            if tenant == "common" {
+                findings.push(Finding::fail(
+                    &key,
+                    "common",
+                    "a specific tenant ID (or `organizations`/`consumers` if intentional)",
+                    "`common` accepts sign-in from ANY Azure AD tenant or personal Microsoft account — any organization's users can authenticate, not just yours.",
+                ));
+            } else {
+                findings.push(Finding::ok(&key, tenant));
+            }
+        }
+
+        findings.extend(check_mapper_url(provider, &base, config_dir));
+    }
+
+    findings
+}
+
+fn check_mapper_url(provider: &Value, base: &str, config_dir: &Path) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    let mapper_key = format!("{base}.mapper_url");
+
+    let Some(url) = dig_str(provider, &["mapper_url"]) else {
+        findings.push(Finding::fail(
+            &mapper_key,
+            "<unset>",
+            "a file:// URL to a jsonnet identity mapper",
+            "without a mapper, Kratos can't translate this provider's claims into identity traits.",
+        ));
+        return findings;
+    };
+
+    let Some(rest) = url.strip_prefix("file://") else {
+        findings.push(Finding::fail(
+            &mapper_key,
+            url,
+            "a file:// URL",
+            "mapper_url must be a `file://` path readable inside the Kratos container; other schemes aren't supported by the reference deployment.",
+        ));
+        return findings;
+    };
+    findings.push(Finding::ok(&mapper_key, url));
+
+    let basename = rest.rsplit('/').next().unwrap_or(rest);
+    let mapper_path = config_dir.join(basename);
+    match std::fs::read_to_string(&mapper_path) {
+        Ok(content) => {
+            if content.contains("email") && !content.contains("email_verified") {
+                findings.push(Finding::warn(
+                    &format!("{mapper_key}.email_verified"),
+                    "emits `email` without `email_verified`",
+                    "guard the trait with `claims.email_verified`",
+                    "an upstream provider that allows unverified emails lets an attacker claim any address and take over the matching Forseti account — this is a real account-takeover vector, not a cosmetic one.",
+                ));
+            }
+        }
+        Err(_) => {
+            findings.push(Finding::fail(
+                &format!("{mapper_key}.file"),
+                mapper_path.display().to_string(),
+                "an existing mapper file next to kratos.yml",
+                "the referenced OIDC identity mapper file is missing on disk — Kratos will fail to start (or reject the flow) when this provider is used.",
+            ));
+        }
+    }
+
+    findings
+}
+
+// ---------------------------------------------------------------------------
+// Post-oidc-login hooks.
+// ---------------------------------------------------------------------------
+
+/// When `oidc` is enabled, both `login` and `registration` need an
+/// `after.oidc` hook (at minimum `session`) or a successful upstream
+/// sign-in never establishes a Kratos session.
+pub(crate) fn check_flow_hooks(root: &Value) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    if dig_bool(root, &["selfservice", "methods", "oidc", "enabled"]) != Some(true) {
+        return findings;
+    }
+
+    for flow in ["login", "registration"] {
+        let key = format!("selfservice.flows.{flow}.after.oidc.hooks");
+        let has_hooks = dig(
+            root,
+            &["selfservice", "flows", flow, "after", "oidc", "hooks"],
+        )
+        .and_then(Value::as_sequence)
+        .is_some_and(|seq| !seq.is_empty());
+        if has_hooks {
+            findings.push(Finding::ok(&key, "<configured>"));
+        } else {
+            findings.push(Finding::fail(
+                &key,
+                "<unset>",
+                "at least one hook (e.g. `session`)",
+                &format!(
+                    "oidc is enabled but the {flow} flow has no `after.oidc` hooks — a successful upstream sign-in won't establish (or complete) a Kratos session."
+                ),
+            ));
+        }
+    }
+
+    findings
+}
+
+// ---------------------------------------------------------------------------
+// web_hook auth tokens.
+// ---------------------------------------------------------------------------
+
+/// Every `web_hook`'s `api_key` / `Authorization` bearer value, paired with
+/// its dotted/bracketed path, in document order. Path strings match
+/// `walk_placeholders`'s convention exactly so a FAIL emitted here suppresses
+/// the generic placeholder scan's duplicate at the same scalar.
+fn collect_hook_tokens(root: &Value) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut path = String::new();
+    walk_hook_tokens(root, &mut path, &mut out);
+    out
+}
+
+fn walk_hook_tokens(value: &Value, path: &mut String, out: &mut Vec<(String, String)>) {
+    match value {
+        Value::Mapping(map) => {
+            if dig_str(value, &["auth", "type"]) == Some("api_key")
+                && dig_str(value, &["auth", "config", "name"]) == Some("Authorization")
+            {
+                if let Some(v) = dig_str(value, &["auth", "config", "value"]) {
+                    let base = path.len();
+                    if !path.is_empty() {
+                        path.push('.');
+                    }
+                    path.push_str("auth.config.value");
+                    out.push((path.clone(), v.to_string()));
+                    path.truncate(base);
+                }
+            }
+            for (k, v) in map {
+                let Some(key) = k.as_str() else { continue };
+                let base = path.len();
+                if !path.is_empty() {
+                    path.push('.');
+                }
+                path.push_str(key);
+                walk_hook_tokens(v, path, out);
+                path.truncate(base);
+            }
+        }
+        Value::Sequence(seq) => {
+            for (i, v) in seq.iter().enumerate() {
+                let base = path.len();
+                use std::fmt::Write as _;
+                let _ = write!(path, "[{i}]");
+                walk_hook_tokens(v, path, out);
+                path.truncate(base);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn strip_bearer(v: &str) -> String {
+    v.strip_prefix("Bearer ").unwrap_or(v).to_string()
+}
+
+/// The first `web_hook`'s `api_key`/`Authorization` bearer value in document
+/// order, with the `Bearer ` scheme prefix stripped.
+pub(crate) fn extract_hook_token(root: &Value) -> Option<String> {
+    collect_hook_tokens(root)
+        .into_iter()
+        .next()
+        .map(|(_, v)| strip_bearer(&v))
+}
+
+/// FAILs every `web_hook` whose bearer token is still the public
+/// dev-playground literal.
+pub(crate) fn check_hook_tokens(root: &Value) -> Vec<Finding> {
+    collect_hook_tokens(root)
+        .into_iter()
+        .filter_map(|(path, raw)| {
+            let token = strip_bearer(&raw);
+            PLACEHOLDER_TOKENS.contains(&token.as_str()).then(|| {
+                Finding::fail(
+                    &path,
+                    "<dev-playground-token-change-me>",
+                    "a real per-deployment secret",
+                    "this hook still carries the public dev-playground bearer token from the repo; anyone can forge audit webhook calls to Forseti's /internal/audit/kratos receiver.",
+                )
+            })
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// config.toml cross-link: the audit webhook accept list vs. kratos.yml.
+// ---------------------------------------------------------------------------
+
+/// `[audit].webhook_token` as written in `config.toml` — either a bare
+/// string or an array (the rotation accept-list form).
+pub(crate) fn webhook_token_entries(doc: &DocumentMut) -> Vec<String> {
+    let Some(item) = doc
+        .get("audit")
+        .and_then(|audit| audit.get("webhook_token"))
+    else {
+        return Vec::new();
+    };
+    if let Some(s) = item.as_str() {
+        return vec![s.to_string()];
+    }
+    if let Some(arr) = item.as_array() {
+        return arr
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
+    }
+    Vec::new()
+}
+
+pub(crate) fn load_forseti_toml(path: &Path) -> anyhow::Result<DocumentMut> {
+    let display = path.display();
+    let text = std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("{display}: {e}"))?;
+    text.parse::<DocumentMut>()
+        .map_err(|e| anyhow::anyhow!("{display}: invalid TOML: {e}"))
+}
+
+/// Cross-checks kratos.yml's `web_hook` bearer token against `config.toml`'s
+/// `[audit].webhook_token` accept list. FAILs on a mismatch (the receiver
+/// will 401 every Kratos event), WARNs when the accept list has more than
+/// one entry (a rotation left mid-flight). No findings when kratos.yml has
+/// no `web_hook` to compare against — nothing to cross-check.
+pub(crate) fn check_forseti_crosslink(kratos: &Value, doc: &DocumentMut) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    let entries = webhook_token_entries(doc);
+    let Some(hook_token) = extract_hook_token(kratos) else {
+        return findings;
+    };
+
+    if entries.is_empty() {
+        findings.push(Finding::fail(
+            "audit.webhook_token",
+            "<unset>",
+            "matching kratos.yml's web_hook Authorization value",
+            "the audit receiver's accept list is empty; every Kratos webhook call will 401.",
+        ));
+    } else if !entries.iter().any(|t| t == &hook_token) {
+        findings.push(Finding::fail(
+            "audit.webhook_token",
+            "<kratos hook token not in accept list>",
+            "add kratos.yml's hook token to [audit].webhook_token",
+            "kratos.yml's web_hook Authorization value isn't accepted by Forseti's /internal/audit/kratos receiver — audit events will 401.",
+        ));
+    } else {
+        findings.push(Finding::ok(
+            "audit.webhook_token",
+            format!(
+                "<{} accept-list entries, kratos hook token present>",
+                entries.len()
+            ),
+        ));
+    }
+
+    if entries.len() > 1 {
+        findings.push(Finding::warn(
+            "audit.webhook_token.rotation",
+            format!("<{} entries>", entries.len()),
+            "prune to a single entry once rotation completes",
+            "rotation in progress, restart + prune pending",
+        ));
+    }
+
+    findings
 }
 
 /// Strip any `user:pass@` userinfo so credentials never hit stdout/CI logs.
@@ -376,6 +783,21 @@ pub(crate) fn resolve_config_path(
     ))
 }
 
+const DEFAULT_FORSETI_TOML: &str = "config.toml";
+
+/// `config.toml` is optional for `check`/`status`: a flag/env value is
+/// honoured even if missing (the caller reports the read error), but with
+/// neither set we only use the dev default when it actually exists on disk
+/// — no finding at all when there's no config.toml to check against.
+pub(crate) fn resolve_forseti_toml_path(flag: Option<&Path>) -> Option<PathBuf> {
+    if let Some(p) = flag.filter(|p| !p.as_os_str().is_empty()) {
+        return Some(p.to_path_buf());
+    }
+    Path::new(DEFAULT_FORSETI_TOML)
+        .exists()
+        .then(|| PathBuf::from(DEFAULT_FORSETI_TOML))
+}
+
 pub(crate) fn check(args: &CheckArgs) -> i32 {
     let strict = args.strict;
 
@@ -397,6 +819,20 @@ pub(crate) fn check(args: &CheckArgs) -> i32 {
     let mut total_warn = 0usize;
     let mut total_fail = 0usize;
 
+    let forseti_doc = match resolve_forseti_toml_path(args.paths.forseti_config.as_deref()) {
+        Some(p) => match load_forseti_toml(&p) {
+            Ok(doc) => Some(doc),
+            Err(e) => {
+                total_fail += 1;
+                println!("== Forseti config ({}) ==", p.display());
+                println!("  {} could not read/parse: {e}", Severity::Fail.marker());
+                println!();
+                None
+            }
+        },
+        None => None,
+    };
+
     for (label, resolved, checker) in [
         ("Kratos", kratos, check_kratos as fn(&Value) -> Vec<Finding>),
         ("Hydra", hydra, check_hydra as fn(&Value) -> Vec<Finding>),
@@ -415,7 +851,17 @@ pub(crate) fn check(args: &CheckArgs) -> i32 {
         println!("== {label} ({} — {source}) ==", path.display());
         match load_yaml(&path) {
             Ok(root) => {
-                let findings = checker(&root);
+                let mut findings = checker(&root);
+                if label == "Kratos" {
+                    let config_dir = path
+                        .parent()
+                        .filter(|p| !p.as_os_str().is_empty())
+                        .unwrap_or_else(|| Path::new("."));
+                    findings.extend(check_oidc_providers(&root, config_dir));
+                    if let Some(doc) = &forseti_doc {
+                        findings.extend(check_forseti_crosslink(&root, doc));
+                    }
+                }
                 for f in &findings {
                     match f.severity {
                         Severity::Warn => total_warn += 1,
@@ -441,6 +887,107 @@ pub(crate) fn check(args: &CheckArgs) -> i32 {
     } else {
         0
     }
+}
+
+fn state_marker(state: &str) -> &'static str {
+    match state {
+        "ok" => "[ OK ]",
+        "missing" => "[MISS]",
+        "placeholder" => "[PLHD]",
+        "dev" => "[ DEV]",
+        "warn" => "[WARN]",
+        "fail" => "[FAIL]",
+        "rotation-pending" => "[ROTP]",
+        _ => "[ ?? ]",
+    }
+}
+
+/// `config status [--json]`: same file resolution as `check` (kratos/hydra
+/// required-resolvable, forseti.toml optional), rendered either as a text
+/// table grouped by `Setting.group` or as JSON. Exits non-zero only when
+/// kratos.yml/hydra.yml can't be resolved/read — the settings themselves
+/// are reported regardless of their state.
+pub(crate) fn status(paths: &PathArgs, json: bool) -> i32 {
+    let kratos_path = match resolve_config_path(
+        paths.kratos.as_deref(),
+        DEFAULT_KRATOS,
+        "Kratos",
+        "--kratos",
+        ENV_KRATOS,
+    ) {
+        Ok((p, _)) => p,
+        Err(msg) => {
+            eprintln!("{msg}");
+            return 1;
+        }
+    };
+    let hydra_path = match resolve_config_path(
+        paths.hydra.as_deref(),
+        DEFAULT_HYDRA,
+        "Hydra",
+        "--hydra",
+        ENV_HYDRA,
+    ) {
+        Ok((p, _)) => p,
+        Err(msg) => {
+            eprintln!("{msg}");
+            return 1;
+        }
+    };
+
+    let kratos_root = match load_yaml(&kratos_path) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{}: {e}", kratos_path.display());
+            return 1;
+        }
+    };
+    let hydra_root = match load_yaml(&hydra_path) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{}: {e}", hydra_path.display());
+            return 1;
+        }
+    };
+
+    let forseti_doc = resolve_forseti_toml_path(paths.forseti_config.as_deref())
+        .and_then(|p| load_forseti_toml(&p).ok());
+
+    let statuses = catalog::status_of(&kratos_root, &hydra_root, forseti_doc.as_ref());
+
+    if json {
+        match serde_json::to_string_pretty(&statuses) {
+            Ok(s) => println!("{s}"),
+            Err(e) => {
+                eprintln!("error: {e}");
+                return 1;
+            }
+        }
+        return 0;
+    }
+
+    let mut current_group: Option<&str> = None;
+    for setting in catalog::SETTINGS {
+        let Some(s) = statuses.iter().find(|s| s.key == setting.key) else {
+            continue;
+        };
+        if current_group != Some(setting.group) {
+            if current_group.is_some() {
+                println!();
+            }
+            println!("== {} ==", setting.group);
+            current_group = Some(setting.group);
+        }
+        println!(
+            "  {} {:<24} {:<32} [{}] {}",
+            state_marker(&s.state),
+            setting.key,
+            setting.title,
+            setting.targets.join(", "),
+            s.detail
+        );
+    }
+    0
 }
 
 #[cfg(test)]
@@ -761,5 +1308,491 @@ secrets:
         )
         .expect_err("empty flag must fall through to error");
         assert!(err.contains("--kratos"));
+    }
+
+    fn unique_tmp_dir(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("forseti-check-{}-{label}", std::process::id()))
+    }
+
+    // -----------------------------------------------------------------
+    // Placeholder scan: now case-insensitive + dev token literal.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn lowercase_changeme_is_now_caught() {
+        let v = parse(
+            r#"
+selfservice:
+  methods:
+    webauthn:
+      enabled: true
+      config:
+        rp:
+          id: changeme_rp_id
+"#,
+        );
+        let findings = check_kratos(&v);
+        assert_eq!(
+            severity_of(&findings, "selfservice.methods.webauthn.config.rp.id"),
+            Some(Severity::Fail)
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // check_secret_lists: full-list checks.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn second_cipher_entry_of_wrong_length_fails() {
+        let v = parse(
+            r#"
+secrets:
+  cipher:
+    - bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+    - too-short
+"#,
+        );
+        let findings = check_secret_lists(&v, false);
+        assert_eq!(severity_of(&findings, "secrets.cipher"), Some(Severity::Ok));
+        assert_eq!(
+            severity_of(&findings, "secrets.cipher[1]"),
+            Some(Severity::Fail)
+        );
+    }
+
+    #[test]
+    fn more_than_three_secret_entries_warns() {
+        let v = parse(
+            r#"
+secrets:
+  system:
+    - aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    - bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+    - cccccccccccccccccccccccccccccccc
+    - dddddddddddddddddddddddddddddddd
+"#,
+        );
+        let findings = check_secret_lists(&v, true);
+        assert_eq!(
+            severity_of(&findings, "secrets.system.count"),
+            Some(Severity::Warn)
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // check_oidc_providers.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn microsoft_tenant_common_fails() {
+        let v = parse(
+            r#"
+selfservice:
+  methods:
+    oidc:
+      config:
+        providers:
+          - id: microsoft
+            provider: microsoft
+            client_id: real-client-id
+            client_secret: real-client-secret
+            microsoft_tenant: common
+            mapper_url: file:///etc/config/kratos/oidc.microsoft.jsonnet
+"#,
+        );
+        let findings = check_oidc_providers(&v, Path::new("/nonexistent"));
+        assert_eq!(
+            severity_of(
+                &findings,
+                "selfservice.methods.oidc.config.providers[0].microsoft_tenant"
+            ),
+            Some(Severity::Fail)
+        );
+    }
+
+    #[test]
+    fn provider_placeholder_client_id_fails() {
+        let v = parse(
+            r#"
+selfservice:
+  methods:
+    oidc:
+      config:
+        providers:
+          - id: google
+            provider: google
+            client_id: CHANGEME_GOOGLE_CLIENT_ID
+            client_secret: real-secret
+            mapper_url: file:///etc/config/kratos/oidc.google.jsonnet
+"#,
+        );
+        let findings = check_oidc_providers(&v, Path::new("/nonexistent"));
+        assert_eq!(
+            severity_of(
+                &findings,
+                "selfservice.methods.oidc.config.providers[0].client_id"
+            ),
+            Some(Severity::Fail)
+        );
+    }
+
+    #[test]
+    fn mapper_url_without_file_scheme_fails() {
+        let v = parse(
+            r#"
+selfservice:
+  methods:
+    oidc:
+      config:
+        providers:
+          - id: google
+            provider: google
+            client_id: real-id
+            client_secret: real-secret
+            mapper_url: https://example.com/mapper.jsonnet
+"#,
+        );
+        let findings = check_oidc_providers(&v, Path::new("/nonexistent"));
+        assert_eq!(
+            severity_of(
+                &findings,
+                "selfservice.methods.oidc.config.providers[0].mapper_url"
+            ),
+            Some(Severity::Fail)
+        );
+    }
+
+    #[test]
+    fn mapper_url_missing_file_fails() {
+        let dir = unique_tmp_dir("mapper-missing");
+        std::fs::create_dir_all(&dir).unwrap();
+        let v = parse(
+            r#"
+selfservice:
+  methods:
+    oidc:
+      config:
+        providers:
+          - id: google
+            provider: google
+            client_id: real-id
+            client_secret: real-secret
+            mapper_url: file:///etc/config/kratos/oidc.google.jsonnet
+"#,
+        );
+        let findings = check_oidc_providers(&v, &dir);
+        assert_eq!(
+            severity_of(
+                &findings,
+                "selfservice.methods.oidc.config.providers[0].mapper_url.file"
+            ),
+            Some(Severity::Fail)
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn mapper_without_email_verified_guard_warns() {
+        let dir = unique_tmp_dir("mapper-unsafe");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("oidc.google.jsonnet"),
+            "local claims = std.extVar('claims');\n{ identity: { traits: { email: claims.email } } }\n",
+        )
+        .unwrap();
+        let v = parse(
+            r#"
+selfservice:
+  methods:
+    oidc:
+      config:
+        providers:
+          - id: google
+            provider: google
+            client_id: real-id
+            client_secret: real-secret
+            mapper_url: file:///etc/config/kratos/oidc.google.jsonnet
+"#,
+        );
+        let findings = check_oidc_providers(&v, &dir);
+        assert_eq!(
+            severity_of(
+                &findings,
+                "selfservice.methods.oidc.config.providers[0].mapper_url.email_verified"
+            ),
+            Some(Severity::Warn)
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn mapper_with_email_verified_guard_is_clean() {
+        let dir = unique_tmp_dir("mapper-safe");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("oidc.google.jsonnet"),
+            "local claims = std.extVar('claims');\n{ identity: { traits: { email: if claims.email_verified then claims.email else null } } }\n",
+        )
+        .unwrap();
+        let v = parse(
+            r#"
+selfservice:
+  methods:
+    oidc:
+      config:
+        providers:
+          - id: google
+            provider: google
+            client_id: real-id
+            client_secret: real-secret
+            mapper_url: file:///etc/config/kratos/oidc.google.jsonnet
+"#,
+        );
+        let findings = check_oidc_providers(&v, &dir);
+        assert!(
+            findings.iter().all(|f| f.severity != Severity::Warn),
+            "expected no WARN, got: {findings:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // -----------------------------------------------------------------
+    // check_flow_hooks.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn enabled_oidc_without_after_hooks_fails() {
+        let v = parse(
+            r#"
+selfservice:
+  methods:
+    oidc:
+      enabled: true
+  flows:
+    login:
+      after: {}
+    registration:
+      after: {}
+"#,
+        );
+        let findings = check_flow_hooks(&v);
+        assert_eq!(
+            severity_of(&findings, "selfservice.flows.login.after.oidc.hooks"),
+            Some(Severity::Fail)
+        );
+        assert_eq!(
+            severity_of(&findings, "selfservice.flows.registration.after.oidc.hooks"),
+            Some(Severity::Fail)
+        );
+    }
+
+    #[test]
+    fn enabled_oidc_with_after_hooks_is_ok() {
+        let v = parse(
+            r#"
+selfservice:
+  methods:
+    oidc:
+      enabled: true
+  flows:
+    login:
+      after:
+        oidc:
+          hooks:
+            - hook: session
+    registration:
+      after:
+        oidc:
+          hooks:
+            - hook: session
+"#,
+        );
+        let findings = check_flow_hooks(&v);
+        assert_eq!(
+            severity_of(&findings, "selfservice.flows.login.after.oidc.hooks"),
+            Some(Severity::Ok)
+        );
+    }
+
+    #[test]
+    fn oidc_disabled_produces_no_flow_hook_findings() {
+        let v = parse("selfservice:\n  methods:\n    oidc:\n      enabled: false\n");
+        assert!(check_flow_hooks(&v).is_empty());
+    }
+
+    // -----------------------------------------------------------------
+    // check_hook_tokens / extract_hook_token.
+    // -----------------------------------------------------------------
+
+    const HOOK_FIXTURE: &str = r#"
+selfservice:
+  flows:
+    settings:
+      after:
+        password:
+          hooks:
+            - hook: web_hook
+              config:
+                url: http://host.docker.internal:8081/internal/audit/kratos?action=password.changed
+                auth:
+                  type: api_key
+                  config:
+                    name: Authorization
+                    value: "Bearer dev-playground-token-change-me"
+                    in: header
+"#;
+
+    #[test]
+    fn dev_token_fails() {
+        let v = parse(HOOK_FIXTURE);
+        let findings = check_hook_tokens(&v);
+        assert_eq!(
+            severity_of(
+                &findings,
+                "selfservice.flows.settings.after.password.hooks[0].config.auth.config.value"
+            ),
+            Some(Severity::Fail)
+        );
+    }
+
+    #[test]
+    fn dev_token_is_suppressed_from_generic_scan() {
+        let v = parse(HOOK_FIXTURE);
+        let findings = check_kratos(&v);
+        let matches: Vec<_> = findings
+            .iter()
+            .filter(|f| f.key.contains("auth.config.value"))
+            .collect();
+        assert_eq!(
+            matches.len(),
+            1,
+            "expected exactly one finding for the hook token, got: {matches:?}"
+        );
+    }
+
+    #[test]
+    fn extract_hook_token_strips_bearer_prefix() {
+        let v = parse(HOOK_FIXTURE);
+        assert_eq!(
+            extract_hook_token(&v).as_deref(),
+            Some("dev-playground-token-change-me")
+        );
+    }
+
+    #[test]
+    fn extract_hook_token_none_when_absent() {
+        let v = parse("selfservice: {}\n");
+        assert_eq!(extract_hook_token(&v), None);
+    }
+
+    #[test]
+    fn real_hook_token_does_not_fail() {
+        let v = parse(
+            r#"
+selfservice:
+  flows:
+    settings:
+      after:
+        password:
+          hooks:
+            - hook: web_hook
+              config:
+                auth:
+                  type: api_key
+                  config:
+                    name: Authorization
+                    value: "Bearer a-real-per-deployment-secret"
+"#,
+        );
+        assert!(check_hook_tokens(&v).is_empty());
+    }
+
+    // -----------------------------------------------------------------
+    // config.toml cross-link.
+    // -----------------------------------------------------------------
+
+    fn toml_doc(s: &str) -> DocumentMut {
+        s.parse().expect("test toml parses")
+    }
+
+    #[test]
+    fn kratos_token_missing_from_accept_list_fails() {
+        let kratos = parse(HOOK_FIXTURE);
+        let doc = toml_doc("[audit]\nwebhook_token = \"some-other-token\"\n");
+        let findings = check_forseti_crosslink(&kratos, &doc);
+        assert_eq!(
+            severity_of(&findings, "audit.webhook_token"),
+            Some(Severity::Fail)
+        );
+    }
+
+    #[test]
+    fn two_entry_accept_list_warns_rotation_pending() {
+        let kratos = parse(HOOK_FIXTURE);
+        let doc = toml_doc(
+            "[audit]\nwebhook_token = [\"dev-playground-token-change-me\", \"new-token\"]\n",
+        );
+        let findings = check_forseti_crosslink(&kratos, &doc);
+        assert_eq!(
+            severity_of(&findings, "audit.webhook_token"),
+            Some(Severity::Ok)
+        );
+        assert_eq!(
+            severity_of(&findings, "audit.webhook_token.rotation"),
+            Some(Severity::Warn)
+        );
+    }
+
+    #[test]
+    fn matching_single_entry_accept_list_is_ok() {
+        let kratos = parse(HOOK_FIXTURE);
+        let doc = toml_doc("[audit]\nwebhook_token = \"dev-playground-token-change-me\"\n");
+        let findings = check_forseti_crosslink(&kratos, &doc);
+        assert_eq!(
+            severity_of(&findings, "audit.webhook_token"),
+            Some(Severity::Ok)
+        );
+        assert!(!findings.iter().any(|f| f.key.ends_with(".rotation")));
+    }
+
+    #[test]
+    fn crosslink_is_empty_when_kratos_has_no_hooks() {
+        let kratos = parse("selfservice: {}\n");
+        let doc = toml_doc("[audit]\nwebhook_token = \"whatever\"\n");
+        assert!(check_forseti_crosslink(&kratos, &doc).is_empty());
+    }
+
+    #[test]
+    fn webhook_token_entries_reads_string_and_array_forms() {
+        let single = toml_doc("[audit]\nwebhook_token = \"a\"\n");
+        assert_eq!(webhook_token_entries(&single), vec!["a".to_string()]);
+
+        let many = toml_doc("[audit]\nwebhook_token = [\"a\", \"b\"]\n");
+        assert_eq!(
+            webhook_token_entries(&many),
+            vec!["a".to_string(), "b".to_string()]
+        );
+
+        let absent = toml_doc("[other]\nkey = \"x\"\n");
+        assert!(webhook_token_entries(&absent).is_empty());
+    }
+
+    #[test]
+    fn load_forseti_toml_reads_a_real_file() {
+        let dir = unique_tmp_dir("forseti-toml");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "[audit]\nwebhook_token = \"a\"\n").unwrap();
+
+        let doc = load_forseti_toml(&path).expect("reads and parses");
+        assert_eq!(webhook_token_entries(&doc), vec!["a".to_string()]);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_forseti_toml_errors_on_missing_file() {
+        let err = load_forseti_toml(Path::new("/does/not/exist/config.toml")).unwrap_err();
+        assert!(err.to_string().contains("does/not/exist"));
     }
 }

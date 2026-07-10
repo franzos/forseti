@@ -118,9 +118,9 @@ pub struct InitArgs {
     #[arg(long)]
     pub smtp_uri: Option<String>,
     #[arg(long)]
-    pub smtp_from_address: Option<String>, // consumed in Task 5
+    pub smtp_from_address: Option<String>,
     #[arg(long)]
-    pub smtp_from_name: Option<String>, // consumed in Task 5
+    pub smtp_from_name: Option<String>,
     #[arg(long, default_value = "kratos.yml")]
     pub kratos_out: String,
     #[arg(long, default_value = "hydra.yml")]

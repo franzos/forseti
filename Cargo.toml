@@ -152,6 +152,12 @@ rpassword = "7"
 similar = "2"
 # `flock(2)` advisory locking for `config_cli::io::lock_config_dir`.
 libc = "0.2"
+# Format-preserving TOML editing for the `config.toml` cross-link check and
+# future `config modify`/`rotate` writers (`config_cli::check::load_forseti_toml`).
+# `figment` already pulls a `toml_edit` transitively for its own TOML
+# provider, but that's an internal detail we can't rely on as a public API —
+# declared directly so `DocumentMut` is a supported dependency.
+toml_edit = "0.25"
 
 [profile.release]
 strip = true

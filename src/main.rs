@@ -122,19 +122,22 @@ async fn main() -> anyhow::Result<()> {
         // Pure file operations: Forseti can't read Kratos's live config via API, so these lint/generate the files.
         Some(Cmd::ConfigCheckAlias(args)) => std::process::exit(config_cli::check(&args)),
         Some(Cmd::ConfigInitAlias(args)) => std::process::exit(config_cli::init(&args)),
-        Some(Cmd::Config(args)) => std::process::exit(dispatch_config(args.cmd)),
+        Some(Cmd::Config(args)) => std::process::exit(dispatch_config(args)),
     }
 }
 
-/// `config` subcommand dispatch. Variants beyond `check`/`init` (and the bare
-/// interactive menu) land in later tasks; until then they're a stub.
-fn dispatch_config(cmd: Option<ConfigCmd>) -> i32 {
+/// `config` subcommand dispatch. Variants beyond `check`/`init`/`status`
+/// (and the bare interactive menu) land in later tasks; until then they're a
+/// stub.
+fn dispatch_config(args: cli::ConfigArgs) -> i32 {
     use clap::CommandFactory;
     use std::io::Write;
 
+    let cli::ConfigArgs { cmd, paths } = args;
     match cmd {
         Some(ConfigCmd::Check(args)) => config_cli::check(&args),
         Some(ConfigCmd::Init(args)) => config_cli::init(&args),
+        Some(ConfigCmd::Status { json }) => config_cli::status(&paths, json),
         None => {
             // Print clap-generated help for the config subcommand to stderr.
             let mut config_cmd = Cli::command()
