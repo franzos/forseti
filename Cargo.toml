@@ -58,6 +58,7 @@ ory_reqwest = { package = "reqwest", version = "0.12", default-features = false,
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
 figment = { version = "0.10", features = ["toml", "env"] }
 ory-client = "1.22"
 rand = "0.9"

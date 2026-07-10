@@ -3,6 +3,7 @@ mod admin;
 mod app;
 mod audit;
 mod auth;
+mod cli;
 mod commercial;
 mod config;
 mod config_cli;
@@ -47,21 +48,20 @@ mod webhook;
 
 pub(crate) use web::{render_error_boundary, safe_return_to, FlowQuery};
 
+use clap::Parser as _;
+use cli::{Cli, Cmd, ConfigCmd};
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // One verb doesn't justify a CLI framework; unrecognised tokens fall through to the HTTP server.
-    match std::env::args().nth(1).as_deref() {
-        Some("--help" | "-h" | "help") => {
-            print_top_help();
-            std::process::exit(0);
-        }
-        Some("audit-prune") => {
+    match Cli::parse().cmd {
+        None => app::run().await,
+        Some(Cmd::AuditPrune) => {
             let cfg = config::AppConfig::load()?;
             let db = bootstrap_db(&cfg).await?;
             let code = audit::prune_cli(&cfg, &db).await;
             std::process::exit(code);
         }
-        Some("unverified-prune") => {
+        Some(Cmd::UnverifiedPrune) => {
             let cfg = config::AppConfig::load()?;
             // Deletes go through Kratos's admin API but cascade to the local POSIX tables, so the pool is needed.
             let ory = ory::OryClients::from_config(&cfg);
@@ -69,7 +69,7 @@ async fn main() -> anyhow::Result<()> {
             let code = identity::prune_unverified_cli(&cfg, &db, &ory).await;
             std::process::exit(code);
         }
-        Some("posix-reconcile") => {
+        Some(Cmd::PosixReconcile) => {
             let cfg = config::AppConfig::load()?;
             let db = bootstrap_db(&cfg).await?;
             let ory = ory::OryClients::from_config(&cfg);
@@ -84,7 +84,7 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Some("posix-init-client") => {
+        Some(Cmd::PosixInitClient) => {
             let cfg = config::AppConfig::load()?;
             let ory = ory::OryClients::from_config(&cfg);
             match oauth::device::ensure_pam_client(&ory, &cfg.posix).await {
@@ -120,20 +120,22 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         // Pure file operations: Forseti can't read Kratos's live config via API, so these lint/generate the files.
-        Some("config-check") => {
-            let args: Vec<String> = std::env::args().skip(2).collect();
-            std::process::exit(config_cli::check(&args));
+        Some(Cmd::ConfigCheckAlias(args)) => std::process::exit(config_cli::check(&args)),
+        Some(Cmd::ConfigInitAlias(args)) => std::process::exit(config_cli::init(&args)),
+        Some(Cmd::Config(args)) => std::process::exit(dispatch_config(args.cmd)),
+    }
+}
+
+/// `config` subcommand dispatch. Variants beyond `check`/`init` (and the bare
+/// interactive menu) land in later tasks; until then they're a stub.
+fn dispatch_config(cmd: Option<ConfigCmd>) -> i32 {
+    match cmd {
+        Some(ConfigCmd::Check(args)) => config_cli::check(&args),
+        Some(ConfigCmd::Init(args)) => config_cli::init(&args),
+        _ => {
+            eprintln!("not implemented yet");
+            2
         }
-        Some("config-init") => {
-            let args: Vec<String> = std::env::args().skip(2).collect();
-            std::process::exit(config_cli::init(&args));
-        }
-        // A flag-shaped token is almost certainly a typo; show help rather than silently booting the server. A bare `forseti` still runs it.
-        Some(tok) if tok.starts_with('-') => {
-            print_top_help();
-            std::process::exit(0);
-        }
-        _ => app::run().await,
     }
 }
 
@@ -146,26 +148,4 @@ async fn bootstrap_db(cfg: &config::AppConfig) -> anyhow::Result<db::DbPool> {
         db.run_migrations().await?;
     }
     Ok(db)
-}
-
-fn print_top_help() {
-    println!(
-        "forseti {version} — identity + OAuth2/OIDC frontend for Ory Kratos & Hydra
-
-USAGE: forseti [SUBCOMMAND]
-
-With no subcommand, forseti runs the HTTP server.
-
-SUBCOMMANDS:
-  config-check       lint Kratos + Hydra config files against Forseti's recommendations
-  config-init        generate a recommended Kratos + Hydra config pair
-  audit-prune        delete audit_events older than [audit].retention_days
-  unverified-prune   delete Kratos identities with unverified addresses past their TTL
-  posix-reconcile    purge POSIX rows whose Kratos identity no longer exists
-  posix-init-client  create the forseti-linux-pam confidential OAuth client (device grant)
-  help               print this help
-
-Run `forseti <SUBCOMMAND> --help` for flags.",
-        version = web::FORSETI_VERSION,
-    );
 }

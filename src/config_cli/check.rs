@@ -2,9 +2,10 @@ use std::path::{Path, PathBuf};
 
 use serde_yaml_ng::Value;
 
+use crate::cli::CheckArgs;
+
 use super::init::is_dev_smtp;
 use super::yamlutil::{dig_bool, dig_str, first_secret, is_placeholder, load_yaml};
-use super::{has_flag, parse_flag, wants_help};
 
 const DEFAULT_KRATOS: &str = "infra/kratos/kratos.yml";
 const DEFAULT_HYDRA: &str = "infra/hydra/hydra.yml";
@@ -348,24 +349,24 @@ pub(crate) fn print_finding(f: &Finding) {
     }
 }
 
-/// Resolve a config file path by precedence: explicit `--flag`, then env var,
-/// then the dev default (only if it exists on disk). A path from the flag or
-/// env is honoured even if missing (the caller surfaces a "file not found"
-/// error on read), but a non-existent default is treated as "no source",
-/// returning `Err` so we never silently lint a phantom file.
+/// Resolve a config file path by precedence: explicit `--flag` (clap already
+/// merged the env var into this), then the dev default (only if it exists on
+/// disk). A flag-supplied path is honoured even if missing (the caller
+/// surfaces a "file not found" error on read), but a non-existent default is
+/// treated as "no source", returning `Err` so we never silently lint a
+/// phantom file.
 pub(crate) fn resolve_config_path(
-    flag: Option<&str>,
-    env_value: Option<String>,
+    flag: Option<&Path>,
     default: &str,
     label: &str,
     flag_name: &str,
     env_name: &str,
 ) -> Result<(PathBuf, String), String> {
-    if let Some(p) = flag.filter(|s| !s.is_empty()) {
-        return Ok((PathBuf::from(p), format!("from {flag_name}")));
-    }
-    if let Some(p) = env_value.filter(|s| !s.is_empty()) {
-        return Ok((PathBuf::from(p), format!("from ${env_name}")));
+    if let Some(p) = flag.filter(|p| !p.as_os_str().is_empty()) {
+        return Ok((
+            p.to_path_buf(),
+            format!("from {flag_name} (or ${env_name})"),
+        ));
     }
     if Path::new(default).exists() {
         return Ok((PathBuf::from(default), "dev default".to_string()));
@@ -375,25 +376,18 @@ pub(crate) fn resolve_config_path(
     ))
 }
 
-pub(crate) fn check(args: &[String]) -> i32 {
-    if wants_help(args) {
-        print_check_help();
-        return 0;
-    }
-
-    let strict = has_flag(args, "--strict");
+pub(crate) fn check(args: &CheckArgs) -> i32 {
+    let strict = args.strict;
 
     let kratos = resolve_config_path(
-        parse_flag(args, "--kratos"),
-        std::env::var(ENV_KRATOS).ok(),
+        args.paths.kratos.as_deref(),
         DEFAULT_KRATOS,
         "Kratos",
         "--kratos",
         ENV_KRATOS,
     );
     let hydra = resolve_config_path(
-        parse_flag(args, "--hydra"),
-        std::env::var(ENV_HYDRA).ok(),
+        args.paths.hydra.as_deref(),
         DEFAULT_HYDRA,
         "Hydra",
         "--hydra",
@@ -449,30 +443,6 @@ pub(crate) fn check(args: &[String]) -> i32 {
     }
 }
 
-fn print_check_help() {
-    println!(
-        "forseti config-check — lint Kratos + Hydra config FILES against Forseti's recommendations
-
-USAGE: forseti config-check [OPTIONS]
-
-OPTIONS:
-  --kratos <path>   Kratos config file
-  --hydra <path>    Hydra config file
-  --strict          also exit non-zero on WARN (not just FAIL)
-  -h, --help        print this help
-
-CONFIG DISCOVERY (per file, highest precedence first):
-  1. --kratos / --hydra flag
-  2. ${ENV_KRATOS} / ${ENV_HYDRA} env var
-  3. dev default ({DEFAULT_KRATOS} / {DEFAULT_HYDRA}) — only if it exists
-  If none resolves to a file, config-check errors and exits non-zero.
-
-EXIT CODES:
-  0  no FAIL (and no WARN under --strict)
-  1  any FAIL, or any WARN under --strict, or no config source found"
-    );
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -486,10 +456,11 @@ mod tests {
     }
 
     #[test]
-    fn resolve_flag_wins_over_env_and_default() {
+    fn resolve_flag_wins_over_default() {
+        // clap already merges flag > env before this function runs; it only
+        // adds the exists-check on the default.
         let (path, source) = resolve_config_path(
-            Some("/flag/kratos.yml"),
-            Some("/env/kratos.yml".to_string()),
+            Some(Path::new("/flag/kratos.yml")),
             DEFAULT_KRATOS,
             "Kratos",
             "--kratos",
@@ -497,29 +468,14 @@ mod tests {
         )
         .expect("flag resolves");
         assert_eq!(path, PathBuf::from("/flag/kratos.yml"));
-        assert_eq!(source, "from --kratos");
-    }
-
-    #[test]
-    fn resolve_env_used_when_no_flag() {
-        let (path, source) = resolve_config_path(
-            None,
-            Some("/env/kratos.yml".to_string()),
-            DEFAULT_KRATOS,
-            "Kratos",
-            "--kratos",
-            ENV_KRATOS,
-        )
-        .expect("env resolves");
-        assert_eq!(path, PathBuf::from("/env/kratos.yml"));
-        assert_eq!(source, format!("from ${ENV_KRATOS}"));
+        assert_eq!(source, format!("from --kratos (or ${ENV_KRATOS})"));
     }
 
     #[test]
     fn resolve_default_used_when_it_exists() {
         // Cargo runs tests from the crate root, where infra/ exists.
         let (path, source) =
-            resolve_config_path(None, None, DEFAULT_KRATOS, "Kratos", "--kratos", ENV_KRATOS)
+            resolve_config_path(None, DEFAULT_KRATOS, "Kratos", "--kratos", ENV_KRATOS)
                 .expect("dev default exists at crate root");
         assert_eq!(path, PathBuf::from(DEFAULT_KRATOS));
         assert_eq!(source, "dev default");
@@ -527,15 +483,8 @@ mod tests {
 
     #[test]
     fn resolve_nothing_found_is_err() {
-        let err = resolve_config_path(
-            None,
-            None,
-            "does/not/exist.yml",
-            "Kratos",
-            "--kratos",
-            ENV_KRATOS,
-        )
-        .expect_err("missing everything should error");
+        let err = resolve_config_path(None, "does/not/exist.yml", "Kratos", "--kratos", ENV_KRATOS)
+            .expect_err("missing everything should error");
         assert!(err.contains("--kratos"));
         assert!(err.contains(ENV_KRATOS));
     }
@@ -804,8 +753,7 @@ secrets:
     #[test]
     fn empty_flag_value_falls_through() {
         let err = resolve_config_path(
-            Some(""),
-            None,
+            Some(Path::new("")),
             "does/not/exist.yml",
             "Kratos",
             "--kratos",

@@ -1,8 +1,9 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
+use crate::cli::InitArgs;
+
 use super::yamlutil::{random_secret, reject_control_chars, yaml_scalar};
-use super::{has_flag, parse_flag, wants_help};
 
 // ---------------------------------------------------------------------------
 // config-init: generate a recommended Kratos + Hydra config.
@@ -419,21 +420,16 @@ pub(crate) fn write_secret_file(path: &str, contents: &str) -> std::io::Result<(
     std::fs::write(path, contents)
 }
 
-pub(crate) fn init(args: &[String]) -> i32 {
-    if wants_help(args) {
-        print_init_help();
-        return 0;
-    }
-
+pub(crate) fn init(args: &InitArgs) -> i32 {
     let inputs = InitInputs {
-        forseti_url: parse_flag(args, "--forseti-url").map(String::from),
-        kratos_public_url: parse_flag(args, "--kratos-public-url").map(String::from),
-        kratos_admin_url: parse_flag(args, "--kratos-admin-url").map(String::from),
-        hydra_public_url: parse_flag(args, "--hydra-public-url").map(String::from),
-        hydra_admin_url: parse_flag(args, "--hydra-admin-url").map(String::from),
-        kratos_db_dsn: parse_flag(args, "--kratos-db-dsn").map(String::from),
-        hydra_db_dsn: parse_flag(args, "--hydra-db-dsn").map(String::from),
-        smtp_uri: parse_flag(args, "--smtp-uri").map(String::from),
+        forseti_url: args.forseti_url.clone(),
+        kratos_public_url: args.kratos_public_url.clone(),
+        kratos_admin_url: args.kratos_admin_url.clone(),
+        hydra_public_url: args.hydra_public_url.clone(),
+        hydra_admin_url: args.hydra_admin_url.clone(),
+        kratos_db_dsn: args.kratos_db_dsn.clone(),
+        hydra_db_dsn: args.hydra_db_dsn.clone(),
+        smtp_uri: args.smtp_uri.clone(),
     };
 
     if let Err(e) = validate_inputs(&inputs) {
@@ -441,9 +437,9 @@ pub(crate) fn init(args: &[String]) -> i32 {
         return 1;
     }
 
-    let kratos_out = parse_flag(args, "--kratos-out").unwrap_or("kratos.yml");
-    let hydra_out = parse_flag(args, "--hydra-out").unwrap_or("hydra.yml");
-    let force = has_flag(args, "--force");
+    let kratos_out = args.kratos_out.as_str();
+    let hydra_out = args.hydra_out.as_str();
+    let force = args.force;
 
     for path in [kratos_out, hydra_out] {
         if Path::new(path).exists() && !force {
@@ -486,36 +482,6 @@ pub(crate) fn init(args: &[String]) -> i32 {
     println!();
     println!("Verify with: forseti config-check --kratos {kratos_out} --hydra {hydra_out}");
     0
-}
-
-fn print_init_help() {
-    println!(
-        "forseti config-init — generate a recommended Kratos + Hydra config pair
-
-USAGE: forseti config-init [OPTIONS]
-
-Secrets are minted from a CSPRNG; the security recommendations are baked in
-regardless of input. Refuses to overwrite an existing output file without
---force. Anything not supplied is written as a loud CHANGEME_* placeholder
-that config-check will FAIL on. The webauthn rp.id is derived from the host
-of --forseti-url (left as CHANGEME_RP_ID if that flag is absent).
-
-CONNECTION OPTIONS:
-  --forseti-url <url>        Forseti public base URL
-  --kratos-public-url <url>  Kratos public base URL
-  --kratos-admin-url <url>   Kratos admin base URL
-  --hydra-public-url <url>   Hydra public issuer URL
-  --hydra-admin-url <url>    Hydra admin base URL
-  --kratos-db-dsn <dsn>      Kratos database DSN
-  --hydra-db-dsn <dsn>       Hydra database DSN
-  --smtp-uri <uri>           courier SMTP connection URI
-
-OUTPUT OPTIONS:
-  --kratos-out <path>        Kratos output file (default: kratos.yml)
-  --hydra-out <path>         Hydra output file (default: hydra.yml)
-  --force                    overwrite existing output files
-  -h, --help                 print this help"
-    );
 }
 
 #[cfg(test)]
@@ -615,27 +581,33 @@ mod tests {
         let ks = kratos.to_str().unwrap().to_string();
         let hs = hydra.to_str().unwrap().to_string();
 
-        let base = vec![
-            "--forseti-url".to_string(),
-            "https://accounts.example.com".to_string(),
-            "--kratos-out".to_string(),
-            ks.clone(),
-            "--hydra-out".to_string(),
-            hs.clone(),
-        ];
-        assert_eq!(init(&base), 0);
+        let build = |force: bool| InitArgs {
+            forseti_url: Some("https://accounts.example.com".to_string()),
+            kratos_public_url: None,
+            kratos_admin_url: None,
+            hydra_public_url: None,
+            hydra_admin_url: None,
+            kratos_db_dsn: None,
+            hydra_db_dsn: None,
+            smtp_uri: None,
+            smtp_from_address: None,
+            smtp_from_name: None,
+            kratos_out: ks.clone(),
+            hydra_out: hs.clone(),
+            force,
+        };
+
+        assert_eq!(init(&build(false)), 0);
         let mode = std::fs::metadata(&kratos).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "kratos.yml must be 0600, got {mode:o}");
 
         // Without --force a second run refuses and leaves the file untouched.
         let before = std::fs::read_to_string(&kratos).unwrap();
-        assert_eq!(init(&base), 1);
+        assert_eq!(init(&build(false)), 1);
         assert_eq!(std::fs::read_to_string(&kratos).unwrap(), before);
 
         // With --force it overwrites and keeps 0600.
-        let mut forced = base.clone();
-        forced.push("--force".to_string());
-        assert_eq!(init(&forced), 0);
+        assert_eq!(init(&build(true)), 0);
         let mode = std::fs::metadata(&kratos).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
 
