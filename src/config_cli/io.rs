@@ -120,8 +120,16 @@ pub(crate) fn backup(target: &Target) -> anyhow::Result<Option<PathBuf>> {
         .map_err(|e| anyhow::anyhow!("system clock before epoch: {e}"))?
         .as_secs();
     let backup_path = dir.join(format!("{file_name}.bak.{secs}"));
-    fs::copy(&target.path, &backup_path)?;
-    fs::set_permissions(&backup_path, fs::Permissions::from_mode(0o600))?;
+
+    // Create backup with 0o600 mode at open time to avoid transient wider exposure
+    let mut src = File::open(&target.path)?;
+    let mut dst = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&backup_path)
+        .map_err(|e| anyhow::anyhow!("{}: {e}", backup_path.display()))?;
+    std::io::copy(&mut src, &mut dst)?;
 
     let ring = list_backups(target)?; // newest first
     for stale in ring.into_iter().skip(BACKUP_RING_SIZE) {
