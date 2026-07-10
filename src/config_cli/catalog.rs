@@ -3,10 +3,15 @@
 //! state. Values themselves never leave this module — only fingerprints
 //! (`io::fingerprint`) and presence/length facts reach the operator.
 
+use std::path::Path;
+
 use serde_yaml_ng::Value;
 use toml_edit::DocumentMut;
 
-use super::check::{extract_hook_token, webhook_token_entries, PLACEHOLDER_TOKENS};
+use super::check::{
+    check_oidc_providers, extract_hook_token, webhook_token_entries, Finding, Severity,
+    PLACEHOLDER_TOKENS,
+};
 use super::init::is_dev_smtp;
 use super::io::fingerprint;
 use super::redact_uri;
@@ -84,20 +89,23 @@ pub(crate) struct SettingStatus {
 
 /// Probes = check findings mapped per setting + presence probes for optional
 /// settings. Reads only presence/length/fingerprint facts, never raw secret
-/// values, and does no filesystem access beyond what the caller already
-/// loaded (no mapper-file reads here — that's `check_oidc_providers`'s job).
+/// values. `config_dir` is threaded through to `check_oidc_providers` (it
+/// reads the mapper file off disk next to kratos.yml) so provider state can
+/// never look better here than it does under `config check` — status derives
+/// from the same lint findings rather than re-implementing them.
 pub(crate) fn status_of(
     kratos: &Value,
     hydra: &Value,
     forseti_toml: Option<&DocumentMut>,
+    config_dir: &Path,
 ) -> Vec<SettingStatus> {
     SETTINGS
         .iter()
         .map(|s| {
             let (state, detail) = match s.key {
-                "oidc.google" => provider_status(kratos, "google"),
-                "oidc.github" => provider_status(kratos, "github"),
-                "oidc.microsoft" => provider_status(kratos, "microsoft"),
+                "oidc.google" => provider_status(kratos, "google", config_dir),
+                "oidc.github" => provider_status(kratos, "github", config_dir),
+                "oidc.microsoft" => provider_status(kratos, "microsoft", config_dir),
                 "audit.webhook-token" => webhook_token_status(kratos, forseti_toml),
                 "kratos.secrets" => kratos_secrets_status(kratos),
                 "hydra.system" => hydra_system_status(hydra),
@@ -116,16 +124,22 @@ pub(crate) fn status_of(
         .collect()
 }
 
-fn provider_status(kratos: &Value, id: &str) -> (String, String) {
+/// Derives from `check_oidc_providers`'s findings for this provider's
+/// subtree rather than re-checking client_id/client_secret by hand — a
+/// provider that FAILs or WARNs under `config check` (bad `microsoft_tenant`,
+/// a non-`file://` or missing mapper, an unverified-email mapper, ...) must
+/// never report "ok" from status.
+fn provider_status(kratos: &Value, id: &str, config_dir: &Path) -> (String, String) {
     let providers = dig(
         kratos,
         &["selfservice", "methods", "oidc", "config", "providers"],
     )
     .and_then(Value::as_sequence);
-    let Some(provider) = providers
+    let Some((idx, provider)) = providers
         .into_iter()
         .flatten()
-        .find(|p| dig_str(p, &["id"]) == Some(id))
+        .enumerate()
+        .find(|(_, p)| dig_str(p, &["id"]) == Some(id))
     else {
         return (
             "missing".to_string(),
@@ -133,16 +147,43 @@ fn provider_status(kratos: &Value, id: &str) -> (String, String) {
         );
     };
 
-    let client_id_ok = dig_str(provider, &["client_id"]).is_some_and(|v| !is_placeholder(v));
-    let client_secret = dig_str(provider, &["client_secret"]);
-    let client_secret_ok = client_secret.is_some_and(|v| !is_placeholder(v));
-    if !client_id_ok || !client_secret_ok {
+    let base = format!("selfservice.methods.oidc.config.providers[{idx}]");
+    let findings = check_oidc_providers(kratos, config_dir);
+    let provider_findings: Vec<&Finding> = findings
+        .iter()
+        .filter(|f| f.key == base || f.key.starts_with(&format!("{base}.")))
+        .collect();
+
+    let credential_bad = provider_findings.iter().any(|f| {
+        f.severity == Severity::Fail
+            && (f.key == format!("{base}.client_id") || f.key == format!("{base}.client_secret"))
+    });
+    if credential_bad {
         return (
             "placeholder".to_string(),
             "client_id/client_secret unset or still a placeholder".to_string(),
         );
     }
-    let fp = client_secret.map(fingerprint).unwrap_or_default();
+
+    if let Some(f) = provider_findings
+        .iter()
+        .find(|f| f.severity == Severity::Fail)
+    {
+        return (
+            "fail".to_string(),
+            format!("{}: {} (recommended: {})", f.key, f.current, f.recommended),
+        );
+    }
+    if let Some(f) = provider_findings
+        .iter()
+        .find(|f| f.severity == Severity::Warn)
+    {
+        return ("warn".to_string(), format!("{}: {}", f.key, f.current));
+    }
+
+    let fp = dig_str(provider, &["client_secret"])
+        .map(fingerprint)
+        .unwrap_or_default();
     (
         "ok".to_string(),
         format!("configured; client_secret sha256[:8]={fp}"),
@@ -353,7 +394,7 @@ oidc:
             .parse()
             .expect("toml parses");
 
-        let statuses = status_of(&kratos_v, &hydra_v, Some(&doc));
+        let statuses = status_of(&kratos_v, &hydra_v, Some(&doc), Path::new("/nonexistent"));
 
         assert_eq!(find(&statuses, "oidc.google").state, "missing");
         assert_eq!(find(&statuses, "oidc.github").state, "missing");
@@ -371,7 +412,7 @@ oidc:
     fn status_of_without_forseti_toml_is_missing() {
         let kratos: Value = serde_yaml_ng::from_str("selfservice: {}").unwrap();
         let hydra: Value = serde_yaml_ng::from_str("secrets: {}").unwrap();
-        let statuses = status_of(&kratos, &hydra, None);
+        let statuses = status_of(&kratos, &hydra, None, Path::new("/nonexistent"));
         assert_eq!(find(&statuses, "audit.webhook-token").state, "missing");
     }
 
@@ -379,7 +420,7 @@ oidc:
     fn json_output_round_trips_through_serde() {
         let kratos: Value = serde_yaml_ng::from_str("selfservice: {}").unwrap();
         let hydra: Value = serde_yaml_ng::from_str("secrets: {}").unwrap();
-        let statuses = status_of(&kratos, &hydra, None);
+        let statuses = status_of(&kratos, &hydra, None, Path::new("/nonexistent"));
 
         let json = serde_json::to_string(&statuses).expect("serializes");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid json");
@@ -388,5 +429,72 @@ oidc:
         assert!(arr[0].get("key").is_some());
         assert!(arr[0].get("state").is_some());
         assert!(arr[0].get("detail").is_some());
+    }
+
+    // -----------------------------------------------------------------
+    // provider_status must derive from check_oidc_providers's findings —
+    // status must never look better than `config check` for the same
+    // provider.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn provider_status_is_not_ok_when_microsoft_tenant_is_common() {
+        let kratos: Value = serde_yaml_ng::from_str(
+            r#"
+selfservice:
+  methods:
+    oidc:
+      config:
+        providers:
+          - id: microsoft
+            provider: microsoft
+            client_id: real-client-id
+            client_secret: real-client-secret
+            microsoft_tenant: common
+            mapper_url: file:///etc/config/kratos/oidc.microsoft.jsonnet
+"#,
+        )
+        .unwrap();
+        let hydra: Value = serde_yaml_ng::from_str("secrets: {}").unwrap();
+
+        // Credentials look fine and the mapper path parses; only
+        // `microsoft_tenant: common` is bad. A narrow, hand-rolled probe
+        // that only looks at client_id/client_secret would miss this and
+        // wrongly report "ok".
+        let statuses = status_of(&kratos, &hydra, None, Path::new("/nonexistent-config-dir"));
+        let microsoft = find(&statuses, "oidc.microsoft");
+        assert_ne!(
+            microsoft.state, "ok",
+            "microsoft_tenant: common must not report ok, got detail: {}",
+            microsoft.detail
+        );
+    }
+
+    #[test]
+    fn provider_status_is_not_ok_when_mapper_file_is_missing_from_disk() {
+        let kratos: Value = serde_yaml_ng::from_str(
+            r#"
+selfservice:
+  methods:
+    oidc:
+      config:
+        providers:
+          - id: google
+            provider: google
+            client_id: real-client-id
+            client_secret: real-client-secret
+            mapper_url: file:///etc/config/kratos/oidc.google.jsonnet
+"#,
+        )
+        .unwrap();
+        let hydra: Value = serde_yaml_ng::from_str("secrets: {}").unwrap();
+
+        let statuses = status_of(&kratos, &hydra, None, Path::new("/nonexistent-config-dir"));
+        let google = find(&statuses, "oidc.google");
+        assert_ne!(
+            google.state, "ok",
+            "a mapper file missing from disk must not report ok, got detail: {}",
+            google.detail
+        );
     }
 }

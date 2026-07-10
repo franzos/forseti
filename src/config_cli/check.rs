@@ -237,15 +237,26 @@ pub(crate) fn check_hydra(root: &Value) -> Vec<Finding> {
     findings
 }
 
+/// Prefix of every key the generic scan must stay off — `check_oidc_providers`
+/// already walks this subtree (client_id/client_secret/mapper_url/etc.) and
+/// FAILs on both empty and placeholder credentials, so the generic scan would
+/// otherwise double-report the same scalar.
+const OIDC_PROVIDERS_PATH: &str = "selfservice.methods.oidc.config.providers";
+
 /// Scan every scalar for a leftover `CHANGEME` placeholder (case-insensitive
 /// — `config-init` always emits it upper-case, but a hand-edited file might
 /// not) or the literal dev-playground hook token, and FAIL on each. `already`
 /// covers keys the specific checks handled; a specific finding whose key is a
 /// prefix of the scalar's path (e.g. `secrets.cipher` vs the scalar at
 /// `secrets.cipher[0]`) suppresses the generic one so we don't double-report.
+/// The OIDC providers subtree is skipped outright — `check_oidc_providers` is
+/// the sole source of truth for it, called separately at the `check()` level.
 pub(crate) fn placeholder_findings(root: &Value, already: &[Finding]) -> Vec<Finding> {
     let mut out = Vec::new();
     walk_placeholders(root, &mut String::new(), &mut |path, value| {
+        if path == OIDC_PROVIDERS_PATH || path.starts_with(&format!("{OIDC_PROVIDERS_PATH}[")) {
+            return;
+        }
         let covered = already
             .iter()
             .any(|f| path == f.key || path.starts_with(&format!("{}[", f.key)));
@@ -953,7 +964,11 @@ pub(crate) fn status(paths: &PathArgs, json: bool) -> i32 {
     let forseti_doc = resolve_forseti_toml_path(paths.forseti_config.as_deref())
         .and_then(|p| load_forseti_toml(&p).ok());
 
-    let statuses = catalog::status_of(&kratos_root, &hydra_root, forseti_doc.as_ref());
+    let config_dir = kratos_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let statuses = catalog::status_of(&kratos_root, &hydra_root, forseti_doc.as_ref(), config_dir);
 
     if json {
         match serde_json::to_string_pretty(&statuses) {
@@ -1241,6 +1256,39 @@ secrets:
             "expected one cipher finding, got: {cipher:?}"
         );
         assert_eq!(cipher[0].severity, Severity::Fail);
+    }
+
+    #[test]
+    fn oidc_provider_changeme_client_id_produces_exactly_one_finding() {
+        // client_id/client_secret placeholders are check_oidc_providers's job;
+        // the generic placeholder walk (run inside check_kratos) must skip the
+        // providers subtree entirely so the two don't both FAIL the same key.
+        let v = parse(
+            r#"
+selfservice:
+  methods:
+    oidc:
+      config:
+        providers:
+          - id: google
+            provider: google
+            client_id: CHANGEME_GOOGLE_CLIENT_ID
+            client_secret: real-secret
+            mapper_url: file:///etc/config/kratos/oidc.google.jsonnet
+"#,
+        );
+        let mut findings = check_kratos(&v);
+        findings.extend(check_oidc_providers(&v, Path::new("/nonexistent")));
+        let matches: Vec<_> = findings
+            .iter()
+            .filter(|f| f.key == "selfservice.methods.oidc.config.providers[0].client_id")
+            .collect();
+        assert_eq!(
+            matches.len(),
+            1,
+            "expected exactly one finding for client_id, got: {matches:?}"
+        );
+        assert_eq!(matches[0].severity, Severity::Fail);
     }
 
     #[test]
