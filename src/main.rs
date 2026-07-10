@@ -129,9 +129,21 @@ async fn main() -> anyhow::Result<()> {
 /// `config` subcommand dispatch. Variants beyond `check`/`init` (and the bare
 /// interactive menu) land in later tasks; until then they're a stub.
 fn dispatch_config(cmd: Option<ConfigCmd>) -> i32 {
+    use clap::CommandFactory;
+    use std::io::Write;
+
     match cmd {
         Some(ConfigCmd::Check(args)) => config_cli::check(&args),
         Some(ConfigCmd::Init(args)) => config_cli::init(&args),
+        None => {
+            // Print clap-generated help for the config subcommand to stderr.
+            let mut config_cmd = Cli::command()
+                .find_subcommand("config")
+                .expect("config subcommand not found")
+                .clone();
+            let _ = writeln!(std::io::stderr(), "{}", config_cmd.render_help());
+            2
+        }
         _ => {
             eprintln!("not implemented yet");
             2

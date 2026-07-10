@@ -131,7 +131,7 @@ pub struct InitArgs {
 
 #[derive(Clone, Args)]
 pub struct SecretSourceArgs {
-    // exactly-one-of group; clap enforces it
+    // at most one; none => interactive prompt fallback, enforced post-parse
     #[arg(long, group = "secret_src")]
     pub client_secret_env: Option<String>,
     #[arg(long, group = "secret_src")]
@@ -252,5 +252,33 @@ mod tests {
     #[test]
     fn bare_invocation_parses_to_server() {
         assert!(Cli::try_parse_from(["forseti"]).unwrap().cmd.is_none());
+    }
+
+    #[test]
+    fn secret_source_may_be_omitted_for_interactive_prompt() {
+        let cli = Cli::try_parse_from([
+            "forseti",
+            "config",
+            "oidc",
+            "enable",
+            "github",
+            "--client-id",
+            "x",
+        ])
+        .unwrap();
+        let Some(Cmd::Config(a)) = cli.cmd else {
+            panic!("wrong variant")
+        };
+        let Some(ConfigCmd::Oidc {
+            cmd: OidcCmd::Enable { secret, .. },
+        }) = a.cmd
+        else {
+            panic!("wrong variant")
+        };
+        assert!(
+            secret.client_secret_env.is_none()
+                && secret.client_secret_file.is_none()
+                && !secret.client_secret_stdin
+        );
     }
 }
