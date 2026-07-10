@@ -4,6 +4,7 @@
 
 mod check;
 mod init;
+mod io;
 mod yamlutil;
 
 pub(crate) use check::check;
