@@ -7,7 +7,7 @@
 
 use std::io::{ErrorKind, IsTerminal as _, Write};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_yaml_ng::{Mapping, Value};
 use toml_edit::DocumentMut;
@@ -108,7 +108,6 @@ pub(crate) struct ModifyCtx {
     pub kratos: Target,
     pub hydra: Target,
     // Resolved for menu reuse; the oidc actions only touch kratos.
-    #[allow(dead_code)]
     pub forseti: Option<Target>,
     pub dry_run: bool,
     pub yes: bool,
@@ -642,6 +641,14 @@ fn write_toml(
     let new_text = doc.to_string();
     let label = target.path.display().to_string();
 
+    if is_git_tracked(&target.path) {
+        writeln!(
+            ctx.out,
+            "warning: {label} is tracked by git; writing it will show up as a local change. \
+             Backups land as {label}.bak.<ts>; add `*.bak.*` to .gitignore to avoid committing them."
+        )?;
+    }
+
     write!(
         ctx.out,
         "{}",
@@ -874,7 +881,10 @@ async fn count_identities(admin_url: Option<&str>, id: &str) -> Option<usize> {
         .append_pair("credentials_identifier_similar", id)
         .append_pair("per_page", "1")
         .finish();
-    let resp = reqwest::Client::new()
+    let resp = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .ok()?
         .get(format!("{base}/admin/identities?{query}"))
         .send()
         .await
@@ -1047,7 +1057,10 @@ pub(crate) fn rotate_webhook_token(ctx: &mut ModifyCtx, interactive: bool) -> an
     let mut check_failed = false;
 
     if kratos_hook_token.is_some() {
-        if !placeholder_or_unset {
+        // A dry-run never writes and never prompts: staging text about a
+        // restart that won't happen (and blocking on Enter for it) would
+        // both contradict --dry-run's contract.
+        if !placeholder_or_unset && !ctx.dry_run {
             if interactive {
                 writeln!(
                     ctx.out,
@@ -1090,6 +1103,7 @@ pub(crate) fn rotate_webhook_token(ctx: &mut ModifyCtx, interactive: bool) -> an
     }
 
     if matches!(toml_outcome, WriteOutcome::DryRun) {
+        writeln!(ctx.out, "\n(dry run: nothing written, no restart required)")?;
         return Ok(0);
     }
 
@@ -1541,7 +1555,10 @@ fn hydra_admin_url(root: &Value) -> Option<String> {
 /// it never blocks the rotation.
 async fn count_pairwise_clients(admin_url: Option<&str>) -> Option<usize> {
     let base = admin_url?.trim_end_matches('/');
-    let resp = reqwest::Client::new()
+    let resp = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .ok()?
         .get(format!("{base}/admin/clients?limit=500"))
         .send()
         .await
@@ -2993,7 +3010,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Task 8: rotate/prune webhook-token.
+    // rotate/prune webhook-token.
     // -----------------------------------------------------------------------
 
     fn kratos_with_token(token: &str) -> String {
@@ -3283,6 +3300,78 @@ extra:
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    #[test]
+    fn rotate_dry_run_with_non_placeholder_token_never_prompts_or_writes() {
+        // A LineSource that panics if read: proves the dry-run path never
+        // reaches the staged-restart Enter-wait, which would otherwise block
+        // on it (or, under a scripted input, silently consume a line).
+        struct PanicOnRead;
+        impl LineSource for PanicOnRead {
+            fn read_line(&mut self, _buf: &mut String) -> std::io::Result<usize> {
+                panic!("dry-run must never read from input");
+            }
+            fn is_terminal(&self) -> bool {
+                true
+            }
+        }
+
+        let dir = unique_tmp_dir("rotate-dry-run-non-placeholder");
+        std::fs::create_dir_all(&dir).unwrap();
+        let kratos_path = dir.join("kratos.yml");
+        let toml_path = dir.join("config.toml");
+        std::fs::write(&kratos_path, kratos_with_token("real-prod-token-xyz")).unwrap();
+        std::fs::write(&toml_path, config_toml_with("\"real-prod-token-xyz\"")).unwrap();
+        let kratos_before = std::fs::read_to_string(&kratos_path).unwrap();
+        let toml_before = std::fs::read_to_string(&toml_path).unwrap();
+
+        let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut ctx = ModifyCtx {
+            kratos: Target {
+                path: kratos_path.clone(),
+            },
+            hydra: Target {
+                path: PathBuf::from("/nonexistent/hydra.yml"),
+            },
+            forseti: Some(Target {
+                path: toml_path.clone(),
+            }),
+            dry_run: true,
+            yes: false,
+            out: Box::new(CapturingWriter(buf.clone())),
+            input: Box::new(PanicOnRead),
+        };
+        let code = rotate_webhook_token(&mut ctx, true).expect("dry-run rotate succeeds");
+        assert_eq!(code, 0);
+
+        assert_eq!(
+            std::fs::read_to_string(&kratos_path).unwrap(),
+            kratos_before,
+            "dry-run must not write kratos.yml"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&toml_path).unwrap(),
+            toml_before,
+            "dry-run must not write config.toml"
+        );
+
+        let out = captured_text(&buf);
+        assert!(
+            !out.contains("press Enter"),
+            "dry-run must not stage the interactive restart wait: {out}"
+        );
+        assert!(
+            !out.contains("Restart Forseti as soon as"),
+            "dry-run must not print the non-interactive restart warning either: {out}"
+        );
+        assert!(
+            !out.contains("Next steps:"),
+            "dry-run must not print the runbook: {out}"
+        );
+        assert!(out.contains("dry run"), "out: {out}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     // -- rotate_webhook_token: hook-less kratos.yml ---------------------------
 
     #[test]
@@ -3464,7 +3553,7 @@ extra:
     }
 
     // -----------------------------------------------------------------------
-    // Task 9: rotate/prune kratos-secrets + hydra-system + pairwise-salt.
+    // rotate/prune kratos-secrets + hydra-system + pairwise-salt.
     // -----------------------------------------------------------------------
 
     const COOKIE_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -3937,7 +4026,7 @@ oidc:
     }
 
     // -----------------------------------------------------------------------
-    // Task 10: config smtp set + config restore.
+    // config smtp set + config restore.
     // -----------------------------------------------------------------------
 
     #[test]

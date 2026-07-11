@@ -1,5 +1,3 @@
-#![allow(dead_code)] // consumed by the modify/menu tasks; remove with the last of them
-
 use std::fs::{self, File, OpenOptions};
 use std::io::{IsTerminal as _, Read as _, Write as _};
 use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
@@ -62,7 +60,7 @@ pub(crate) fn resolve_target(path: &Path, follow_symlink: bool) -> anyhow::Resul
 // ---------------------------------------------------------------------------
 
 #[derive(Debug)]
-pub(crate) struct LockGuard(File);
+pub(crate) struct LockGuard(#[allow(dead_code)] File); // held only for its Drop (releases the flock)
 
 /// Advisory `flock(2)` on `<dir>/.forseti-config.lock`. Locks are per open
 /// file description (unlike `fcntl` record locks, which are per-process and

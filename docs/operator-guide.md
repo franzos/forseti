@@ -948,7 +948,7 @@ Because this is irreversible and blast-radius-wide, `--yes` does **not** satisfy
 
 Every write through `forseti config`'s mutating subcommands backs up the target file first, as `<file>.bak.<unix-secs>`, mode `0600`, in a ring capped at the 3 most recent generations per file (older backups are pruned automatically). `forseti config restore [--from <unix-secs>]` lists what's available per target (Kratos, Hydra, and `config.toml` when resolvable) and restores from a chosen generation: restoring is itself backed up first, so a restore is undoable too. Without `--from`, an interactive terminal is offered each target's newest backup one at a time; non-interactively you must pass `--from`. A restore copies the backup's bytes back verbatim (not re-serialized), so unlike every other `config` write it does **not** drop comments: restoring a hand-annotated file gives you the comments back exactly as they were.
 
-`config.toml`/`kratos.yml`/`hydra.yml` are frequently git-tracked (the playground reference files are). Writes to `kratos.yml` and `hydra.yml` through the guarded YAML pipeline warn when the target is under git and remind you to gitignore the backups: add `*.bak.*` to `.gitignore` so a rotation doesn't litter the repo with secret-bearing backup files. (`config.toml` writes and `config restore` do not trigger this warning.)
+`config.toml`/`kratos.yml`/`hydra.yml` are frequently git-tracked (the playground reference files are). Writes to `kratos.yml`, `hydra.yml`, and `config.toml` through the guarded write pipelines warn when the target is under git and remind you to gitignore the backups: add `*.bak.*` to `.gitignore` so a rotation doesn't litter the repo with secret-bearing backup files. (`config restore` does not trigger this warning.)
 
 ### `--dry-run`
 
@@ -1095,7 +1095,7 @@ selfservice:
 
 The mapper CLI-writes at `oidc.google.jsonnet` gates the `email` trait on `claims.email_verified`: copying `email` without that gate is an account-takeover vector (anyone who controls an unverified alias at the provider could claim the matching Forseti account). Don't hand-edit the mapper unless you understand that invariant; `forseti config check` warns if a provider's mapper doesn't match Forseti's reviewed pinned body.
 
-GitHub and Microsoft (Azure AD) follow the same `forseti config oidc enable <github|microsoft>` shape. GitHub's claims don't reliably carry `email_verified`, so its pinned mapper treats every GitHub-sourced email as unverified and Forseti's own verification flow gates trust instead. Microsoft requires `--microsoft-tenant <tenant-id>`: `common` (any Azure AD tenant or personal Microsoft account) is refused outright, since it opens the [nOAuth](https://www.descope.com/blog/post/noauth) account-takeover class where an attacker edits their own account's email in a tenant Microsoft doesn't verify.
+GitHub and Microsoft (Azure AD) follow the same `forseti config oidc enable <github|microsoft>` shape. GitHub's claims don't reliably carry `email_verified`, and the pinned mapper drops the `email` trait whenever `email_verified` is absent or false, the same gate it uses for Google and Microsoft, so such GitHub identities fall back to Forseti's own email verification flow. Microsoft requires `--microsoft-tenant <tenant-id>`: `common` (any Azure AD tenant or personal Microsoft account) is refused outright, since it opens the [nOAuth](https://www.descope.com/blog/post/noauth) account-takeover class where an attacker edits their own account's email in a tenant Microsoft doesn't verify.
 
 ### Flow URLs
 

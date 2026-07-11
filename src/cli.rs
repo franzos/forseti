@@ -94,7 +94,7 @@ pub enum ConfigCmd {
 pub struct CheckArgs {
     #[command(flatten)]
     pub paths: PathArgs,
-    // Not in the Task 2 interface block; kept to preserve existing config-check behavior.
+    // Kept to preserve existing config-check behavior.
     #[arg(long)]
     pub strict: bool,
 }
