@@ -820,7 +820,7 @@ pub(crate) fn resolve_config_path(
     ))
 }
 
-const DEFAULT_FORSETI_TOML: &str = "config.toml";
+pub(crate) const DEFAULT_FORSETI_TOML: &str = "config.toml";
 
 /// `config.toml` is optional for `check`/`status`: a flag/env value is
 /// honoured even if missing (the caller reports the read error), but with

@@ -49,7 +49,7 @@ mod webhook;
 pub(crate) use web::{render_error_boundary, safe_return_to, FlowQuery};
 
 use clap::Parser as _;
-use cli::{Cli, Cmd, ConfigCmd};
+use cli::{Cli, Cmd, ConfigCmd, PruneCmd, RotateCmd};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -139,6 +139,12 @@ async fn dispatch_config(args: cli::ConfigArgs) -> i32 {
         Some(ConfigCmd::Init(args)) => config_cli::init(&args),
         Some(ConfigCmd::Status { json }) => config_cli::status(&paths, json),
         Some(ConfigCmd::Oidc { cmd }) => config_cli::run_oidc(cmd, &paths).await,
+        Some(ConfigCmd::Rotate {
+            cmd: RotateCmd::WebhookToken,
+        }) => config_cli::run_rotate_webhook_token(&paths),
+        Some(ConfigCmd::Prune {
+            cmd: PruneCmd::WebhookToken,
+        }) => config_cli::run_prune_webhook_token(&paths),
         None => {
             // Print clap-generated help for the config subcommand to stderr.
             let mut config_cmd = Cli::command()

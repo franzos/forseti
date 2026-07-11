@@ -9,19 +9,20 @@ use std::io::{ErrorKind, IsTerminal as _, Write};
 use std::path::Path;
 
 use serde_yaml_ng::{Mapping, Value};
+use toml_edit::DocumentMut;
 
 use crate::cli::{OidcCmd, PathArgs, SecretSourceArgs};
 
 use super::check::{
-    check_hydra, check_kratos, check_oidc_providers, resolve_config_path,
-    resolve_forseti_toml_path, Finding, Severity, DEFAULT_HYDRA, DEFAULT_KRATOS, ENV_HYDRA,
-    ENV_KRATOS,
+    check_hydra, check_kratos, check_oidc_providers, extract_hook_token, resolve_config_path,
+    resolve_forseti_toml_path, webhook_token_entries, Finding, Severity, DEFAULT_FORSETI_TOML,
+    DEFAULT_HYDRA, DEFAULT_KRATOS, ENV_HYDRA, ENV_KRATOS, PLACEHOLDER_TOKENS,
 };
 use super::io::{
     atomic_write, backup, fingerprint, is_git_tracked, lock_config_dir, read_secret, redacted_diff,
     resolve_target, SecretSource, Target,
 };
-use super::yamlutil::{dig, dig_mut, dig_mut_or_insert, dig_str, load_yaml};
+use super::yamlutil::{dig, dig_mut, dig_mut_or_insert, dig_str, load_yaml, random_secret};
 
 // ---------------------------------------------------------------------------
 // Pinned identity mappers.
@@ -314,6 +315,95 @@ fn apply_oidc_disable(root: &mut Value, id: &str) -> Result<bool, String> {
 }
 
 // ---------------------------------------------------------------------------
+// Audit webhook token rotation: kratos.yml hook rewriting + config.toml
+// accept-list editing.
+// ---------------------------------------------------------------------------
+
+/// Rewrite every audit `web_hook` node's bearer token to `new_token`. Matches
+/// structurally — a mapping with `hook: web_hook` and a `config.auth` shaped
+/// `{type: api_key, config: {name: Authorization, value: ...}}` — so a plain
+/// string that happens to contain the old token elsewhere in the document
+/// (a comment-like note, an unrelated field) is never touched. Returns the
+/// number of nodes rewritten.
+pub(crate) fn rewrite_hook_tokens(root: &mut Value, new_token: &str) -> usize {
+    let mut count = 0;
+    walk_rewrite_hook_tokens(root, new_token, &mut count);
+    count
+}
+
+fn walk_rewrite_hook_tokens(value: &mut Value, new_token: &str, count: &mut usize) {
+    if value.is_mapping() {
+        let is_hook_token_node = dig_str(value, &["hook"]) == Some("web_hook")
+            && dig_str(value, &["config", "auth", "type"]) == Some("api_key")
+            && dig_str(value, &["config", "auth", "config", "name"]) == Some("Authorization");
+        if is_hook_token_node {
+            if let Some(slot) = dig_mut(value, &["config", "auth", "config", "value"]) {
+                *slot = Value::String(format!("Bearer {new_token}"));
+                *count += 1;
+            }
+        }
+    }
+    match value {
+        Value::Mapping(map) => {
+            for (_, v) in map.iter_mut() {
+                walk_rewrite_hook_tokens(v, new_token, count);
+            }
+        }
+        Value::Sequence(seq) => {
+            for v in seq.iter_mut() {
+                walk_rewrite_hook_tokens(v, new_token, count);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// `[audit].webhook_token` as currently written in `config.toml`. Delegates to
+/// `check::webhook_token_entries` (same string-or-array parsing the linter and
+/// `config status` use) so there's exactly one reader of that shape.
+pub(crate) fn toml_get_webhook_tokens(doc: &DocumentMut) -> Vec<String> {
+    webhook_token_entries(doc)
+}
+
+/// Write `[audit].webhook_token` back: a single entry becomes a bare string,
+/// more than one becomes an array (the rotation accept-list form). Mutates the
+/// existing `[audit]` table in place — `toml_edit` is lossless, so any
+/// comments elsewhere in the document (including on this key) survive.
+pub(crate) fn toml_set_webhook_tokens(doc: &mut DocumentMut, tokens: &[String]) {
+    use toml_edit::{value, Array};
+    let item = if tokens.len() == 1 {
+        value(tokens[0].as_str())
+    } else {
+        let mut arr = Array::new();
+        for t in tokens {
+            arr.push(t.as_str());
+        }
+        value(arr)
+    };
+    doc["audit"]["webhook_token"] = item;
+}
+
+/// Minimal `config.toml` skeleton offered when `rotate webhook-token` finds no
+/// config.toml at all: just enough of `[self]`/`[internal]`/`[audit]` for the
+/// audit receiver to be configurable. NOT a complete bootable config — it's
+/// missing `[kratos]`/`[hydra]`/`[brand]`, which Forseti also requires at
+/// boot; the operator still needs to fill those in (see config.example.toml).
+pub(crate) fn minimal_config_toml() -> &'static str {
+    r#"[self]
+url = "CHANGEME_FORSETI_URL"
+bind = "0.0.0.0:3000"
+
+[internal]
+bind = "127.0.0.1:8081"
+
+[audit]
+webhook_token = ""
+ip_salt = ""
+audit_retention_days = 90
+"#
+}
+
+// ---------------------------------------------------------------------------
 // Prompts + runbook.
 // ---------------------------------------------------------------------------
 
@@ -492,6 +582,47 @@ fn post_write_check(ctx: &mut ModifyCtx, target: &Target) -> bool {
         let _ = writeln!(ctx.out, "  no new FAILs");
     }
     check_failed
+}
+
+/// `config.toml`'s own guarded write: backup + atomic write via `io.rs`, a
+/// secret-redacted diff — but unlike `write_yaml`, no comment-drop confirm.
+/// `toml_edit::DocumentMut` only rewrites the keys actually mutated, so every
+/// other comment in the file survives regardless.
+fn write_toml(
+    ctx: &mut ModifyCtx,
+    target: &Target,
+    old_text: &str,
+    doc: &DocumentMut,
+    secrets: &[&str],
+) -> anyhow::Result<WriteOutcome> {
+    let new_text = doc.to_string();
+    let label = target.path.display().to_string();
+
+    write!(
+        ctx.out,
+        "{}",
+        redacted_diff(&label, old_text, &new_text, secrets)
+    )?;
+
+    if ctx.dry_run {
+        writeln!(ctx.out, "(dry-run: no changes written to {label})")?;
+        return Ok(WriteOutcome::DryRun);
+    }
+
+    let dir = target
+        .path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let _lock = lock_config_dir(dir)?;
+    if let Some(bak) = backup(target)? {
+        writeln!(ctx.out, "backed up {label} to {}", bak.display())?;
+    }
+    atomic_write(target, new_text.as_bytes())?;
+    writeln!(ctx.out, "wrote {label}")?;
+    Ok(WriteOutcome::Written {
+        check_failed: false,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -720,6 +851,323 @@ async fn count_identities(admin_url: Option<&str>, id: &str) -> Option<usize> {
 }
 
 // ---------------------------------------------------------------------------
+// config rotate/prune webhook-token.
+// ---------------------------------------------------------------------------
+
+/// Where `config.toml` lives for this run: the operator-resolved target from
+/// `ctx.forseti` when one exists (flag/env/dev-default-that-exists), else the
+/// dev default path even though it doesn't exist yet — unlike
+/// `resolve_forseti_toml_path` (used by `check`/`status`, which treat a
+/// missing default as "nothing to check"), rotate needs a concrete path to
+/// offer creating.
+fn forseti_toml_target(ctx: &ModifyCtx) -> anyhow::Result<Target> {
+    if let Some(t) = &ctx.forseti {
+        return Ok(Target {
+            path: t.path.clone(),
+        });
+    }
+    // A nonexistent path is never a symlink, so `follow_symlink` doesn't matter here.
+    resolve_target(Path::new(DEFAULT_FORSETI_TOML), false)
+}
+
+/// figment layers env vars over `config.toml`, so a live
+/// `FORSETI_AUDIT__WEBHOOK_TOKEN` (or a `$FORSETI_CONFIG_PATH` pointed
+/// somewhere else) would silently override whatever this command writes.
+fn warn_env_shadow(ctx: &mut ModifyCtx, toml_path: &Path) -> anyhow::Result<()> {
+    if std::env::var_os("FORSETI_AUDIT__WEBHOOK_TOKEN").is_some() {
+        writeln!(
+            ctx.out,
+            "warning: $FORSETI_AUDIT__WEBHOOK_TOKEN is set; it overrides [audit].webhook_token \
+             at boot, so Forseti won't see the accept list this command writes until it's unset."
+        )?;
+    }
+    if let Some(env_path) = std::env::var_os("FORSETI_CONFIG_PATH") {
+        if Path::new(&env_path) != toml_path {
+            writeln!(
+                ctx.out,
+                "warning: $FORSETI_CONFIG_PATH ({}) differs from the config.toml being edited \
+                 ({}); Forseti will load the env path, not this one.",
+                Path::new(&env_path).display(),
+                toml_path.display()
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// `config.toml` is missing: offer to create it from `minimal_config_toml()`
+/// when interactive, otherwise refuse with instructions. Returns the "old"
+/// text for the guarded write's diff — nothing is written to disk here; the
+/// caller's `write_toml` call performs the actual (backed-up, atomic) first
+/// write.
+fn bootstrap_config_toml(
+    ctx: &mut ModifyCtx,
+    target: &Target,
+    interactive: bool,
+) -> anyhow::Result<String> {
+    let label = target.path.display();
+    if !interactive {
+        anyhow::bail!(
+            "{label} does not exist. Create it (see config.example.toml for a full template), \
+             or re-run this command from an interactive terminal without --yes to be offered a \
+             minimal skeleton."
+        );
+    }
+    writeln!(ctx.out, "{label} does not exist.")?;
+    if !prompt_yes_no(
+        &mut *ctx.out,
+        "Create it from a minimal [self]/[internal]/[audit] skeleton?",
+    )? {
+        anyhow::bail!("aborted: {label} not created");
+    }
+    Ok(minimal_config_toml().to_string())
+}
+
+/// `config rotate webhook-token`. New token = `random_secret(48)`; the
+/// "current" token comes from kratos.yml's first `web_hook` when one exists,
+/// else (a kratos.yml with no audit hooks at all — every `config-init`
+/// output) from config.toml's own accept list, so the command still has
+/// something to rotate.
+///
+/// A placeholder/unset current token is replaced in one pass (both files, no
+/// staged accept list — there's no live secret to protect a rotation window
+/// for). Otherwise config.toml's accept list is staged `[new, old]` first;
+/// interactive mode waits for the operator to restart Forseti before
+/// rewriting kratos.yml, non-interactive writes both back-to-back and warns
+/// about the resulting audit-loss window. When kratos.yml has no hooks, only
+/// config.toml changes either way.
+pub(crate) fn rotate_webhook_token(ctx: &mut ModifyCtx, interactive: bool) -> anyhow::Result<i32> {
+    let kratos_old_text = std::fs::read_to_string(&ctx.kratos.path)
+        .map_err(|e| anyhow::anyhow!("{}: {e}", ctx.kratos.path.display()))?;
+    let mut kratos_root: Value = serde_yaml_ng::from_str(&kratos_old_text)
+        .map_err(|e| anyhow::anyhow!("{}: invalid YAML: {e}", ctx.kratos.path.display()))?;
+
+    let toml_target = forseti_toml_target(ctx)?;
+    warn_env_shadow(ctx, &toml_target.path)?;
+
+    let toml_old_text = match std::fs::read_to_string(&toml_target.path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == ErrorKind::NotFound => {
+            bootstrap_config_toml(ctx, &toml_target, interactive)?
+        }
+        Err(e) => return Err(anyhow::anyhow!("{}: {e}", toml_target.path.display())),
+    };
+    let mut toml_doc: DocumentMut = toml_old_text
+        .parse()
+        .map_err(|e| anyhow::anyhow!("{}: invalid TOML: {e}", toml_target.path.display()))?;
+
+    let kratos_hook_token = extract_hook_token(&kratos_root);
+    let toml_entries = toml_get_webhook_tokens(&toml_doc);
+    let new_token = random_secret(48);
+
+    // The "current" token, and whether it's a placeholder/unset (=> replace
+    // in one pass, no staging). When kratos.yml has no hooks, both come from
+    // config.toml's own accept list instead.
+    let (current, placeholder_or_unset) = match &kratos_hook_token {
+        Some(t) => (Some(t.clone()), PLACEHOLDER_TOKENS.contains(&t.as_str())),
+        None => {
+            let first = toml_entries.first().cloned();
+            let unset_like = match &first {
+                None => true,
+                Some(s) if s.is_empty() => true,
+                Some(s) => PLACEHOLDER_TOKENS.contains(&s.as_str()),
+            };
+            (first, unset_like)
+        }
+    };
+
+    let mut secret_pool: Vec<String> = vec![new_token.clone()];
+    secret_pool.extend(current.clone());
+    secret_pool.extend(toml_entries.iter().cloned());
+    let secrets: Vec<&str> = secret_pool.iter().map(String::as_str).collect();
+
+    if kratos_hook_token.is_none() {
+        writeln!(
+            ctx.out,
+            "note: {} carries no audit web_hook nodes; nothing to rewrite there.",
+            ctx.kratos.path.display()
+        )?;
+    }
+
+    let new_accept_list: Vec<String> = if placeholder_or_unset {
+        vec![new_token.clone()]
+    } else {
+        vec![
+            new_token.clone(),
+            current
+                .clone()
+                .expect("non-placeholder branch always has a current token"),
+        ]
+    };
+    toml_set_webhook_tokens(&mut toml_doc, &new_accept_list);
+    let toml_outcome = write_toml(ctx, &toml_target, &toml_old_text, &toml_doc, &secrets)?;
+
+    let mut kratos_written = false;
+    let mut check_failed = false;
+
+    if kratos_hook_token.is_some() {
+        if !placeholder_or_unset {
+            if interactive {
+                writeln!(
+                    ctx.out,
+                    "\nrestart Forseti now so it accepts both the new and old webhook tokens, \
+                     then press Enter to continue..."
+                )?;
+                ctx.out.flush()?;
+                let mut line = String::new();
+                std::io::stdin().read_line(&mut line)?;
+            } else {
+                writeln!(
+                    ctx.out,
+                    "warning: non-interactive rotation writes config.toml and kratos.yml \
+                     back-to-back; until Forseti is restarted to reload config.toml, audit \
+                     webhook calls carrying the new token will 401. Restart Forseti as soon as \
+                     possible after this command returns."
+                )?;
+            }
+        }
+
+        let n = rewrite_hook_tokens(&mut kratos_root, &new_token);
+        writeln!(
+            ctx.out,
+            "rewrote {n} audit hook token(s) in {}",
+            ctx.kratos.path.display()
+        )?;
+        let outcome = write_yaml(
+            ctx,
+            &Target {
+                path: ctx.kratos.path.clone(),
+            },
+            &kratos_old_text,
+            &kratos_root,
+            &secrets,
+        )?;
+        if let WriteOutcome::Written { check_failed: f } = outcome {
+            kratos_written = true;
+            check_failed = f;
+        }
+    }
+
+    if matches!(toml_outcome, WriteOutcome::DryRun) {
+        return Ok(0);
+    }
+
+    let mut extra = vec![format!("changed: {}", toml_target.path.display())];
+    if kratos_written {
+        extra.push(format!("changed: {}", ctx.kratos.path.display()));
+        extra.push(
+            "Kratos reloads its config file automatically; verify with: forseti config check"
+                .to_string(),
+        );
+    }
+    if !placeholder_or_unset {
+        extra.push(
+            "once every service has reloaded, run `forseti config prune webhook-token` to drop \
+             the old token from config.toml's accept list."
+                .to_string(),
+        );
+    }
+    extra.push(
+        "`forseti config check`/`config status` report rotation-pending while the accept list \
+         has more than one entry."
+            .to_string(),
+    );
+    let extra_refs: Vec<&str> = extra.iter().map(String::as_str).collect();
+
+    if check_failed {
+        writeln!(ctx.out, "fix the FAIL above before restarting Kratos.")?;
+        print_runbook(&mut *ctx.out, &["Forseti"], &extra_refs);
+        return Ok(1);
+    }
+
+    print_runbook(&mut *ctx.out, &["Forseti"], &extra_refs);
+    Ok(0)
+}
+
+/// `config prune webhook-token`. Drops every accept-list entry except the one
+/// kratos.yml currently presents, refusing when that token isn't in the
+/// accept list at all (pruning would then leave Kratos unable to
+/// authenticate). When kratos.yml has no audit hooks, there's no way to
+/// verify which token it would present, so prune refuses unless the accept
+/// list already has at most one entry (nothing to prune either way).
+pub(crate) fn prune_webhook_token(ctx: &mut ModifyCtx) -> anyhow::Result<i32> {
+    let kratos_text = std::fs::read_to_string(&ctx.kratos.path)
+        .map_err(|e| anyhow::anyhow!("{}: {e}", ctx.kratos.path.display()))?;
+    let kratos_root: Value = serde_yaml_ng::from_str(&kratos_text)
+        .map_err(|e| anyhow::anyhow!("{}: invalid YAML: {e}", ctx.kratos.path.display()))?;
+
+    let toml_target = forseti_toml_target(ctx)?;
+    warn_env_shadow(ctx, &toml_target.path)?;
+    let toml_old_text = std::fs::read_to_string(&toml_target.path)
+        .map_err(|e| anyhow::anyhow!("{}: {e}", toml_target.path.display()))?;
+    let mut toml_doc: DocumentMut = toml_old_text
+        .parse()
+        .map_err(|e| anyhow::anyhow!("{}: invalid TOML: {e}", toml_target.path.display()))?;
+
+    let entries = toml_get_webhook_tokens(&toml_doc);
+    let kratos_token = extract_hook_token(&kratos_root);
+
+    let Some(kratos_token) = kratos_token else {
+        if entries.len() <= 1 {
+            writeln!(
+                ctx.out,
+                "{} has no audit web_hook nodes and the accept list already has {} entr{}; \
+                 nothing to prune.",
+                ctx.kratos.path.display(),
+                entries.len(),
+                if entries.len() == 1 { "y" } else { "ies" }
+            )?;
+            return Ok(0);
+        }
+        anyhow::bail!(
+            "{} has no audit web_hook nodes, so there's no way to verify which token Kratos \
+             presents; refusing to prune config.toml's {}-entry accept list. Add a web_hook (or \
+             edit [audit].webhook_token by hand) first.",
+            ctx.kratos.path.display(),
+            entries.len()
+        );
+    };
+
+    if entries == [kratos_token.clone()] {
+        writeln!(
+            ctx.out,
+            "config.toml's accept list already contains only the token kratos.yml presents; \
+             nothing to prune."
+        )?;
+        return Ok(0);
+    }
+
+    if !entries.iter().any(|t| t == &kratos_token) {
+        anyhow::bail!(
+            "kratos.yml's current hook token isn't in config.toml's accept list; pruning would \
+             leave Kratos unable to authenticate to the audit receiver at all. Rotate first, \
+             restart Kratos, then prune."
+        );
+    }
+
+    let mut secret_pool = entries.clone();
+    secret_pool.push(kratos_token.clone());
+    let secrets: Vec<&str> = secret_pool.iter().map(String::as_str).collect();
+
+    toml_set_webhook_tokens(&mut toml_doc, std::slice::from_ref(&kratos_token));
+    let outcome = write_toml(ctx, &toml_target, &toml_old_text, &toml_doc, &secrets)?;
+    match outcome {
+        WriteOutcome::DryRun => Ok(0),
+        WriteOutcome::Written { .. } => {
+            print_runbook(
+                &mut *ctx.out,
+                &[],
+                &[
+                    "config.toml's accept list is now a single entry.",
+                    "`forseti config check` should no longer report rotation-pending.",
+                ],
+            );
+            Ok(0)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // CLI entry.
 // ---------------------------------------------------------------------------
 
@@ -831,6 +1279,41 @@ pub(crate) async fn run_oidc(cmd: OidcCmd, paths: &PathArgs) -> i32 {
                     1
                 }
             }
+        }
+    }
+}
+
+pub(crate) fn run_rotate_webhook_token(paths: &PathArgs) -> i32 {
+    let mut ctx = match build_ctx(paths) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 1;
+        }
+    };
+    let interactive = std::io::stdin().is_terminal() && !ctx.yes;
+    match rotate_webhook_token(&mut ctx, interactive) {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("error: {e}");
+            1
+        }
+    }
+}
+
+pub(crate) fn run_prune_webhook_token(paths: &PathArgs) -> i32 {
+    let mut ctx = match build_ctx(paths) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 1;
+        }
+    };
+    match prune_webhook_token(&mut ctx) {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("error: {e}");
+            1
         }
     }
 }
@@ -1479,6 +1962,476 @@ mod tests {
             !mapper_path.exists(),
             "a mapper created this run must be removed when the write is aborted"
         );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 8: rotate/prune webhook-token.
+    // -----------------------------------------------------------------------
+
+    fn kratos_with_token(token: &str) -> String {
+        format!(
+            r#"session:
+  whoami:
+    required_aal: highest_available
+selfservice:
+  flows:
+    settings:
+      required_aal: highest_available
+      after:
+        password:
+          hooks:
+            - hook: web_hook
+              config:
+                url: http://host.docker.internal:8081/internal/audit/kratos?action=password.changed
+                auth:
+                  type: api_key
+                  config:
+                    name: Authorization
+                    value: "Bearer {token}"
+                    in: header
+    recovery:
+      enabled: true
+  methods:
+    lookup_secret:
+      enabled: true
+    webauthn:
+      enabled: true
+      config:
+        passwordless: false
+secrets:
+  cookie:
+    - aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  cipher:
+    - bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+courier:
+  smtp:
+    connection_uri: smtps://user:pass@smtp.example.com:465
+"#
+        )
+    }
+
+    fn config_toml_with(webhook_token_literal: &str) -> String {
+        format!(
+            "[audit]\nwebhook_token = {webhook_token_literal}\nip_salt = \"\"\naudit_retention_days = 90\n"
+        )
+    }
+
+    fn rotate_ctx(
+        kratos: PathBuf,
+        forseti: PathBuf,
+        yes: bool,
+    ) -> (ModifyCtx, std::sync::Arc<std::sync::Mutex<Vec<u8>>>) {
+        let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let ctx = ModifyCtx {
+            kratos: Target { path: kratos },
+            hydra: Target {
+                path: PathBuf::from("/nonexistent/hydra.yml"),
+            },
+            forseti: Some(Target { path: forseti }),
+            dry_run: false,
+            yes,
+            out: Box::new(CapturingWriter(buf.clone())),
+        };
+        (ctx, buf)
+    }
+
+    fn toml_webhook_item_is_string(text: &str) -> bool {
+        let doc: DocumentMut = text.parse().expect("resulting config.toml parses");
+        doc["audit"]["webhook_token"].as_str().is_some()
+    }
+
+    fn toml_webhook_array(text: &str) -> Vec<String> {
+        let doc: DocumentMut = text.parse().expect("resulting config.toml parses");
+        toml_get_webhook_tokens(&doc)
+    }
+
+    // -- rewrite_hook_tokens: structural match only --------------------------
+
+    #[test]
+    fn rewrite_hook_tokens_matches_structurally_only() {
+        let raw = std::fs::read_to_string("infra/kratos/kratos.yml").expect("playground kratos");
+        let hook_count = raw.matches("hook: web_hook").count();
+
+        let mut text = raw.clone();
+        // A plain string mentioning the old token, and a mapping shaped like a
+        // hook's auth block but under a non-`web_hook` hook: neither is a
+        // `web_hook` node, so both must survive rewrite_hook_tokens untouched.
+        text.push_str(
+            r#"
+extra:
+  plain_string_mentioning_token: "see dev-playground-token-change-me in the runbook"
+  not_a_hook:
+    hook: not_web_hook
+    config:
+      auth:
+        type: api_key
+        config:
+          name: Authorization
+          value: "Bearer dev-playground-token-change-me"
+"#,
+        );
+        let mut root: Value = serde_yaml_ng::from_str(&text).expect("fixture yaml parses");
+
+        let n = rewrite_hook_tokens(&mut root, "brand-new-token-value");
+        assert_eq!(
+            n, hook_count,
+            "must rewrite exactly the real web_hook nodes"
+        );
+
+        let rendered = serde_yaml_ng::to_string(&root).unwrap();
+        assert_eq!(
+            rendered.matches("brand-new-token-value").count(),
+            hook_count,
+            "every real hook must carry the new token"
+        );
+        // The decoy plain string and the decoy non-web_hook mapping both keep
+        // the old literal — 2 survivors, not rewritten.
+        assert_eq!(
+            rendered.matches("dev-playground-token-change-me").count(),
+            2
+        );
+    }
+
+    #[test]
+    fn rewrite_hook_tokens_on_hookless_kratos_is_a_noop() {
+        let mut root = render_default_kratos();
+        assert_eq!(rewrite_hook_tokens(&mut root, "whatever"), 0);
+    }
+
+    // -- toml_set_webhook_tokens: shape + losslessness -----------------------
+
+    #[test]
+    fn toml_set_webhook_tokens_single_becomes_string_multi_becomes_array() {
+        let mut doc: DocumentMut = "[audit]\nwebhook_token = \"old\"\n".parse().unwrap();
+        toml_set_webhook_tokens(&mut doc, &["only-one".to_string()]);
+        assert_eq!(doc["audit"]["webhook_token"].as_str(), Some("only-one"));
+
+        toml_set_webhook_tokens(&mut doc, &["new".to_string(), "old".to_string()]);
+        assert_eq!(
+            toml_get_webhook_tokens(&doc),
+            vec!["new".to_string(), "old".to_string()]
+        );
+    }
+
+    #[test]
+    fn toml_set_webhook_tokens_preserves_an_unrelated_comment() {
+        let mut doc: DocumentMut =
+            "# a note the operator left behind\n[audit]\nwebhook_token = \"old\"\n"
+                .parse()
+                .unwrap();
+        toml_set_webhook_tokens(&mut doc, &["new".to_string()]);
+        let rendered = doc.to_string();
+        assert!(
+            rendered.contains("# a note the operator left behind"),
+            "rendered: {rendered}"
+        );
+        assert_eq!(toml_get_webhook_tokens(&doc), vec!["new".to_string()]);
+    }
+
+    #[test]
+    fn minimal_config_toml_parses_and_has_an_audit_table() {
+        let doc: DocumentMut = minimal_config_toml().parse().expect("valid toml");
+        assert!(doc.contains_table("audit"));
+        assert!(doc.contains_table("internal"));
+        assert!(doc.contains_table("self"));
+    }
+
+    // -- rotate_webhook_token: placeholder => replace in one pass ------------
+
+    #[test]
+    fn rotate_placeholder_current_token_replaces_in_one_pass() {
+        let dir = unique_tmp_dir("rotate-placeholder");
+        std::fs::create_dir_all(&dir).unwrap();
+        let kratos_path = dir.join("kratos.yml");
+        let toml_path = dir.join("config.toml");
+        std::fs::write(
+            &kratos_path,
+            kratos_with_token("dev-playground-token-change-me"),
+        )
+        .unwrap();
+        std::fs::write(
+            &toml_path,
+            config_toml_with("\"dev-playground-token-change-me\""),
+        )
+        .unwrap();
+
+        let (mut ctx, buf) = rotate_ctx(kratos_path.clone(), toml_path.clone(), true);
+        let code = rotate_webhook_token(&mut ctx, false).expect("rotate succeeds");
+        assert_eq!(code, 0);
+
+        let new_toml = std::fs::read_to_string(&toml_path).unwrap();
+        assert!(
+            toml_webhook_item_is_string(&new_toml),
+            "placeholder rotation must leave a single string, not an accept-list array"
+        );
+        let tokens = toml_webhook_array(&new_toml);
+        assert_eq!(tokens.len(), 1);
+        assert_ne!(tokens[0], "dev-playground-token-change-me");
+
+        let new_kratos = std::fs::read_to_string(&kratos_path).unwrap();
+        assert!(!new_kratos.contains("dev-playground-token-change-me"));
+        assert!(new_kratos.contains(&tokens[0]));
+
+        let out = captured_text(&buf);
+        assert!(!out.contains(&tokens[0]), "new token leaked: {out}");
+        assert!(
+            !out.contains("dev-playground-token-change-me"),
+            "old token leaked unredacted: {out}"
+        );
+        assert!(out.contains("<redacted"), "out: {out}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // -- rotate_webhook_token: staged accept list -----------------------------
+
+    #[test]
+    fn rotate_staged_non_placeholder_yields_two_entry_list_new_first() {
+        let dir = unique_tmp_dir("rotate-staged");
+        std::fs::create_dir_all(&dir).unwrap();
+        let kratos_path = dir.join("kratos.yml");
+        let toml_path = dir.join("config.toml");
+        std::fs::write(&kratos_path, kratos_with_token("real-prod-token-xyz")).unwrap();
+        std::fs::write(&toml_path, config_toml_with("\"real-prod-token-xyz\"")).unwrap();
+
+        let (mut ctx, buf) = rotate_ctx(kratos_path.clone(), toml_path.clone(), true);
+        // Non-interactive: writes both back-to-back and warns about the window.
+        let code = rotate_webhook_token(&mut ctx, false).expect("rotate succeeds");
+        assert_eq!(code, 0);
+
+        let new_toml = std::fs::read_to_string(&toml_path).unwrap();
+        let tokens = toml_webhook_array(&new_toml);
+        assert_eq!(tokens.len(), 2, "staged rotation must yield a 2-entry list");
+        assert_eq!(tokens[1], "real-prod-token-xyz", "old token stays second");
+        assert_ne!(tokens[0], "real-prod-token-xyz", "new token comes first");
+
+        let new_kratos = std::fs::read_to_string(&kratos_path).unwrap();
+        assert!(
+            new_kratos.contains(&tokens[0]),
+            "kratos.yml gets the new token"
+        );
+        assert!(!new_kratos.contains("real-prod-token-xyz"));
+
+        let out = captured_text(&buf);
+        assert!(
+            out.contains("audit-loss") || out.contains("401"),
+            "non-interactive staged rotation must warn about the window: {out}"
+        );
+        assert!(
+            !out.contains("real-prod-token-xyz"),
+            "old token leaked: {out}"
+        );
+        assert!(!out.contains(&tokens[0]), "new token leaked: {out}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn rotate_staged_interactive_waits_then_rewrites_kratos() {
+        // No TTY in the test harness, so stdin reads EOF immediately — this
+        // exercises the "press Enter" wait without actually blocking.
+        let dir = unique_tmp_dir("rotate-staged-interactive");
+        std::fs::create_dir_all(&dir).unwrap();
+        let kratos_path = dir.join("kratos.yml");
+        let toml_path = dir.join("config.toml");
+        std::fs::write(&kratos_path, kratos_with_token("real-prod-token-xyz")).unwrap();
+        std::fs::write(&toml_path, config_toml_with("\"real-prod-token-xyz\"")).unwrap();
+
+        let (mut ctx, buf) = rotate_ctx(kratos_path.clone(), toml_path.clone(), true);
+        let code = rotate_webhook_token(&mut ctx, true).expect("rotate succeeds");
+        assert_eq!(code, 0);
+
+        let new_toml = std::fs::read_to_string(&toml_path).unwrap();
+        let tokens = toml_webhook_array(&new_toml);
+        assert_eq!(tokens.len(), 2);
+
+        let new_kratos = std::fs::read_to_string(&kratos_path).unwrap();
+        assert!(new_kratos.contains(&tokens[0]));
+
+        let out = captured_text(&buf);
+        assert!(out.contains("press Enter"), "out: {out}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // -- rotate_webhook_token: hook-less kratos.yml ---------------------------
+
+    #[test]
+    fn rotate_hookless_kratos_rotates_config_toml_only() {
+        let dir = unique_tmp_dir("rotate-hookless");
+        std::fs::create_dir_all(&dir).unwrap();
+        let kratos_path = dir.join("kratos.yml");
+        let toml_path = dir.join("config.toml");
+        let (k, _, _) = render_configs(&InitInputs::default());
+        std::fs::write(&kratos_path, &k).unwrap();
+        std::fs::write(&toml_path, config_toml_with("\"existing-real-token\"")).unwrap();
+        let kratos_before = std::fs::read_to_string(&kratos_path).unwrap();
+
+        let (mut ctx, buf) = rotate_ctx(kratos_path.clone(), toml_path.clone(), true);
+        let code = rotate_webhook_token(&mut ctx, false).expect("rotate succeeds");
+        assert_eq!(code, 0);
+
+        assert_eq!(
+            std::fs::read_to_string(&kratos_path).unwrap(),
+            kratos_before,
+            "a hook-less kratos.yml must not be rewritten"
+        );
+
+        let new_toml = std::fs::read_to_string(&toml_path).unwrap();
+        let tokens = toml_webhook_array(&new_toml);
+        assert_eq!(tokens.len(), 2);
+        assert_eq!(tokens[1], "existing-real-token");
+
+        let out = captured_text(&buf);
+        assert!(
+            out.contains("no audit web_hook nodes"),
+            "must explain why kratos.yml wasn't touched: {out}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn rotate_hookless_kratos_with_placeholder_toml_replaces_in_one_pass() {
+        let dir = unique_tmp_dir("rotate-hookless-placeholder");
+        std::fs::create_dir_all(&dir).unwrap();
+        let kratos_path = dir.join("kratos.yml");
+        let toml_path = dir.join("config.toml");
+        let (k, _, _) = render_configs(&InitInputs::default());
+        std::fs::write(&kratos_path, &k).unwrap();
+        std::fs::write(&toml_path, config_toml_with("\"\"")).unwrap();
+
+        let (mut ctx, _buf) = rotate_ctx(kratos_path.clone(), toml_path.clone(), true);
+        let code = rotate_webhook_token(&mut ctx, false).expect("rotate succeeds");
+        assert_eq!(code, 0);
+
+        let new_toml = std::fs::read_to_string(&toml_path).unwrap();
+        assert!(toml_webhook_item_is_string(&new_toml));
+        let tokens = toml_webhook_array(&new_toml);
+        assert_eq!(tokens.len(), 1);
+        assert!(!tokens[0].is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // -- prune_webhook_token ---------------------------------------------------
+
+    #[test]
+    fn prune_refuses_when_kratos_token_not_in_accept_list() {
+        let dir = unique_tmp_dir("prune-refuse");
+        std::fs::create_dir_all(&dir).unwrap();
+        let kratos_path = dir.join("kratos.yml");
+        let toml_path = dir.join("config.toml");
+        std::fs::write(&kratos_path, kratos_with_token("T1")).unwrap();
+        std::fs::write(&toml_path, config_toml_with("\"T2\"")).unwrap();
+
+        let (mut ctx, _buf) = rotate_ctx(kratos_path, toml_path.clone(), true);
+        let err = prune_webhook_token(&mut ctx).unwrap_err();
+        assert!(err.to_string().contains("accept list"), "err: {err}");
+
+        // Refusal must not touch config.toml.
+        let after = std::fs::read_to_string(&toml_path).unwrap();
+        assert!(after.contains("\"T2\""));
+    }
+
+    #[test]
+    fn prune_succeeds_and_trims_to_the_single_kratos_token() {
+        let dir = unique_tmp_dir("prune-success");
+        std::fs::create_dir_all(&dir).unwrap();
+        let kratos_path = dir.join("kratos.yml");
+        let toml_path = dir.join("config.toml");
+        std::fs::write(&kratos_path, kratos_with_token("T1")).unwrap();
+        std::fs::write(&toml_path, config_toml_with("[\"T2\", \"T1\"]")).unwrap();
+
+        let (mut ctx, buf) = rotate_ctx(kratos_path, toml_path.clone(), true);
+        let code = prune_webhook_token(&mut ctx).expect("prune succeeds");
+        assert_eq!(code, 0);
+
+        let after = std::fs::read_to_string(&toml_path).unwrap();
+        assert!(toml_webhook_item_is_string(&after));
+        assert_eq!(toml_webhook_array(&after), vec!["T1".to_string()]);
+
+        let out = captured_text(&buf);
+        assert!(!out.contains("T1") || out.contains("<redacted"));
+    }
+
+    #[test]
+    fn prune_hookless_kratos_with_multiple_entries_refuses() {
+        let dir = unique_tmp_dir("prune-hookless-refuse");
+        std::fs::create_dir_all(&dir).unwrap();
+        let kratos_path = dir.join("kratos.yml");
+        let toml_path = dir.join("config.toml");
+        let (k, _, _) = render_configs(&InitInputs::default());
+        std::fs::write(&kratos_path, &k).unwrap();
+        std::fs::write(&toml_path, config_toml_with("[\"T2\", \"T1\"]")).unwrap();
+
+        let (mut ctx, _buf) = rotate_ctx(kratos_path, toml_path, true);
+        let err = prune_webhook_token(&mut ctx).unwrap_err();
+        assert!(err.to_string().contains("no audit web_hook"), "err: {err}");
+    }
+
+    #[test]
+    fn prune_hookless_kratos_with_single_entry_is_a_noop() {
+        let dir = unique_tmp_dir("prune-hookless-noop");
+        std::fs::create_dir_all(&dir).unwrap();
+        let kratos_path = dir.join("kratos.yml");
+        let toml_path = dir.join("config.toml");
+        let (k, _, _) = render_configs(&InitInputs::default());
+        std::fs::write(&kratos_path, &k).unwrap();
+        std::fs::write(&toml_path, config_toml_with("\"only-one\"")).unwrap();
+        let before = std::fs::read_to_string(&toml_path).unwrap();
+
+        let (mut ctx, buf) = rotate_ctx(kratos_path, toml_path.clone(), true);
+        let code = prune_webhook_token(&mut ctx).expect("noop, not a refusal");
+        assert_eq!(code, 0);
+        assert_eq!(std::fs::read_to_string(&toml_path).unwrap(), before);
+
+        let out = captured_text(&buf);
+        assert!(out.contains("nothing to prune"), "out: {out}");
+    }
+
+    // -- env shadow warnings ----------------------------------------------------
+
+    #[test]
+    fn rotate_warns_when_env_shadows_the_webhook_token() {
+        let dir = unique_tmp_dir("rotate-env-shadow");
+        std::fs::create_dir_all(&dir).unwrap();
+        let kratos_path = dir.join("kratos.yml");
+        let toml_path = dir.join("config.toml");
+        std::fs::write(&kratos_path, kratos_with_token("real-prod-token-xyz")).unwrap();
+        std::fs::write(&toml_path, config_toml_with("\"real-prod-token-xyz\"")).unwrap();
+
+        // SAFETY: test-only env var, unique name, single-threaded within this test's scope.
+        unsafe {
+            std::env::set_var("FORSETI_AUDIT__WEBHOOK_TOKEN", "shadow");
+        }
+        let (mut ctx, buf) = rotate_ctx(kratos_path, toml_path, true);
+        rotate_webhook_token(&mut ctx, false).expect("rotate succeeds");
+        unsafe {
+            std::env::remove_var("FORSETI_AUDIT__WEBHOOK_TOKEN");
+        }
+
+        let out = captured_text(&buf);
+        assert!(out.contains("FORSETI_AUDIT__WEBHOOK_TOKEN"), "out: {out}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // -- config.toml bootstrap --------------------------------------------------
+
+    #[test]
+    fn rotate_non_interactive_missing_config_toml_errors_with_guidance() {
+        let dir = unique_tmp_dir("rotate-missing-toml");
+        std::fs::create_dir_all(&dir).unwrap();
+        let kratos_path = dir.join("kratos.yml");
+        let toml_path = dir.join("config.toml"); // never created
+        std::fs::write(&kratos_path, kratos_with_token("real-prod-token-xyz")).unwrap();
+
+        let (mut ctx, _buf) = rotate_ctx(kratos_path, toml_path, true);
+        let err = rotate_webhook_token(&mut ctx, false).unwrap_err();
+        assert!(err.to_string().contains("does not exist"), "err: {err}");
 
         std::fs::remove_dir_all(&dir).ok();
     }

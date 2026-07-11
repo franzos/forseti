@@ -14,3 +14,5 @@ pub(crate) use check::redact_uri;
 pub(crate) use check::status;
 pub(crate) use init::init;
 pub(crate) use modify::run_oidc;
+pub(crate) use modify::run_prune_webhook_token;
+pub(crate) use modify::run_rotate_webhook_token;
