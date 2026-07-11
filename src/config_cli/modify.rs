@@ -70,6 +70,40 @@ const SUPPORTED_PROVIDERS: &[&str] = &["google", "github", "microsoft"];
 // Context + outcomes.
 // ---------------------------------------------------------------------------
 
+/// An injectable line-oriented input, carrying both a `read_line` and the
+/// TTY-ness the confirm prompts gate on. Every blocking prompt in this module
+/// reads through this rather than `std::io::stdin()` directly, so the menu can
+/// route them through its own scriptable input and tests can feed answers.
+pub(crate) trait LineSource {
+    fn read_line(&mut self, buf: &mut String) -> std::io::Result<usize>;
+    fn is_terminal(&self) -> bool;
+}
+
+/// The plain-CLI line source: the process's real stdin. Locks fresh per call
+/// (never held open) so it composes with anything else reading stdin.
+pub(crate) struct StdinLines;
+
+impl LineSource for StdinLines {
+    fn read_line(&mut self, buf: &mut String) -> std::io::Result<usize> {
+        std::io::stdin().read_line(buf)
+    }
+    fn is_terminal(&self) -> bool {
+        std::io::stdin().is_terminal()
+    }
+}
+
+/// `std::io::empty()` as a non-interactive line source (immediate EOF, never a
+/// TTY): the default in tests that never reach a prompt, and the shape a
+/// non-TTY CLI run behaves like.
+impl LineSource for std::io::Empty {
+    fn read_line(&mut self, _buf: &mut String) -> std::io::Result<usize> {
+        Ok(0)
+    }
+    fn is_terminal(&self) -> bool {
+        false
+    }
+}
+
 pub(crate) struct ModifyCtx {
     pub kratos: Target,
     pub hydra: Target,
@@ -79,6 +113,8 @@ pub(crate) struct ModifyCtx {
     pub dry_run: bool,
     pub yes: bool,
     pub out: Box<dyn Write>,
+    /// Where blocking confirm/enter/typed-phrase prompts read their answer.
+    pub input: Box<dyn LineSource>,
 }
 
 pub(crate) enum WriteOutcome {
@@ -411,14 +447,18 @@ audit_retention_days = 90
 // Prompts + runbook.
 // ---------------------------------------------------------------------------
 
-fn prompt_yes_no(out: &mut dyn Write, question: &str) -> anyhow::Result<bool> {
-    if !std::io::stdin().is_terminal() {
+/// Renders `question` to `ctx.out` (flushed) *before* blocking on
+/// `ctx.input`, so the operator always sees what they're answering. The
+/// not-a-TTY guard reads the same injectable input's terminal state, so the
+/// menu (a real TTY, or a scripted one under test) is never falsely refused.
+fn prompt_yes_no(ctx: &mut ModifyCtx, question: &str) -> anyhow::Result<bool> {
+    if !ctx.input.is_terminal() {
         anyhow::bail!("{question}: stdin is not a TTY; pass --yes to proceed non-interactively");
     }
-    write!(out, "{question} [y/N]: ")?;
-    out.flush()?;
+    write!(ctx.out, "{question} [y/N]: ")?;
+    ctx.out.flush()?;
     let mut line = String::new();
-    std::io::stdin().read_line(&mut line)?;
+    ctx.input.read_line(&mut line)?;
     Ok(matches!(
         line.trim().to_ascii_lowercase().as_str(),
         "y" | "yes"
@@ -491,7 +531,7 @@ pub(crate) fn write_yaml(
             ctx.out,
             "note: {label} contains comments; rewriting it drops ALL comments."
         )?;
-        if !prompt_yes_no(&mut *ctx.out, "Proceed and drop comments?")? {
+        if !prompt_yes_no(ctx, "Proceed and drop comments?")? {
             anyhow::bail!("aborted: {label} left unchanged");
         }
     }
@@ -794,10 +834,7 @@ pub(crate) async fn oidc_disable(
         )?,
     }
 
-    if !ctx.yes
-        && !ctx.dry_run
-        && !prompt_yes_no(&mut *ctx.out, &format!("Disable OIDC provider `{id}`?"))?
-    {
+    if !ctx.yes && !ctx.dry_run && !prompt_yes_no(ctx, &format!("Disable OIDC provider `{id}`?"))? {
         writeln!(ctx.out, "aborted; no changes made.")?;
         return Ok(1);
     }
@@ -919,7 +956,7 @@ fn bootstrap_config_toml(
     }
     writeln!(ctx.out, "{label} does not exist.")?;
     if !prompt_yes_no(
-        &mut *ctx.out,
+        ctx,
         "Create it from a minimal [self]/[internal]/[audit] skeleton?",
     )? {
         anyhow::bail!("aborted: {label} not created");
@@ -1019,7 +1056,7 @@ pub(crate) fn rotate_webhook_token(ctx: &mut ModifyCtx, interactive: bool) -> an
                 )?;
                 ctx.out.flush()?;
                 let mut line = String::new();
-                std::io::stdin().read_line(&mut line)?;
+                ctx.input.read_line(&mut line)?;
             } else {
                 writeln!(
                     ctx.out,
@@ -1263,7 +1300,7 @@ pub(crate) fn rotate_kratos_secrets(
             changed.join(", "),
             ctx.kratos.path.display()
         );
-        if !prompt_yes_no(&mut *ctx.out, &question)? {
+        if !prompt_yes_no(ctx, &question)? {
             writeln!(ctx.out, "aborted; no changes made.")?;
             return Ok(1);
         }
@@ -1356,7 +1393,7 @@ pub(crate) fn prune_kratos_secrets(
             pruned.join(", "),
             ctx.kratos.path.display()
         );
-        if !prompt_yes_no(&mut *ctx.out, &question)? {
+        if !prompt_yes_no(ctx, &question)? {
             writeln!(ctx.out, "aborted; no changes made.")?;
             return Ok(1);
         }
@@ -1409,7 +1446,7 @@ pub(crate) fn rotate_hydra_system(ctx: &mut ModifyCtx) -> anyhow::Result<i32> {
              Hydra must be restarted for the new value to take effect.",
             ctx.hydra.path.display()
         );
-        if !prompt_yes_no(&mut *ctx.out, &question)? {
+        if !prompt_yes_no(ctx, &question)? {
             writeln!(ctx.out, "aborted; no changes made.")?;
             return Ok(1);
         }
@@ -1457,7 +1494,7 @@ pub(crate) fn prune_hydra_system(ctx: &mut ModifyCtx) -> anyhow::Result<i32> {
             "Prune secrets.system in {}? The removed value stops decrypting immediately.",
             ctx.hydra.path.display()
         );
-        if !prompt_yes_no(&mut *ctx.out, &question)? {
+        if !prompt_yes_no(ctx, &question)? {
             writeln!(ctx.out, "aborted; no changes made.")?;
             return Ok(1);
         }
@@ -1565,7 +1602,7 @@ pub(crate) async fn rotate_pairwise_salt(
             write!(ctx.out, "Type `{SALT_CONFIRM_PHRASE}` to confirm: ")?;
             ctx.out.flush()?;
             let mut line = String::new();
-            std::io::stdin().read_line(&mut line)?;
+            ctx.input.read_line(&mut line)?;
             if line.trim() != SALT_CONFIRM_PHRASE {
                 writeln!(ctx.out, "aborted; no changes made.")?;
                 return Ok(1);
@@ -1937,7 +1974,7 @@ pub(crate) fn restore(ctx: &mut ModifyCtx, from: Option<&str>) -> anyhow::Result
             p.label,
             p.target.path.display()
         );
-        if prompt_yes_no(&mut *ctx.out, &question)? {
+        if prompt_yes_no(ctx, &question)? {
             selections.push((p, bak));
         } else {
             writeln!(ctx.out, "skipped {} (no changes)", p.label)?;
@@ -2027,6 +2064,7 @@ fn build_ctx(paths: &PathArgs) -> anyhow::Result<ModifyCtx> {
         dry_run: paths.dry_run,
         yes: paths.yes,
         out: Box::new(std::io::stdout()),
+        input: Box::new(StdinLines),
     })
 }
 
@@ -2576,6 +2614,7 @@ mod tests {
             dry_run: true,
             yes: true,
             out: Box::new(std::io::sink()),
+            input: Box::new(std::io::empty()),
         };
         let err = oidc_enable(
             &mut c1,
@@ -2602,6 +2641,7 @@ mod tests {
             dry_run: true,
             yes: true,
             out: Box::new(std::io::sink()),
+            input: Box::new(std::io::empty()),
         };
         assert!(oidc_enable(
             &mut c2,
@@ -2637,6 +2677,7 @@ mod tests {
             dry_run: true,
             yes: false,
             out: Box::new(std::io::sink()),
+            input: Box::new(std::io::empty()),
         };
         oidc_enable(
             &mut ctx,
@@ -2677,6 +2718,7 @@ mod tests {
             dry_run: false,
             yes: true,
             out: Box::new(std::io::sink()),
+            input: Box::new(std::io::empty()),
         };
         handle_mapper(&mut ctx, &mapper, "google", false).unwrap();
 
@@ -2722,6 +2764,7 @@ mod tests {
             dry_run,
             yes,
             out: Box::new(CapturingWriter(buf.clone())),
+            input: Box::new(std::io::empty()),
         };
         (ctx, buf)
     }
@@ -2885,6 +2928,7 @@ mod tests {
             dry_run: false,
             yes: true,
             out: Box::new(std::io::sink()),
+            input: Box::new(std::io::empty()),
         };
         let err = oidc_enable(
             &mut ctx,
@@ -2926,6 +2970,7 @@ mod tests {
             dry_run: false,
             yes: false,
             out: Box::new(std::io::sink()),
+            input: Box::new(std::io::empty()),
         };
         let err = oidc_enable(
             &mut ctx,
@@ -3014,6 +3059,7 @@ courier:
             dry_run: false,
             yes,
             out: Box::new(CapturingWriter(buf.clone())),
+            input: Box::new(std::io::empty()),
         };
         (ctx, buf)
     }
@@ -4254,6 +4300,7 @@ oidc:
             dry_run: false,
             yes: true,
             out: Box::new(CapturingWriter(buf.clone())),
+            input: Box::new(std::io::empty()),
         };
 
         let code = restore(&mut ctx, Some("1000")).unwrap();

@@ -163,9 +163,13 @@ async fn dispatch_config(args: cli::ConfigArgs) -> i32 {
         Some(ConfigCmd::Restore { from }) => config_cli::run_restore(&paths, from),
         Some(ConfigCmd::Smtp { cmd }) => config_cli::run_smtp(cmd, &paths),
         None if std::io::stdin().is_terminal() => {
-            let mut input = config_cli::RealStdin;
-            let mut output = config_cli::RealStdout;
-            let mut io = config_cli::MenuIo::new(&mut input, &mut output, true);
+            use std::cell::RefCell;
+            use std::rc::Rc;
+            let input: Rc<RefCell<dyn config_cli::LineSource>> =
+                Rc::new(RefCell::new(config_cli::StdinLines));
+            let output: Rc<RefCell<dyn std::io::Write>> =
+                Rc::new(RefCell::new(config_cli::RealStdout));
+            let mut io = config_cli::MenuIo::new(input, output, true);
             config_cli::run_menu(&mut io, &paths)
         }
         None => {

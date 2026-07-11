@@ -13,7 +13,7 @@
 
 use std::cell::RefCell;
 use std::future::Future;
-use std::io::{BufRead, Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -29,16 +29,53 @@ use super::check::{
 };
 use super::init;
 use super::io::{read_secret, resolve_target, SecretSource};
-use super::modify::{self, ModifyCtx, OidcEnableInput};
+use super::modify::{self, LineSource, ModifyCtx, OidcEnableInput};
 use super::yamlutil::{dig_str, load_yaml};
 
 // ---------------------------------------------------------------------------
 // MenuIo: every prompt/echo goes through this so the loop is scriptable.
+//
+// `input`/`output` are shared, `'static` handles (`Rc<RefCell<_>>` behind a
+// thin forwarding wrapper) rather than borrowed references, precisely so the
+// same sink/source can be handed to the `ModifyCtx` a delegated action runs
+// under. That's what lets a delegated confirm prompt render its question to
+// the operator's terminal *before* it blocks on the answer, and read that
+// answer from the same (scriptable) input the menu itself uses — in
+// production both are the process's stdout/stdin; under test both are a
+// shared capture buffer / scripted line source.
 // ---------------------------------------------------------------------------
 
-pub(crate) struct MenuIo<'a> {
-    pub input: &'a mut dyn BufRead,
-    pub output: &'a mut dyn Write,
+/// A cloneable `Write` over a shared sink. Each write goes straight through to
+/// the underlying stream, so a menu write and a delegated `ModifyCtx::out`
+/// write (both clones of the same handle) interleave in call order.
+#[derive(Clone)]
+pub(crate) struct SharedWriter(Rc<RefCell<dyn Write>>);
+
+impl Write for SharedWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.borrow_mut().write(buf)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.borrow_mut().flush()
+    }
+}
+
+/// A cloneable `LineSource` over a shared input, mirroring `SharedWriter`.
+#[derive(Clone)]
+pub(crate) struct SharedInput(Rc<RefCell<dyn LineSource>>);
+
+impl LineSource for SharedInput {
+    fn read_line(&mut self, buf: &mut String) -> std::io::Result<usize> {
+        self.0.borrow_mut().read_line(buf)
+    }
+    fn is_terminal(&self) -> bool {
+        self.0.borrow().is_terminal()
+    }
+}
+
+pub(crate) struct MenuIo {
+    pub input: SharedInput,
+    pub output: SharedWriter,
     pub is_tty: bool,
     /// Factory for the `SecretSource` a hidden-value prompt (client_secret,
     /// SMTP URI) uses. Defaults to `SecretSource::Prompt`, which refuses
@@ -47,11 +84,15 @@ pub(crate) struct MenuIo<'a> {
     pub secret_source: Box<dyn Fn(&'static str) -> SecretSource>,
 }
 
-impl<'a> MenuIo<'a> {
-    pub(crate) fn new(input: &'a mut dyn BufRead, output: &'a mut dyn Write, is_tty: bool) -> Self {
+impl MenuIo {
+    pub(crate) fn new(
+        input: Rc<RefCell<dyn LineSource>>,
+        output: Rc<RefCell<dyn Write>>,
+        is_tty: bool,
+    ) -> Self {
         MenuIo {
-            input,
-            output,
+            input: SharedInput(input),
+            output: SharedWriter(output),
             is_tty,
             secret_source: Box::new(SecretSource::Prompt),
         }
@@ -59,34 +100,12 @@ impl<'a> MenuIo<'a> {
 }
 
 // ---------------------------------------------------------------------------
-// `Stdin`/`Stdout` each guard a single process-wide, non-reentrant `Mutex`.
-// A `StdinLock`/`StdoutLock` held for the menu's whole lifetime would
-// deadlock the instant a delegated action tries to lock the same stream
-// again on this thread — `prompt_yes_no` and the other confirm prompts in
-// modify.rs read `std::io::stdin()` directly, and `check::check`/`init::
-// init`/`check::status` (the `[c]`/`[i]`/`[s]` actions) print via `println!`/
-// `eprintln!`, which lock `std::io::stdout()` internally. These wrappers
-// lock fresh per call and drop immediately after, so nothing is held open
-// across a delegated call — the underlying buffer is still the same
-// process-wide one, so no data is lost between calls.
-pub(crate) struct RealStdin;
-
-impl Read for RealStdin {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        std::io::stdin().lock().read(buf)
-    }
-}
-
-impl BufRead for RealStdin {
-    fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
-        unreachable!("menu.rs only ever calls read_line on MenuIo::input")
-    }
-    fn consume(&mut self, _amt: usize) {}
-    fn read_line(&mut self, buf: &mut String) -> std::io::Result<usize> {
-        std::io::stdin().lock().read_line(buf)
-    }
-}
-
+// `Stdout` guards a single process-wide, non-reentrant `Mutex`. A held
+// `StdoutLock` would deadlock the instant a delegated action locks the same
+// stream again on this thread (`check::check`/`init::init`/`check::status`
+// print via `println!`/`eprintln!`). This wrapper locks fresh per call and
+// drops immediately after, so nothing is held open across a delegated call —
+// the underlying buffer is the same process-wide one, so no data is lost.
 pub(crate) struct RealStdout;
 
 impl Write for RealStdout {
@@ -95,26 +114,6 @@ impl Write for RealStdout {
     }
     fn flush(&mut self) -> std::io::Result<()> {
         std::io::stdout().lock().flush()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// A `Box<dyn Write>` for `ModifyCtx::out` (which requires `'static`) that
-// forwards into `MenuIo::output` (which is borrowed, non-'static) after the
-// action completes. Mirrors the `CapturingWriter` pattern already used by
-// modify.rs's own tests.
-// ---------------------------------------------------------------------------
-
-#[derive(Clone)]
-struct SharedBuf(Rc<RefCell<Vec<u8>>>);
-
-impl Write for SharedBuf {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.borrow_mut().extend_from_slice(buf);
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
     }
 }
 
@@ -414,16 +413,21 @@ fn run_detail(
 }
 
 // ---------------------------------------------------------------------------
-// Action wrappers: build a `ModifyCtx` whose `out` forwards into
-// `io.output`, run the (already-implemented) modify.rs function, flush
-// captured output, and on error print exactly one extra line. A modify fn
-// returning `Ok(1)` (a post-write FAIL) already printed its own findings and
-// "fix the FAIL above..." line into that captured output — nothing more to
-// add here. `dry_run`/`yes` are always false: the menu's own y/N prompts
-// are the confirmation step.
+// Action wrappers: build a `ModifyCtx` sharing the menu's own stdout/stdin
+// handles, run the (already-implemented) modify.rs function, and on error
+// print exactly one extra line. Because `out`/`input` are the same shared
+// handles the menu uses (not a deferred buffer), a delegated confirm prompt
+// renders its question before it blocks on the answer. A modify fn returning
+// `Ok(1)` (a post-write FAIL) already printed its own findings and "fix the
+// FAIL above..." line — nothing more to add here. `dry_run`/`yes` are always
+// false: the delegated y/N prompts are the confirmation step.
 // ---------------------------------------------------------------------------
 
-fn build_menu_ctx(paths: &PathArgs, out: SharedBuf) -> anyhow::Result<ModifyCtx> {
+fn build_menu_ctx(
+    paths: &PathArgs,
+    out: SharedWriter,
+    input: SharedInput,
+) -> anyhow::Result<ModifyCtx> {
     let (kratos_path, _) = resolve_config_path(
         paths.kratos.as_deref(),
         DEFAULT_KRATOS,
@@ -449,6 +453,7 @@ fn build_menu_ctx(paths: &PathArgs, out: SharedBuf) -> anyhow::Result<ModifyCtx>
         dry_run: false,
         yes: false,
         out: Box::new(out),
+        input: Box::new(input),
     })
 }
 
@@ -457,9 +462,8 @@ fn run_ctx_action(
     paths: &PathArgs,
     f: impl FnOnce(&mut ModifyCtx) -> anyhow::Result<i32>,
 ) {
-    let buf = Rc::new(RefCell::new(Vec::new()));
-    let result = build_menu_ctx(paths, SharedBuf(buf.clone())).and_then(|mut ctx| f(&mut ctx));
-    let _ = io.output.write_all(&buf.borrow());
+    let result =
+        build_menu_ctx(paths, io.output.clone(), io.input.clone()).and_then(|mut ctx| f(&mut ctx));
     if let Err(e) = result {
         let _ = writeln!(io.output, "error: {e}");
     }
@@ -507,24 +511,20 @@ fn run_oidc_disable(io: &mut MenuIo, paths: &PathArgs, kratos_path: &Path, id: &
         .and_then(|t| serde_yaml_ng::from_str::<Value>(&t).ok())
         .and_then(|r| dig_str(&r, &["serve", "admin", "base_url"]).map(str::to_string));
 
-    let buf = Rc::new(RefCell::new(Vec::new()));
-    let result = match build_menu_ctx(paths, SharedBuf(buf.clone())) {
+    let result = match build_menu_ctx(paths, io.output.clone(), io.input.clone()) {
         Ok(mut ctx) => block_on(modify::oidc_disable(&mut ctx, id, admin_url.as_deref())),
         Err(e) => Err(e),
     };
-    let _ = io.output.write_all(&buf.borrow());
     if let Err(e) = result {
         let _ = writeln!(io.output, "error: {e}");
     }
 }
 
 fn run_pairwise_rotate(io: &mut MenuIo, paths: &PathArgs) {
-    let buf = Rc::new(RefCell::new(Vec::new()));
-    let result = match build_menu_ctx(paths, SharedBuf(buf.clone())) {
+    let result = match build_menu_ctx(paths, io.output.clone(), io.input.clone()) {
         Ok(mut ctx) => block_on(modify::rotate_pairwise_salt(&mut ctx, false, true)),
         Err(e) => Err(e),
     };
-    let _ = io.output.write_all(&buf.borrow());
     if let Err(e) = result {
         let _ = writeln!(io.output, "error: {e}");
     }
@@ -569,10 +569,65 @@ fn run_smtp_edit(io: &mut MenuIo, paths: &PathArgs) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
+    use crate::config_cli::yamlutil::secret_entries;
+    use std::io::{BufRead as _, Cursor};
 
-    fn menu_io<'a>(input: &'a mut dyn BufRead, output: &'a mut dyn Write) -> MenuIo<'a> {
-        MenuIo::new(input, output, true)
+    /// A scripted line source that reports itself as a TTY, so the confirm
+    /// prompts proceed instead of bailing.
+    struct ScriptedLines(Cursor<Vec<u8>>);
+
+    impl ScriptedLines {
+        fn new(bytes: &[u8]) -> Self {
+            ScriptedLines(Cursor::new(bytes.to_vec()))
+        }
+    }
+
+    impl LineSource for ScriptedLines {
+        fn read_line(&mut self, buf: &mut String) -> std::io::Result<usize> {
+            self.0.read_line(buf)
+        }
+        fn is_terminal(&self) -> bool {
+            true
+        }
+    }
+
+    /// A scripted line source that snapshots the shared output buffer at the
+    /// moment each answer is read, so a test can prove the prompt's question
+    /// was already on screen before the read blocked.
+    struct RecordingLines {
+        lines: std::collections::VecDeque<String>,
+        out: Rc<RefCell<Vec<u8>>>,
+        snapshots: Rc<RefCell<Vec<String>>>,
+    }
+
+    impl LineSource for RecordingLines {
+        fn read_line(&mut self, buf: &mut String) -> std::io::Result<usize> {
+            let seen = String::from_utf8_lossy(&self.out.borrow()).into_owned();
+            self.snapshots.borrow_mut().push(seen);
+            match self.lines.pop_front() {
+                Some(line) => {
+                    buf.push_str(&line);
+                    Ok(line.len())
+                }
+                None => Ok(0),
+            }
+        }
+        fn is_terminal(&self) -> bool {
+            true
+        }
+    }
+
+    /// Builds a menu wired to a scripted input and a capture buffer; returns
+    /// the menu and the shared output so the test can read what was rendered.
+    fn menu_io(input: &[u8]) -> (MenuIo, Rc<RefCell<Vec<u8>>>) {
+        let inp: Rc<RefCell<dyn LineSource>> = Rc::new(RefCell::new(ScriptedLines::new(input)));
+        let out = Rc::new(RefCell::new(Vec::<u8>::new()));
+        let io = MenuIo::new(inp, out.clone(), true);
+        (io, out)
+    }
+
+    fn captured(out: &Rc<RefCell<Vec<u8>>>) -> String {
+        String::from_utf8(out.borrow().clone()).unwrap()
     }
 
     fn nonexistent_forseti_toml() -> PathBuf {
@@ -585,9 +640,7 @@ mod tests {
 
     #[test]
     fn menu_renders_all_settings_and_quits_on_q() {
-        let mut input = Cursor::new(b"q\n".to_vec());
-        let mut output = Vec::new();
-        let mut io = menu_io(&mut input, &mut output);
+        let (mut io, out) = menu_io(b"q\n");
         let paths = PathArgs {
             kratos: Some(PathBuf::from("infra/kratos/kratos.yml")),
             hydra: Some(PathBuf::from("infra/hydra/hydra.yml")),
@@ -600,7 +653,7 @@ mod tests {
         let code = run_menu(&mut io, &paths);
         assert_eq!(code, 0);
 
-        let text = String::from_utf8(output).unwrap();
+        let text = captured(&out);
         for setting in catalog::SETTINGS {
             assert!(
                 text.contains(setting.title),
@@ -617,9 +670,7 @@ mod tests {
 
     #[test]
     fn selecting_setting_shows_detail_then_back() {
-        let mut input = Cursor::new(b"1\nb\nq\n".to_vec());
-        let mut output = Vec::new();
-        let mut io = menu_io(&mut input, &mut output);
+        let (mut io, out) = menu_io(b"1\nb\nq\n");
         let paths = PathArgs {
             kratos: Some(PathBuf::from("infra/kratos/kratos.yml")),
             hydra: Some(PathBuf::from("infra/hydra/hydra.yml")),
@@ -632,7 +683,7 @@ mod tests {
         let code = run_menu(&mut io, &paths);
         assert_eq!(code, 0);
 
-        let text = String::from_utf8(output).unwrap();
+        let text = captured(&out);
         assert!(
             text.contains("upstream OIDC client of Google"),
             "text: {text}"
@@ -655,9 +706,7 @@ mod tests {
             std::env::set_var("FORSETI_TEST_MENU_SECRET", "a-real-secret");
         }
 
-        let mut input = Cursor::new(b"2\ne\ncid\n".to_vec());
-        let mut output = Vec::new();
-        let mut io = menu_io(&mut input, &mut output);
+        let (mut io, _out) = menu_io(b"2\ne\ncid\n");
         io.secret_source = Box::new(|_| SecretSource::Env("FORSETI_TEST_MENU_SECRET".to_string()));
         let paths = PathArgs {
             kratos: Some(kratos.clone()),
@@ -683,11 +732,75 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// The confirm-bearing flow the review flagged: rotating kratos-secrets
+    /// from the menu must render its `[y/N]` question to the operator's
+    /// terminal BEFORE it blocks reading the answer, route that answer through
+    /// the same scriptable input, and actually land the rotation.
+    #[test]
+    fn scripted_rotate_kratos_secrets_renders_confirm_before_blocking() {
+        let dir = unique_tmp_dir("rotate-kratos");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (k, h, _) = init::render_configs(&init::InitInputs::default());
+        let kratos = dir.join("kratos.yml");
+        let hydra = dir.join("hydra.yml");
+        std::fs::write(&kratos, &k).unwrap();
+        std::fs::write(&hydra, &h).unwrap();
+
+        let before = secret_entries(&load_yaml(&kratos).unwrap(), &["secrets", "cookie"]).len();
+
+        let idx = catalog::SETTINGS
+            .iter()
+            .position(|s| s.key == "kratos.secrets")
+            .expect("kratos.secrets is a catalog setting")
+            + 1;
+
+        // Select the setting, choose [r]otate, answer the confirm `y`, quit.
+        let script = format!("{idx}\nr\ny\nq\n");
+        let out = Rc::new(RefCell::new(Vec::<u8>::new()));
+        let snapshots = Rc::new(RefCell::new(Vec::<String>::new()));
+        let input = RecordingLines {
+            lines: script.lines().map(|l| format!("{l}\n")).collect(),
+            out: out.clone(),
+            snapshots: snapshots.clone(),
+        };
+        let inp: Rc<RefCell<dyn LineSource>> = Rc::new(RefCell::new(input));
+        let mut io = MenuIo::new(inp, out.clone(), true);
+
+        let paths = PathArgs {
+            kratos: Some(kratos.clone()),
+            hydra: Some(hydra),
+            forseti_config: Some(nonexistent_forseti_toml()),
+            dry_run: false,
+            yes: false,
+            follow_symlink: false,
+        };
+
+        let code = run_menu(&mut io, &paths);
+        assert_eq!(code, 0);
+
+        // The snapshot taken at the confirm read must already carry the full
+        // question + `[y/N]:` prompt. A deferred writer (the bug being fixed)
+        // would leave that snapshot without the question.
+        let snaps = snapshots.borrow();
+        let confirm = snaps
+            .iter()
+            .find(|s| s.contains("[y/N]:"))
+            .unwrap_or_else(|| panic!("no confirm question rendered before any read: {snaps:?}"));
+        assert!(
+            confirm.contains("Rotate secrets.cookie, secrets.cipher in"),
+            "confirm question missing from the pre-read snapshot: {confirm}"
+        );
+
+        // The rotation actually landed: cookie list gained the new secret.
+        let after = secret_entries(&load_yaml(&kratos).unwrap(), &["secrets", "cookie"]).len();
+        assert_eq!(after, before + 1, "rotation should prepend a cookie secret");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn eof_exits_cleanly() {
-        let mut input = Cursor::new(Vec::new());
-        let mut output = Vec::new();
-        let mut io = menu_io(&mut input, &mut output);
+        let (mut io, _out) = menu_io(b"");
         let paths = PathArgs {
             kratos: Some(PathBuf::from("infra/kratos/kratos.yml")),
             hydra: Some(PathBuf::from("infra/hydra/hydra.yml")),
