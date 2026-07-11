@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- `forseti config` interactive menu and non-interactive subcommands: enable/disable OIDC sign-in providers, rotate/prune the audit webhook token and Kratos/Hydra secrets, set courier SMTP, restore from backups, `status` view
+- Audit webhook token accept-list for zero-loss rotation
+- `config check` lints for OIDC providers, mappers, flow hooks, secret lists, and config.toml consistency
+
+### Changed
+- CLI parsing moved to clap; unrecognized subcommands now error instead of starting the server
+- `config init` templates are comment-free; rationale moved to the operator guide and the CLI's own descriptions
+
 ## [0.1.10] - 2026-07-10
 
 ### Added

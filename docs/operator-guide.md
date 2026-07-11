@@ -459,13 +459,7 @@ The `POST /internal/audit/kratos` endpoint authenticates inbound Kratos webhooks
 
 **The token is mandatory.** Forseti refuses to boot when `webhook_token` is empty (exit code `1`, error on stderr) — a misconfigured deployment is supposed to fail loudly at startup rather than silently accept or reject every inbound event.
 
-To rotate:
-
-1. Stop Forseti process.
-2. Update `[audit].webhook_token` in `config.toml` (or `FORSETI_AUDIT__WEBHOOK_TOKEN`) **and** the `auth.config.value` field on every `web_hook` in `infra/kratos/kratos.yml`.
-3. Restart Forseti, then restart (or HUP) Kratos so it picks up the new value.
-
-There's no online-rotation path: Kratos's Viper-based config loader does not support env-var overrides for fields inside arrays (see [ory/kratos#2663](https://github.com/ory/kratos/issues/2663)), so the playground `kratos.yml` embeds the dev token literally. For real production deploys, template the config through your deploy tooling — Helm's `values.yaml`, Terraform, or equivalent — and source the token from your secret manager. Forseti-side value comes from `config.toml` (or `FORSETI_AUDIT__WEBHOOK_TOKEN`), where env-var binding works because Forseti's config is a flat struct.
+**To rotate, use `forseti config rotate webhook-token`** (see [Rotating the audit webhook token](#rotating-the-audit-webhook-token)) rather than hand-editing both files — it stages the new token in an accept-list so Forseti keeps accepting the old one until every `web_hook` has picked up the new value, avoiding an audit-loss window. Hand-editing both files in one shot works too, but there's no online-rotation path that way: Kratos's Viper-based config loader does not support env-var overrides for fields inside arrays (see [ory/kratos#2663](https://github.com/ory/kratos/issues/2663)), so the token has to be a literal value in `kratos.yml`, and stopping Forseti before both files agree drops every webhook delivered in between. For real production deploys, template the config through your deploy tooling — Helm's `values.yaml`, Terraform, or equivalent — and source the token from your secret manager. Forseti-side value comes from `config.toml` (or `FORSETI_AUDIT__WEBHOOK_TOKEN`), where env-var binding works because Forseti's config is a flat struct.
 
 #### Audit webhook replay protection
 
@@ -521,6 +515,7 @@ The subcommand reads the same `config.toml` as the running server, runs migratio
 - **Tier-1 allowlist is global.** A single `[admin].allowed_emails` controls operator access for the whole deployment; there's no per-realm partition. For per-customer scoping, use Tier 2 (org-scoped admin) instead — see [Admin access model](#admin-access-model).
 - **No CSV / JSON export.** Audit and identity lists render only in the UI for now.
 - **No tamper-evidence (hash chain).** Append-only is enforced by the trigger; for stronger guarantees ship the row stream to an S3 archive with object-lock externally.
+- **OIDC sign-ins are unaudited by default.** A `config init`-generated `kratos.yml` carries no audit `web_hook` nodes, so `forseti config oidc enable` has no existing hook to clone onto the new provider's login/registration flows and warns rather than silently leaving a gap — see [Enabling and disabling OIDC providers](#enabling-and-disabling-oidc-providers). Wiring one up is a manual step today.
 
 ## Linux authentication
 
@@ -796,7 +791,7 @@ This is the subtle part. Get the recovery model wrong and you'll lock users out 
 
 ## Config CLI
 
-Forseti's 2FA enforcement lives entirely in Kratos config, and Kratos won't tell you over the wire whether you got it right. So Forseti ships two subcommands that work on the config *files* directly — no DB, no running server, no Ory clients. They're pure file operations.
+Forseti's 2FA enforcement lives entirely in Kratos config, and Kratos won't tell you over the wire whether you got it right. So Forseti ships subcommands that work on the config *files* directly — no DB, no running server, no Ory clients. They're pure file operations. `config-check` and `config-init` (below) started as standalone subcommands and are now also reachable as `forseti config check` / `forseti config init` under the unified `forseti config` surface — both spellings work, the top-level ones are kept as hidden aliases for backward compatibility. See [Managing configuration with forseti config](#managing-configuration-with-forseti-config) for the rest of that surface: enabling/disabling OIDC providers, rotating secrets, SMTP, backups.
 
 Every subcommand takes `--help` (also `-h`), and `forseti --help` lists them all. Running `forseti` with no subcommand starts the HTTP server.
 
@@ -831,6 +826,8 @@ Each line is `[ OK ]` / `[WARN]` / `[FAIL]` followed by the key path, the curren
 
 The headline checks are the two 2FA knobs from the section above: `selfservice.flows.settings.required_aal` at anything other than `highest_available` is a **FAIL** (it's the factor-removal bypass), and `session.whoami.required_aal` not at `highest_available` is a **WARN**. It also covers recovery codes (`lookup_secret`), WebAuthn-as-second-factor (`passwordless: false`), self-service recovery, a non-placeholder SMTP URI, and the Kratos/Hydra secrets (presence, no obvious placeholders, and `secrets.cipher` being exactly 32 chars). On top of those specific checks it scans both files recursively and **FAILs** on any leftover `CHANGEME_*` placeholder (naming the dotted key path) — so a half-filled `config-init` output can't pass.
 
+Running it against the playground reference config as-is (`forseti config-check --kratos infra/kratos/kratos.yml --hydra infra/hydra/hydra.yml`) exits `1` with well over a dozen FAILs — that's expected, not a bug. The playground ships Kratos/Hydra secrets unset and the literal `dev-playground-token-change-me` audit webhook bearer baked into every hook, both deliberately insecure defaults meant to be replaced before anything resembling production traffic touches the stack (see [`config-init`](#config-init) or [`forseti config`](#managing-configuration-with-forseti-config) below for generating or rotating real values). Don't be alarmed by a non-zero exit against the playground; be alarmed by one against a deployment you meant to be production-ready.
+
 ### `config-init`
 
 Generates a recommended Kratos + Hydra config from the known-good reference, with your URLs/DSN/SMTP substituted in and fresh secrets minted from a CSPRNG. The security recommendations are baked in regardless of input — both `required_aal` knobs at `highest_available`, recovery codes on, WebAuthn as a second factor, TOTP on, recovery enabled.
@@ -853,6 +850,8 @@ forseti config-init \
 It refuses to clobber an existing file unless you pass `--force`. Anything you don't supply via a flag is written as a loud `CHANGEME_*` placeholder, and the command prints exactly which ones are still outstanding — so a half-filled config can't masquerade as complete. `config-check` then **FAILs on any leftover `CHANGEME_*`**, anywhere in either file. The WebAuthn `rp.id` is derived from the host of `--forseti-url` (e.g. `accounts.example.com`), which is correct for a single-host deployment; narrow it to a registrable parent domain by hand if you serve several subdomains. With `--forseti-url` absent it stays `CHANGEME_RP_ID` and `config-check` FAILs on it like any other placeholder. `--smtp-from-address` / `--smtp-from-name` are optional and, when supplied, are written under `courier.smtp` in `kratos.yml` alongside `connection_uri`.
 
 The generated files carry no comments — `config-init` and the other `config` subcommands round-trip these files through `serde_yaml_ng`, which would silently drop any comments on the next parse/write, so keeping prose in the file would be misleading. See [Configuration rationale](#configuration-rationale) for why each baked-in recommendation is set the way it is. After writing, run the linter over what it produced to confirm the round-trip:
+
+> **`--force` is a full regeneration, not a merge.** Re-running `config-init --force` against an existing `kratos.yml`/`hydra.yml` does not patch the file — it renders a brand-new pair from scratch, with fresh CSPRNG secrets throughout (cookie/cipher/system secrets, and Hydra's pairwise salt). Any OIDC providers you'd enabled with `forseti config oidc enable`, any flow hooks, and any rotation history (accept-lists from a prior `config rotate webhook-token`, multi-entry secret lists) are gone — overwritten with the from-scratch template. Only reach for `--force` on a config you're deliberately starting over; otherwise use the targeted `forseti config` subcommands below to change one thing at a time.
 
 ```bash
 forseti config-init ... --kratos-out kratos.yml --hydra-out hydra.yml
@@ -880,6 +879,91 @@ Why `config-init`'s baked-in recommendations are set the way they are. This used
 **Hydra `oauth2.pkce.enforced_for_public_clients: true`.** MCP 2025-06-18 requires PKCE with S256 for public clients.
 
 **Hydra `strategies.access_token: jwt`.** Access tokens are JWTs by default. Resource servers validate locally against Hydra's JWKS. Flip to `opaque` if you need immediate revocation (and route every RS to the admin API on `:4445`).
+
+## Managing configuration with forseti config
+
+`config-check` and `config-init` cover linting and first-time generation. Once a deployment is live, day-2 operations — turning on a sign-in provider, rotating a secret, restoring from a backup — go through the rest of the `forseti config` surface. Like `config-check`/`config-init`, every subcommand here is a pure file operation: no DB, no running Forseti process, no live Kratos/Hydra API calls beyond a couple of best-effort read-only probes (counting affected identities/clients before a destructive change, when an admin URL is configured).
+
+Bare `forseti config` (no subcommand) drops into an interactive menu when stdin is a TTY — it walks every setting `config check` knows about, lets you drill into one, and delegates to the same functions the subcommands below call. Outside a TTY (scripts, CI, systemd) it prints the subcommand help and exits `2` instead of hanging.
+
+### Subcommand overview
+
+| Command | What it does |
+|---|---|
+| `forseti config` | Interactive menu (TTY only) |
+| `forseti config status [--json]` | One-line-per-setting summary: OIDC providers, secret rotation state, SMTP, webhook token |
+| `forseti config check [--strict]` | The linter described above |
+| `forseti config init ...` | The generator described above |
+| `forseti config oidc enable <google\|github\|microsoft> --client-id <id> (--client-secret-env/-file/-stdin) [--microsoft-tenant <id>] [--keep-mapper]` | Add/replace an upstream sign-in provider |
+| `forseti config oidc disable <id>` | Remove a provider |
+| `forseti config rotate webhook-token` | Stage a new audit webhook token (accept-list, zero-loss) |
+| `forseti config rotate kratos-secrets [--cookie \| --cipher]` | Prepend a new Kratos cookie and/or cipher secret |
+| `forseti config rotate hydra-system` | Prepend a new Hydra system secret |
+| `forseti config rotate pairwise-salt --i-understand-subs-change` | Overwrite Hydra's pairwise salt (irreversible) |
+| `forseti config prune webhook-token` | Drop the old webhook token once every service has reloaded |
+| `forseti config prune kratos-secrets [--cookie \| --cipher]` | Drop old Kratos secrets |
+| `forseti config prune hydra-system` | Drop old Hydra system secrets |
+| `forseti config restore [--from <unix-secs>]` | Restore a file from its `.bak.<ts>` ring |
+| `forseti config smtp set (--uri-env/-file/-stdin) [--from-address] [--from-name]` | Set Kratos courier SMTP |
+
+Global flags, valid on every `config` subcommand: `--kratos`/`--hydra` (aliases `--kratos-config`/`--hydra-config`, same discovery order as `config-check`), `--forseti-config` (path to `config.toml`; falls back to `$FORSETI_CONFIG_PATH` or the dev default), `--dry-run`, `--yes` (skip confirmation prompts), `--follow-symlink` (operate on a symlinked target instead of refusing it).
+
+Every mutating subcommand backs up the file it's about to change first (see [Backups and restore](#backups-and-restore)), shows a redacted unified diff of what it's about to write, and, unless `--yes` or `--dry-run` is set, asks for confirmation before writing. Writes are atomic (temp file + rename) and land `0600`.
+
+### Enabling and disabling OIDC providers
+
+`forseti config oidc enable <provider> --client-id <id> --client-secret-env <VAR>` writes the provider block into `kratos.yml` (literal `client_id`/`client_secret` — see the `${VAR}` note under [Kratos configuration → oidc](#oidc) above) and drops a reviewed mapper jsonnet next to it, gated on `email_verified` (Microsoft/Google) or treated as always-unverified (GitHub, which doesn't reliably send `email_verified`). The secret can come from an env var, a file, stdin, or (interactively) a masked prompt — never a bare CLI argument, so it doesn't end up in shell history or `ps`. Microsoft requires `--microsoft-tenant <tenant-id>`; `common` is refused (the nOAuth account-takeover class — see the note above).
+
+If the target mapper file already exists with content that doesn't match Forseti's pinned body, `enable` refuses and asks for `--keep-mapper` to proceed without touching it — it won't silently clobber a mapper you've customized.
+
+**The audit gap.** `config init`-generated `kratos.yml` files carry no audit `web_hook` nodes at all (see [Audit logging](#audit-logging) — the reference playground has them, a from-scratch `config init` doesn't). `oidc enable` looks for an existing `web_hook` template on another flow to clone onto the OIDC login/registration flows; when it finds none, it still enables the provider but prints a loud warning that OIDC sign-ins won't reach the audit log until a webhook is wired up by hand. This is a known, documented gap, not a bug — wiring one up requires an audit-endpoint URL and bearer token that only the operator knows.
+
+`forseti config oidc disable <id>` removes the provider block (and, best-effort, reports how many existing identities look like they signed in through it, when an admin URL is configured — this is advisory, not a block on proceeding).
+
+### Rotating the audit webhook token
+
+`[audit].webhook_token` authenticates inbound Kratos flow-completion webhooks (see [Audit webhook bearer](#audit-webhook-bearer)). The old manual procedure (stop Forseti, hand-edit both files, restart) has a hard availability trade-off: there's no window where both the old and new token work, so *any* ordering drops audit events for however long it takes to update both sides. `forseti config rotate webhook-token` avoids that by staging the change:
+
+1. `forseti config rotate webhook-token` writes `config.toml`'s `[audit].webhook_token` as an accept-list `[new, old]` — Forseti will accept requests bearing *either* token — and only then rewrites `kratos.yml`'s hooks to send the new one. In interactive mode it stops and waits for you to restart Forseti before touching `kratos.yml`, so the accept-list is live before Kratos starts sending the new token. Non-interactively it writes both files back-to-back and prints a warning: restart Forseti immediately, since until it reloads `config.toml` it will 401 the new token Kratos is now sending.
+2. Restart Forseti (it doesn't hot-reload `config.toml`). Kratos hot-reloads its config file on its own, so no Kratos restart is needed once `kratos.yml` is written.
+3. Once you're satisfied every event source is using the new token, `forseti config prune webhook-token` drops the old entry from the accept-list back to a single value. `forseti config check`/`config status` report the rotation as pending for as long as the accept-list has more than one entry.
+
+If the current token is a placeholder (`CHANGEME_*`) or unset, there's nothing live to protect a rotation window for, so rotation happens in one pass with no accept-list staging.
+
+**`$FORSETI_AUDIT__WEBHOOK_TOKEN` shadowing.** Figment layers env vars over `config.toml` at boot. If that env var is set, it overrides whatever `[audit].webhook_token` this command writes, and Forseti won't see the accept-list until the env var is unset (or updated to match). The command detects a set env var and warns; it can't fix it for you, since unsetting an operator's environment isn't something a config-file tool should touch.
+
+### Rotating Kratos and Hydra secrets
+
+`secrets.cookie`/`secrets.cipher` (Kratos) and `secrets.system` (Hydra) follow Ory's own rotation convention: the **first** entry in the list signs/encrypts new values, but **every** entry in the list remains valid to verify/decrypt existing ones. `forseti config rotate kratos-secrets [--cookie|--cipher]` (neither flag rotates both) prepends a fresh secret; `forseti config rotate hydra-system` does the same for Hydra. Kratos hot-reloads, so no restart is needed there; Hydra does not, so a Hydra system-secret rotation needs a restart before the new secret takes effect for signing (it still verifies old sessions/tokens against the full list either way).
+
+Prune (`forseti config prune kratos-secrets [--cookie|--cipher]`, `forseti config prune hydra-system`) drops everything except the current first entry, and refuses when there's only one entry to begin with (nothing to prune). **Prune `secrets.cookie` only after the max session lifetime has elapsed since rotation** — a leaked old cookie secret can still forge sessions for as long as it's listed, so pruning early doesn't buy you anything and pruning late is safe. The command prints this reminder whenever a cookie prune is requested.
+
+### Rotating the pairwise salt
+
+`oidc.subject_identifiers.pairwise.salt` (Hydra) is a **scalar overwrite, not a rotation list** — there's no prune step, because there's nothing to keep around. The salt derives every pairwise `sub` Hydra has ever issued per client; rotating it changes all of them, permanently, the moment the write is confirmed. Any downstream app that matches users by their pairwise `sub` will see what looks like a brand-new account for every user, forever. Hydra does not hot-reload, so the new salt only takes effect once Hydra restarts.
+
+Because this is irreversible and blast-radius-wide, `--yes` does **not** satisfy the confirmation gate. Interactive mode requires typing a specific confirmation phrase verbatim; non-interactive mode requires `--i-understand-subs-change`. Before either, the command makes a best-effort call to Hydra's admin API (when an admin URL is configured in `hydra.yml`) to report how many pairwise clients will be affected — informational only, it never blocks the rotation.
+
+### Backups and restore
+
+Every write through `forseti config`'s mutating subcommands backs up the target file first, as `<file>.bak.<unix-secs>`, mode `0600`, in a ring capped at the 3 most recent generations per file (older backups are pruned automatically). `forseti config restore [--from <unix-secs>]` lists what's available per target (Kratos, Hydra, and `config.toml` when resolvable) and restores from a chosen generation — restoring is itself backed up first, so a restore is undoable too. Without `--from`, an interactive terminal is offered each target's newest backup one at a time; non-interactively you must pass `--from`. A restore copies the backup's bytes back verbatim (not re-serialized), so unlike every other `config` write it does **not** drop comments — restoring a hand-annotated file gives you the comments back exactly as they were.
+
+`config.toml`/`kratos.yml`/`hydra.yml` are frequently git-tracked (the playground reference files are). Every write warns when the target is under git and reminds you to gitignore the backups: add `*.bak.*` to `.gitignore` so a rotation doesn't litter the repo with secret-bearing backup files.
+
+### `--dry-run`
+
+Every mutating subcommand accepts `--dry-run`: it computes and prints the same redacted unified diff it would otherwise write, backs up nothing, writes nothing, and any interactive confirmation prompt is skipped (there's nothing to confirm). Use it to preview a rotation or an OIDC enable/disable before committing to it, or in CI to confirm a scripted change would do what you expect.
+
+### Offline schema validation
+
+`forseti config check` lints Forseti's own recommendations, but it's not a substitute for validating that a hand-edited or CLI-generated `kratos.yml` actually parses as valid Kratos config. Kratos ships its own schema validator; run it offline against the pinned image version (see `infra/docker-compose.yml`) without standing up the full stack:
+
+```bash
+podman run --rm -v <dir-containing-kratos.yml>:/etc/config/kratos oryd/kratos:v26.2.0 \
+  validate config /etc/config/kratos/kratos.yml
+```
+
+(substitute `docker` if that's your runtime). **Single-file bind mounts don't see atomic writes.** `forseti config`'s writes are temp-file-plus-rename (so a crash mid-write never corrupts the target), which replaces the file's inode. Docker/Podman bind-mounting a *single file* (`-v ./kratos.yml:/etc/config/kratos/kratos.yml`) binds to that specific inode at container-start time — a rename on the host is invisible to the container until it's restarted, so a config CLI write can silently not take effect from the container's point of view even though the file on the host disk is correct. Bind-mount the containing *directory* instead (as the playground `docker-compose.yml` does: `./kratos:/etc/config/kratos`), which doesn't have this problem, or restart the container after every config write if you must bind-mount a single file.
 
 ## Kratos configuration
 
@@ -977,55 +1061,41 @@ selfservice:
 
 #### `oidc`
 
-Upstream OIDC providers (Google, GitHub, Microsoft, Apple, custom). Operators register one OAuth app per provider on the provider's side, paste the client credentials into `kratos.yml`, and Forseti automatically renders one "Sign in with X" button per configured provider.
+Upstream OIDC providers (Google, GitHub, Microsoft). Operators register one OAuth app per provider on the provider's side; Forseti's `forseti config oidc enable` writes the client credentials into `kratos.yml` and renders one "Sign in with X" button per configured provider. See [Managing configuration with forseti config](#managing-configuration-with-forseti-config) below — that's the supported path for adding a provider; the manual YAML shape here is for reference (e.g. reading an existing `kratos.yml`) or for providers the CLI doesn't cover yet.
 
-Worked example for Google:
+**`${VAR}` is not interpolated.** Kratos does **not** expand `${VAR}`-style environment references anywhere in `kratos.yml` — that's a common assumption carried over from tools like Docker Compose or Helm, but Kratos's own config loader has no such substitution step (confirmed against the upstream config loader; there's no `${...}` expansion pass on the parsed YAML). Every value, including `client_id` and `client_secret`, must be the literal string Kratos will use. `forseti config oidc enable` writes secrets in literal, plaintext form (redacted only in this CLI's own diff output) for exactly this reason. If you want secrets sourced from the environment at *deploy* time rather than baked into the file, template `kratos.yml` through your deploy tooling (Helm, Terraform, a `sops`/`envsubst` pre-render step) before Kratos ever reads it — Kratos itself never does that substitution.
+
+Worked example for Google, via the CLI:
 
 1. Go to <https://console.cloud.google.com/apis/credentials> and create an OAuth 2.0 Client ID.
 2. Authorized redirect URI: `https://accounts.example.com/self-service/methods/oidc/callback/google`. Substitute `accounts.example.com` for your Kratos public hostname — the path is fixed by Kratos.
 3. Capture the client ID and client secret.
-4. Add the provider to `kratos.yml`:
+4. `forseti config oidc enable google --client-id <id> --client-secret-env GOOGLE_CLIENT_SECRET` (export the secret into that env var first, or use `--client-secret-file`/`--client-secret-stdin`; omit the flag entirely and the CLI prompts, masked, on a TTY). This writes the `providers` entry into `kratos.yml`, including `requested_claims.id_token.email`/`email_verified` as essential, and drops the reviewed mapper jsonnet next to it.
 
-   ```yaml
-   selfservice:
-     methods:
-       oidc:
-         enabled: true
-         config:
-           providers:
-             - id: google
-               provider: google
-               client_id: ${GOOGLE_CLIENT_ID}
-               client_secret: ${GOOGLE_CLIENT_SECRET}
-               mapper_url: file:///etc/config/kratos/oidc.google.jsonnet
-               scope:
-                 - openid
-                 - email
-                 - profile
-               requested_claims:
-                 id_token:
-                   email:
-                     essential: true
-                   email_verified:
-                     essential: true
-   ```
+The resulting YAML looks like this (shown here so you know what to expect, or if you're reading an existing config by hand):
 
-5. Provide an identity mapper at the referenced path. The mapper translates the upstream id_token claims into your Kratos identity traits. Minimum example mapping `email`:
+```yaml
+selfservice:
+  methods:
+    oidc:
+      enabled: true
+      config:
+        providers:
+          - id: google
+            provider: google
+            client_id: 1234567890-abc.apps.googleusercontent.com
+            client_secret: GOCSPX-actual-secret-value
+            mapper_url: file:///etc/config/kratos/oidc.google.jsonnet
+            scope: [openid, email, profile]
+            requested_claims:
+              id_token:
+                email: { essential: true }
+                email_verified: { essential: true }
+```
 
-   ```jsonnet
-   local claims = std.extVar('claims');
-   {
-     identity: {
-       traits: {
-         email: claims.email,
-       },
-     },
-   }
-   ```
+The mapper CLI-writes at `oidc.google.jsonnet` gates the `email` trait on `claims.email_verified` — copying `email` without that gate is an account-takeover vector (anyone who controls an unverified alias at the provider could claim the matching Forseti account). Don't hand-edit the mapper unless you understand that invariant; `forseti config check` warns if a provider's mapper doesn't match Forseti's reviewed pinned body.
 
-6. Pass the secret in via env at Kratos startup; Kratos expands `${VAR}` references in its config when started with `--config` and the env populated.
-
-GitHub, Microsoft (Azure AD), Apple, and generic OIDC providers follow the same shape: register an OAuth app on the provider side, set the callback to `https://accounts.example.com/self-service/methods/oidc/callback/<id>`, and add a `providers` entry under `selfservice.methods.oidc.config.providers`.
+GitHub and Microsoft (Azure AD) follow the same `forseti config oidc enable <github|microsoft>` shape. GitHub's claims don't reliably carry `email_verified`, so its pinned mapper treats every GitHub-sourced email as unverified and Forseti's own verification flow gates trust instead. Microsoft requires `--microsoft-tenant <tenant-id>` — `common` (any Azure AD tenant or personal Microsoft account) is refused outright, since it opens the [nOAuth](https://www.descope.com/blog/post/noauth) account-takeover class where an attacker edits their own account's email in a tenant Microsoft doesn't verify.
 
 ### Flow URLs
 

@@ -74,38 +74,10 @@ selfservice:
           origins:
             - http://localhost:3000
 
-    # ---------------------------------------------------------------------
-    # OIDC upstream providers (Google / GitHub / Microsoft) — commented out
-    # because the playground has no real OAuth app credentials. To enable:
-    #
-    # 1. Register an OAuth app at each provider with the callback URL
-    #      http://localhost:4433/self-service/methods/oidc/callback/<id>
-    # 2. Export the client_id + secret as env vars and uncomment below.
-    # 3. Restart Kratos.
-    #
-    # oidc:
-    #   enabled: true
-    #   config:
-    #     providers:
-    #       - id: google
-    #         provider: google
-    #         client_id: "${GOOGLE_CLIENT_ID}"
-    #         client_secret: "${GOOGLE_CLIENT_SECRET}"
-    #         mapper_url: file:///etc/config/kratos/oidc.google.jsonnet
-    #         scope: [openid, email, profile]
-    #       - id: github
-    #         provider: github
-    #         client_id: "${GITHUB_CLIENT_ID}"
-    #         client_secret: "${GITHUB_CLIENT_SECRET}"
-    #         mapper_url: file:///etc/config/kratos/oidc.github.jsonnet
-    #         scope: [user:email]
-    #       - id: microsoft
-    #         provider: microsoft
-    #         client_id: "${MICROSOFT_CLIENT_ID}"
-    #         client_secret: "${MICROSOFT_CLIENT_SECRET}"
-    #         mapper_url: file:///etc/config/kratos/oidc.microsoft.jsonnet
-    #         scope: [openid, email, profile]
-    #         microsoft_tenant: common
+    # OIDC upstream providers (Google / GitHub / Microsoft) aren't configured
+    # in the playground. Use `forseti config oidc enable <google|github|microsoft>`
+    # to add one — see docs/operator-guide.md's "Managing configuration with
+    # forseti config" section.
 
   flows:
     error:
