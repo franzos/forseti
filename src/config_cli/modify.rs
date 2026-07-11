@@ -21,7 +21,7 @@ use super::io::{
     atomic_write, backup, fingerprint, is_git_tracked, lock_config_dir, read_secret, redacted_diff,
     resolve_target, SecretSource, Target,
 };
-use super::yamlutil::{dig_mut, dig_mut_or_insert, dig_str, load_yaml};
+use super::yamlutil::{dig, dig_mut, dig_mut_or_insert, dig_str, load_yaml};
 
 // ---------------------------------------------------------------------------
 // Pinned identity mappers.
@@ -152,19 +152,16 @@ fn web_hook_entry(config: &Value, action: &str) -> Value {
 // Pure mutations (tested without I/O).
 // ---------------------------------------------------------------------------
 
-fn apply_oidc_enable(
-    root: &mut Value,
-    input: &OidcEnableInput,
-    mapper_url: &str,
-) -> Result<(), String> {
+/// All input validation for `oidc enable`, run with no side effects so callers
+/// can gate mapper-file writes and other side effects on it up front.
+fn validate_oidc_enable_input(input: &OidcEnableInput) -> Result<(), String> {
     let provider = input.provider.as_str();
     if !SUPPORTED_PROVIDERS.contains(&provider) {
         return Err(format!(
             "unknown provider `{provider}`; expected one of google, github, microsoft"
         ));
     }
-
-    let tenant = if provider == "microsoft" {
+    if provider == "microsoft" {
         match input.microsoft_tenant.as_deref() {
             None | Some("") => {
                 return Err(
@@ -180,8 +177,24 @@ fn apply_oidc_enable(
                         .to_string(),
                 );
             }
-            Some(t) => Some(t.to_string()),
+            Some(_) => {}
         }
+    }
+    Ok(())
+}
+
+/// Applies the enable mutation to `root`. Returns whether the no-`web_hook`
+/// fallback was used (the caller-visible signal to warn about the audit gap).
+fn apply_oidc_enable(
+    root: &mut Value,
+    input: &OidcEnableInput,
+    mapper_url: &str,
+) -> Result<bool, String> {
+    validate_oidc_enable_input(input)?;
+    let provider = input.provider.as_str();
+    let tenant = if provider == "microsoft" {
+        // validated above: Some, non-empty, not "common".
+        input.microsoft_tenant.clone()
     } else {
         None
     };
@@ -221,33 +234,49 @@ fn apply_oidc_enable(
 
     let template = first_web_hook_config(root);
     let session = || mapping(vec![("hook", Value::String("session".into()))]);
-    let (reg_hooks, login_hooks) = match &template {
-        Some(cfg) => (
-            Value::Sequence(vec![session(), web_hook_entry(cfg, "registration.oidc")]),
-            Value::Sequence(vec![web_hook_entry(cfg, "login.oidc")]),
-        ),
-        None => (
-            Value::Sequence(vec![session()]),
-            Value::Sequence(vec![session()]),
-        ),
-    };
-    *dig_mut_or_insert(
-        root,
-        &[
-            "selfservice",
-            "flows",
-            "registration",
-            "after",
-            "oidc",
-            "hooks",
-        ],
-    ) = reg_hooks;
-    *dig_mut_or_insert(
-        root,
-        &["selfservice", "flows", "login", "after", "oidc", "hooks"],
-    ) = login_hooks;
+    let used_fallback = template.is_none();
+    match &template {
+        Some(cfg) => {
+            *dig_mut_or_insert(
+                root,
+                &[
+                    "selfservice",
+                    "flows",
+                    "registration",
+                    "after",
+                    "oidc",
+                    "hooks",
+                ],
+            ) = Value::Sequence(vec![session(), web_hook_entry(cfg, "registration.oidc")]);
+            *dig_mut_or_insert(
+                root,
+                &["selfservice", "flows", "login", "after", "oidc", "hooks"],
+            ) = Value::Sequence(vec![web_hook_entry(cfg, "login.oidc")]);
+        }
+        None => {
+            // Kratos's login flow doesn't accept the `session` hook (registration-only;
+            // login accepts web_hook/revoke_active_sessions/require_verified_address), so
+            // without a web_hook template the login flow gets no `after.oidc` node at all.
+            *dig_mut_or_insert(
+                root,
+                &[
+                    "selfservice",
+                    "flows",
+                    "registration",
+                    "after",
+                    "oidc",
+                    "hooks",
+                ],
+            ) = Value::Sequence(vec![session()]);
+            if let Some(after) = dig_mut(root, &["selfservice", "flows", "login", "after"])
+                .and_then(Value::as_mapping_mut)
+            {
+                after.remove("oidc");
+            }
+        }
+    }
 
-    Ok(())
+    Ok(used_fallback)
 }
 
 /// Remove the provider named `id`. Returns whether the method is now empty (the
@@ -320,6 +349,20 @@ fn marker(sev: Severity) -> &'static str {
     }
 }
 
+/// Every `client_secret` under `selfservice.methods.oidc.config.providers[*]`.
+fn harvest_client_secrets(root: &Value) -> Vec<String> {
+    dig(
+        root,
+        &["selfservice", "methods", "oidc", "config", "providers"],
+    )
+    .and_then(Value::as_sequence)
+    .into_iter()
+    .flatten()
+    .filter_map(|p| dig_str(p, &["client_secret"]))
+    .map(str::to_string)
+    .collect()
+}
+
 // ---------------------------------------------------------------------------
 // The guarded write pipeline.
 // ---------------------------------------------------------------------------
@@ -333,6 +376,19 @@ pub(crate) fn write_yaml(
 ) -> anyhow::Result<WriteOutcome> {
     let new_text = serde_yaml_ng::to_string(new_root)?;
     let label = target.path.display().to_string();
+
+    // The diff must never leak a provider's client_secret, including ones the
+    // caller didn't explicitly pass in (e.g. a provider being removed, or the
+    // one being replaced on re-enable): harvest every client_secret from both
+    // documents and union it with whatever the caller already knows about.
+    let mut harvested: Vec<String> = secrets.iter().map(|s| (*s).to_string()).collect();
+    if let Ok(old_root) = serde_yaml_ng::from_str::<Value>(old_text) {
+        harvested.extend(harvest_client_secrets(&old_root));
+    }
+    harvested.extend(harvest_client_secrets(new_root));
+    harvested.sort();
+    harvested.dedup();
+    let all_secrets: Vec<&str> = harvested.iter().map(String::as_str).collect();
 
     // Re-serializing drops every comment; confirm before we do that.
     let has_comments = old_text.lines().any(|l| l.trim_start().starts_with('#'));
@@ -357,7 +413,7 @@ pub(crate) fn write_yaml(
     write!(
         ctx.out,
         "{}",
-        redacted_diff(&label, old_text, &new_text, secrets)
+        redacted_diff(&label, old_text, &new_text, &all_secrets)
     )?;
 
     if ctx.dry_run {
@@ -506,6 +562,11 @@ fn handle_mapper(
 // ---------------------------------------------------------------------------
 
 pub(crate) fn oidc_enable(ctx: &mut ModifyCtx, input: OidcEnableInput) -> anyhow::Result<i32> {
+    // Validate everything before any side effect (mapper file write, YAML
+    // write): a rejected tenant or provider must never leave a stray mapper
+    // or prompt the operator for a change that's about to be refused anyway.
+    validate_oidc_enable_input(&input).map_err(|e| anyhow::anyhow!(e))?;
+
     let old_text = std::fs::read_to_string(&ctx.kratos.path)
         .map_err(|e| anyhow::anyhow!("{}: {e}", ctx.kratos.path.display()))?;
     let mut root: Value = serde_yaml_ng::from_str(&old_text)
@@ -521,39 +582,59 @@ pub(crate) fn oidc_enable(ctx: &mut ModifyCtx, input: OidcEnableInput) -> anyhow
     let mapper_file = config_dir.join(format!("oidc.{}.jsonnet", input.provider));
     let mapper_url = format!("file:///etc/config/kratos/oidc.{}.jsonnet", input.provider);
 
-    handle_mapper(ctx, &mapper_file, &input.provider, input.keep_mapper)?;
+    let mapper_existed_before = mapper_file.exists();
 
-    apply_oidc_enable(&mut root, &input, &mapper_url).map_err(|e| anyhow::anyhow!(e))?;
+    let result = (|| -> anyhow::Result<i32> {
+        handle_mapper(ctx, &mapper_file, &input.provider, input.keep_mapper)?;
 
-    if input.provider == "github" {
-        writeln!(
-            ctx.out,
-            "note: GitHub only returns an email when the `user:email` scope is granted, and its \
-             claims don't reliably carry `email_verified`; Forseti treats GitHub emails as \
-             unverified until the user verifies through Forseti's own flow."
-        )?;
-    }
+        let used_fallback =
+            apply_oidc_enable(&mut root, &input, &mapper_url).map_err(|e| anyhow::anyhow!(e))?;
+        if used_fallback {
+            writeln!(
+                ctx.out,
+                "warning: no audit web_hook template found in this kratos.yml, so OIDC \
+                 login/registration events will NOT reach Forseti's audit log; see \
+                 docs/operator-guide.md."
+            )?;
+        }
 
-    let target = Target {
-        path: ctx.kratos.path.clone(),
-    };
-    let outcome = write_yaml(ctx, &target, &old_text, &root, &[&input.client_secret])?;
-    match outcome {
-        WriteOutcome::DryRun => Ok(0),
-        WriteOutcome::Written { check_failed } => {
-            if check_failed {
-                writeln!(ctx.out, "fix the FAIL above before restarting Kratos.")?;
-                Ok(1)
-            } else {
-                let l1 =
-                    "Kratos reloads its config file automatically; verify with: forseti config check";
-                let l2 = format!("changed: {}", target.path.display());
-                let l3 = format!("changed: {}", mapper_file.display());
-                print_runbook(&mut *ctx.out, &["Kratos"], &[l1, &l2, &l3]);
-                Ok(0)
+        if input.provider == "github" {
+            writeln!(
+                ctx.out,
+                "note: GitHub only returns an email when the `user:email` scope is granted, and \
+                 its claims don't reliably carry `email_verified`; Forseti treats GitHub emails \
+                 as unverified until the user verifies through Forseti's own flow."
+            )?;
+        }
+
+        let target = Target {
+            path: ctx.kratos.path.clone(),
+        };
+        let outcome = write_yaml(ctx, &target, &old_text, &root, &[&input.client_secret])?;
+        match outcome {
+            WriteOutcome::DryRun => Ok(0),
+            WriteOutcome::Written { check_failed } => {
+                if check_failed {
+                    writeln!(ctx.out, "fix the FAIL above before restarting Kratos.")?;
+                    Ok(1)
+                } else {
+                    let l1 = "Kratos reloads its config file automatically; verify with: forseti \
+                              config check";
+                    let l2 = format!("changed: {}", target.path.display());
+                    let l3 = format!("changed: {}", mapper_file.display());
+                    print_runbook(&mut *ctx.out, &["Kratos"], &[l1, &l2, &l3]);
+                    Ok(0)
+                }
             }
         }
+    })();
+
+    // write_yaml failing or the operator declining its comment-drop prompt
+    // must not leave behind a mapper this run created.
+    if result.is_err() && !mapper_existed_before && mapper_file.exists() {
+        std::fs::remove_file(&mapper_file).ok();
     }
+    result
 }
 
 pub(crate) async fn oidc_disable(
@@ -585,6 +666,9 @@ pub(crate) async fn oidc_disable(
         writeln!(ctx.out, "aborted; no changes made.")?;
         return Ok(1);
     }
+    // The confirmation above already covers dropping comments on rewrite;
+    // don't ask again in write_yaml's comment-drop prompt.
+    ctx.yes = true;
 
     apply_oidc_disable(&mut root, id).map_err(|e| anyhow::anyhow!(e))?;
 
@@ -784,19 +868,24 @@ mod tests {
 
     #[test]
     fn enable_github_shapes_the_yaml() {
+        // render_default_kratos ships no web_hook, so this exercises the
+        // no-audit-hook fallback: registration keeps `session`, login gets no
+        // `after.oidc` node at all (Kratos's login flow doesn't accept the
+        // `session` hook).
         let mut root = render_default_kratos();
-        apply_oidc_enable(
+        let used_fallback = apply_oidc_enable(
             &mut root,
             &enable_input("github", None),
             "file:///etc/config/kratos/oidc.github.jsonnet",
         )
         .unwrap();
+        assert!(used_fallback, "default kratos.yml has no web_hook template");
 
         assert_eq!(
             dig_bool(&root, &["selfservice", "methods", "oidc", "enabled"]),
             Some(true)
         );
-        assert!(dig(
+        let reg_hooks = dig(
             &root,
             &[
                 "selfservice",
@@ -804,15 +893,17 @@ mod tests {
                 "registration",
                 "after",
                 "oidc",
-                "hooks"
-            ]
+                "hooks",
+            ],
         )
-        .is_some());
-        assert!(dig(
-            &root,
-            &["selfservice", "flows", "login", "after", "oidc", "hooks"]
-        )
-        .is_some());
+        .and_then(Value::as_sequence)
+        .unwrap();
+        assert_eq!(reg_hooks.len(), 1);
+        assert_eq!(dig_str(&reg_hooks[0], &["hook"]), Some("session"));
+        assert!(
+            dig(&root, &["selfservice", "flows", "login", "after", "oidc"]).is_none(),
+            "login flow must not get an after.oidc node without a web_hook template"
+        );
 
         // github scope is user:email only.
         let scope = dig(
@@ -840,12 +931,13 @@ mod tests {
     #[test]
     fn enable_clones_web_hook_on_playground_config() {
         let mut root = playground_kratos();
-        apply_oidc_enable(
+        let used_fallback = apply_oidc_enable(
             &mut root,
             &enable_input("google", None),
             "file:///etc/config/kratos/oidc.google.jsonnet",
         )
         .unwrap();
+        assert!(!used_fallback, "playground kratos.yml ships a web_hook");
 
         let reg = dig(
             &root,
@@ -1127,6 +1219,266 @@ mod tests {
         let mode = std::fs::metadata(&mapper).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
         assert_eq!(std::fs::read_to_string(&mapper).unwrap(), MAPPER_GOOGLE);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // -----------------------------------------------------------------------
+    // Review-round fixes: secret redaction union, audited-hook fallback,
+    // validate-before-side-effects.
+    // -----------------------------------------------------------------------
+
+    #[derive(Clone)]
+    struct CapturingWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl Write for CapturingWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("test capture mutex poisoned")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn captured_ctx(
+        kratos: PathBuf,
+        hydra: PathBuf,
+        dry_run: bool,
+        yes: bool,
+    ) -> (ModifyCtx, std::sync::Arc<std::sync::Mutex<Vec<u8>>>) {
+        let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let ctx = ModifyCtx {
+            kratos: Target { path: kratos },
+            hydra: Target { path: hydra },
+            forseti: None,
+            dry_run,
+            yes,
+            out: Box::new(CapturingWriter(buf.clone())),
+        };
+        (ctx, buf)
+    }
+
+    fn captured_text(buf: &std::sync::Arc<std::sync::Mutex<Vec<u8>>>) -> String {
+        String::from_utf8(buf.lock().unwrap().clone()).expect("captured output is UTF-8")
+    }
+
+    #[tokio::test]
+    async fn disable_redacts_removed_provider_secret_in_diff() {
+        const FIXTURE_SECRET: &str = "fixture-old-secret-abcXYZ";
+        let dir = unique_tmp_dir("disable-redact");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut root = playground_kratos();
+        apply_oidc_enable(
+            &mut root,
+            &OidcEnableInput {
+                provider: "google".into(),
+                client_id: "cid".into(),
+                client_secret: FIXTURE_SECRET.into(),
+                microsoft_tenant: None,
+                keep_mapper: false,
+            },
+            "file:///etc/config/kratos/oidc.google.jsonnet",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("kratos.yml"),
+            serde_yaml_ng::to_string(&root).unwrap(),
+        )
+        .unwrap();
+
+        let (mut ctx, buf) =
+            captured_ctx(dir.join("kratos.yml"), dir.join("hydra.yml"), true, true);
+        oidc_disable(&mut ctx, "google", None).await.unwrap();
+
+        let out = captured_text(&buf);
+        assert!(out.contains("<redacted"), "out: {out}");
+        assert!(!out.contains(FIXTURE_SECRET), "out: {out}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn re_enable_redacts_the_old_secret_too() {
+        const OLD_SECRET: &str = "fixture-old-secret-111";
+        const NEW_SECRET: &str = "fixture-new-secret-222";
+        let dir = unique_tmp_dir("reenable-redact");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut root = playground_kratos();
+        apply_oidc_enable(
+            &mut root,
+            &OidcEnableInput {
+                provider: "google".into(),
+                client_id: "cid".into(),
+                client_secret: OLD_SECRET.into(),
+                microsoft_tenant: None,
+                keep_mapper: false,
+            },
+            "file:///etc/config/kratos/oidc.google.jsonnet",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("kratos.yml"),
+            serde_yaml_ng::to_string(&root).unwrap(),
+        )
+        .unwrap();
+
+        let (mut ctx, buf) =
+            captured_ctx(dir.join("kratos.yml"), dir.join("hydra.yml"), true, true);
+        oidc_enable(
+            &mut ctx,
+            OidcEnableInput {
+                provider: "google".into(),
+                client_id: "cid2".into(),
+                client_secret: NEW_SECRET.into(),
+                microsoft_tenant: None,
+                keep_mapper: false,
+            },
+        )
+        .unwrap();
+
+        let out = captured_text(&buf);
+        assert!(out.contains("<redacted"), "out: {out}");
+        assert!(!out.contains(OLD_SECRET), "old secret leaked; out: {out}");
+        assert!(!out.contains(NEW_SECRET), "new secret leaked; out: {out}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn enable_fallback_warns_and_login_gets_no_after_oidc() {
+        let dir = unique_tmp_dir("fallback-warn");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (k, _, _) = render_configs(&InitInputs::default());
+        let kratos_path = dir.join("kratos.yml");
+        std::fs::write(&kratos_path, &k).unwrap();
+
+        let (mut ctx, buf) = captured_ctx(kratos_path.clone(), dir.join("hydra.yml"), false, true);
+        oidc_enable(
+            &mut ctx,
+            OidcEnableInput {
+                provider: "github".into(),
+                client_id: "cid".into(),
+                client_secret: "sec".into(),
+                microsoft_tenant: None,
+                keep_mapper: false,
+            },
+        )
+        .unwrap();
+
+        let out = captured_text(&buf);
+        assert!(
+            out.contains("no audit web_hook template"),
+            "warning missing from output: {out}"
+        );
+        assert!(out.contains("docs/operator-guide.md"), "out: {out}");
+
+        let written = std::fs::read_to_string(&kratos_path).unwrap();
+        let root: Value = serde_yaml_ng::from_str(&written).unwrap();
+        let reg_hooks = dig(
+            &root,
+            &[
+                "selfservice",
+                "flows",
+                "registration",
+                "after",
+                "oidc",
+                "hooks",
+            ],
+        )
+        .and_then(Value::as_sequence)
+        .unwrap();
+        assert_eq!(reg_hooks.len(), 1);
+        assert_eq!(dig_str(&reg_hooks[0], &["hook"]), Some("session"));
+        assert!(
+            dig(&root, &["selfservice", "flows", "login", "after", "oidc"]).is_none(),
+            "login flow must not get an after.oidc node without a web_hook template"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn microsoft_common_tenant_leaves_no_mapper_file() {
+        let dir = unique_tmp_dir("common-tenant-no-mapper");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (k, _, _) = render_configs(&InitInputs::default());
+        let kratos_path = dir.join("kratos.yml");
+        std::fs::write(&kratos_path, &k).unwrap();
+        let mapper_path = dir.join("oidc.microsoft.jsonnet");
+
+        let mut ctx = ModifyCtx {
+            kratos: Target { path: kratos_path },
+            hydra: Target {
+                path: dir.join("hydra.yml"),
+            },
+            forseti: None,
+            dry_run: false,
+            yes: true,
+            out: Box::new(std::io::sink()),
+        };
+        let err = oidc_enable(
+            &mut ctx,
+            OidcEnableInput {
+                provider: "microsoft".into(),
+                client_id: "cid".into(),
+                client_secret: "sec".into(),
+                microsoft_tenant: Some("common".into()),
+                keep_mapper: false,
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("common"), "err: {err}");
+        assert!(
+            !mapper_path.exists(),
+            "tenant validation must run before the mapper is ever written"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn enable_aborted_write_removes_freshly_created_mapper() {
+        // No TTY in the test harness: write_yaml's comment-drop prompt bails
+        // the same way a `no` answer would, so this doubles as the "user
+        // declined" rollback path.
+        let dir = unique_tmp_dir("abort-removes-mapper");
+        std::fs::create_dir_all(&dir).unwrap();
+        let kratos_path = dir.join("kratos.yml");
+        std::fs::copy("infra/kratos/kratos.yml", &kratos_path).unwrap();
+        let mapper_path = dir.join("oidc.github.jsonnet");
+
+        let mut ctx = ModifyCtx {
+            kratos: Target { path: kratos_path },
+            hydra: Target {
+                path: dir.join("hydra.yml"),
+            },
+            forseti: None,
+            dry_run: false,
+            yes: false,
+            out: Box::new(std::io::sink()),
+        };
+        let err = oidc_enable(
+            &mut ctx,
+            OidcEnableInput {
+                provider: "github".into(),
+                client_id: "cid".into(),
+                client_secret: "sec".into(),
+                microsoft_tenant: None,
+                keep_mapper: false,
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("TTY"), "err: {err}");
+        assert!(
+            !mapper_path.exists(),
+            "a mapper created this run must be removed when the write is aborted"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
