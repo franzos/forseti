@@ -926,7 +926,7 @@ pub(crate) fn check(args: &CheckArgs) -> i32 {
     }
 }
 
-fn state_marker(state: &str) -> &'static str {
+pub(crate) fn state_marker(state: &str) -> &'static str {
     match state {
         "ok" => "[ OK ]",
         "missing" => "[MISS]",

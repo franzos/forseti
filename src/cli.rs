@@ -29,7 +29,7 @@ pub enum Cmd {
 #[derive(Args)]
 pub struct ConfigArgs {
     #[command(subcommand)]
-    pub cmd: Option<ConfigCmd>, // None => interactive menu (Task 11; until then: print help, exit 2)
+    pub cmd: Option<ConfigCmd>, // None => interactive menu when stdin is a TTY; else help + exit 2
     #[command(flatten)]
     pub paths: PathArgs,
 }

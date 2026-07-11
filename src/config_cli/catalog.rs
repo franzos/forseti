@@ -21,9 +21,6 @@ pub(crate) struct Setting {
     pub key: &'static str,
     pub group: &'static str,
     pub title: &'static str,
-    // Rendered by a later task (the interactive menu / `config <setting> --help`
-    // prose); `config status` itself only needs key/group/title/targets today.
-    #[allow(dead_code)]
     pub description: &'static str,
     pub targets: &'static [&'static str],
 }

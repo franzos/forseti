@@ -126,11 +126,12 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-/// `config` subcommand dispatch. The bare interactive menu (`cmd: None`) is a
-/// later task; every other variant is implemented.
+/// `config` subcommand dispatch. Bare `forseti config` (`cmd: None`) drops
+/// into the interactive menu when stdin is a TTY; otherwise it prints the
+/// same clap help it always did and exits 2.
 async fn dispatch_config(args: cli::ConfigArgs) -> i32 {
     use clap::CommandFactory;
-    use std::io::Write;
+    use std::io::{IsTerminal as _, Write};
 
     let cli::ConfigArgs { cmd, paths } = args;
     match cmd {
@@ -161,8 +162,14 @@ async fn dispatch_config(args: cli::ConfigArgs) -> i32 {
         }) => config_cli::run_prune_hydra_system(&paths),
         Some(ConfigCmd::Restore { from }) => config_cli::run_restore(&paths, from),
         Some(ConfigCmd::Smtp { cmd }) => config_cli::run_smtp(cmd, &paths),
+        None if std::io::stdin().is_terminal() => {
+            let mut input = config_cli::RealStdin;
+            let mut output = config_cli::RealStdout;
+            let mut io = config_cli::MenuIo::new(&mut input, &mut output, true);
+            config_cli::run_menu(&mut io, &paths)
+        }
         None => {
-            // Print clap-generated help for the config subcommand to stderr.
+            // Not a TTY (script/CI context): print clap-generated help instead.
             let mut config_cmd = Cli::command()
                 .find_subcommand("config")
                 .expect("config subcommand not found")
