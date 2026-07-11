@@ -22,7 +22,9 @@ use super::io::{
     atomic_write, backup, fingerprint, is_git_tracked, lock_config_dir, read_secret, redacted_diff,
     resolve_target, SecretSource, Target,
 };
-use super::yamlutil::{dig, dig_mut, dig_mut_or_insert, dig_str, load_yaml, random_secret};
+use super::yamlutil::{
+    dig, dig_mut, dig_mut_or_insert, dig_str, load_yaml, random_secret, secret_entries,
+};
 
 // ---------------------------------------------------------------------------
 // Pinned identity mappers.
@@ -1168,6 +1170,447 @@ pub(crate) fn prune_webhook_token(ctx: &mut ModifyCtx) -> anyhow::Result<i32> {
 }
 
 // ---------------------------------------------------------------------------
+// config rotate/prune kratos-secrets, hydra-system, pairwise-salt.
+// ---------------------------------------------------------------------------
+
+/// Prepends `new_secret` to the list at `path`, turning a bare scalar into a
+/// 1-element list first. Kratos/Hydra's rotation convention: the first entry
+/// signs/encrypts new values, every entry remains valid to verify/decrypt.
+pub(crate) fn rotate_secret_list(
+    root: &mut Value,
+    path: &[&str],
+    new_secret: String,
+) -> Result<(), String> {
+    let mut entries: Vec<String> = secret_entries(root, path)
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    entries.insert(0, new_secret);
+    *dig_mut_or_insert(root, path) =
+        Value::Sequence(entries.into_iter().map(Value::String).collect());
+    Ok(())
+}
+
+/// Keeps only `entries[0]`. Errors when the list has a single entry (or is a
+/// bare scalar): there's nothing to prune.
+pub(crate) fn prune_secret_list(root: &mut Value, path: &[&str]) -> Result<(), String> {
+    let entries: Vec<String> = secret_entries(root, path)
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    if entries.len() <= 1 {
+        return Err(format!(
+            "{} has only {} entr{}; nothing to prune",
+            path.join("."),
+            entries.len(),
+            if entries.len() == 1 { "y" } else { "ies" }
+        ));
+    }
+    let Some(slot) = dig_mut(root, path) else {
+        return Err(format!("{}: not found", path.join(".")));
+    };
+    *slot = Value::Sequence(vec![Value::String(entries[0].clone())]);
+    Ok(())
+}
+
+/// `config rotate kratos-secrets [--cookie] [--cipher]`. Neither flag rotates
+/// both. Every existing cookie/cipher value is pulled into the redaction set
+/// regardless of which list is rotated, since both remain live secrets in the
+/// diff either way.
+pub(crate) fn rotate_kratos_secrets(
+    ctx: &mut ModifyCtx,
+    cookie: bool,
+    cipher: bool,
+) -> anyhow::Result<i32> {
+    let (do_cookie, do_cipher) = if !cookie && !cipher {
+        (true, true)
+    } else {
+        (cookie, cipher)
+    };
+
+    let old_text = std::fs::read_to_string(&ctx.kratos.path)
+        .map_err(|e| anyhow::anyhow!("{}: {e}", ctx.kratos.path.display()))?;
+    let mut root: Value = serde_yaml_ng::from_str(&old_text)
+        .map_err(|e| anyhow::anyhow!("{}: invalid YAML: {e}", ctx.kratos.path.display()))?;
+
+    let mut secret_pool: Vec<String> = secret_entries(&root, &["secrets", "cookie"])
+        .into_iter()
+        .chain(secret_entries(&root, &["secrets", "cipher"]))
+        .map(str::to_string)
+        .collect();
+
+    let mut changed = Vec::new();
+    if do_cookie {
+        let new_secret = random_secret(32);
+        secret_pool.push(new_secret.clone());
+        rotate_secret_list(&mut root, &["secrets", "cookie"], new_secret)
+            .map_err(|e| anyhow::anyhow!(e))?;
+        changed.push("secrets.cookie");
+    }
+    if do_cipher {
+        let new_secret = random_secret(32);
+        secret_pool.push(new_secret.clone());
+        rotate_secret_list(&mut root, &["secrets", "cipher"], new_secret)
+            .map_err(|e| anyhow::anyhow!(e))?;
+        changed.push("secrets.cipher");
+    }
+
+    if !ctx.yes && !ctx.dry_run {
+        let question = format!(
+            "Rotate {} in {}? The old value(s) stay valid for verify/decrypt until pruned.",
+            changed.join(", "),
+            ctx.kratos.path.display()
+        );
+        if !prompt_yes_no(&mut *ctx.out, &question)? {
+            writeln!(ctx.out, "aborted; no changes made.")?;
+            return Ok(1);
+        }
+        // Already confirmed above; don't ask a second time in write_yaml's comment-drop prompt.
+        ctx.yes = true;
+    }
+
+    let target = Target {
+        path: ctx.kratos.path.clone(),
+    };
+    let secrets: Vec<&str> = secret_pool.iter().map(String::as_str).collect();
+    let outcome = write_yaml(ctx, &target, &old_text, &root, &secrets)?;
+    match outcome {
+        WriteOutcome::DryRun => Ok(0),
+        WriteOutcome::Written { check_failed } => {
+            if check_failed {
+                writeln!(ctx.out, "fix the FAIL above before restarting Kratos.")?;
+                Ok(1)
+            } else {
+                let l1 =
+                    "Kratos reloads its config file automatically; verify with: forseti config check";
+                let l2 = format!("changed: {}", target.path.display());
+                print_runbook(&mut *ctx.out, &["Kratos"], &[l1, &l2]);
+                Ok(0)
+            }
+        }
+    }
+}
+
+/// `config prune kratos-secrets [--cookie] [--cipher]`. Neither flag sweeps
+/// both lists, pruning only the ones that actually have >1 entry (silently
+/// skipping the rest); an explicit `--cookie`/`--cipher` errors if that
+/// specific list has nothing to prune.
+pub(crate) fn prune_kratos_secrets(
+    ctx: &mut ModifyCtx,
+    cookie: bool,
+    cipher: bool,
+) -> anyhow::Result<i32> {
+    let (want_cookie, want_cipher, explicit) = if !cookie && !cipher {
+        (true, true, false)
+    } else {
+        (cookie, cipher, true)
+    };
+
+    let old_text = std::fs::read_to_string(&ctx.kratos.path)
+        .map_err(|e| anyhow::anyhow!("{}: {e}", ctx.kratos.path.display()))?;
+    let mut root: Value = serde_yaml_ng::from_str(&old_text)
+        .map_err(|e| anyhow::anyhow!("{}: invalid YAML: {e}", ctx.kratos.path.display()))?;
+
+    let secret_pool: Vec<String> = secret_entries(&root, &["secrets", "cookie"])
+        .into_iter()
+        .chain(secret_entries(&root, &["secrets", "cipher"]))
+        .map(str::to_string)
+        .collect();
+
+    let mut pruned: Vec<&str> = Vec::new();
+    for (want, path, label) in [
+        (want_cookie, &["secrets", "cookie"][..], "secrets.cookie"),
+        (want_cipher, &["secrets", "cipher"][..], "secrets.cipher"),
+    ] {
+        if !want {
+            continue;
+        }
+        match prune_secret_list(&mut root, path) {
+            Ok(()) => pruned.push(label),
+            Err(e) if explicit => return Err(anyhow::anyhow!(e)),
+            Err(_) => {} // sweep mode: this particular list has nothing to prune
+        }
+    }
+
+    if pruned.is_empty() {
+        writeln!(
+            ctx.out,
+            "nothing to prune: the selected secrets list(s) already have a single entry."
+        )?;
+        return Ok(0);
+    }
+
+    if pruned.contains(&"secrets.cookie") {
+        writeln!(
+            ctx.out,
+            "note: prune secrets.cookie only after the max session lifetime has elapsed since \
+             rotation; a leaked old cookie secret can still forge sessions while it's listed."
+        )?;
+    }
+
+    if !ctx.yes && !ctx.dry_run {
+        let question = format!(
+            "Prune {} in {}? Removed entries stop verifying/decrypting immediately.",
+            pruned.join(", "),
+            ctx.kratos.path.display()
+        );
+        if !prompt_yes_no(&mut *ctx.out, &question)? {
+            writeln!(ctx.out, "aborted; no changes made.")?;
+            return Ok(1);
+        }
+        ctx.yes = true;
+    }
+
+    let target = Target {
+        path: ctx.kratos.path.clone(),
+    };
+    let secrets: Vec<&str> = secret_pool.iter().map(String::as_str).collect();
+    let outcome = write_yaml(ctx, &target, &old_text, &root, &secrets)?;
+    match outcome {
+        WriteOutcome::DryRun => Ok(0),
+        WriteOutcome::Written { check_failed } => {
+            if check_failed {
+                writeln!(ctx.out, "fix the FAIL above before restarting Kratos.")?;
+                Ok(1)
+            } else {
+                let l1 =
+                    "Kratos reloads its config file automatically; verify with: forseti config check";
+                let l2 = format!("changed: {}", target.path.display());
+                print_runbook(&mut *ctx.out, &["Kratos"], &[l1, &l2]);
+                Ok(0)
+            }
+        }
+    }
+}
+
+/// `config rotate hydra-system`. Hydra does NOT hot-reload, and the runbook
+/// says so explicitly, unlike Kratos's rotations.
+pub(crate) fn rotate_hydra_system(ctx: &mut ModifyCtx) -> anyhow::Result<i32> {
+    let old_text = std::fs::read_to_string(&ctx.hydra.path)
+        .map_err(|e| anyhow::anyhow!("{}: {e}", ctx.hydra.path.display()))?;
+    let mut root: Value = serde_yaml_ng::from_str(&old_text)
+        .map_err(|e| anyhow::anyhow!("{}: invalid YAML: {e}", ctx.hydra.path.display()))?;
+
+    let mut secret_pool: Vec<String> = secret_entries(&root, &["secrets", "system"])
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    let new_secret = random_secret(32);
+    secret_pool.push(new_secret.clone());
+
+    rotate_secret_list(&mut root, &["secrets", "system"], new_secret)
+        .map_err(|e| anyhow::anyhow!(e))?;
+
+    if !ctx.yes && !ctx.dry_run {
+        let question = format!(
+            "Rotate secrets.system in {}? The old value stays valid for decryption until pruned; \
+             Hydra must be restarted for the new value to take effect.",
+            ctx.hydra.path.display()
+        );
+        if !prompt_yes_no(&mut *ctx.out, &question)? {
+            writeln!(ctx.out, "aborted; no changes made.")?;
+            return Ok(1);
+        }
+        ctx.yes = true;
+    }
+
+    let target = Target {
+        path: ctx.hydra.path.clone(),
+    };
+    let secrets: Vec<&str> = secret_pool.iter().map(String::as_str).collect();
+    let outcome = write_yaml(ctx, &target, &old_text, &root, &secrets)?;
+    match outcome {
+        WriteOutcome::DryRun => Ok(0),
+        WriteOutcome::Written { check_failed } => {
+            if check_failed {
+                writeln!(ctx.out, "fix the FAIL above before restarting Hydra.")?;
+                Ok(1)
+            } else {
+                let l1 = "Hydra does NOT hot-reload its config; the new secret takes effect only \
+                          once Hydra is restarted.";
+                let l2 = format!("changed: {}", target.path.display());
+                print_runbook(&mut *ctx.out, &["Hydra"], &[l1, &l2]);
+                Ok(0)
+            }
+        }
+    }
+}
+
+/// `config prune hydra-system`.
+pub(crate) fn prune_hydra_system(ctx: &mut ModifyCtx) -> anyhow::Result<i32> {
+    let old_text = std::fs::read_to_string(&ctx.hydra.path)
+        .map_err(|e| anyhow::anyhow!("{}: {e}", ctx.hydra.path.display()))?;
+    let mut root: Value = serde_yaml_ng::from_str(&old_text)
+        .map_err(|e| anyhow::anyhow!("{}: invalid YAML: {e}", ctx.hydra.path.display()))?;
+
+    let secret_pool: Vec<String> = secret_entries(&root, &["secrets", "system"])
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+
+    prune_secret_list(&mut root, &["secrets", "system"]).map_err(|e| anyhow::anyhow!(e))?;
+
+    if !ctx.yes && !ctx.dry_run {
+        let question = format!(
+            "Prune secrets.system in {}? The removed value stops decrypting immediately.",
+            ctx.hydra.path.display()
+        );
+        if !prompt_yes_no(&mut *ctx.out, &question)? {
+            writeln!(ctx.out, "aborted; no changes made.")?;
+            return Ok(1);
+        }
+        ctx.yes = true;
+    }
+
+    let target = Target {
+        path: ctx.hydra.path.clone(),
+    };
+    let secrets: Vec<&str> = secret_pool.iter().map(String::as_str).collect();
+    let outcome = write_yaml(ctx, &target, &old_text, &root, &secrets)?;
+    match outcome {
+        WriteOutcome::DryRun => Ok(0),
+        WriteOutcome::Written { check_failed } => {
+            if check_failed {
+                writeln!(ctx.out, "fix the FAIL above before restarting Hydra.")?;
+                Ok(1)
+            } else {
+                let l1 = "Hydra does NOT hot-reload its config; the pruned list takes effect only \
+                          once Hydra is restarted.";
+                let l2 = format!("changed: {}", target.path.display());
+                print_runbook(&mut *ctx.out, &["Hydra"], &[l1, &l2]);
+                Ok(0)
+            }
+        }
+    }
+}
+
+pub(crate) const SALT_CONFIRM_PHRASE: &str = "change every pairwise subject";
+
+/// Hydra's admin base URL, if hydra.yml carries one. The reference templates
+/// (`config-init`, the playground `infra/hydra/hydra.yml`) don't write one:
+/// Hydra's admin port is normally supplied out-of-band (CLI flag/env), so
+/// this is a best-effort probe that's expected to miss most of the time; the
+/// pairwise-client count degrades silently when it does.
+fn hydra_admin_url(root: &Value) -> Option<String> {
+    dig_str(root, &["serve", "admin", "base_url"])
+        .or_else(|| dig_str(root, &["urls", "admin"]))
+        .map(str::to_string)
+}
+
+/// Best-effort count of clients with `subject_type == "pairwise"`. Any error
+/// (unresolvable admin URL, network failure, unexpected body) yields `None`;
+/// it never blocks the rotation.
+async fn count_pairwise_clients(admin_url: Option<&str>) -> Option<usize> {
+    let base = admin_url?.trim_end_matches('/');
+    let resp = reqwest::Client::new()
+        .get(format!("{base}/admin/clients?limit=500"))
+        .send()
+        .await
+        .ok()?;
+    let body: serde_json::Value = resp.json().await.ok()?;
+    let clients = body.as_array()?;
+    Some(
+        clients
+            .iter()
+            .filter(|c| {
+                c.get("subject_type").and_then(serde_json::Value::as_str) == Some("pairwise")
+            })
+            .count(),
+    )
+}
+
+/// `config rotate pairwise-salt`. A scalar overwrite, not a rotation list:
+/// there is no prune step, and the old salt is gone the moment this is
+/// confirmed. Every pairwise `sub` Hydra has ever issued changes permanently.
+/// `--yes` never satisfies the gate: interactive mode requires typing
+/// [`SALT_CONFIRM_PHRASE`] verbatim, non-interactive requires
+/// `confirmed_flag` (`--i-understand-subs-change`).
+pub(crate) async fn rotate_pairwise_salt(
+    ctx: &mut ModifyCtx,
+    confirmed_flag: bool,
+    interactive: bool,
+) -> anyhow::Result<i32> {
+    let old_text = std::fs::read_to_string(&ctx.hydra.path)
+        .map_err(|e| anyhow::anyhow!("{}: {e}", ctx.hydra.path.display()))?;
+    let mut root: Value = serde_yaml_ng::from_str(&old_text)
+        .map_err(|e| anyhow::anyhow!("{}: invalid YAML: {e}", ctx.hydra.path.display()))?;
+
+    let old_salt =
+        dig_str(&root, &["oidc", "subject_identifiers", "pairwise", "salt"]).map(str::to_string);
+
+    writeln!(
+        ctx.out,
+        "warning: the pairwise salt derives every pairwise subject identifier Hydra has ever \
+         issued, per client. Rotating it changes ALL of them, permanently; there is no prune \
+         step, the old salt is gone as soon as this is confirmed. Any downstream app matching \
+         users by their old pairwise `sub` will see what looks like a brand-new account."
+    )?;
+
+    if !ctx.dry_run {
+        match count_pairwise_clients(hydra_admin_url(&root).as_deref()).await {
+            Some(n) => writeln!(
+                ctx.out,
+                "{n} pairwise client{} configured in Hydra will be affected.",
+                if n == 1 { "" } else { "s" }
+            )?,
+            None => writeln!(
+                ctx.out,
+                "could not query Hydra for pairwise clients (best-effort probe)."
+            )?,
+        }
+
+        if interactive {
+            write!(ctx.out, "Type `{SALT_CONFIRM_PHRASE}` to confirm: ")?;
+            ctx.out.flush()?;
+            let mut line = String::new();
+            std::io::stdin().read_line(&mut line)?;
+            if line.trim() != SALT_CONFIRM_PHRASE {
+                writeln!(ctx.out, "aborted; no changes made.")?;
+                return Ok(1);
+            }
+        } else if !confirmed_flag {
+            anyhow::bail!(
+                "rotating the pairwise salt is irreversible and changes every pairwise subject; \
+                 pass --i-understand-subs-change to proceed non-interactively (--yes does not \
+                 satisfy this gate)."
+            );
+        }
+        // Confirmed above; don't ask again in write_yaml's comment-drop prompt.
+        ctx.yes = true;
+    }
+
+    let new_salt = random_secret(32);
+    *dig_mut_or_insert(
+        &mut root,
+        &["oidc", "subject_identifiers", "pairwise", "salt"],
+    ) = Value::String(new_salt.clone());
+
+    let mut secret_pool = vec![new_salt];
+    secret_pool.extend(old_salt);
+    let secrets: Vec<&str> = secret_pool.iter().map(String::as_str).collect();
+
+    let target = Target {
+        path: ctx.hydra.path.clone(),
+    };
+    let outcome = write_yaml(ctx, &target, &old_text, &root, &secrets)?;
+    match outcome {
+        WriteOutcome::DryRun => Ok(0),
+        WriteOutcome::Written { check_failed } => {
+            if check_failed {
+                writeln!(ctx.out, "fix the FAIL above before restarting Hydra.")?;
+                Ok(1)
+            } else {
+                let l1 = "Hydra does NOT hot-reload its config; the new pairwise salt takes \
+                          effect only once Hydra is restarted.";
+                let l2 = format!("changed: {}", target.path.display());
+                print_runbook(&mut *ctx.out, &["Hydra"], &[l1, &l2]);
+                Ok(0)
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // CLI entry.
 // ---------------------------------------------------------------------------
 
@@ -1318,9 +1761,99 @@ pub(crate) fn run_prune_webhook_token(paths: &PathArgs) -> i32 {
     }
 }
 
+pub(crate) fn run_rotate_kratos_secrets(paths: &PathArgs, cookie: bool, cipher: bool) -> i32 {
+    let mut ctx = match build_ctx(paths) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 1;
+        }
+    };
+    match rotate_kratos_secrets(&mut ctx, cookie, cipher) {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("error: {e}");
+            1
+        }
+    }
+}
+
+pub(crate) fn run_prune_kratos_secrets(paths: &PathArgs, cookie: bool, cipher: bool) -> i32 {
+    let mut ctx = match build_ctx(paths) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 1;
+        }
+    };
+    match prune_kratos_secrets(&mut ctx, cookie, cipher) {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("error: {e}");
+            1
+        }
+    }
+}
+
+pub(crate) fn run_rotate_hydra_system(paths: &PathArgs) -> i32 {
+    let mut ctx = match build_ctx(paths) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 1;
+        }
+    };
+    match rotate_hydra_system(&mut ctx) {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("error: {e}");
+            1
+        }
+    }
+}
+
+pub(crate) fn run_prune_hydra_system(paths: &PathArgs) -> i32 {
+    let mut ctx = match build_ctx(paths) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 1;
+        }
+    };
+    match prune_hydra_system(&mut ctx) {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("error: {e}");
+            1
+        }
+    }
+}
+
+/// `interactive` is derived from stdin's own TTY state, not `ctx.yes`: the
+/// pairwise-salt gate is deliberately immune to `--yes` (see
+/// `rotate_pairwise_salt`).
+pub(crate) async fn run_rotate_pairwise_salt(paths: &PathArgs, confirmed: bool) -> i32 {
+    let mut ctx = match build_ctx(paths) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 1;
+        }
+    };
+    let interactive = std::io::stdin().is_terminal();
+    match rotate_pairwise_salt(&mut ctx, confirmed, interactive).await {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("error: {e}");
+            1
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config_cli::check::check_secret_lists;
     use crate::config_cli::init::{render_configs, InitInputs};
     use crate::config_cli::yamlutil::{dig, dig_bool};
     use std::path::PathBuf;
@@ -2432,6 +2965,479 @@ extra:
         let (mut ctx, _buf) = rotate_ctx(kratos_path, toml_path, true);
         let err = rotate_webhook_token(&mut ctx, false).unwrap_err();
         assert!(err.to_string().contains("does not exist"), "err: {err}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 9: rotate/prune kratos-secrets + hydra-system + pairwise-salt.
+    // -----------------------------------------------------------------------
+
+    const COOKIE_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const CIPHER_A: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const SYSTEM_A: &str = "cccccccccccccccccccccccccccccccc";
+    const SALT_A: &str = "dddddddddddddddddddddddddddddddd";
+
+    fn kratos_scalar_secrets() -> String {
+        format!("secrets:\n  cookie: {COOKIE_A}\n  cipher: {CIPHER_A}\n")
+    }
+
+    /// A `check_kratos`-clean fixture (mirrors `check.rs`'s
+    /// `good_kratos_has_no_warn_or_fail`): rotate/prune tests assert `code ==
+    /// 0`, so any FAIL findings here would be noise unrelated to the secret
+    /// being exercised, not `render_configs(&InitInputs::default())`'s
+    /// CHANGEME placeholders.
+    fn kratos_good_fixture() -> String {
+        format!(
+            r#"session:
+  whoami:
+    required_aal: highest_available
+selfservice:
+  flows:
+    settings:
+      required_aal: highest_available
+    recovery:
+      enabled: true
+  methods:
+    lookup_secret:
+      enabled: true
+    webauthn:
+      enabled: true
+      config:
+        passwordless: false
+secrets:
+  cookie:
+    - {COOKIE_A}
+  cipher:
+    - {CIPHER_A}
+courier:
+  smtp:
+    connection_uri: smtps://user:pass@smtp.example.com:465
+"#
+        )
+    }
+
+    /// A `check_hydra`-clean fixture, for the same reason as
+    /// `kratos_good_fixture`.
+    fn hydra_good_fixture() -> String {
+        format!(
+            r#"secrets:
+  system:
+    - {SYSTEM_A}
+urls:
+  self:
+    issuer: https://hydra.example.com
+  login: https://forseti.example.com/oauth/login
+  consent: https://forseti.example.com/oauth/consent
+  logout: https://forseti.example.com/oauth/logout
+oidc:
+  subject_identifiers:
+    pairwise:
+      salt: {SALT_A}
+"#
+        )
+    }
+
+    fn kratos_hydra_fixture(dir: &Path) -> (PathBuf, PathBuf) {
+        let kratos_path = dir.join("kratos.yml");
+        let hydra_path = dir.join("hydra.yml");
+        std::fs::write(&kratos_path, kratos_good_fixture()).unwrap();
+        std::fs::write(&hydra_path, hydra_good_fixture()).unwrap();
+        (kratos_path, hydra_path)
+    }
+
+    // -- rotate_secret_list / prune_secret_list: pure mutations -------------
+
+    #[test]
+    fn rotate_secret_list_turns_scalar_cookie_into_two_entry_list_new_first() {
+        let mut root: Value = serde_yaml_ng::from_str(&kratos_scalar_secrets()).unwrap();
+        rotate_secret_list(
+            &mut root,
+            &["secrets", "cookie"],
+            "newcookie1111111111111111111111".to_string(),
+        )
+        .unwrap();
+        let entries = secret_entries(&root, &["secrets", "cookie"]);
+        assert_eq!(entries, vec!["newcookie1111111111111111111111", COOKIE_A]);
+    }
+
+    #[test]
+    fn rotate_secret_list_accumulates_and_check_warns_past_three_entries() {
+        let mut root: Value = serde_yaml_ng::from_str(&kratos_scalar_secrets()).unwrap();
+        rotate_secret_list(&mut root, &["secrets", "cookie"], random_secret(32)).unwrap();
+        assert_eq!(secret_entries(&root, &["secrets", "cookie"]).len(), 2);
+
+        rotate_secret_list(&mut root, &["secrets", "cookie"], random_secret(32)).unwrap();
+        assert_eq!(secret_entries(&root, &["secrets", "cookie"]).len(), 3);
+        let findings = check_secret_lists(&root, false);
+        assert!(
+            !findings.iter().any(|f| f.key == "secrets.cookie.count"),
+            "3 entries must not warn yet: {findings:?}"
+        );
+
+        rotate_secret_list(&mut root, &["secrets", "cookie"], random_secret(32)).unwrap();
+        assert_eq!(secret_entries(&root, &["secrets", "cookie"]).len(), 4);
+        let findings = check_secret_lists(&root, false);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.key == "secrets.cookie.count" && f.severity == Severity::Warn),
+            "4 entries must warn: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn cipher_rotation_entries_all_pass_check_secret_lists() {
+        let mut root: Value = serde_yaml_ng::from_str(&kratos_scalar_secrets()).unwrap();
+        rotate_secret_list(&mut root, &["secrets", "cipher"], random_secret(32)).unwrap();
+        let findings = check_secret_lists(&root, false);
+        let cipher_bad: Vec<_> = findings
+            .iter()
+            .filter(|f| f.key.starts_with("secrets.cipher") && f.severity != Severity::Ok)
+            .collect();
+        assert!(cipher_bad.is_empty(), "{cipher_bad:?}");
+    }
+
+    #[test]
+    fn prune_secret_list_keeps_only_first_entry() {
+        let mut root: Value =
+            serde_yaml_ng::from_str("secrets:\n  cookie:\n    - new\n    - old\n").unwrap();
+        prune_secret_list(&mut root, &["secrets", "cookie"]).unwrap();
+        assert_eq!(secret_entries(&root, &["secrets", "cookie"]), vec!["new"]);
+    }
+
+    #[test]
+    fn prune_secret_list_errors_on_single_entry_list() {
+        let mut root: Value = serde_yaml_ng::from_str("secrets:\n  cookie:\n    - only\n").unwrap();
+        let err = prune_secret_list(&mut root, &["secrets", "cookie"]).unwrap_err();
+        assert!(err.contains("nothing to prune"), "err: {err}");
+    }
+
+    #[test]
+    fn prune_secret_list_errors_on_bare_scalar() {
+        let mut root: Value = serde_yaml_ng::from_str(&kratos_scalar_secrets()).unwrap();
+        let err = prune_secret_list(&mut root, &["secrets", "cookie"]).unwrap_err();
+        assert!(err.contains("nothing to prune"), "err: {err}");
+    }
+
+    // -- rotate_kratos_secrets ------------------------------------------------
+
+    #[test]
+    fn rotate_kratos_secrets_cookie_only_grows_cookie_leaves_cipher() {
+        let dir = unique_tmp_dir("rotate-kratos-cookie-only");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (kratos_path, hydra_path) = kratos_hydra_fixture(&dir);
+        let before: Value =
+            serde_yaml_ng::from_str(&std::fs::read_to_string(&kratos_path).unwrap()).unwrap();
+        let cipher_before = secret_entries(&before, &["secrets", "cipher"])[0].to_string();
+
+        let (mut ctx, buf) = captured_ctx(kratos_path.clone(), hydra_path, false, true);
+        let code = rotate_kratos_secrets(&mut ctx, true, false).expect("rotate succeeds");
+        assert_eq!(code, 0);
+
+        let root: Value =
+            serde_yaml_ng::from_str(&std::fs::read_to_string(&kratos_path).unwrap()).unwrap();
+        let cookie = secret_entries(&root, &["secrets", "cookie"]);
+        assert_eq!(cookie.len(), 2, "cookie must grow to 2 entries");
+        assert_eq!(
+            secret_entries(&root, &["secrets", "cipher"]),
+            vec![cipher_before.as_str()],
+            "cipher must be untouched"
+        );
+
+        let out = captured_text(&buf);
+        assert!(!out.contains(cookie[0]), "new cookie leaked: {out}");
+        assert!(!out.contains(cookie[1]), "old cookie leaked: {out}");
+        assert!(out.contains("<redacted"), "out: {out}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn rotate_kratos_secrets_neither_flag_rotates_both_lists() {
+        let dir = unique_tmp_dir("rotate-kratos-both");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (kratos_path, hydra_path) = kratos_hydra_fixture(&dir);
+
+        let (mut ctx, _buf) = captured_ctx(kratos_path.clone(), hydra_path, false, true);
+        let code = rotate_kratos_secrets(&mut ctx, false, false).expect("rotate succeeds");
+        assert_eq!(code, 0);
+
+        let root: Value =
+            serde_yaml_ng::from_str(&std::fs::read_to_string(&kratos_path).unwrap()).unwrap();
+        assert_eq!(secret_entries(&root, &["secrets", "cookie"]).len(), 2);
+        assert_eq!(secret_entries(&root, &["secrets", "cipher"]).len(), 2);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // -- prune_kratos_secrets ---------------------------------------------------
+
+    #[test]
+    fn prune_kratos_secrets_explicit_flag_errors_on_single_entry() {
+        let dir = unique_tmp_dir("prune-kratos-explicit-error");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (kratos_path, hydra_path) = kratos_hydra_fixture(&dir);
+
+        let (mut ctx, _buf) = captured_ctx(kratos_path, hydra_path, false, true);
+        let err = prune_kratos_secrets(&mut ctx, true, false).unwrap_err();
+        assert!(err.to_string().contains("nothing to prune"), "err: {err}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn prune_kratos_secrets_sweep_reports_nothing_when_both_single_entry() {
+        let dir = unique_tmp_dir("prune-kratos-sweep-noop");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (kratos_path, hydra_path) = kratos_hydra_fixture(&dir);
+        let before = std::fs::read_to_string(&kratos_path).unwrap();
+
+        let (mut ctx, buf) = captured_ctx(kratos_path.clone(), hydra_path, false, true);
+        let code = prune_kratos_secrets(&mut ctx, false, false).expect("sweep noop, not an error");
+        assert_eq!(code, 0);
+        assert_eq!(std::fs::read_to_string(&kratos_path).unwrap(), before);
+
+        let out = captured_text(&buf);
+        assert!(out.contains("nothing to prune"), "out: {out}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn prune_kratos_secrets_after_rotation_keeps_only_first_entry_and_warns_cookie_guidance() {
+        // Starts from an already-rotated (2-entry) state directly rather than
+        // chaining a real rotate call: two guarded writes to the same target
+        // within the same wall-clock second would collide on the backup
+        // ring's second-granularity filename.
+        let dir = unique_tmp_dir("prune-kratos-after-rotate");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (kratos_path, hydra_path) = kratos_hydra_fixture(&dir);
+        let rotated = kratos_good_fixture().replace(
+            &format!("cookie:\n    - {COOKIE_A}"),
+            &format!("cookie:\n    - new-cookie-2222222222222222222\n    - {COOKIE_A}"),
+        );
+        std::fs::write(&kratos_path, &rotated).unwrap();
+
+        let (mut ctx, buf) = captured_ctx(kratos_path.clone(), hydra_path, false, true);
+        let code = prune_kratos_secrets(&mut ctx, false, false).expect("prune succeeds");
+        assert_eq!(code, 0);
+
+        let after_prune: Value =
+            serde_yaml_ng::from_str(&std::fs::read_to_string(&kratos_path).unwrap()).unwrap();
+        assert_eq!(
+            secret_entries(&after_prune, &["secrets", "cookie"]),
+            vec!["new-cookie-2222222222222222222"]
+        );
+        assert_eq!(
+            secret_entries(&after_prune, &["secrets", "cipher"]).len(),
+            1
+        );
+
+        let out = captured_text(&buf);
+        assert!(out.contains("max session lifetime"), "out: {out}");
+        assert!(!out.contains(COOKIE_A), "pruned secret leaked: {out}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // -- rotate_hydra_system / prune_hydra_system --------------------------
+
+    #[test]
+    fn rotate_hydra_system_grows_system_list_new_first() {
+        let dir = unique_tmp_dir("rotate-hydra-system");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (kratos_path, hydra_path) = kratos_hydra_fixture(&dir);
+        let before: Value =
+            serde_yaml_ng::from_str(&std::fs::read_to_string(&hydra_path).unwrap()).unwrap();
+        let system_before = secret_entries(&before, &["secrets", "system"])[0].to_string();
+
+        let (mut ctx, buf) = captured_ctx(kratos_path, hydra_path.clone(), false, true);
+        let code = rotate_hydra_system(&mut ctx).expect("rotate succeeds");
+        assert_eq!(code, 0);
+
+        let root: Value =
+            serde_yaml_ng::from_str(&std::fs::read_to_string(&hydra_path).unwrap()).unwrap();
+        let system = secret_entries(&root, &["secrets", "system"]);
+        assert_eq!(system.len(), 2);
+        assert_eq!(system[1], system_before);
+        assert_ne!(system[0], system_before);
+
+        let out = captured_text(&buf);
+        assert!(!out.contains(system[0]), "new secret leaked: {out}");
+        assert!(!out.contains(system[1]), "old secret leaked: {out}");
+        assert!(
+            out.contains("does NOT hot-reload"),
+            "runbook must warn Hydra needs a restart: {out}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn prune_hydra_system_errors_on_single_entry() {
+        let dir = unique_tmp_dir("prune-hydra-single");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (kratos_path, hydra_path) = kratos_hydra_fixture(&dir);
+
+        let (mut ctx, _buf) = captured_ctx(kratos_path, hydra_path, false, true);
+        let err = prune_hydra_system(&mut ctx).unwrap_err();
+        assert!(err.to_string().contains("nothing to prune"), "err: {err}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn prune_hydra_system_after_rotation_keeps_only_first_entry() {
+        // Starts from an already-rotated (2-entry) state directly; see the
+        // comment on the kratos-secrets equivalent above for why.
+        let dir = unique_tmp_dir("prune-hydra-after-rotate");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (kratos_path, hydra_path) = kratos_hydra_fixture(&dir);
+        let rotated = hydra_good_fixture().replace(
+            &format!("system:\n    - {SYSTEM_A}"),
+            &format!("system:\n    - new-system-3333333333333333333\n    - {SYSTEM_A}"),
+        );
+        std::fs::write(&hydra_path, &rotated).unwrap();
+
+        let (mut ctx, _buf) = captured_ctx(kratos_path, hydra_path.clone(), false, true);
+        let code = prune_hydra_system(&mut ctx).expect("prune succeeds");
+        assert_eq!(code, 0);
+
+        let after_prune: Value =
+            serde_yaml_ng::from_str(&std::fs::read_to_string(&hydra_path).unwrap()).unwrap();
+        assert_eq!(
+            secret_entries(&after_prune, &["secrets", "system"]),
+            vec!["new-system-3333333333333333333"]
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // -- rotate_pairwise_salt -------------------------------------------------
+
+    #[tokio::test]
+    async fn rotate_pairwise_salt_non_interactive_without_flag_errors_and_writes_nothing() {
+        let dir = unique_tmp_dir("pairwise-no-flag");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (kratos_path, hydra_path) = kratos_hydra_fixture(&dir);
+        let before = std::fs::read_to_string(&hydra_path).unwrap();
+
+        let (mut ctx, _buf) = captured_ctx(kratos_path, hydra_path.clone(), false, true);
+        let err = rotate_pairwise_salt(&mut ctx, false, false)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("--i-understand-subs-change"),
+            "err: {err}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&hydra_path).unwrap(),
+            before,
+            "a refused rotation must not write"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn rotate_pairwise_salt_yes_alone_does_not_satisfy_the_gate() {
+        // captured_ctx's `yes = true` mirrors --yes; the salt gate must ignore it.
+        let dir = unique_tmp_dir("pairwise-yes-insufficient");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (kratos_path, hydra_path) = kratos_hydra_fixture(&dir);
+
+        let (mut ctx, _buf) = captured_ctx(kratos_path, hydra_path, false, true);
+        let err = rotate_pairwise_salt(&mut ctx, false, false)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("--i-understand-subs-change"),
+            "err: {err}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn rotate_pairwise_salt_with_flag_overwrites_scalar_not_a_list() {
+        let dir = unique_tmp_dir("pairwise-with-flag");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (kratos_path, hydra_path) = kratos_hydra_fixture(&dir);
+        let before: Value =
+            serde_yaml_ng::from_str(&std::fs::read_to_string(&hydra_path).unwrap()).unwrap();
+        let salt_before = dig_str(
+            &before,
+            &["oidc", "subject_identifiers", "pairwise", "salt"],
+        )
+        .unwrap()
+        .to_string();
+
+        let (mut ctx, buf) = captured_ctx(kratos_path, hydra_path.clone(), false, true);
+        let code = rotate_pairwise_salt(&mut ctx, true, false)
+            .await
+            .expect("rotate succeeds");
+        assert_eq!(code, 0);
+
+        let root: Value =
+            serde_yaml_ng::from_str(&std::fs::read_to_string(&hydra_path).unwrap()).unwrap();
+        let salt_node = dig(&root, &["oidc", "subject_identifiers", "pairwise", "salt"]).unwrap();
+        assert!(
+            salt_node.is_string(),
+            "salt must stay a scalar overwrite, not become a rotation list"
+        );
+        let new_salt = salt_node.as_str().unwrap();
+        assert_ne!(new_salt, salt_before);
+
+        let out = captured_text(&buf);
+        assert!(!out.contains(&salt_before), "old salt leaked: {out}");
+        assert!(!out.contains(new_salt), "new salt leaked: {out}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn rotate_pairwise_salt_interactive_wrong_phrase_aborts_without_writing() {
+        // No TTY in the test harness: stdin reads EOF immediately, so the typed
+        // line is empty and never matches SALT_CONFIRM_PHRASE; this exercises
+        // the decline path the same way other interactive prompts do here.
+        let dir = unique_tmp_dir("pairwise-interactive-wrong");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (kratos_path, hydra_path) = kratos_hydra_fixture(&dir);
+        let before = std::fs::read_to_string(&hydra_path).unwrap();
+
+        let (mut ctx, buf) = captured_ctx(kratos_path, hydra_path.clone(), false, true);
+        let code = rotate_pairwise_salt(&mut ctx, false, true)
+            .await
+            .expect("declined, not an error");
+        assert_eq!(code, 1);
+        assert_eq!(std::fs::read_to_string(&hydra_path).unwrap(), before);
+
+        let out = captured_text(&buf);
+        assert!(
+            out.contains(SALT_CONFIRM_PHRASE),
+            "prompt must show the exact phrase: {out}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn rotate_pairwise_salt_probe_degrades_silently_without_admin_url() {
+        // The reference hydra.yml templates carry no admin base_url, so the
+        // best-effort probe must miss without blocking the rotation.
+        let dir = unique_tmp_dir("pairwise-probe-degrade");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (kratos_path, hydra_path) = kratos_hydra_fixture(&dir);
+
+        let (mut ctx, buf) = captured_ctx(kratos_path, hydra_path, false, true);
+        let code = rotate_pairwise_salt(&mut ctx, true, false)
+            .await
+            .expect("rotate succeeds");
+        assert_eq!(code, 0);
+
+        let out = captured_text(&buf);
+        assert!(out.contains("could not query Hydra"), "out: {out}");
 
         std::fs::remove_dir_all(&dir).ok();
     }

@@ -142,9 +142,24 @@ async fn dispatch_config(args: cli::ConfigArgs) -> i32 {
         Some(ConfigCmd::Rotate {
             cmd: RotateCmd::WebhookToken,
         }) => config_cli::run_rotate_webhook_token(&paths),
+        Some(ConfigCmd::Rotate {
+            cmd: RotateCmd::KratosSecrets { cookie, cipher },
+        }) => config_cli::run_rotate_kratos_secrets(&paths, cookie, cipher),
+        Some(ConfigCmd::Rotate {
+            cmd: RotateCmd::HydraSystem,
+        }) => config_cli::run_rotate_hydra_system(&paths),
+        Some(ConfigCmd::Rotate {
+            cmd: RotateCmd::PairwiseSalt { confirmed },
+        }) => config_cli::run_rotate_pairwise_salt(&paths, confirmed).await,
         Some(ConfigCmd::Prune {
             cmd: PruneCmd::WebhookToken,
         }) => config_cli::run_prune_webhook_token(&paths),
+        Some(ConfigCmd::Prune {
+            cmd: PruneCmd::KratosSecrets { cookie, cipher },
+        }) => config_cli::run_prune_kratos_secrets(&paths, cookie, cipher),
+        Some(ConfigCmd::Prune {
+            cmd: PruneCmd::HydraSystem,
+        }) => config_cli::run_prune_hydra_system(&paths),
         None => {
             // Print clap-generated help for the config subcommand to stderr.
             let mut config_cmd = Cli::command()
