@@ -6,24 +6,26 @@
 //! secret-redacted diff.
 
 use std::io::{ErrorKind, IsTerminal as _, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_yaml_ng::{Mapping, Value};
 use toml_edit::DocumentMut;
 
-use crate::cli::{OidcCmd, PathArgs, SecretSourceArgs};
+use crate::cli::{OidcCmd, PathArgs, SecretSourceArgs, SmtpCmd};
 
 use super::check::{
-    check_hydra, check_kratos, check_oidc_providers, extract_hook_token, resolve_config_path,
-    resolve_forseti_toml_path, webhook_token_entries, Finding, Severity, DEFAULT_FORSETI_TOML,
-    DEFAULT_HYDRA, DEFAULT_KRATOS, ENV_HYDRA, ENV_KRATOS, PLACEHOLDER_TOKENS,
+    check_hydra, check_kratos, check_oidc_providers, extract_hook_token, redact_uri,
+    resolve_config_path, resolve_forseti_toml_path, webhook_token_entries, Finding, Severity,
+    DEFAULT_FORSETI_TOML, DEFAULT_HYDRA, DEFAULT_KRATOS, ENV_HYDRA, ENV_KRATOS, PLACEHOLDER_TOKENS,
 };
 use super::io::{
-    atomic_write, backup, fingerprint, is_git_tracked, lock_config_dir, read_secret, redacted_diff,
-    resolve_target, SecretSource, Target,
+    atomic_write, backup, fingerprint, is_git_tracked, list_backups, lock_config_dir, read_secret,
+    redacted_diff, resolve_target, SecretSource, Target,
 };
 use super::yamlutil::{
-    dig, dig_mut, dig_mut_or_insert, dig_str, load_yaml, random_secret, secret_entries,
+    dig, dig_mut, dig_mut_or_insert, dig_str, load_yaml, random_secret, reject_control_chars,
+    secret_entries,
 };
 
 // ---------------------------------------------------------------------------
@@ -1611,6 +1613,379 @@ pub(crate) async fn rotate_pairwise_salt(
 }
 
 // ---------------------------------------------------------------------------
+// config smtp set.
+// ---------------------------------------------------------------------------
+
+/// `config smtp set`. `uri`/`from_address`/`from_name` are each optional, but
+/// at least one must be given. `uri` is treated as a secret (it embeds
+/// `user:pass`), so it's fed into `write_yaml`'s redaction set and echoed back
+/// only through [`redact_uri`] — the raw value never lands in this function's
+/// output.
+pub(crate) fn smtp_set(
+    ctx: &mut ModifyCtx,
+    uri: Option<String>,
+    from_address: Option<String>,
+    from_name: Option<String>,
+) -> anyhow::Result<i32> {
+    if uri.is_none() && from_address.is_none() && from_name.is_none() {
+        anyhow::bail!(
+            "nothing to set: pass a URI source (--uri-env/--uri-file/--uri-stdin) and/or \
+             --from-address/--from-name"
+        );
+    }
+
+    if let Some(u) = &uri {
+        reject_control_chars("SMTP URI", u).map_err(|e| anyhow::anyhow!(e))?;
+        let parsed = url::Url::parse(u).map_err(|e| anyhow::anyhow!("invalid SMTP URI: {e}"))?;
+        if !matches!(parsed.scheme(), "smtp" | "smtps") {
+            anyhow::bail!(
+                "invalid SMTP URI: scheme must be smtp:// or smtps:// (got `{}`)",
+                parsed.scheme()
+            );
+        }
+    }
+    if let Some(addr) = &from_address {
+        reject_control_chars("--from-address", addr).map_err(|e| anyhow::anyhow!(e))?;
+    }
+    if let Some(name) = &from_name {
+        reject_control_chars("--from-name", name).map_err(|e| anyhow::anyhow!(e))?;
+    }
+
+    let old_text = std::fs::read_to_string(&ctx.kratos.path)
+        .map_err(|e| anyhow::anyhow!("{}: {e}", ctx.kratos.path.display()))?;
+    let mut root: Value = serde_yaml_ng::from_str(&old_text)
+        .map_err(|e| anyhow::anyhow!("{}: invalid YAML: {e}", ctx.kratos.path.display()))?;
+
+    if let Some(u) = &uri {
+        writeln!(
+            ctx.out,
+            "setting courier.smtp.connection_uri to {}",
+            redact_uri(u)
+        )?;
+        *dig_mut_or_insert(&mut root, &["courier", "smtp", "connection_uri"]) =
+            Value::String(u.clone());
+    }
+    if let Some(addr) = &from_address {
+        *dig_mut_or_insert(&mut root, &["courier", "smtp", "from_address"]) =
+            Value::String(addr.clone());
+    }
+    if let Some(name) = &from_name {
+        *dig_mut_or_insert(&mut root, &["courier", "smtp", "from_name"]) =
+            Value::String(name.clone());
+    }
+
+    let target = Target {
+        path: ctx.kratos.path.clone(),
+    };
+    let secrets: Vec<&str> = uri.as_deref().into_iter().collect();
+    let outcome = write_yaml(ctx, &target, &old_text, &root, &secrets)?;
+    match outcome {
+        WriteOutcome::DryRun => Ok(0),
+        WriteOutcome::Written { check_failed } => {
+            if check_failed {
+                writeln!(ctx.out, "fix the FAIL above before restarting Kratos.")?;
+                Ok(1)
+            } else {
+                let l1 =
+                    "Kratos reloads its config file automatically; verify with: forseti config check";
+                let l2 = format!("changed: {}", target.path.display());
+                print_runbook(&mut *ctx.out, &["Kratos"], &[l1, &l2]);
+                Ok(0)
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// config restore.
+// ---------------------------------------------------------------------------
+
+/// The `<file>.bak.<unix-secs>` suffix, parsed back out of a backup path.
+fn backup_timestamp(path: &Path) -> Option<u64> {
+    path.file_name()?
+        .to_str()?
+        .rsplit_once(".bak.")?
+        .1
+        .parse()
+        .ok()
+}
+
+/// Every `client_secret`/rotation-list/hook-token/SMTP-URI value in a parsed
+/// YAML doc, best-effort. Mirrors the secret shapes the various `rotate_*`
+/// actions already treat as sensitive, so a restore diff redacts them the same
+/// way a normal write would.
+fn harvest_yaml_secrets(text: &str) -> Vec<String> {
+    let Ok(root) = serde_yaml_ng::from_str::<Value>(text) else {
+        return Vec::new();
+    };
+    let mut out = harvest_client_secrets(&root);
+    for path in [
+        &["secrets", "cookie"][..],
+        &["secrets", "cipher"][..],
+        &["secrets", "system"][..],
+    ] {
+        out.extend(secret_entries(&root, path).into_iter().map(str::to_string));
+    }
+    out.extend(extract_hook_token(&root));
+    if let Some(uri) = dig_str(&root, &["courier", "smtp", "connection_uri"]) {
+        out.push(uri.to_string());
+    }
+    out
+}
+
+/// `[audit].webhook_token` entries from a parsed TOML doc, best-effort.
+fn harvest_toml_secrets(text: &str) -> Vec<String> {
+    text.parse::<DocumentMut>()
+        .map(|doc| toml_get_webhook_tokens(&doc))
+        .unwrap_or_default()
+}
+
+/// The union of every secret shape restore knows how to find in either the
+/// current file or the backup being restored, from both sides of the diff —
+/// a value present only in one (e.g. a since-removed provider) still needs
+/// redacting.
+fn harvest_restore_secrets(old_text: &str, new_text: &str) -> Vec<String> {
+    let mut out = harvest_yaml_secrets(old_text);
+    out.extend(harvest_yaml_secrets(new_text));
+    out.extend(harvest_toml_secrets(old_text));
+    out.extend(harvest_toml_secrets(new_text));
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Restore a single target from `backup_path`, verbatim: the backup's raw
+/// bytes are copied byte-for-byte, never re-serialized through
+/// `serde_yaml_ng`/`toml_edit`, so any comments or formatting the backup
+/// carries survive intact. This is the deliberate opposite of `write_yaml`'s
+/// comment-drop behavior — restoring comments is the point, not a loss to
+/// confirm — so this bypasses `write_yaml`/`write_toml` entirely rather than
+/// routing through them.
+fn restore_file(
+    ctx: &mut ModifyCtx,
+    target: &Target,
+    backup_path: &Path,
+) -> anyhow::Result<WriteOutcome> {
+    let label = target.path.display().to_string();
+    let old_bytes = std::fs::read(&target.path).unwrap_or_default();
+    let new_bytes = std::fs::read(backup_path)
+        .map_err(|e| anyhow::anyhow!("{}: {e}", backup_path.display()))?;
+    let old_text = String::from_utf8_lossy(&old_bytes).into_owned();
+    let new_text = String::from_utf8_lossy(&new_bytes).into_owned();
+
+    let secrets = harvest_restore_secrets(&old_text, &new_text);
+    let secret_refs: Vec<&str> = secrets.iter().map(String::as_str).collect();
+
+    write!(
+        ctx.out,
+        "{}",
+        redacted_diff(&label, &old_text, &new_text, &secret_refs)
+    )?;
+
+    if ctx.dry_run {
+        writeln!(ctx.out, "(dry-run: no changes written to {label})")?;
+        return Ok(WriteOutcome::DryRun);
+    }
+
+    let dir = target
+        .path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let _lock = lock_config_dir(dir)?;
+    if let Some(bak) = backup(target)? {
+        writeln!(ctx.out, "backed up current {label} to {}", bak.display())?;
+    }
+    atomic_write(target, &new_bytes)?;
+    writeln!(ctx.out, "restored {label} from {}", backup_path.display())?;
+
+    Ok(WriteOutcome::Written {
+        check_failed: false,
+    })
+}
+
+struct RestoreCandidate {
+    label: &'static str,
+    target: Target,
+    backups: Vec<PathBuf>,
+}
+
+/// `config restore [--from <unix-secs>]`. Targets are kratos.yml, hydra.yml,
+/// and config.toml (when resolvable, same as `check`/`status`); any target
+/// with no backups at all is skipped with a note, not an error. `--from`
+/// picks that generation for every remaining target — a target that has
+/// backups but not that specific one is a hard error (listing what's
+/// available) so a restore never silently mixes generations across files.
+/// Without `--from`, an interactive terminal is offered each target's newest
+/// backup one at a time; non-interactively (or under `--yes`) it's an error
+/// telling the operator to pass `--from`. `--dry-run` always previews the
+/// newest backup per target without prompting, since nothing is written.
+pub(crate) fn restore(ctx: &mut ModifyCtx, from: Option<&str>) -> anyhow::Result<i32> {
+    let from_ts: Option<u64> =
+        match from {
+            Some(s) => Some(s.parse::<u64>().map_err(|_| {
+                anyhow::anyhow!("--from must be a unix-seconds timestamp, got `{s}`")
+            })?),
+            None => None,
+        };
+
+    let mut candidates = vec![
+        (
+            "Kratos",
+            Target {
+                path: ctx.kratos.path.clone(),
+            },
+        ),
+        (
+            "Hydra",
+            Target {
+                path: ctx.hydra.path.clone(),
+            },
+        ),
+    ];
+    if let Some(t) = &ctx.forseti {
+        candidates.push((
+            "Forseti config.toml",
+            Target {
+                path: t.path.clone(),
+            },
+        ));
+    }
+
+    let mut participants = Vec::new();
+    for (label, target) in candidates {
+        let backups = list_backups(&target)?;
+        if backups.is_empty() {
+            writeln!(
+                ctx.out,
+                "note: no backups for {label} ({}); skipping.",
+                target.path.display()
+            )?;
+            continue;
+        }
+        participants.push(RestoreCandidate {
+            label,
+            target,
+            backups,
+        });
+    }
+
+    if participants.is_empty() {
+        writeln!(
+            ctx.out,
+            "no backups found for any target; nothing to restore."
+        )?;
+        return Ok(0);
+    }
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    for p in &participants {
+        writeln!(ctx.out, "== {} ({}) ==", p.label, p.target.path.display())?;
+        for (i, bak) in p.backups.iter().enumerate() {
+            let ts = backup_timestamp(bak).unwrap_or(0);
+            let age = now.saturating_sub(ts);
+            let size = std::fs::metadata(bak).map(|m| m.len()).unwrap_or(0);
+            writeln!(
+                ctx.out,
+                "  [{i}] {} ({age}s ago, {size} bytes)",
+                bak.display()
+            )?;
+        }
+    }
+
+    let interactive = std::io::stdin().is_terminal() && !ctx.yes;
+    if from_ts.is_none() && !ctx.dry_run && !interactive {
+        anyhow::bail!("pass --from <timestamp>");
+    }
+
+    let mut selections: Vec<(&RestoreCandidate, PathBuf)> = Vec::new();
+    for p in &participants {
+        if let Some(ts) = from_ts {
+            match p
+                .backups
+                .iter()
+                .find(|b| backup_timestamp(b.as_path()) == Some(ts))
+            {
+                Some(bak) => selections.push((p, bak.clone())),
+                None => {
+                    let available: Vec<String> = p
+                        .backups
+                        .iter()
+                        .filter_map(|b| backup_timestamp(b.as_path()))
+                        .map(|t| t.to_string())
+                        .collect();
+                    anyhow::bail!(
+                        "{} has no backup at --from {ts}; available: {}",
+                        p.target.path.display(),
+                        available.join(", ")
+                    );
+                }
+            }
+            continue;
+        }
+        if ctx.dry_run {
+            selections.push((p, p.backups[0].clone()));
+            continue;
+        }
+        let bak = p.backups[0].clone();
+        let ts = backup_timestamp(&bak).unwrap_or(0);
+        let question = format!(
+            "Restore {} ({}) to the backup from {ts}?",
+            p.label,
+            p.target.path.display()
+        );
+        if prompt_yes_no(&mut *ctx.out, &question)? {
+            selections.push((p, bak));
+        } else {
+            writeln!(ctx.out, "skipped {} (no changes)", p.label)?;
+        }
+    }
+
+    if selections.is_empty() {
+        writeln!(ctx.out, "nothing selected; no changes made.")?;
+        return Ok(0);
+    }
+
+    let mut any_dry_run = false;
+    let mut any_check_failed = false;
+    let mut changed = Vec::new();
+    for (p, backup_path) in &selections {
+        let outcome = restore_file(ctx, &p.target, backup_path)?;
+        match outcome {
+            WriteOutcome::DryRun => any_dry_run = true,
+            WriteOutcome::Written { .. } => {
+                changed.push(format!("changed: {}", p.target.path.display()));
+                let is_yaml = p.target.path == ctx.kratos.path || p.target.path == ctx.hydra.path;
+                if is_yaml && post_write_check(ctx, &p.target) {
+                    any_check_failed = true;
+                }
+            }
+        }
+    }
+
+    if any_dry_run {
+        return Ok(0);
+    }
+
+    changed.push("run `forseti config check` to verify the restored state.".to_string());
+    let extra: Vec<&str> = changed.iter().map(String::as_str).collect();
+    print_runbook(&mut *ctx.out, &[], &extra);
+
+    if any_check_failed {
+        writeln!(
+            ctx.out,
+            "fix the FAIL above before restarting affected services."
+        )?;
+        Ok(1)
+    } else {
+        Ok(0)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // CLI entry.
 // ---------------------------------------------------------------------------
 
@@ -1842,6 +2217,79 @@ pub(crate) async fn run_rotate_pairwise_salt(paths: &PathArgs, confirmed: bool) 
     };
     let interactive = std::io::stdin().is_terminal();
     match rotate_pairwise_salt(&mut ctx, confirmed, interactive).await {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("error: {e}");
+            1
+        }
+    }
+}
+
+/// Maps `SmtpCmd::Set`'s at-most-one URI source flags to a `SecretSource`.
+/// `None` when none were given — unlike `secret_source` (oidc's mandatory
+/// client secret), there's no interactive-prompt fallback here: with no URI
+/// flag, `smtp set` simply leaves the URI untouched (see `smtp_set`).
+fn smtp_uri_source(
+    uri_env: Option<String>,
+    uri_file: Option<std::path::PathBuf>,
+    uri_stdin: bool,
+) -> Option<SecretSource> {
+    if let Some(name) = uri_env {
+        Some(SecretSource::Env(name))
+    } else if let Some(path) = uri_file {
+        Some(SecretSource::File(path))
+    } else if uri_stdin {
+        Some(SecretSource::Stdin)
+    } else {
+        None
+    }
+}
+
+pub(crate) fn run_smtp(cmd: SmtpCmd, paths: &PathArgs) -> i32 {
+    let SmtpCmd::Set {
+        uri_env,
+        uri_file,
+        uri_stdin,
+        from_address,
+        from_name,
+    } = cmd;
+
+    let uri = match smtp_uri_source(uri_env, uri_file, uri_stdin) {
+        Some(src) => match read_secret(src) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                eprintln!("error: {e}");
+                return 1;
+            }
+        },
+        None => None,
+    };
+
+    let mut ctx = match build_ctx(paths) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 1;
+        }
+    };
+    match smtp_set(&mut ctx, uri, from_address, from_name) {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("error: {e}");
+            1
+        }
+    }
+}
+
+pub(crate) fn run_restore(paths: &PathArgs, from: Option<String>) -> i32 {
+    let mut ctx = match build_ctx(paths) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 1;
+        }
+    };
+    match restore(&mut ctx, from.as_deref()) {
         Ok(code) => code,
         Err(e) => {
             eprintln!("error: {e}");
@@ -3438,6 +3886,382 @@ oidc:
 
         let out = captured_text(&buf);
         assert!(out.contains("could not query Hydra"), "out: {out}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 10: config smtp set + config restore.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn smtp_set_writes_all_three_keys() {
+        let dir = unique_tmp_dir("smtp-set-all");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (kratos_path, hydra_path) = kratos_hydra_fixture(&dir);
+
+        let (mut ctx, buf) = captured_ctx(kratos_path.clone(), hydra_path, false, true);
+        let code = smtp_set(
+            &mut ctx,
+            Some("smtps://newuser:newpass@smtp.new.example.com:465".to_string()),
+            Some("no-reply@example.com".to_string()),
+            Some("Example Accounts".to_string()),
+        )
+        .unwrap();
+        assert_eq!(code, 0);
+
+        let root: Value =
+            serde_yaml_ng::from_str(&std::fs::read_to_string(&kratos_path).unwrap()).unwrap();
+        assert_eq!(
+            dig_str(&root, &["courier", "smtp", "connection_uri"]),
+            Some("smtps://newuser:newpass@smtp.new.example.com:465")
+        );
+        assert_eq!(
+            dig_str(&root, &["courier", "smtp", "from_address"]),
+            Some("no-reply@example.com")
+        );
+        assert_eq!(
+            dig_str(&root, &["courier", "smtp", "from_name"]),
+            Some("Example Accounts")
+        );
+
+        let out = captured_text(&buf);
+        assert!(!out.contains("newuser:newpass"), "raw URI leaked: {out}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn smtp_set_confirmation_echoes_redact_uri_never_raw_uri() {
+        let dir = unique_tmp_dir("smtp-set-redact");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (kratos_path, hydra_path) = kratos_hydra_fixture(&dir);
+
+        let (mut ctx, buf) = captured_ctx(kratos_path, hydra_path, false, true);
+        smtp_set(
+            &mut ctx,
+            Some("smtps://opuser:oppass@smtp.new.example.com:465".to_string()),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let out = captured_text(&buf);
+        assert!(!out.contains("opuser:oppass"), "raw URI leaked: {out}");
+        assert!(
+            out.contains("smtps://***@smtp.new.example.com:465"),
+            "confirmation must echo the redact_uri form: {out}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn smtp_set_only_from_fields_when_no_uri_given() {
+        let dir = unique_tmp_dir("smtp-set-from-only");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (kratos_path, hydra_path) = kratos_hydra_fixture(&dir);
+        let before: Value =
+            serde_yaml_ng::from_str(&std::fs::read_to_string(&kratos_path).unwrap()).unwrap();
+
+        let (mut ctx, _buf) = captured_ctx(kratos_path.clone(), hydra_path, false, true);
+        let code = smtp_set(
+            &mut ctx,
+            None,
+            Some("no-reply@example.com".to_string()),
+            None,
+        )
+        .unwrap();
+        assert_eq!(code, 0);
+
+        let root: Value =
+            serde_yaml_ng::from_str(&std::fs::read_to_string(&kratos_path).unwrap()).unwrap();
+        assert_eq!(
+            dig_str(&root, &["courier", "smtp", "connection_uri"]),
+            dig_str(&before, &["courier", "smtp", "connection_uri"]),
+            "the URI must be untouched when only --from-address is given"
+        );
+        assert_eq!(
+            dig_str(&root, &["courier", "smtp", "from_address"]),
+            Some("no-reply@example.com")
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn smtp_set_nothing_given_errors() {
+        let dir = unique_tmp_dir("smtp-set-nothing");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (kratos_path, hydra_path) = kratos_hydra_fixture(&dir);
+        let (mut ctx, _buf) = captured_ctx(kratos_path, hydra_path, false, true);
+
+        let err = smtp_set(&mut ctx, None, None, None).unwrap_err();
+        assert!(err.to_string().contains("nothing to set"), "err: {err}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn smtp_set_rejects_control_char_uri() {
+        let dir = unique_tmp_dir("smtp-set-control-char");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (kratos_path, hydra_path) = kratos_hydra_fixture(&dir);
+        let (mut ctx, _buf) = captured_ctx(kratos_path, hydra_path, false, true);
+
+        let err = smtp_set(
+            &mut ctx,
+            Some("smtp://h:1025\nselfservice:\n  flows: {}\n".to_string()),
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("control characters"), "err: {err}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn smtp_set_rejects_non_smtp_scheme() {
+        let dir = unique_tmp_dir("smtp-set-bad-scheme");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (kratos_path, hydra_path) = kratos_hydra_fixture(&dir);
+        let (mut ctx, _buf) = captured_ctx(kratos_path, hydra_path, false, true);
+
+        let err = smtp_set(
+            &mut ctx,
+            Some("https://smtp.example.com".to_string()),
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("smtp"), "err: {err}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Writes a `<file_name>.bak.<secs>` backup directly (mirrors `io.rs`'s own
+    /// tests) so restore tests control exactly which generations exist without
+    /// depending on wall-clock second boundaries the way the real `backup()`
+    /// (used only for the restore's own pre-overwrite snapshot) does.
+    fn write_backup(dir: &Path, file_name: &str, secs: u64, content: &str) -> PathBuf {
+        let path = dir.join(format!("{file_name}.bak.{secs}"));
+        std::fs::write(&path, content).unwrap();
+        path
+    }
+
+    #[test]
+    fn restore_round_trip_preserves_bytes_verbatim() {
+        let dir = unique_tmp_dir("restore-verbatim");
+        std::fs::create_dir_all(&dir).unwrap();
+        let kratos_path = dir.join("kratos.yml");
+        let hydra_path = dir.join("hydra.yml"); // no backups: must be skipped, not restored.
+
+        let v1 = "# a comment the operator left behind\ncourier:\n  smtp:\n    connection_uri: smtp://v1:1025\n";
+        write_backup(&dir, "kratos.yml", 1_000, v1);
+        std::fs::write(
+            &kratos_path,
+            "courier:\n  smtp:\n    connection_uri: smtp://v2:1025\n",
+        )
+        .unwrap();
+
+        let (mut ctx, buf) = captured_ctx(kratos_path.clone(), hydra_path, false, true);
+        // This minimal fixture isn't check_kratos-clean (no session/settings
+        // AAL etc.), so the post-write check may legitimately report FAILs
+        // (exit code 1); this test only cares that the bytes round-trip.
+        restore(&mut ctx, Some("1000")).unwrap();
+
+        let restored = std::fs::read_to_string(&kratos_path).unwrap();
+        assert_eq!(
+            restored, v1,
+            "restore must copy the backup's bytes verbatim, comments included"
+        );
+
+        let out = captured_text(&buf);
+        assert!(out.contains("no backups for Hydra"), "out: {out}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn restore_backs_up_current_state_before_overwriting() {
+        let dir = unique_tmp_dir("restore-backs-up-current");
+        std::fs::create_dir_all(&dir).unwrap();
+        let kratos_path = dir.join("kratos.yml");
+        let hydra_path = dir.join("hydra.yml");
+
+        let v1 = "courier:\n  smtp:\n    connection_uri: smtp://v1:1025\n";
+        let v2 = "courier:\n  smtp:\n    connection_uri: smtp://v2:1025\n";
+        write_backup(&dir, "kratos.yml", 1_000, v1);
+        std::fs::write(&kratos_path, v2).unwrap();
+
+        let (mut ctx, _buf) = captured_ctx(kratos_path.clone(), hydra_path, false, true);
+        restore(&mut ctx, Some("1000")).unwrap();
+
+        let target = Target {
+            path: kratos_path.clone(),
+        };
+        let backups = list_backups(&target).unwrap();
+        let v2_backup = backups
+            .iter()
+            .any(|p| std::fs::read_to_string(p).unwrap() == v2);
+        assert!(
+            v2_backup,
+            "the pre-restore state (v2) must be backed up before restoring v1"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn restore_from_unknown_suffix_errors_listing_available() {
+        let dir = unique_tmp_dir("restore-unknown-suffix");
+        std::fs::create_dir_all(&dir).unwrap();
+        let kratos_path = dir.join("kratos.yml");
+        let current = "courier:\n  smtp:\n    connection_uri: smtp://v2:1025\n";
+        std::fs::write(&kratos_path, current).unwrap();
+        write_backup(&dir, "kratos.yml", 1_000, "v1");
+        write_backup(&dir, "kratos.yml", 2_000, "v1b");
+
+        let (mut ctx, _buf) = captured_ctx(kratos_path.clone(), dir.join("hydra.yml"), false, true);
+        let err = restore(&mut ctx, Some("9999")).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("9999"), "msg: {msg}");
+        assert!(
+            msg.contains("1000") && msg.contains("2000"),
+            "msg should list the available suffixes: {msg}"
+        );
+
+        assert_eq!(
+            std::fs::read_to_string(&kratos_path).unwrap(),
+            current,
+            "a rejected --from must leave every target untouched"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn restore_non_interactive_without_from_errors() {
+        let dir = unique_tmp_dir("restore-non-interactive");
+        std::fs::create_dir_all(&dir).unwrap();
+        let kratos_path = dir.join("kratos.yml");
+        std::fs::write(&kratos_path, "x: 1\n").unwrap();
+        write_backup(&dir, "kratos.yml", 1_000, "x: 0\n");
+
+        let (mut ctx, _buf) = captured_ctx(kratos_path, dir.join("hydra.yml"), false, true);
+        let err = restore(&mut ctx, None).unwrap_err();
+        assert!(err.to_string().contains("--from"), "err: {err}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn restore_dry_run_writes_nothing() {
+        let dir = unique_tmp_dir("restore-dry-run");
+        std::fs::create_dir_all(&dir).unwrap();
+        let kratos_path = dir.join("kratos.yml");
+        std::fs::write(&kratos_path, "x: 1\n").unwrap();
+        write_backup(&dir, "kratos.yml", 1_000, "x: 0\n");
+
+        let (mut ctx, buf) = captured_ctx(kratos_path.clone(), dir.join("hydra.yml"), true, false);
+        let code = restore(&mut ctx, None).unwrap();
+        assert_eq!(code, 0);
+        assert_eq!(std::fs::read_to_string(&kratos_path).unwrap(), "x: 1\n");
+
+        let out = captured_text(&buf);
+        assert!(out.contains("dry-run"), "out: {out}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn restore_skips_targets_with_no_backups_at_all() {
+        let dir = unique_tmp_dir("restore-skip-empty");
+        std::fs::create_dir_all(&dir).unwrap();
+        let kratos_path = dir.join("kratos.yml");
+        let hydra_path = dir.join("hydra.yml");
+        std::fs::write(&kratos_path, "x: 1\n").unwrap();
+        std::fs::write(&hydra_path, "y: 1\n").unwrap();
+
+        let (mut ctx, buf) = captured_ctx(kratos_path, hydra_path, false, true);
+        let code = restore(&mut ctx, None).unwrap();
+        assert_eq!(code, 0);
+
+        let out = captured_text(&buf);
+        assert!(
+            out.contains("no backups found for any target"),
+            "out: {out}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn restore_redacts_smtp_uri_in_diff() {
+        let dir = unique_tmp_dir("restore-redact-smtp");
+        std::fs::create_dir_all(&dir).unwrap();
+        let kratos_path = dir.join("kratos.yml");
+        let old_uri = "smtps://olduser:oldpass@smtp.example.com:465";
+        let new_uri = "smtps://newuser:newpass@smtp.example.com:465";
+        write_backup(
+            &dir,
+            "kratos.yml",
+            1_000,
+            &format!("courier:\n  smtp:\n    connection_uri: {old_uri}\n"),
+        );
+        std::fs::write(
+            &kratos_path,
+            format!("courier:\n  smtp:\n    connection_uri: {new_uri}\n"),
+        )
+        .unwrap();
+
+        let (mut ctx, buf) = captured_ctx(kratos_path, dir.join("hydra.yml"), true, true);
+        restore(&mut ctx, Some("1000")).unwrap();
+
+        let out = captured_text(&buf);
+        assert!(!out.contains("olduser:oldpass"), "old creds leaked: {out}");
+        assert!(!out.contains("newuser:newpass"), "new creds leaked: {out}");
+        assert!(out.contains("<redacted"), "out: {out}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn restore_includes_config_toml_when_resolvable() {
+        let dir = unique_tmp_dir("restore-toml");
+        std::fs::create_dir_all(&dir).unwrap();
+        let kratos_path = dir.join("kratos.yml");
+        let hydra_path = dir.join("hydra.yml");
+        let toml_path = dir.join("config.toml");
+        std::fs::write(&kratos_path, "x: 1\n").unwrap();
+        std::fs::write(&hydra_path, "y: 1\n").unwrap();
+        std::fs::write(&toml_path, "[audit]\nwebhook_token = \"new\"\n").unwrap();
+        write_backup(
+            &dir,
+            "config.toml",
+            1_000,
+            "[audit]\nwebhook_token = \"old\"\n",
+        );
+
+        let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut ctx = ModifyCtx {
+            kratos: Target { path: kratos_path },
+            hydra: Target { path: hydra_path },
+            forseti: Some(Target {
+                path: toml_path.clone(),
+            }),
+            dry_run: false,
+            yes: true,
+            out: Box::new(CapturingWriter(buf.clone())),
+        };
+
+        let code = restore(&mut ctx, Some("1000")).unwrap();
+        assert_eq!(code, 0);
+        assert_eq!(
+            std::fs::read_to_string(&toml_path).unwrap(),
+            "[audit]\nwebhook_token = \"old\"\n"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }

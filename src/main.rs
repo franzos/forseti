@@ -126,9 +126,8 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-/// `config` subcommand dispatch. Variants beyond `check`/`init`/`status`
-/// (and the bare interactive menu) land in later tasks; until then they're a
-/// stub.
+/// `config` subcommand dispatch. The bare interactive menu (`cmd: None`) is a
+/// later task; every other variant is implemented.
 async fn dispatch_config(args: cli::ConfigArgs) -> i32 {
     use clap::CommandFactory;
     use std::io::Write;
@@ -160,6 +159,8 @@ async fn dispatch_config(args: cli::ConfigArgs) -> i32 {
         Some(ConfigCmd::Prune {
             cmd: PruneCmd::HydraSystem,
         }) => config_cli::run_prune_hydra_system(&paths),
+        Some(ConfigCmd::Restore { from }) => config_cli::run_restore(&paths, from),
+        Some(ConfigCmd::Smtp { cmd }) => config_cli::run_smtp(cmd, &paths),
         None => {
             // Print clap-generated help for the config subcommand to stderr.
             let mut config_cmd = Cli::command()
@@ -167,10 +168,6 @@ async fn dispatch_config(args: cli::ConfigArgs) -> i32 {
                 .expect("config subcommand not found")
                 .clone();
             let _ = writeln!(std::io::stderr(), "{}", config_cmd.render_help());
-            2
-        }
-        _ => {
-            eprintln!("not implemented yet");
             2
         }
     }

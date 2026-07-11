@@ -255,6 +255,51 @@ mod tests {
     }
 
     #[test]
+    fn smtp_uri_source_flags_are_mutually_exclusive() {
+        let err = Cli::try_parse_from([
+            "forseti",
+            "config",
+            "smtp",
+            "set",
+            "--uri-env",
+            "A",
+            "--uri-stdin",
+        ]);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn smtp_set_parses_with_no_uri_source() {
+        let cli = Cli::try_parse_from(["forseti", "config", "smtp", "set", "--from-name", "Foo"])
+            .unwrap();
+        let Some(Cmd::Config(a)) = cli.cmd else {
+            panic!("wrong variant")
+        };
+        let Some(ConfigCmd::Smtp {
+            cmd: SmtpCmd::Set {
+                uri_env, from_name, ..
+            },
+        }) = a.cmd
+        else {
+            panic!("wrong variant")
+        };
+        assert!(uri_env.is_none());
+        assert_eq!(from_name.as_deref(), Some("Foo"));
+    }
+
+    #[test]
+    fn restore_from_parses() {
+        let cli = Cli::try_parse_from(["forseti", "config", "restore", "--from", "12345"]).unwrap();
+        let Some(Cmd::Config(a)) = cli.cmd else {
+            panic!("wrong variant")
+        };
+        let Some(ConfigCmd::Restore { from }) = a.cmd else {
+            panic!("wrong variant")
+        };
+        assert_eq!(from.as_deref(), Some("12345"));
+    }
+
+    #[test]
     fn secret_source_may_be_omitted_for_interactive_prompt() {
         let cli = Cli::try_parse_from([
             "forseti",
