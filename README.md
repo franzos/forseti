@@ -40,6 +40,20 @@ Because it's backed by software the giants scale with — OpenAI self-hosts Ory 
 | 🌗 **Light & dark** | A built-in theme toggle (light / dark / follow-system) across every page. |
 | 🛡️ **Production-minded** | CSRF on every form, signed cookies, rate-limited DCR, and an account-deletion webhook saga with retries. |
 
+## Organization claims over OIDC
+
+Forseti can fold the caller's org membership into the ID token and userinfo, so a connected app does tenant-aware access control without a second API call. Three opt-in scopes cover different needs; grant a client any combination (each still needs the user's consent, and only shows up when requested):
+
+| Scope | Claim shape | Covers | Standardized? | Reach for it when |
+| --- | --- | --- | --- | --- |
+| `groups` | Flat array of team slugs | The **active** org's teams | De-facto (widely implemented) | Wiring a third-party app (ArgoCD, Grafana, Harbor, Proxmox, …) that maps a `groups` claim to its own roles |
+| `org` | One object: active org + your role | The **active** org | Forseti-specific | An app that only cares about the currently-selected tenant |
+| `orgs` | Array of `{id, slug, role, name}` | **Every** org you belong to | Forseti-specific | A multi-tenant app (e.g. Stackpit) that renders an org switcher and enforces per-org roles |
+
+`groups` is the portable path: it's in no RFC, but enough apps read a `groups` claim that it's become the lingua franca for role mapping, which is why the app templates use it. `org`/`orgs` are richer and self-describing (they carry the role explicitly) but only an app written against Forseti's shape can consume them. No off-the-shelf IdP emits `orgs`, and no generic app reads it.
+
+One thing to keep in mind: `groups` reflects the active org only, while `orgs` spans all memberships, so for a multi-tenant app the two can look like they disagree. That's by design, not a bug.
+
 ## OSS vs commercial
 
 | | OSS (unlicensed) | Commercial (licensed) |

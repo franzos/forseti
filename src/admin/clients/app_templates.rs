@@ -96,7 +96,7 @@ impl AppTemplate {
             redirect_uris: &["https://YOUR_DOMAIN/web/auth/callback"],
             post_logout_redirect_uris: &[],
             backchannel_logout_uri: Some("https://YOUR_DOMAIN/web/auth/backchannel-logout"),
-            scope: "openid email profile offline_access",
+            scope: "openid email profile orgs offline_access",
             token_endpoint_auth_method: "client_secret_basic",
             require_pkce: true,
             audience_visible: true,
@@ -1113,6 +1113,17 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn stackpit_grants_orgs_scope() {
+        // Stackpit requests the `orgs` scope; a client built from this template
+        // without it fails the authorize with invalid_scope.
+        assert!(AppTemplate::from_slug("stackpit")
+            .unwrap()
+            .scope
+            .split_whitespace()
+            .any(|s| s == "orgs"));
     }
 
     #[test]
