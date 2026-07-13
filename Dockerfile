@@ -29,6 +29,8 @@ COPY templates ./templates
 COPY migrations ./migrations
 # i18n-embed loads locales/ at compile time.
 COPY locales ./locales
+# src/legal.rs include_str!s assets/legal/*.md at compile time.
+COPY assets ./assets
 # `include_dir!` captures static/ at compile time, so the freshly built CSS
 # must be in place before `cargo build`.
 COPY static ./static

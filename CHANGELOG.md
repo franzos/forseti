@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.1.11] - 2026-07-13
 
 ### Added
 - `forseti config` interactive menu and non-interactive subcommands: enable/disable OIDC sign-in providers, rotate/prune the audit webhook token and Kratos/Hydra secrets, set courier SMTP, restore from backups, `status` view
@@ -10,6 +10,9 @@
 ### Changed
 - CLI parsing moved to clap; unrecognized subcommands now error instead of starting the server
 - `config init` templates are comment-free; rationale moved to the operator guide and the CLI's own descriptions
+
+### Fixed
+- Container image failed to build since the legal pages landed: the build stage never copied `assets/`, so ghcr was stuck at 0.1.8
 
 ## [0.1.10] - 2026-07-10
 

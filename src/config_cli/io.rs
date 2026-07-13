@@ -157,7 +157,7 @@ pub(crate) fn list_backups(target: &Target) -> anyhow::Result<Vec<PathBuf>> {
             }
         }
     }
-    backups.sort_by(|a, b| b.0.cmp(&a.0));
+    backups.sort_by_key(|b| std::cmp::Reverse(b.0));
     Ok(backups.into_iter().map(|(_, p)| p).collect())
 }
 
