@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.1.12] - 2026-07-17
 
 ### Security
 - Secret-holding config values (cookie secret, PAM client secret, metrics scrape token, audit webhook tokens) are redacted in debug output
@@ -18,6 +18,8 @@
 - Anonymous requests (e.g. to a public org logo) no longer trigger a needless Kratos session lookup
 - Consent-session pagination no longer stops early on an unexpected Hydra `Link` header part, which could have left some sessions out of the account-deletion webhook fan-out
 - PAM module: opaque FFI handle types switched from empty enums to the sound `repr(C)` pattern
+- Org branding and theme changes are now recorded in the audit log
+- Malformed consent submissions render a friendly error instead of a raw deserialization message
 
 ## [0.1.11] - 2026-07-13
 
