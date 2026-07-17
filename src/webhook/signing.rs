@@ -56,10 +56,10 @@ impl std::fmt::Debug for SigningKey {
 
 impl SigningKey {
     /// Load the Ed25519 private key from `path`, generating + persisting a
-    /// fresh key when the file is missing. The file is written with `0600`
-    /// permissions on Unix; on other platforms we rely on the process
-    /// umask. An existing file that isn't a valid Ed25519 PKCS#8 PEM is a
-    /// hard error — the operator must remove or replace it deliberately.
+    /// fresh key when the file is missing. The file is created with `0600`
+    /// permissions from the start. An existing file that isn't a valid
+    /// Ed25519 PKCS#8 PEM is a hard error — the operator must remove or
+    /// replace it deliberately.
     pub fn load_or_generate(path: &Path) -> anyhow::Result<Self> {
         let key = if path.exists() {
             let pem = std::fs::read_to_string(path)
@@ -144,10 +144,14 @@ fn generate_and_persist(path: &Path) -> anyhow::Result<EdSigningKey> {
     Ok(key)
 }
 
-/// Write a freshly-generated key to `path` with mode 0600 (Unix). Creates
-/// the parent directory if needed. On non-Unix the umask handles the
-/// permission story; mode is best-effort.
+/// Write a freshly-generated key to `path`, created `0600` at open time so
+/// the private key is never world-readable, even transiently. Creates the
+/// parent directory if needed. `create_new` (O_EXCL) is safe here: the
+/// caller only generates when the file is missing.
 fn persist_new_key(path: &Path, key: &EdSigningKey) -> anyhow::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent).map_err(|e| {
@@ -158,18 +162,14 @@ fn persist_new_key(path: &Path, key: &EdSigningKey) -> anyhow::Result<()> {
     let pem = key
         .to_pkcs8_pem(LineEnding::LF)
         .map_err(|e| anyhow::anyhow!("serialise generated webhook signing key: {e}"))?;
-    std::fs::write(path, pem.as_bytes())
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
         .map_err(|e| anyhow::anyhow!("write webhook signing key {path:?}: {e}"))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(path)
-            .map_err(|e| anyhow::anyhow!("stat webhook signing key {path:?}: {e}"))?
-            .permissions();
-        perms.set_mode(0o600);
-        std::fs::set_permissions(path, perms)
-            .map_err(|e| anyhow::anyhow!("chmod webhook signing key {path:?}: {e}"))?;
-    }
+    file.write_all(pem.as_bytes())
+        .map_err(|e| anyhow::anyhow!("write webhook signing key {path:?}: {e}"))?;
     Ok(())
 }
 
@@ -378,6 +378,22 @@ mod tests {
             .as_str()
             .map(|s| !s.is_empty())
             .unwrap_or(false));
+    }
+
+    #[test]
+    fn generated_key_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempdir_path();
+        let path = dir.join("perms.pem");
+        let _ = std::fs::remove_file(&path);
+        SigningKey::load_or_generate(&path).expect("generate");
+        let mode = std::fs::metadata(&path)
+            .expect("stat generated key")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

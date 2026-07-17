@@ -25,9 +25,11 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             tailwind: tailwindcss-linux-x64
+            tailwind_sha256: 09e6876a63ceb09ccd7e5867e3dbb2b2dc65c3a2f2e2fe210d68ea3bc0432050
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
             tailwind: tailwindcss-linux-arm64
+            tailwind_sha256: 967eb434f4d6a1c0dfda106decc646cb742e04d745aa484726023cdd46ba8eda
 
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -50,6 +52,7 @@ jobs:
           mkdir -p .bin
           curl -fsSL -o .bin/tailwindcss \
             "https://github.com/tailwindlabs/tailwindcss/releases/download/${TAILWIND_VERSION}/${{ matrix.tailwind }}"
+          echo "${{ matrix.tailwind_sha256 }}  .bin/tailwindcss" | sha256sum -c -
           chmod +x .bin/tailwindcss
           make css
 

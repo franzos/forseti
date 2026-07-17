@@ -418,7 +418,7 @@ pub async fn middleware(
     mut req: Request,
     next: Next,
 ) -> Response {
-    let salt = ip_salt(&state.cfg);
+    let salt = ip_salt(&state.cfg, &state.cookie_secret);
     let peer_ip = req
         .extensions()
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
@@ -447,19 +447,19 @@ pub async fn middleware(
 }
 
 /// Derive the deployment IP salt. Operator override via `[audit].ip_salt`
-/// takes precedence; otherwise the salt is `SHA-256(domain || self.url)`
-/// — mirrors the pattern in `flash.rs::flash_key`, so rotating
-/// `self.url` rotates the salt as a side-effect.
-pub fn ip_salt(cfg: &AppConfig) -> String {
+/// takes precedence; otherwise the salt is `SHA-256(domain || cookie_secret)`.
+/// v1 derived from `self.url` — public information, so anyone holding an
+/// audit dump could recompute the salt and brute-force the IPv4 space.
+pub fn ip_salt(cfg: &AppConfig, cookie_secret: &[u8]) -> String {
     if let Some(s) = cfg.audit.ip_salt.as_ref() {
         if !s.is_empty() {
             return s.clone();
         }
     }
-    const DOMAIN: &[u8] = b"forseti::audit::ip-salt::v1";
+    const DOMAIN: &[u8] = b"forseti::audit::ip-salt::v2";
     let mut h = Sha256::new();
     h.update(DOMAIN);
-    h.update(cfg.self_.url.as_bytes());
+    h.update(cookie_secret);
     hex::encode(h.finalize())
 }
 
@@ -1340,6 +1340,54 @@ mod sensitive_key_tests {
         for k in ["status_code", "country_code", "error_code"] {
             assert!(!is_sensitive_key(k), "{k} should be allowed");
         }
+    }
+}
+
+#[cfg(test)]
+mod ip_salt_tests {
+    use super::{hash_ip, ip_salt};
+    use crate::config::AppConfig;
+
+    #[test]
+    fn operator_override_wins() {
+        let mut cfg = AppConfig::test_fixture();
+        cfg.audit.ip_salt = Some("operator-salt".into());
+        assert_eq!(ip_salt(&cfg, b"cookie-secret"), "operator-salt");
+    }
+
+    #[test]
+    fn empty_override_falls_back_to_derivation() {
+        let mut cfg = AppConfig::test_fixture();
+        cfg.audit.ip_salt = Some(String::new());
+        assert_eq!(
+            ip_salt(&cfg, b"cookie-secret"),
+            ip_salt(&AppConfig::test_fixture(), b"cookie-secret")
+        );
+    }
+
+    #[test]
+    fn fallback_depends_on_cookie_secret_not_self_url() {
+        let mut a = AppConfig::test_fixture();
+        a.self_.url = "https://other.example".into();
+        let b = AppConfig::test_fixture();
+        assert_eq!(ip_salt(&a, b"cookie-secret"), ip_salt(&b, b"cookie-secret"));
+        assert_ne!(ip_salt(&b, b"secret-one"), ip_salt(&b, b"secret-two"));
+    }
+
+    #[test]
+    fn hash_ip_is_deterministic_and_salted() {
+        assert_eq!(
+            hash_ip("192.0.2.1", "salt-a"),
+            hash_ip("192.0.2.1", "salt-a")
+        );
+        assert_ne!(
+            hash_ip("192.0.2.1", "salt-a"),
+            hash_ip("192.0.2.1", "salt-b")
+        );
+        assert_ne!(
+            hash_ip("192.0.2.1", "salt-a"),
+            hash_ip("192.0.2.2", "salt-a")
+        );
     }
 }
 

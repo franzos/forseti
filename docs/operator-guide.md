@@ -144,6 +144,13 @@ Defaulting to sqlite-next-to-the-binary is deliberate: clone, run, get a working
 
 **Multi-instance sqlite footgun.** sqlite + multiple Forseti instances corrupts the database. Forseti can't see other instances, only deployment shape — so at boot it logs a `warn!` and surfaces a banner on `/admin/status` when the backend is sqlite *and* `self.url` is `https://` with a non-loopback / non-RFC1918 host. Switch to Postgres for any HA setup.
 
+**Per-process state in multi-instance deployments.** Postgres makes the database safe to share, but a few components are process-local, so running several instances changes their behavior:
+
+- Webhook delivery: every instance runs its own outbox worker. Rows are claimed with a short lease before sending, so each row is delivered by exactly one worker; extra instances add polling, not duplicate deliveries.
+- Rate limits: the per-IP and global buckets are in-memory, per instance. Behind a load balancer the effective limit is roughly the configured value times the instance count; size the configured limits with that in mind.
+- Logo cache: each instance caches served org logos independently. After a logo is replaced or removed, the instance that handled the change drops its cached copy immediately; other instances may serve the previous version until the entry is evicted under cache pressure or the process restarts.
+- Domain-challenge email cooldown: the one-hour cooldown between ownership-challenge emails to a domain is tracked per instance, so N instances can send up to N challenge emails per domain per hour.
+
 Migrations run on startup by default (`FORSETI_DATABASE__SKIP_MIGRATIONS=1` to opt out). The two backends carry parallel SQL files under `migrations/{sqlite,postgres}/`.
 
 The playground compose file ships a dedicated `forseti-postgres` sidecar on `127.0.0.1:5450` (separate from the Kratos/Hydra postgres, per the design's schema-isolation goal). Smoke-boot the Postgres path with:
@@ -229,6 +236,8 @@ Per-IP / per-IAT rate limiting on `POST /oauth2/register`, plus the reserved-nam
 |----------------------------|----------|------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `dcr_ip_rate_per_minute`   | u32      | `10`             | Per-IP rate limit on `POST /oauth2/register` — max requests per minute. In-memory, per-process. `0` disables this bucket.                                  |
 | `dcr_ip_rate_per_hour`     | u32      | `100`            | Per-IP rate limit — max requests per hour. Enforced in parallel with the per-minute bucket. `0` disables.                                                  |
+| `dcr_global_rate_per_minute` | u32    | `40`             | Global (all-callers-share-one-bucket) rate limit, requests per minute. Bounds total traffic even when a spoofed `X-Forwarded-For` defeats the per-IP bucket. `0` disables. |
+| `dcr_global_rate_per_hour` | u32      | `400`            | Global rate limit, requests per hour, in parallel with the per-minute global bucket. `0` disables.                                                        |
 | `dcr_iat_daily_limit`      | u32      | `50`             | Per-IAT cap on successful registrations over a rolling 24h window opened by first use. `0` disables.                                                       |
 | `dcr_reserved_names`       | string[] | (code-baked set) | DCR `client_name` denylist. Case-insensitive substring match. When the key is absent from `config.toml`, the defaults in `crate::oauth::register::RESERVED_NAMES_DEFAULT` are used; setting the key replaces the list entirely. |
 
@@ -415,7 +424,7 @@ The picker at `/admin/clients/new` is always the source of truth, but the bundle
 | Git, CI/CD & infrastructure | GitLab, Gitea, Forgejo, Jenkins, Argo CD, Harbor, Rancher, Portainer, Proxmox VE, NetBox |
 | Files, media & knowledge | Nextcloud, Seafile, Immich, Jellyfin, Audiobookshelf, Paperless-ngx, Outline, BookStack, HedgeDoc |
 | Collaboration & productivity | Matrix Synapse, Discourse, Rocket.Chat, Mattermost\*, OpenProject\*, Plane\*, Vikunja, Mealie, Penpot, WordPress |
-| Data, monitoring & feeds | Grafana, Apache Superset, Matomo, Miniflux, Open WebUI |
+| Data, monitoring & feeds | Grafana, Apache Superset, Matomo, Miniflux, Open WebUI, Parseable |
 | Other | Mastodon, Vaultwarden, Actual Budget, Atlassian Data Center\* |
 
 \* OIDC login requires that app's paid/enterprise tier — the template still works, but the form's guidance banner flags the licensing requirement.
@@ -440,6 +449,10 @@ Three sources feed the table:
 1. **Forseti-owned handlers — direct emit.** Logout, settings session revoke, OAuth consent (granted / denied), account self-deletion, every admin action (`/admin/clients/*`, `/admin/identities/*`, `/admin/sessions/*`, `/admin/webhooks/*`).
 2. **Kratos flow webhooks** delivered to `POST /internal/audit/kratos` on the **internal listener**. Flow-completion events only: `identity.created` (registration), `auth.login` (login.{password,passkey} — AAL2 step-up methods intentionally don't fire so a single sign-in produces one row, not two), `password.changed` (settings.password), `password.recovered` (recovery), `verification.completed` (verification), `mfa.*` (settings.{totp,webauthn,lookup}). Kratos's admin API does not fire flow hooks, so admin-driven identity writes go through path 1.
 3. **Hydra consent decisions** emitted from Forseti's own `src/oauth/consent.rs` (Hydra has thin hook surface; scraping logs is fragile).
+
+#### IP pseudonymization
+
+Audit rows store a salted hash of the client IP, not the address itself, so events from the same address correlate without retaining the address. The salt comes from `[audit].ip_salt` when set; when unset it is derived from `[security].cookie_secret`, and a boot warning reminds you of that. The derived default has one operational consequence: rotating the cookie secret also rotates every `ip_hash`, so rows from before the rotation no longer correlate with rows after it. Set a dedicated `ip_salt` (`openssl rand -hex 32`) to decouple audit correlation from cookie-secret rotation.
 
 #### Internal listener
 
@@ -1455,9 +1468,10 @@ curl -X POST https://accounts.example.com/oauth2/register \
 
 The audit row for the registration is then keyed on `dcr_iat:<id>` instead of `system`, so an operator triaging suspicious activity can find every event back to that one issued token. The client still lands `unverified` — IAT presentation is not (yet) an auto-promotion signal.
 
-**Rate limiting.** Two independent layers stack in front of `POST /oauth2/register`, both belt-and-suspenders to the IAT itself.
+**Rate limiting.** Three independent layers stack in front of `POST /oauth2/register`, all belt-and-suspenders to the IAT itself.
 
 - **Per-IP** (in-memory, per-process). Two buckets enforced in parallel: 10 requests/minute and 100 requests/hour. Limits are configurable via `oauth.dcr_ip_rate_per_minute` and `oauth.dcr_ip_rate_per_hour` in `config.toml`; set either to `0` to disable that bucket. By default the limiter keys on the **TCP peer IP** (`proxy.trust_forwarded_for = false`) — unforgeable, but behind a reverse proxy that means every caller shares a single bucket (key = proxy's IP), so size the limits accordingly. To get per-real-client buckets, set `proxy.trust_forwarded_for = true` — the limiter then reads `X-Forwarded-For` (first hop), falling back to `X-Real-IP`, `Forwarded`, and the socket peer. **Only flip this on when your reverse proxy strips client-sent forwarded-for headers before re-adding its own**; otherwise a direct caller forges `X-Forwarded-For` and bypasses the bucket. The haproxy sketches in [`operator-guide-proxy.md`](./operator-guide-proxy.md) show the correct `http-request del-header X-Forwarded-For` + `set-header X-Forwarded-For %[src]` pattern. A throttled request gets `429 Too Many Requests` with `Retry-After: <seconds>` and an RFC 7591-shaped body (`error: "temporarily_unavailable"`). Per-IP hits are **not** audited — too noisy; a `trace`-level log line is emitted instead. State is in-memory only and does **not** cross-replicate; multi-instance deployments still get useful per-process gating but a determined attacker spread across replicas can exceed the nominal rate by Nx.
+- **Global** (in-memory, per-process). Two buckets shared by **all** callers: 40 requests/minute and 400 requests/hour, configurable via `oauth.dcr_global_rate_per_minute` and `oauth.dcr_global_rate_per_hour` (`0` disables). This bounds total registration traffic even when distributed sources or a spoofed `X-Forwarded-For` defeat the per-IP buckets — the same pattern as `/registration`'s global limiter.
 - **Per-IAT** (DB-backed, persists across restarts). Cap on successful registrations per IAT over a rolling 24-hour window opened by the first successful use. Default 50, configurable via `oauth.dcr_iat_daily_limit` (set to `0` to disable). The window resets in-place when 24h have elapsed since `daily_window_started_at`. Only **successful** registrations count — failed lookups, reserved-name rejects, and Hydra rejections don't burn the counter. Both the `uses_remaining` decrement and the daily-counter increment are gated by the UPDATE's `WHERE` clause inside a single transaction (`uses_remaining > 0` AND, when the window is live and `daily_limit > 0`, `daily_use_count < daily_limit`), so two concurrent successes at either boundary can't both win — the second UPDATE matches zero rows and falls through to the rejection path. A per-IAT rejection emits an audit row at `WARNING` severity (`oauth.client.dcr_rate_limited`, target = the IAT id) and returns `429` with `error: "temporarily_unavailable", error_description: "iat daily limit exceeded"`.
 
 **Follow-ups tracked but not yet implemented:**
@@ -1732,6 +1746,8 @@ Generate fresh values with `openssl rand -base64 64` (cookie/session secrets) or
 
 - **Kratos's Postgres database** holds every identity, credential hash, and active session. Restoring it restores user accounts.
 - **Hydra's Postgres database** holds OAuth2 client registrations, consent grants, refresh tokens, and the JWKS used to sign id_tokens. Losing the JWKS invalidates every previously-issued id_token's signature.
+- **Forseti's own database** holds organizations, the audit log, the webhook outbox, DCR tokens, and POSIX accounts. On the default sqlite backend that's `forseti.db` next to the binary: copy it while Forseti is stopped, or use `sqlite3 forseti.db ".backup backup.db"` online (a plain file copy of a live WAL-mode database can be inconsistent). On Postgres, include it in the `pg_dump` routine.
+- **Forseti's webhook signing key** (`[webhook].signing_key_path`, default `data/webhook-signing-key.pem`, created `0600`) signs outbound Security Event Tokens. Without a backup, a rebuilt host mints a fresh key and `kid`, and receivers that pinned the old JWKS reject deliveries (see [Rotating the webhook signing key](#rotating-the-webhook-signing-key)).
 - Take daily logical backups (`pg_dump`) at minimum. Streaming replication or PITR is preferable for production.
 - Test restore quarterly. A backup you have never restored is not a backup.
 

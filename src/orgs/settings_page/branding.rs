@@ -502,6 +502,7 @@ pub(super) async fn logo_upload(
             tracing::error!(error = ?e, "logo_upload: delete failed");
             return (StatusCode::INTERNAL_SERVER_ERROR, "remove failed").into_response();
         }
+        state.logo_cache.lock().await.remove(&org_id);
         let _ = audit::log(
             &state.db,
             AuditEvent::new(action::ORG_LOGO_REMOVED)
@@ -527,6 +528,7 @@ pub(super) async fn logo_upload(
         tracing::error!(error = ?e, "logo_upload: upsert failed");
         return (StatusCode::INTERNAL_SERVER_ERROR, "save failed").into_response();
     }
+    state.logo_cache.lock().await.remove(&org_id);
 
     let _ = audit::log(
         &state.db,

@@ -53,6 +53,8 @@ impl DbPool {
         match cfg.backend() {
             DatabaseBackend::Sqlite => {
                 let path = sqlite_path(&cfg.url);
+                #[cfg(unix)]
+                restrict_sqlite_permissions(&path)?;
                 let manager = SqliteManager::new(path, SqliteRuntime::Tokio1);
                 let pool = SqlitePool::builder(manager)
                     .max_size(SQLITE_MAX_POOL)
@@ -197,6 +199,38 @@ macro_rules! db_interact {
             }
         }
     }};
+}
+
+/// The sqlite file holds secrets (transient secret_reveals payloads, invite
+/// tokens, audit log), so it must not be world-readable. Pre-create the db
+/// file `0600` when missing — sqlite gives `-wal`/`-shm` the same mode as the
+/// main file — and tighten the main file plus any existing siblings on
+/// pre-existing deployments. A zero-length file is a valid empty sqlite db.
+#[cfg(unix)]
+fn restrict_sqlite_permissions(path: &str) -> anyhow::Result<()> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    if path == ":memory:" {
+        return Ok(());
+    }
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(path)
+        .map_err(|e| anyhow::anyhow!("create sqlite db {path:?}: {e}"))?;
+    let perms = std::fs::Permissions::from_mode(0o600);
+    std::fs::set_permissions(path, perms.clone())
+        .map_err(|e| anyhow::anyhow!("chmod sqlite db {path:?}: {e}"))?;
+    for suffix in ["-wal", "-shm"] {
+        let sibling = format!("{path}{suffix}");
+        match std::fs::set_permissions(&sibling, perms.clone()) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(anyhow::anyhow!("chmod {sibling:?}: {e}")),
+        }
+    }
+    Ok(())
 }
 
 /// Diesel's sqlite manager wants a filesystem path, not a URL. Accept both

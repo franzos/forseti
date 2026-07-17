@@ -9,7 +9,7 @@ use axum::response::Response;
 use tokio::sync::Mutex;
 
 use crate::commercial::LicenseHandle;
-use crate::config::AppConfig;
+use crate::config::{AppConfig, Redacted};
 use crate::db::DbPool;
 use crate::logo_cache::LogoCache;
 use crate::ory::discovery::OidcDiscovery;
@@ -40,7 +40,7 @@ pub struct AppState {
     pub db: DbPool,
     /// Heartbeat for the background webhook worker; `/readyz` reports degraded (still 200) when it hasn't ticked recently.
     pub webhook_worker: WorkerHandle,
-    /// RSA signing key for outbound Security Event Tokens; public half served at `/.well-known/webhook-jwks.json`.
+    /// Ed25519 signing key for outbound Security Event Tokens; public half served at `/.well-known/webhook-jwks.json`.
     pub signing_key: SigningKey,
     /// Commercial-tier license state. Lock-free; swapped on activation at `/admin/license`.
     pub license: LicenseHandle,
@@ -53,7 +53,7 @@ pub struct AppState {
     /// Prometheus render handle backing `/metrics`; see [`crate::metrics`].
     pub metrics_handle: metrics_exporter_prometheus::PrometheusHandle,
     /// Bearer token a scraper must present at `/metrics`. `None` = endpoint disabled (404).
-    pub metrics_scrape_token: Option<String>,
+    pub metrics_scrape_token: Option<Redacted>,
 }
 
 impl AppState {

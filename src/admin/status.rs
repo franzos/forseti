@@ -78,50 +78,53 @@ pub(crate) struct ServiceStatus {
 pub async fn show(State(state): State<AppState>, admin: RequireAdmin) -> Response {
     let ctx = admin.ctx;
 
-    let mut services = Vec::with_capacity(4);
-    services.push(probe(
-        "Kratos (alive)",
-        &state.cfg.kratos.admin_url,
-        ory::kratos::health_alive(&state.ory).await,
-    ));
-    services.push(probe(
-        "Kratos (ready)",
-        &state.cfg.kratos.admin_url,
-        ory::kratos::health_ready(&state.ory).await,
-    ));
-    services.push(probe(
-        "Hydra (alive)",
-        &state.cfg.hydra.admin_url,
-        ory::hydra::health_alive(&state.ory).await,
-    ));
-    services.push(probe(
-        "Hydra (ready)",
-        &state.cfg.hydra.admin_url,
-        ory::hydra::health_ready(&state.ory).await,
-    ));
-
-    let courier_pending = count_courier(
+    // Independent upstream probes run concurrently; sequentially each carries
+    // its own 10s timeout, so a down Kratos/Hydra would stall the page.
+    let (
+        kratos_alive,
+        kratos_ready,
+        hydra_alive,
+        hydra_ready,
+        courier_queued,
+        courier_abandoned,
+        kratos_version_res,
+        hydra_version_res,
+        (disc, discovery_ok),
+    ) = tokio::join!(
+        ory::kratos::health_alive(&state.ory),
+        ory::kratos::health_ready(&state.ory),
+        ory::hydra::health_alive(&state.ory),
+        ory::hydra::health_ready(&state.ory),
         ory::kratos::list_courier_messages(
             &state.ory,
             100,
-            Some(ory::CourierMessageStatus::Queued),
-        )
-        .await,
-    );
-    let courier_failed = count_courier(
+            Some(ory::CourierMessageStatus::Queued)
+        ),
         ory::kratos::list_courier_messages(
             &state.ory,
             100,
-            Some(ory::CourierMessageStatus::Abandoned),
-        )
-        .await,
+            Some(ory::CourierMessageStatus::Abandoned)
+        ),
+        ory::kratos::version(&state.ory),
+        ory::hydra::version(&state.ory),
+        state.openid_configuration(),
     );
 
-    let kratos_version = ory::kratos::version(&state.ory).await.unwrap_or_else(|e| {
+    let services = vec![
+        probe("Kratos (alive)", &state.cfg.kratos.admin_url, kratos_alive),
+        probe("Kratos (ready)", &state.cfg.kratos.admin_url, kratos_ready),
+        probe("Hydra (alive)", &state.cfg.hydra.admin_url, hydra_alive),
+        probe("Hydra (ready)", &state.cfg.hydra.admin_url, hydra_ready),
+    ];
+
+    let courier_pending = count_courier(courier_queued);
+    let courier_failed = count_courier(courier_abandoned);
+
+    let kratos_version = kratos_version_res.unwrap_or_else(|e| {
         tracing::warn!(error = ?e, "kratos version probe failed");
         "—".to_string()
     });
-    let hydra_version = ory::hydra::version(&state.ory).await.unwrap_or_else(|e| {
+    let hydra_version = hydra_version_res.unwrap_or_else(|e| {
         tracing::warn!(error = ?e, "hydra version probe failed");
         "—".to_string()
     });
@@ -131,8 +134,6 @@ pub async fn show(State(state): State<AppState>, admin: RequireAdmin) -> Respons
         actor = %ctx.email,
         "admin action"
     );
-
-    let (disc, discovery_ok) = state.openid_configuration().await;
 
     let db_backend = state.db.backend();
     let database_backend = match db_backend {

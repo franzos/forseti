@@ -653,7 +653,10 @@ fn next_link(headers: &reqwest::header::HeaderMap) -> Option<String> {
     let raw = headers.get("link").and_then(|v| v.to_str().ok())?;
     for part in raw.split(',') {
         let part = part.trim();
-        let (url_part, params) = part.split_once(';')?;
+        // Skip malformed parts; aborting with None would read as end-of-pagination.
+        let Some((url_part, params)) = part.split_once(';') else {
+            continue;
+        };
         if !params.contains("rel=\"next\"") && !params.contains("rel=next") {
             continue;
         }
@@ -1040,6 +1043,18 @@ SRZ/w8gQ2ALLGaApskC1zn5ojdqqjTvXWmW9bccCeGYJ8yOu4oWP/QLkNzM4WVKA\n\
             "link",
             HeaderValue::from_static(
                 "<https://hydra/prev?page_token=xyz>; rel=\"prev\", <https://hydra/next?page_token=def>; rel=\"next\"",
+            ),
+        );
+        assert_eq!(next_link(&h).as_deref(), Some("def"));
+    }
+
+    #[test]
+    fn next_link_skips_bare_part_before_next() {
+        let mut h = HeaderMap::new();
+        h.insert(
+            "link",
+            HeaderValue::from_static(
+                "<https://hydra/first?page_token=xyz>, <https://hydra/next?page_token=def>; rel=\"next\"",
             ),
         );
         assert_eq!(next_link(&h).as_deref(), Some("def"));

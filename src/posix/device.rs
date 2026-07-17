@@ -646,7 +646,7 @@ mod tests {
     fn require_client_secret_rejects_unset_and_empty() {
         let mut cfg = crate::config::PosixConfig::default();
         assert_eq!(require_client_secret(&cfg), None);
-        cfg.pam_client_secret = Some(String::new());
+        cfg.pam_client_secret = Some(String::new().into());
         assert_eq!(require_client_secret(&cfg), None);
         cfg.pam_client_secret = Some("s3cret".into());
         assert_eq!(require_client_secret(&cfg).as_deref(), Some("s3cret"));

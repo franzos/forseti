@@ -205,6 +205,10 @@ pub(crate) async fn optional_session(
     if let Some(outcome) = cached_whoami(extensions) {
         return optional_session_from_outcome(outcome);
     }
+    // No Kratos session cookie means whoami is a guaranteed 401; skip the round-trip.
+    if cookies::read_cookie(headers, crate::orgs::middleware::KRATOS_SESSION_COOKIE).is_none() {
+        return OptionalSession::None;
+    }
     let cookie = cookies::cookie_header(headers);
     match ory::kratos::whoami(&state.ory, (!cookie.is_empty()).then_some(cookie.as_str())).await {
         Ok(outcome) => optional_session_from_outcome(outcome),

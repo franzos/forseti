@@ -4,11 +4,15 @@
 FROM debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2 AS css
 WORKDIR /src
 ARG TAILWIND_VERSION=v4.1.16
+# Release assets are mutable; pin the binary by digest (bump together with the
+# version, from the release's sha256sums.txt).
+ARG TAILWIND_SHA256=09e6876a63ceb09ccd7e5867e3dbb2b2dc65c3a2f2e2fe210d68ea3bc0432050
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && curl -fsSL -o /usr/local/bin/tailwindcss \
         "https://github.com/tailwindlabs/tailwindcss/releases/download/${TAILWIND_VERSION}/tailwindcss-linux-x64" \
+    && echo "${TAILWIND_SHA256}  /usr/local/bin/tailwindcss" | sha256sum -c - \
     && chmod +x /usr/local/bin/tailwindcss
 COPY assets ./assets
 COPY templates ./templates

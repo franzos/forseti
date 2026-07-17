@@ -88,6 +88,12 @@ support_email = "support@example.com"
 # 100/hour. Set to 0 to disable that bucket entirely. Both run in
 # parallel — a request must satisfy both.
 #
+# `dcr_global_rate_per_minute` / `dcr_global_rate_per_hour` cap requests
+# to `POST /oauth2/register` across ALL callers in one shared bucket, so
+# total registration traffic stays bounded even when distributed sources
+# or a spoofed forwarded-for header defeat the per-IP buckets. Defaults
+# are 40/min and 400/hour. Set to 0 to disable that bucket.
+#
 # `dcr_iat_daily_limit` caps successful registrations per IAT over a
 # rolling 24h window opened on the first successful use. Belt-and-
 # suspenders to `uses_remaining`: even an "unlimited" token (`uses=NULL`)
@@ -116,6 +122,8 @@ support_email = "support@example.com"
 # [oauth]
 # dcr_ip_rate_per_minute = 10
 # dcr_ip_rate_per_hour   = 100
+# dcr_global_rate_per_minute = 40
+# dcr_global_rate_per_hour   = 400
 # dcr_iat_daily_limit    = 50
 # device_verify_ip_rate_per_minute = 20
 # device_verify_ip_rate_per_hour   = 120
@@ -257,7 +265,10 @@ support_email = "support@example.com"
 # then starting both back up.
 # [audit]
 # webhook_token = "change-me-32-bytes-of-secret-entropy"
-# ip_salt = ""                 # optional override; derived from [self].url when unset
+# ip_salt = ""                 # optional; derived from [security].cookie_secret when
+#                              # unset (rotating that secret then rotates audit ip_hash
+#                              # values too). Set a dedicated value (`openssl rand -hex 32`)
+#                              # to decouple them.
 # audit_retention_days = 90    # default for the `forseti audit-prune` CLI
 
 # Deployment-shape: is Forseti behind a trusted reverse proxy that

@@ -54,7 +54,7 @@ impl LogoCache {
         }
     }
 
-    fn remove(&mut self, org_id: &str) {
+    pub(crate) fn remove(&mut self, org_id: &str) {
         if let Some(evicted) = self.entries.remove(org_id) {
             self.total_bytes -= evicted.bytes.len();
             self.order.retain(|k| k != org_id);

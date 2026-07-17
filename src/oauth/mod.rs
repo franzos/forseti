@@ -39,6 +39,11 @@ pub(crate) fn default_scope_description(scope: &str) -> Option<&'static str> {
 /// bursts, 100/hour slow-drip abuse; a request must satisfy both buckets.
 const DEFAULT_DCR_IP_RATE_PER_MINUTE: u32 = 10;
 const DEFAULT_DCR_IP_RATE_PER_HOUR: u32 = 100;
+/// Global (all-callers-share-one-bucket) defaults, bounding total DCR traffic
+/// regardless of claimed source IP. 4x the per-IP caps, mirroring the
+/// `/registration` ratio.
+const DEFAULT_DCR_GLOBAL_RATE_PER_MINUTE: u32 = 40;
+const DEFAULT_DCR_GLOBAL_RATE_PER_HOUR: u32 = 400;
 
 pub(crate) fn router(oauth_cfg: &OAuthConfig, proxy_cfg: &ProxyConfig) -> Router<AppState> {
     Router::new()
@@ -111,15 +116,23 @@ fn register_router(oauth_cfg: &OAuthConfig, proxy_cfg: &ProxyConfig) -> Router<A
     let per_hour = oauth_cfg
         .dcr_ip_rate_per_hour
         .unwrap_or(DEFAULT_DCR_IP_RATE_PER_HOUR);
+    let global_per_minute = oauth_cfg
+        .dcr_global_rate_per_minute
+        .unwrap_or(DEFAULT_DCR_GLOBAL_RATE_PER_MINUTE);
+    let global_per_hour = oauth_cfg
+        .dcr_global_rate_per_hour
+        .unwrap_or(DEFAULT_DCR_GLOBAL_RATE_PER_HOUR);
 
     // Strict (peer-IP) mode requires
     // `into_make_service_with_connect_info::<SocketAddr>()` at the serve site
     // so `ConnectInfo` is in extensions; see `app::run`.
-    rate_limit::dual_window(
+    rate_limit::dual_window_with_global(
         r,
         proxy_cfg.trust_forwarded_for,
         per_minute,
         per_hour,
+        global_per_minute,
+        global_per_hour,
         register::rate_limit_error_response,
     )
 }

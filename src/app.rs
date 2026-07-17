@@ -96,6 +96,15 @@ pub(crate) async fn run() -> anyhow::Result<()> {
     let cookie_secret =
         resolve_cookie_secret(cfg.security.cookie_secret.as_deref(), &cfg.self_.url);
 
+    if cfg.audit.ip_salt.as_deref().is_none_or(str::is_empty) {
+        tracing::warn!(
+            "[audit].ip_salt not configured; the audit IP-pseudonymization salt is derived \
+             from [security].cookie_secret. Setting a dedicated [audit].ip_salt is recommended \
+             (e.g. `openssl rand -hex 32`); note rotating the cookie secret rotates audit \
+             ip_hash values as a side-effect."
+        );
+    }
+
     // Reconcile PENDING rows stranded by a crash between writing the rows and the Kratos delete, then drain CONFIRMED rows.
     if let Err(e) = webhook::reconcile_pending(&db, &ory).await {
         tracing::warn!(error = %e, "webhook reconcile_pending failed at startup");

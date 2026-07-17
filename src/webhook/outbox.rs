@@ -185,12 +185,17 @@ pub async fn find_by_id(db: &DbPool, row_id: &str) -> anyhow::Result<Option<Outb
     Ok(row)
 }
 
-/// Full list of DEAD rows for the `/admin/webhooks` page. Newest first.
+/// Hard cap on the dead-letter list (see `orgs::db::MAX_ROWS_PER_LIST`).
+const MAX_ROWS_PER_LIST: i64 = 500;
+
+/// DEAD rows for the `/admin/webhooks` page. Newest first, capped at
+/// [`MAX_ROWS_PER_LIST`].
 pub async fn list_dead(db: &DbPool) -> anyhow::Result<Vec<OutboxRow>> {
     let rows = db_interact!(db, |conn| {
         webhook_outbox::table
             .filter(webhook_outbox::state.eq(state::DEAD))
             .order(webhook_outbox::created_at.desc())
+            .limit(MAX_ROWS_PER_LIST)
             .select(OutboxRow::as_select())
             .load(conn)
     })?;

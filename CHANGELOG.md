@@ -1,5 +1,24 @@
 # Changelog
 
+## [Unreleased]
+
+### Security
+- Secret-holding config values (cookie secret, PAM client secret, metrics scrape token, audit webhook tokens) are redacted in debug output
+- Webhook signing key and the SQLite database (plus `-wal`/`-shm`) are created with owner-only (0600) permissions; previously both were briefly or permanently world-readable under the default umask
+- Anonymous client registration (`POST /oauth2/register`) now also has a global rate limit, configurable via `[oauth].dcr_global_rate_per_minute` / `dcr_global_rate_per_hour` (defaults 40/400)
+- The default audit IP-pseudonymization salt is now derived from the cookie secret instead of the public instance URL, which made de-pseudonymization feasible from a log dump alone. Pseudonymized IPs in existing audit rows won't correlate with new ones, and rotating the cookie secret rotates them again; set `[audit].ip_salt` to opt out (a boot warning reminds you)
+- Tailwind CLI downloads in the container build and the release workflow are now pinned by checksum
+
+### Changed
+- `/admin/status` probes Kratos and Hydra concurrently, so the page loads quickly even when an upstream is down
+- The dead-letter list on `/admin/webhooks` is capped at 500 rows
+
+### Fixed
+- A replaced or removed org logo could keep being served from the in-process cache indefinitely
+- Anonymous requests (e.g. to a public org logo) no longer trigger a needless Kratos session lookup
+- Consent-session pagination no longer stops early on an unexpected Hydra `Link` header part, which could have left some sessions out of the account-deletion webhook fan-out
+- PAM module: opaque FFI handle types switched from empty enums to the sound `repr(C)` pattern
+
 ## [0.1.11] - 2026-07-13
 
 ### Added

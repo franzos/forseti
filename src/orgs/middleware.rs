@@ -14,7 +14,7 @@ use crate::cookies;
 use crate::ory;
 use crate::state::AppState;
 
-const KRATOS_SESSION_COOKIE: &str = "ory_kratos_session";
+pub(crate) const KRATOS_SESSION_COOKIE: &str = "ory_kratos_session";
 
 /// A request to this exact path is mid external-self-serve join; force-
 /// joining Default here first would strand the user in the wrong org.

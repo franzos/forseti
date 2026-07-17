@@ -11,8 +11,12 @@ use libc::{c_char, c_int};
 use crate::pam::constants::{AlwaysZero, PamMessageStyle, PamResultCode};
 use crate::pam::module::{PamItem, PamItemType, PamResult, PAM_CONV};
 
-#[allow(missing_copy_implementations)]
-pub enum AppDataPtr {}
+// Opaque FFI type (see `PamHandle` in module.rs), only ever handled by pointer.
+#[repr(C)]
+pub struct AppDataPtr {
+    _data: [u8; 0],
+    _marker: core::marker::PhantomData<(*mut u8, core::marker::PhantomPinned)>,
+}
 
 #[repr(C)]
 struct PamMessage {

@@ -140,7 +140,7 @@ make run
 
 Open <http://localhost:3000>. Register at `/registration`, grab the verification email from Mailcrab at <http://127.0.0.1:4436>, and you're in.
 
-For the full OAuth2 dance — register a Hydra client, run an auth-code flow, exchange a token — see [`.claude/skills/ory-up/SKILL.md`](.claude/skills/ory-up/SKILL.md) or the [integration guide](docs/integration-guide.md).
+For the full OAuth2 dance — register a Hydra client, run an auth-code flow, exchange a token — see the [integration guide](docs/integration-guide.md).
 
 ## How it fits together
 

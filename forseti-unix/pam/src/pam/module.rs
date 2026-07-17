@@ -13,12 +13,19 @@ use crate::pam::conv::PamConv;
 pub use crate::pam::constants::{PamItemType, PAM_CONV};
 
 /// Opaque PAM handle. Passed to every `pam_sm_*` entrypoint and threaded back
-/// into the PAM API calls.
-#[allow(missing_copy_implementations)]
-pub enum PamHandle {}
+/// into the PAM API calls. Nomicon-style opaque FFI type: an empty enum is
+/// uninhabited, so `&PamHandle` would be instant UB.
+#[repr(C)]
+pub struct PamHandle {
+    _data: [u8; 0],
+    _marker: core::marker::PhantomData<(*mut u8, core::marker::PhantomPinned)>,
+}
 
-#[allow(missing_copy_implementations)]
-enum PamItemT {}
+#[repr(C)]
+struct PamItemT {
+    _data: [u8; 0],
+    _marker: core::marker::PhantomData<(*mut u8, core::marker::PhantomPinned)>,
+}
 
 // No `#[link(name = "pam")]`: a PAM module must NOT link libpam at build time.
 // PAM dlopens this .so into a process that already has libpam mapped, so these

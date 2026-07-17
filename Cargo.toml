@@ -187,7 +187,7 @@ uuid = { version = "1", features = ["v4"] }
 rand = "0.9"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 # JWS verification on the receiver side of the account-deletion webhook
-# fan-out test. Forseti signs the SET with RS256; the test fetches
+# fan-out test. Forseti signs the SET with EdDSA (Ed25519); the test fetches
 # the JWKS from `/.well-known/webhook-jwks.json` and verifies via the
 # same `jsonwebtoken` crate.
 jsonwebtoken = { version = "10", default-features = false, features = ["use_pem", "aws_lc_rs"] }

@@ -122,7 +122,7 @@ impl LegalConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct SecurityConfig {
-    pub cookie_secret: Option<String>,
+    pub cookie_secret: Option<Redacted>,
     /// CSP `frame-ancestors` value. `'self'` blocks third-party framing while
     /// leaving same-origin iframes (e.g. embedded widgets) working.
     #[serde(default = "default_frame_ancestors")]
@@ -191,7 +191,7 @@ pub struct PosixConfig {
     /// as for Linux PAM auth. Created (if absent) by `posix-init-client`.
     pub pam_client_id: String,
     /// Client secret for `pam_client_id`. `None` = let `posix-init-client` mint one (revealed once).
-    pub pam_client_secret: Option<String>,
+    pub pam_client_secret: Option<Redacted>,
     /// Wall-clock cap (seconds) on a device-auth poll loop. Kept below sshd's `LoginGraceTime` (120s) so an abandoned flow can't pin the login.
     pub device_poll_cap_secs: u64,
     /// `iat` freshness window (seconds) for the device id_token; a replay guard layered on top of `exp`.
@@ -391,6 +391,16 @@ pub struct OAuthConfig {
     /// `None` falls back to 100. Set to `0` to disable the per-hour bucket.
     #[serde(default)]
     pub dcr_ip_rate_per_hour: Option<u32>,
+    /// Global (all-callers-share-one-bucket) rate limit on `POST /oauth2/register`,
+    /// max requests per minute. Bounds total traffic even when `trust_xff` trusts
+    /// a spoofable header. `None` falls back to the code-side default (40).
+    #[serde(default)]
+    pub dcr_global_rate_per_minute: Option<u32>,
+    /// Global rate limit on `POST /oauth2/register`, max requests per hour, in
+    /// parallel with the per-minute global bucket. `None` falls back to 400.
+    /// Set to `0` to disable the bucket.
+    #[serde(default)]
+    pub dcr_global_rate_per_hour: Option<u32>,
     /// Per-IAT registration cap over a rolling 24-hour window opened by
     /// the first successful use. Counts successful registrations only
     /// (failed lookups, reserved-name rejects, Hydra failures don't
@@ -523,11 +533,19 @@ impl DatabaseConfig {
 /// receiver in `audit::kratos_webhook` accepts a request when the presented
 /// bearer matches any entry, so an operator can add a new token, roll it
 /// out, then drop the old one with no window where valid tokens 401.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(untagged)]
 pub enum WebhookTokens {
     One(String),
     Many(Vec<String>),
+}
+
+/// Manual `Debug` (instead of wrapping the entries in [`Redacted`]) so the
+/// constant-time matcher and boot validation keep working on plain `&[String]`.
+impl std::fmt::Debug for WebhookTokens {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[redacted; {} entries]", self.entries().len())
+    }
 }
 
 impl WebhookTokens {
@@ -574,8 +592,9 @@ impl Default for WebhookTokens {
 ///
 /// `webhook_token` gates the `/internal/audit/kratos` receiver and must match the Kratos config;
 /// a single string or an array of strings (accept-list, for zero-loss rotation) — see
-/// [`WebhookTokens`]. Forseti refuses to boot when unset. `ip_salt` is optional (derived from
-/// `self.url` via `audit::ip_salt()` when unset). `audit_retention_days` is the `audit-prune` default.
+/// [`WebhookTokens`]. Forseti refuses to boot when unset. `ip_salt` is optional (derived from the
+/// operator cookie secret via `audit::ip_salt()` when unset). `audit_retention_days` is the
+/// `audit-prune` default.
 #[derive(Debug, Clone, Deserialize)]
 pub struct AuditConfig {
     #[serde(default)]
@@ -687,6 +706,12 @@ impl From<String> for Redacted {
     }
 }
 
+impl From<&str> for Redacted {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct ProfilesConfig {
     /// Gates the extended-profile form, the public `/users/{id}` view, the roster link, and the `extended_profile` scope.
@@ -713,7 +738,7 @@ pub struct LicenseConfig {
 #[serde(default)]
 pub struct MetricsConfig {
     /// Bearer token a Prometheus scraper must present. When unset, /metrics is disabled (404).
-    pub scrape_token: Option<String>,
+    pub scrape_token: Option<Redacted>,
 }
 
 /// SAML SSO bridge (commercial, opt-in). Absent = `/sso/*` unmounted, zero SAML footprint. The bridge
@@ -1176,6 +1201,20 @@ impl AppConfig {
                 RATE_LIMIT_PER_HOUR_CEILING,
             ));
         }
+        if let Some(v) = self.oauth.dcr_global_rate_per_minute {
+            self.oauth.dcr_global_rate_per_minute = Some(clamp_rate(
+                "oauth.dcr_global_rate_per_minute",
+                v,
+                RATE_LIMIT_PER_MINUTE_CEILING,
+            ));
+        }
+        if let Some(v) = self.oauth.dcr_global_rate_per_hour {
+            self.oauth.dcr_global_rate_per_hour = Some(clamp_rate(
+                "oauth.dcr_global_rate_per_hour",
+                v,
+                RATE_LIMIT_PER_HOUR_CEILING,
+            ));
+        }
         if let Some(v) = self.oauth.dcr_iat_daily_limit {
             self.oauth.dcr_iat_daily_limit = Some(clamp_rate(
                 "oauth.dcr_iat_daily_limit",
@@ -1609,6 +1648,25 @@ mod tests {
         let cfg = email_cfg(r#"{"provider":"lettermint","token":"lm_supersecret"}"#);
         let dump = format!("{cfg:?}");
         assert!(!dump.contains("lm_supersecret"), "token leaked: {dump}");
+        assert!(dump.contains("[redacted]"));
+    }
+
+    #[test]
+    fn secret_config_fields_debug_print_redacted() {
+        let mut cfg = AppConfig::test_fixture();
+        cfg.security.cookie_secret = Some("cookie_s3cret".into());
+        cfg.posix.pam_client_secret = Some("pam_s3cret".into());
+        cfg.metrics.scrape_token = Some("scrape_s3cret".into());
+        cfg.audit.webhook_token = WebhookTokens::Many(vec!["hook_s3cret".into()]);
+        let dump = format!("{cfg:?}");
+        for secret in [
+            "cookie_s3cret",
+            "pam_s3cret",
+            "scrape_s3cret",
+            "hook_s3cret",
+        ] {
+            assert!(!dump.contains(secret), "secret leaked: {dump}");
+        }
         assert!(dump.contains("[redacted]"));
     }
 
