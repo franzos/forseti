@@ -291,6 +291,9 @@ pub(crate) async fn oauth_consent(
 #[derive(Debug, Deserialize)]
 pub(crate) struct OAuthConsentForm {
     consent_challenge: String,
+    // Defaulted so a body without a submitter (e.g. the switch-account form
+    // posted with no button) yields a friendly error, not a raw 422.
+    #[serde(default)]
     decision: String,
     /// `Vec` because the field repeats once per granted scope.
     #[serde(default, rename = "grant_scope")]
@@ -375,6 +378,14 @@ pub(crate) async fn oauth_consent_submit(
                 return Redirect::to("/error").into_response();
             }
         }
+    }
+
+    // Only "accept" reaches the grant path; "deny" and "switch_account" are
+    // handled above. Anything else (empty from a submitterless POST, or a
+    // tampered value) is a friendly error, never an implicit grant.
+    if form.decision != "accept" {
+        tracing::warn!(decision = %form.decision, "consent: unrecognized decision; redirecting to error");
+        return Redirect::to("/error").into_response();
     }
 
     let req = match ory::hydra::get_consent_request(&state.ory, &form.consent_challenge).await {
