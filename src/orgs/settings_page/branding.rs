@@ -372,6 +372,8 @@ pub(super) async fn branding_save(
     } else {
         Some(support_email)
     };
+    let logo_set = logo_opt.is_some();
+    let support_email_set = email_opt.is_some();
     if let Err(e) = orgs::update_branding(
         &state.db,
         org_id,
@@ -399,6 +401,19 @@ pub(super) async fn branding_save(
         tracing::error!(error = ?e, "branding_save: update_theme failed");
         return (StatusCode::INTERNAL_SERVER_ERROR, "save failed").into_response();
     }
+    let _ = audit::log(
+        &state.db,
+        AuditEvent::new(action::ORG_BRANDING_UPDATED)
+            .actor_user(sess.identity_id.as_str(), sess.email.as_str())
+            .target(target_kind::ORG, org_id.clone())
+            .with_ctx(&actx)
+            .metadata(audit_metadata!(
+                "theme_preset" => theme.preset.as_deref().unwrap_or("none"),
+                "logo_set" => logo_set,
+                "support_email_set" => support_email_set,
+            )),
+    )
+    .await;
     if let Some(toggle_action) =
         public_login_toggle_action(existing.public_login_enabled, theme.public_login_enabled)
     {

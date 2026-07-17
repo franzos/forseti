@@ -171,6 +171,7 @@ pub mod action {
     pub const ORG_ACCESS_MODE_CHANGED: &str = "org.access_mode.changed";
     pub const ORG_MEMBER_DIRECTORY_HIDDEN: &str = "org.member.directory_hidden";
     pub const ORG_MEMBER_DIRECTORY_UNHIDDEN: &str = "org.member.directory_unhidden";
+    pub const ORG_BRANDING_UPDATED: &str = "org.branding.updated";
     pub const ORG_LOGO_UPLOADED: &str = "org.logo.uploaded";
     pub const ORG_LOGO_REMOVED: &str = "org.logo.removed";
     pub const ORG_PUBLIC_LOGIN_ENABLED: &str = "org.public_login.enabled";
