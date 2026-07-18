@@ -16,18 +16,20 @@ pub async fn get_login_request(
 }
 
 /// Accept a Hydra login challenge for a Kratos subject. `amr`/`acr` mirror the OIDC claims RPs see;
-/// `remember` extends Hydra's login session so subsequent SSO hits skip re-prompting Kratos.
+/// `remember` extends Hydra's login session so subsequent SSO hits skip re-prompting Kratos, for
+/// `remember_for` seconds (`0` = Hydra's maximum duration).
 pub async fn accept_login_request(
     clients: &OryClients,
     challenge: &str,
     subject: &str,
     remember: bool,
+    remember_for: i64,
     amr: Vec<String>,
     acr: Option<String>,
 ) -> Result<OAuth2RedirectTo> {
     let mut body = AcceptOAuth2LoginRequest::new(subject.to_string());
     body.remember = Some(remember);
-    body.remember_for = Some(3600);
+    body.remember_for = Some(remember_for);
     if !amr.is_empty() {
         body.amr = Some(amr);
     }
@@ -47,6 +49,7 @@ pub async fn get_consent_request(
 }
 
 /// Accept a Hydra consent challenge with the granted scopes and id_token claim payload (folded into Hydra's `session.id_token`).
+/// A remembered consent (`remember == true`) persists indefinitely, until the user revokes it from Authorized apps.
 pub async fn accept_consent_request(
     clients: &OryClients,
     challenge: &str,
@@ -65,7 +68,7 @@ pub async fn accept_consent_request(
     body.grant_scope = Some(grant_scope);
     body.grant_access_token_audience = Some(grant_audience);
     body.remember = Some(remember);
-    body.remember_for = Some(3600);
+    body.remember_for = Some(0);
     body.session = Some(Box::new(session));
 
     o_auth2_api::accept_o_auth2_consent_request(&clients.hydra_admin, challenge, Some(body))

@@ -145,6 +145,7 @@ pub(crate) async fn oauth_login(
         &challenge,
         &subject,
         true,
+        state.cfg.oauth.login_session_remember_for.unwrap_or(86400),
         amr,
         Some(session_aal),
     )

@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.13] - 2026-07-18
+
+### Added
+- `[oauth].login_session_remember_for` to configure Hydra's login SSO session lifetime (defaults to 24h)
+
+### Fixed
+- Authorized apps no longer disappear after an hour; a remembered consent grant now persists until revoked
+
 ## [0.1.12] - 2026-07-17
 
 ### Security

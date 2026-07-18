@@ -418,6 +418,15 @@ pub struct OAuthConfig {
     /// disable the per-hour bucket.
     #[serde(default)]
     pub device_verify_ip_rate_per_hour: Option<u32>,
+    /// How long Hydra remembers the login SSO session, in seconds. Mainly
+    /// governs `prompt=none` silent renewals, since Forseti re-validates the
+    /// live Kratos session on every login regardless; it should track the
+    /// Kratos `session.lifespan` so Hydra isn't the limiting factor. `None`
+    /// falls back to 86400 (24h, matching Kratos's default). `0` remembers for
+    /// the maximum duration Hydra allows. Separate from consent grants, which
+    /// persist indefinitely once the user opts to be remembered.
+    #[serde(default)]
+    pub login_session_remember_for: Option<i64>,
 }
 
 /// Admin-surface gating: emails allowed through `/admin/*`; everyone else gets 403 even with a valid session.
