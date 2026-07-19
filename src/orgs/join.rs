@@ -22,20 +22,39 @@ use crate::render::render;
 use crate::state::AppState;
 use crate::theming;
 
-/// Resolve `landing_slug` to an org eligible for external self-serve signup:
-/// exists, is `external`, and `public_login_enabled=1`. Re-read at call time.
+/// Eligibility for external self-serve signup: `external` access_mode AND
+/// `public_login_enabled=1`. Single source of truth for `/join/confirm` and
+/// the OAuth pin.
+pub(crate) fn is_signup_eligible(org: &Org) -> bool {
+    parse_access_mode(&org.access_mode).is_external() && org.public_login_enabled == 1
+}
+
+/// Resolve `landing_slug` to an org eligible for external self-serve signup.
 pub(crate) async fn resolve_signup_org(db: &DbPool, landing_slug: &str) -> Option<Org> {
     let org = crate::orgs::db::org_by_slug(db, landing_slug)
         .await
         .ok()
         .flatten()?;
-    if !parse_access_mode(&org.access_mode).is_external() {
+    is_signup_eligible(&org).then_some(org)
+}
+
+/// Post-action redirect target: the sanitized `return_to`, else `/`.
+fn redirect_target(cfg: &crate::config::AppConfig, return_to: Option<&str>) -> String {
+    match return_to.filter(|s| !s.is_empty()) {
+        Some(rt) => crate::web::safe_return_to(cfg, rt).to_string(),
+        None => "/".to_string(),
+    }
+}
+
+/// "Continue without joining" target: sanitized `return_to` with `skip_org_join` marker; None when there's nothing to decline to.
+fn decline_target(cfg: &crate::config::AppConfig, return_to: Option<&str>) -> Option<String> {
+    let rt = return_to.filter(|s| !s.is_empty())?;
+    let safe = crate::web::safe_return_to(cfg, rt);
+    if safe == "/" {
         return None;
     }
-    if org.public_login_enabled != 1 {
-        return None;
-    }
-    Some(org)
+    let sep = if safe.contains('?') { '&' } else { '?' };
+    Some(format!("{safe}{sep}skip_org_join=1"))
 }
 
 pub(crate) fn router() -> Router<AppState> {
@@ -48,6 +67,9 @@ pub(crate) fn router() -> Router<AppState> {
 #[derive(Debug, Deserialize)]
 struct JoinConfirmQuery {
     org: Option<String>,
+    return_to: Option<String>,
+    /// Advisory OAuth client ID (front-channel); marks interstitial joins for audit.
+    client_id: Option<String>,
 }
 
 #[derive(Template)]
@@ -60,6 +82,12 @@ struct JoinConfirmTemplate {
     /// CTA into Kratos registration (anonymous branch).
     can_join_now: bool,
     register_url: String,
+    /// Sanitized `return_to` for the POST form's hidden field ("" when none).
+    return_to: String,
+    /// "Continue without joining" href ("" when there is nothing to decline to).
+    decline_href: String,
+    /// Advisory OAuth `client_id` for the POST form's hidden field ("" when none).
+    client_id: String,
 }
 
 /// Theme the chrome from `org`'s branding (colors only, no tenant logo — the
@@ -98,15 +126,24 @@ async fn join_confirm_get(
     };
 
     let Some(session) = session else {
-        let return_to = format!(
+        let mut join_target = format!(
             "{}/join/confirm?org={}",
             state.cfg.self_.url.trim_end_matches('/'),
             ory_client::apis::urlencode(&slug)
         );
+        if let Some(rt) = q.return_to.as_deref().filter(|s| !s.is_empty()) {
+            let safe = crate::web::safe_return_to(&state.cfg, rt);
+            if safe != "/" {
+                join_target.push_str(&format!("&return_to={}", ory_client::apis::urlencode(safe)));
+            }
+        }
+        if let Some(cid) = q.client_id.as_deref().filter(|s| !s.is_empty()) {
+            join_target.push_str(&format!("&client_id={}", ory_client::apis::urlencode(cid)));
+        }
         let register_url = ory::kratos::browser_init_url(
             ory::FlowKind::Registration,
             &state.cfg.kratos.public_url,
-            Some(&return_to),
+            Some(&join_target),
         );
         return render(&JoinConfirmTemplate {
             chrome: themed_chrome(
@@ -118,6 +155,9 @@ async fn join_confirm_get(
             org_slug: slug,
             can_join_now: false,
             register_url,
+            return_to: q.return_to.clone().unwrap_or_default(),
+            decline_href: String::new(),
+            client_id: q.client_id.clone().unwrap_or_default(),
         });
     };
 
@@ -126,7 +166,7 @@ async fn join_confirm_get(
         .await
         .is_some()
     {
-        return Redirect::to("/").into_response();
+        return Redirect::to(&redirect_target(&state.cfg, q.return_to.as_deref())).into_response();
     }
 
     render(&JoinConfirmTemplate {
@@ -139,12 +179,17 @@ async fn join_confirm_get(
         org_slug: slug,
         can_join_now: true,
         register_url: String::new(),
+        return_to: q.return_to.clone().unwrap_or_default(),
+        decline_href: decline_target(&state.cfg, q.return_to.as_deref()).unwrap_or_default(),
+        client_id: q.client_id.clone().unwrap_or_default(),
     })
 }
 
 #[derive(Debug, Deserialize)]
 struct JoinConfirmForm {
     org: String,
+    return_to: Option<String>,
+    client_id: Option<String>,
 }
 
 /// `POST /join/confirm` — explicit confirmation of a self-serve join.
@@ -179,7 +224,8 @@ async fn join_confirm_post(
         .await
         .is_some()
     {
-        return Redirect::to("/").into_response();
+        return Redirect::to(&redirect_target(&state.cfg, form.return_to.as_deref()))
+            .into_response();
     }
 
     let drop_default = !state.cfg.admin.is_admin(&session_email);
@@ -195,20 +241,26 @@ async fn join_confirm_post(
         tracing::error!(error = ?e, org_id = %org.id, "join_confirm_post: join_org_race_safe failed");
         return (StatusCode::INTERNAL_SERVER_ERROR, "could not join").into_response();
     }
-    let _ = audit::log(
-        &state.db,
-        AuditEvent::new(action::ORG_MEMBER_ADDED)
-            .actor_user(&identity_id, &session_email)
-            .target(target_kind::IDENTITY, identity_id.clone())
-            .with_ctx(&actx)
-            .metadata(audit_metadata!(
-                "org_id" => &org.id,
-                "role" => Role::Member.as_str(),
-                "via" => "self_serve",
-            )),
-    )
-    .await;
-    Redirect::to("/").into_response()
+    let event = AuditEvent::new(action::ORG_MEMBER_ADDED)
+        .actor_user(&identity_id, &session_email)
+        .target(target_kind::IDENTITY, identity_id.clone())
+        .with_ctx(&actx);
+    // Audit `via` field: oauth_interstitial for OAuth joins, self_serve for direct joins.
+    let event = match form.client_id.as_deref().filter(|s| !s.is_empty()) {
+        Some(cid) => event.metadata(audit_metadata!(
+            "org_id" => &org.id,
+            "role" => Role::Member.as_str(),
+            "via" => "oauth_interstitial",
+            "client_id" => cid,
+        )),
+        None => event.metadata(audit_metadata!(
+            "org_id" => &org.id,
+            "role" => Role::Member.as_str(),
+            "via" => "self_serve",
+        )),
+    };
+    let _ = audit::log(&state.db, event).await;
+    Redirect::to(&redirect_target(&state.cfg, form.return_to.as_deref())).into_response()
 }
 
 #[cfg(test)]
@@ -285,6 +337,31 @@ mod tests {
         assert!(orgs::org_role(&db, "ident-1", DEFAULT_ORG_ID)
             .await
             .is_none());
+    }
+
+    #[test]
+    fn redirect_target_sanitizes_or_defaults() {
+        let cfg = crate::config::AppConfig::test_fixture();
+        assert_eq!(redirect_target(&cfg, None), "/");
+        assert_eq!(redirect_target(&cfg, Some("")), "/");
+        assert_eq!(
+            redirect_target(&cfg, Some("/oauth/login?login_challenge=x")),
+            "/oauth/login?login_challenge=x"
+        );
+        assert_eq!(
+            redirect_target(&cfg, Some("https://evil.example/phish")),
+            "/"
+        ); // open-redirect rejected
+    }
+
+    #[test]
+    fn decline_target_appends_skip_marker() {
+        let cfg = crate::config::AppConfig::test_fixture();
+        assert_eq!(decline_target(&cfg, None), None);
+        assert_eq!(
+            decline_target(&cfg, Some("/oauth/login?login_challenge=x")).as_deref(),
+            Some("/oauth/login?login_challenge=x&skip_org_join=1")
+        );
     }
 
     #[tokio::test]

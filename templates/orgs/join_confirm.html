@@ -15,11 +15,18 @@
               class="flex flex-col gap-stack-md">
           <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
           <input type="hidden" name="org" value="{{ org_slug }}">
+          {% if return_to != "" %}<input type="hidden" name="return_to" value="{{ return_to }}">{% endif %}
+          {% if client_id != "" %}<input type="hidden" name="client_id" value="{{ client_id }}">{% endif %}
           <button type="submit"
                   class="bg-primary text-on-primary rounded-lg px-4 py-2 font-label-md text-label-md self-start">
             {{ chrome.t("join-confirm-cta") }}
           </button>
         </form>
+        {% if decline_href != "" %}
+          <a href="{{ decline_href }}" class="font-label-md text-label-md text-on-surface-variant hover:underline self-start">
+            {{ chrome.t("join-confirm-decline") }}
+          </a>
+        {% endif %}
       {% else %}
         <a href="{{ register_url }}"
            class="bg-primary text-on-primary rounded-lg px-4 py-2 font-label-md text-label-md inline-block w-fit">{{ chrome.tv1("join-confirm-register-cta", "org", &org_name) }}</a>

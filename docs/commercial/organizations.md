@@ -84,12 +84,23 @@ Each org can carry its own **theme, logo, and support email**. When set, these o
 
 Every non-Default org is **internal** by default: invite-only, no public presence. An owner can switch a named org to **external** (a licensed, Orgs-feature capability — the Default org can never be external), which unlocks self-serve public signup:
 
-- A public landing page at `/o/<slug>`, themed with the org's branding.
+- A public landing page at `/o/<slug>`, themed with the org's branding, with a "Create an account" CTA.
 - A `/join/confirm` flow: a visitor registers (or signs in) and explicitly confirms joining as a **member** — no invite needed.
+
+The `/o/<slug>` landing page also carries a "Sign in" link for any org with branding enabled, including internal ones (signing in doesn't carry the self-serve signup restriction, it just takes a returning member straight to a login pre-selected for their org). The "Create an account" CTA stays gated to external orgs with public login on; an unresolvable, internal, or disabled slug falls back to the plain, unbranded landing page either way, so the page never confirms that a given slug exists.
 
 Switching to external automatically applies two defaults: the member directory is set to **administrators-only** and public login is turned on. The administrators-only directory is **hard-enforced** for external orgs — an owner cannot loosen it to a more open visibility policy while the org stays external, and an attempt to do so is rejected and recorded in the audit log. Switching back to internal lifts the restriction.
 
 Both the public landing page and the registration flow are per-IP and globally rate-limited (see the [operator guide](../operator-guide.md#external-access-mode-public-self-serve) for the specifics and their limitations).
+
+### Routing app logins into a specific org
+
+An app wiring its OIDC login against Forseti can send its users straight into one of your orgs by adding `organization_id=<id-or-slug>` to its authorize request: hand the app's developer the org's id or slug and they do the rest; there's nothing to configure on your side. What happens next depends on the org's access mode:
+
+- **Public org** (external, public login on): a returning member is placed straight into that org, no prompt. A non-member, including someone signing up for the first time through that app, sees a one-time "Join `<Org>`?" confirmation before their login completes, so joining always happens as an explicit step, never silently. Once they've joined, they're never asked again.
+- **Private org** (internal, or public login off): the pin has no effect for a non-member: they log in with whatever context they already have, and the only ways into the org remain an invite or (if enabled) domain auto-join. A private org can't be self-serve-joined through this parameter, regardless of what an app sends.
+
+This is what lets an app like Stackpit brand its login for one tenant and have new signups land as members of that tenant automatically, without you minting an invite for every one of them. See the [integration guide](../integration-guide.md#active-org-selection-org-scope) for the parameter's app-developer-facing details.
 
 ## Org-scoped admin
 

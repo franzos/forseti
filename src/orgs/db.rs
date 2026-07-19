@@ -141,6 +141,15 @@ pub async fn org_by_id(db: &DbPool, id: &str) -> anyhow::Result<Option<Org>> {
     Ok(row)
 }
 
+/// Resolve an org reference that may be a canonical id or a slug: id first
+/// (stable), then slug. Used by the OAuth `organization_id` pin.
+pub async fn org_by_ref(db: &DbPool, raw: &str) -> anyhow::Result<Option<Org>> {
+    if let Some(org) = org_by_id(db, raw).await? {
+        return Ok(Some(org));
+    }
+    org_by_slug(db, raw).await
+}
+
 pub async fn list_memberships(db: &DbPool, identity_id: &str) -> anyhow::Result<Vec<Membership>> {
     list_memberships_limited(db, identity_id, MAX_ROWS_PER_LIST).await
 }
@@ -1196,6 +1205,21 @@ mod tests {
     use super::*;
     use crate::orgs::{Role, DEFAULT_ORG_ID};
     use chrono::TimeZone;
+
+    #[tokio::test]
+    async fn org_by_ref_resolves_id_then_slug() {
+        let db = test_pool().await;
+        create_org(&db, "o1", "acme", "Acme", None).await.unwrap();
+        assert_eq!(
+            org_by_ref(&db, "o1").await.unwrap().map(|o| o.id),
+            Some("o1".to_string())
+        );
+        assert_eq!(
+            org_by_ref(&db, "acme").await.unwrap().map(|o| o.id),
+            Some("o1".to_string())
+        );
+        assert!(org_by_ref(&db, "nope").await.unwrap().is_none());
+    }
 
     #[tokio::test]
     async fn set_access_mode_persists_external() {

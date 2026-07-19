@@ -160,8 +160,9 @@ flash-logo-updated = Logo updated.
 flash-logo-removed = Logo removed.
 
 # Public landing page (public_landing.html)
-orgs-public-landing-note = To sign in, open the application your team provided. Sign-in happens from there.
+orgs-public-landing-note = Sign in below, or create an account to get started.
 orgs-public-landing-register = Create an account
+orgs-public-landing-signin = Sign in
 
 # Join confirm (join_confirm.html)
 join-confirm-page-title = Join organization
@@ -169,3 +170,4 @@ join-confirm-heading = Join { $org }
 join-confirm-body = You are joining { $org }. Continue?
 join-confirm-cta = Join
 join-confirm-register-cta = Register to join { $org }
+join-confirm-decline = Continue without joining

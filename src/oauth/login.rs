@@ -5,6 +5,7 @@ use axum::http::{HeaderMap, Uri};
 use axum::response::{IntoResponse, Redirect, Response};
 use serde::Deserialize;
 
+use crate::db::DbPool;
 use crate::extractors::OptionalSession;
 use crate::ory;
 use crate::state::AppState;
@@ -12,6 +13,8 @@ use crate::state::AppState;
 #[derive(Debug, Deserialize)]
 pub(crate) struct OAuthLoginQuery {
     login_challenge: String,
+    #[serde(default)]
+    skip_org_join: Option<String>,
 }
 
 /// `/oauth/login?login_challenge=...` — Hydra's "who is this user?" redirect
@@ -24,6 +27,7 @@ pub(crate) async fn oauth_login(
     headers: HeaderMap,
     session: OptionalSession,
 ) -> Response {
+    let skip_org_join = query.skip_org_join.is_some();
     let challenge = query.login_challenge;
     let req = match ory::hydra::get_login_request(&state.ory, &challenge).await {
         Ok(r) => r,
@@ -115,28 +119,42 @@ pub(crate) async fn oauth_login(
         })
         .unwrap_or_else(|| vec!["pwd".to_string()]);
 
-    // Optional `organization_id=<id>` from Hydra's `request_url`: when the
-    // user is a member, pre-select that org via the active-org cookie so
-    // consent folds it into the `org` claim. Silent fallback otherwise.
-    let pre_select_org_id = parse_organization_id_param(req.request_url.as_str())
-        .filter(|org_id: &String| !org_id.is_empty());
+    // Optional `organization_id` (id or slug) from Hydra's `request_url`.
+    // Members: pre-select via the active-org cookie. Eligible non-members:
+    // redirect to the one-time /join/confirm interstitial (the write lives
+    // there, behind CSRF), unless the user already declined this flow.
     let mut set_org_cookie: Option<String> = None;
-    if let Some(org_id) = pre_select_org_id {
-        if crate::orgs::is_member(&state.db, &subject, &org_id).await {
-            set_org_cookie = Some(crate::orgs::cookie::set_active_org_cookie(
-                &state.cookie_secret,
-                state.cfg.orgs.active_org_cookie_ttl_seconds,
-                &org_id,
-                state.cfg.self_.is_https(),
-            ));
-        } else {
-            // TODO: emit an audit row here; for now a tracing::info! catches
-            // the "wrong org_id pinned in the auth request" misuse pattern.
-            tracing::info!(
+    if let Some(raw) =
+        parse_organization_id_param(req.request_url.as_str()).filter(|s| !s.is_empty())
+    {
+        match resolve_pin_action(&state.db, &subject, &raw, skip_org_join).await {
+            PinAction::Cookie(org_id) => {
+                set_org_cookie = Some(crate::orgs::cookie::set_active_org_cookie(
+                    &state.cookie_secret,
+                    state.cfg.orgs.active_org_cookie_ttl_seconds,
+                    &org_id,
+                    state.cfg.self_.is_https(),
+                ));
+            }
+            PinAction::Interstitial { slug } => {
+                let mut url = format!(
+                    "/join/confirm?org={}&return_to={}",
+                    ory_client::apis::urlencode(&slug),
+                    ory_client::apis::urlencode(&self_login_url),
+                );
+                // Advisory attribution: the OAuth client that routed the user here
+                // (`req.client` is non-optional on the login request; `client_id`
+                // is `Option<String>`).
+                if let Some(cid) = req.client.client_id.as_deref().filter(|s| !s.is_empty()) {
+                    url.push_str(&format!("&client_id={}", ory_client::apis::urlencode(cid)));
+                }
+                return Redirect::to(&url).into_response();
+            }
+            PinAction::Ignore => tracing::info!(
                 subject = %subject,
-                organization_id = %org_id,
-                "oauth login: requested organization_id is not a membership; ignoring",
-            );
+                organization_id = %raw,
+                "oauth login: organization_id not applied (unknown, ineligible, or declined)",
+            ),
         }
     }
 
@@ -193,6 +211,32 @@ pub(crate) fn parse_organization_id_param(request_url: &str) -> Option<String> {
         .map(|(_, v)| v.into_owned())
 }
 
+/// What the `organization_id` pin resolves to for a signed-in subject.
+enum PinAction {
+    /// Already a member; set the active-org cookie for this org id.
+    Cookie(String),
+    /// Eligible external+public org, not yet a member: send to `/join/confirm`.
+    Interstitial { slug: String },
+    /// Unknown ref, ineligible non-member, or a declined pin: ignore.
+    Ignore,
+}
+
+/// Resolve the pin (id or slug). Members -> cookie pre-select. Eligible
+/// non-members -> the one-time join interstitial, unless `skip_join` (the
+/// user already declined this flow). Everything else -> ignore. No write here.
+async fn resolve_pin_action(db: &DbPool, subject: &str, raw: &str, skip_join: bool) -> PinAction {
+    let Some(org) = crate::orgs::db::org_by_ref(db, raw).await.ok().flatten() else {
+        return PinAction::Ignore;
+    };
+    if crate::orgs::is_member(db, subject, &org.id).await {
+        return PinAction::Cookie(org.id);
+    }
+    if skip_join || !crate::orgs::join::is_signup_eligible(&org) {
+        return PinAction::Ignore;
+    }
+    PinAction::Interstitial { slug: org.slug }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{anonymous_login_redirect_url, parse_organization_id_param};
@@ -238,5 +282,77 @@ mod tests {
         let request_url = "https://hydra.example.com/oauth2/auth?client_id=x";
         let url = anonymous_login_redirect_url("https://self/oauth/login", "en", request_url);
         assert!(!url.contains("organization_id"));
+    }
+}
+
+#[cfg(test)]
+mod pin_tests {
+    use super::{resolve_pin_action, PinAction};
+    use crate::orgs::db::{
+        add_member_race_safe, create_org, set_access_mode, test_pool, update_theme,
+    };
+    use crate::orgs::{AccessMode, Role};
+
+    async fn eligible_org(db: &crate::db::DbPool) {
+        create_org(db, "o1", "acme", "Acme", None).await.unwrap();
+        set_access_mode(db, "o1", AccessMode::External)
+            .await
+            .unwrap();
+        update_theme(db, "o1", None, None, None, None, 1)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn member_yields_cookie() {
+        let db = test_pool().await;
+        eligible_org(&db).await;
+        add_member_race_safe(&db, "ident-1", "o1", Role::Member)
+            .await
+            .unwrap();
+        assert!(
+            matches!(resolve_pin_action(&db, "ident-1", "acme", false).await, PinAction::Cookie(id) if id == "o1")
+        );
+    }
+
+    #[tokio::test]
+    async fn eligible_nonmember_yields_interstitial() {
+        let db = test_pool().await;
+        eligible_org(&db).await;
+        assert!(
+            matches!(resolve_pin_action(&db, "ident-2", "o1", false).await, PinAction::Interstitial { slug } if slug == "acme")
+        );
+    }
+
+    #[tokio::test]
+    async fn skip_marker_ignores() {
+        let db = test_pool().await;
+        eligible_org(&db).await;
+        assert!(matches!(
+            resolve_pin_action(&db, "ident-3", "acme", true).await,
+            PinAction::Ignore
+        ));
+    }
+
+    #[tokio::test]
+    async fn internal_org_ignored() {
+        let db = test_pool().await;
+        create_org(&db, "o2", "corp", "Corp", None).await.unwrap();
+        update_theme(&db, "o2", None, None, None, None, 1)
+            .await
+            .unwrap();
+        assert!(matches!(
+            resolve_pin_action(&db, "ident-4", "corp", false).await,
+            PinAction::Ignore
+        ));
+    }
+
+    #[tokio::test]
+    async fn unknown_ref_ignored() {
+        let db = test_pool().await;
+        assert!(matches!(
+            resolve_pin_action(&db, "ident-5", "ghost", false).await,
+            PinAction::Ignore
+        ));
     }
 }

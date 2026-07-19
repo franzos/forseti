@@ -20,4 +20,12 @@
      class="inline-flex items-center justify-center font-label-lg text-label-lg rounded-lg bg-primary text-on-primary px-stack-lg py-stack-sm hover:opacity-90 transition-opacity">
     {{ chrome.t("orgs-public-landing-register") }}
   </a>
+  {% match login_href %}
+    {% when Some with (href) %}
+  <a href="{{ href }}"
+     class="mt-stack-sm inline-flex items-center justify-center font-label-md text-label-md text-primary hover:underline transition-colors">
+    {{ chrome.t("orgs-public-landing-signin") }}
+  </a>
+    {% when None %}
+  {% endmatch %}
 {% endblock %}

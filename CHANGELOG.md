@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- OAuth `organization_id` pin accepts an org slug as well as an id
+- Non-members are offered a one-time join into a pinned public org during app login
+- Sign-in link on the public org landing page
+
+### Changed
+- Public org landing note now points to on-page sign-in/register
+
 ## [0.1.13] - 2026-07-18
 
 ### Added

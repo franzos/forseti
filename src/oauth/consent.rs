@@ -729,7 +729,21 @@ async fn finalize_consent(
     )
     .and_then(|id| memberships.iter().find(|m| m.org_id == id).cloned())
     .or_else(|| memberships.first().cloned());
-    let active = resolve_claim_active_org(requested_org_id, &memberships, cookie_choice.as_ref());
+    // The pin may be an id or a slug; resolve to a canonical id so the org/
+    // groups claims match either form. No membership write here.
+    let canonical_pin = match requested_org_id.filter(|s| !s.is_empty()) {
+        Some(raw) => crate::orgs::db::org_by_ref(&state.db, raw)
+            .await
+            .ok()
+            .flatten()
+            .map(|o| o.id),
+        None => None,
+    };
+    let active = resolve_claim_active_org(
+        canonical_pin.as_deref(),
+        &memberships,
+        cookie_choice.as_ref(),
+    );
     if let Some(req_org) = requested_org_id.filter(|s| !s.is_empty()) {
         if active.is_none() {
             tracing::info!(
@@ -1310,6 +1324,20 @@ mod tests {
         let ms = vec![mem("a")];
         let got = resolve_claim_active_org(Some(""), &ms, Some(&ms[0]));
         assert_eq!(got.map(|m| m.org_id), Some("a".to_string()));
+    }
+
+    #[test]
+    fn resolve_claim_active_org_pins_by_canonical_id() {
+        let m = mem("o1");
+        assert_eq!(
+            super::resolve_claim_active_org(Some("o1"), std::slice::from_ref(&m), None)
+                .map(|x| x.org_id),
+            Some("o1".to_string())
+        );
+        // An unresolved slug would not match an id -> suppressed:
+        assert!(
+            super::resolve_claim_active_org(Some("acme"), std::slice::from_ref(&m), None).is_none()
+        );
     }
 
     #[test]

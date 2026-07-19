@@ -240,8 +240,15 @@ pub(crate) async fn run() -> anyhow::Result<()> {
             axum::http::HeaderValue::from_static("SAMEORIGIN"),
         ));
     }
+    // `/join/confirm` and `/oauth/consent` must always be unframable (CSRF POST), overriding global config.
+    let csp_strict = axum::http::HeaderValue::from_str(&build_csp("'none'"))
+        .expect("static strict csp is a valid header value");
     let public_app = public_app
         .layer(TraceLayer::new_for_http())
+        .layer(axum::middleware::from_fn_with_state(
+            csp_strict,
+            strict_frame_for_sensitive,
+        ))
         .with_state(state.clone());
 
     // Internal listener: machine-to-machine endpoints only. No CSRF, no readiness probes (those stay on the public listener).
@@ -425,6 +432,25 @@ async fn shutdown_signal() {
 // omits default-src/script-src/style-src/img-src/form-action: those break WebAuthn/QR/Shape-2 forms
 fn build_csp(frame_ancestors: &str) -> String {
     format!("object-src 'none'; base-uri 'self'; frame-ancestors {frame_ancestors}")
+}
+
+/// Forces `frame-ancestors 'none'` + `X-Frame-Options: DENY` on sensitive, state-changing pages, overriding global config.
+async fn strict_frame_for_sensitive(
+    State(csp_strict): State<axum::http::HeaderValue>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let sensitive = matches!(req.uri().path(), "/join/confirm" | "/oauth/consent");
+    let mut resp = next.run(req).await;
+    if sensitive {
+        resp.headers_mut()
+            .insert(axum::http::header::CONTENT_SECURITY_POLICY, csp_strict);
+        resp.headers_mut().insert(
+            axum::http::header::X_FRAME_OPTIONS,
+            axum::http::HeaderValue::from_static("DENY"),
+        );
+    }
+    resp
 }
 
 #[cfg(test)]

@@ -160,8 +160,9 @@ flash-logo-updated = Logo aggiornato.
 flash-logo-removed = Logo rimosso.
 
 # Pagina di destinazione pubblica (public_landing.html)
-orgs-public-landing-note = Per accedere, apra l'applicazione fornita dal suo team. L'accesso avviene da lì.
+orgs-public-landing-note = Accedi qui sotto oppure crea un account per iniziare.
 orgs-public-landing-register = Crea un account
+orgs-public-landing-signin = Accedi
 
 # Conferma di adesione (join_confirm.html)
 join-confirm-page-title = Unisciti all'organizzazione
@@ -169,3 +170,4 @@ join-confirm-heading = Unisciti a { $org }
 join-confirm-body = Stai per unirti a { $org }. Continuare?
 join-confirm-cta = Unisciti
 join-confirm-register-cta = Registrati per unirti a { $org }
+join-confirm-decline = Continua senza unirti

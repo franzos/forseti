@@ -67,6 +67,19 @@ struct PublicLandingTemplate {
     /// Registration CTA href: bound to `/join/confirm?org=<slug>` via Kratos
     /// registration when `slug` resolves live, else the plain link.
     register_href: String,
+    /// Sign-in CTA, present only for a resolved (branded) org; `None` keeps the
+    /// unknown/disabled fallback byte-identical.
+    login_href: Option<String>,
+}
+
+/// Branded-login link for the landing page: `/login?organization_id=<slug>`.
+/// The slug is accepted by the login pin (id-or-slug), so `/login` themes for
+/// this org and returning members log in there.
+fn login_href(slug: &str) -> String {
+    format!(
+        "/login?organization_id={}",
+        ory_client::apis::urlencode(slug)
+    )
 }
 
 /// Bind the registration CTA to `/join/confirm?org=<slug>` when `slug`
@@ -146,10 +159,12 @@ pub(crate) async fn landing(
         &slug,
         is_signup_org,
     );
+    let login_href = org_name.as_ref().map(|_| login_href(&slug));
     let mut resp = render(&PublicLandingTemplate {
         chrome,
         org_name,
         register_href,
+        login_href,
     });
     if let Some(cookie) = cookie {
         if let Ok(v) = axum::http::HeaderValue::from_str(&cookie) {
@@ -328,6 +343,13 @@ mod tests {
             ),
             DEFAULT_REGISTER_HREF
         );
+    }
+
+    #[test]
+    fn login_href_points_at_branded_login_by_slug() {
+        assert_eq!(super::login_href("acme"), "/login?organization_id=acme");
+        // ory_client::apis::urlencode is form-urlencoded (matches oauth/login.rs's use), so space -> `+`.
+        assert_eq!(super::login_href("a b"), "/login?organization_id=a+b");
     }
 
     #[tokio::test]

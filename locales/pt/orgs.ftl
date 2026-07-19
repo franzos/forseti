@@ -160,8 +160,9 @@ flash-logo-updated = Logótipo atualizado.
 flash-logo-removed = Logótipo removido.
 
 # Página de destino pública (public_landing.html)
-orgs-public-landing-note = Para iniciar sessão, abra a aplicação que a sua equipa forneceu. O início de sessão acontece a partir daí.
+orgs-public-landing-note = Inicie sessão abaixo ou crie uma conta para começar.
 orgs-public-landing-register = Criar uma conta
+orgs-public-landing-signin = Iniciar sessão
 
 # Confirmação de adesão (join_confirm.html)
 join-confirm-page-title = Ingressar na organização
@@ -169,3 +170,4 @@ join-confirm-heading = Ingressar em { $org }
 join-confirm-body = Você está ingressando em { $org }. Continuar?
 join-confirm-cta = Ingressar
 join-confirm-register-cta = Registre-se para ingressar em { $org }
+join-confirm-decline = Continuar sem aderir

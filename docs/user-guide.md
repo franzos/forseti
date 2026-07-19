@@ -6,6 +6,8 @@ For people using an account on a site that runs Forseti. You don't need to insta
 
 Enter your email and password on the login page. If the site has other sign-in methods enabled (a social or enterprise login), you'll see them as buttons on the same page. After signing in you're returned to the app you came from.
 
+Some apps route you into a specific organization when you sign in. If you're not already a member, you may see a one-time "Join `<Org>`?" page asking you to confirm before you continue; you can also choose to continue without joining. You won't be asked again once you've joined.
+
 ## Creating an account
 
 The registration page asks for your email and a password, plus whatever profile fields the operator has configured. Some sites verify your email address before the account is fully active; if so, you'll get a message with a link or code to confirm.

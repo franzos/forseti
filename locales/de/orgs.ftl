@@ -160,8 +160,9 @@ flash-logo-updated = Logo aktualisiert.
 flash-logo-removed = Logo entfernt.
 
 # Öffentliche Landingpage (public_landing.html)
-orgs-public-landing-note = Zum Anmelden öffnen Sie die Anwendung, die Ihr Team bereitgestellt hat. Die Anmeldung erfolgt dort.
+orgs-public-landing-note = Melden Sie sich unten an oder erstellen Sie ein Konto.
 orgs-public-landing-register = Konto erstellen
+orgs-public-landing-signin = Anmelden
 
 # Beitrittsbestätigung (join_confirm.html)
 join-confirm-page-title = Organisation beitreten
@@ -169,3 +170,4 @@ join-confirm-heading = { $org } beitreten
 join-confirm-body = Sie treten { $org } bei. Fortfahren?
 join-confirm-cta = Beitreten
 join-confirm-register-cta = Registrieren, um { $org } beizutreten
+join-confirm-decline = Ohne Beitritt fortfahren

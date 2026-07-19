@@ -160,8 +160,9 @@ flash-logo-updated = Логотип обновлён.
 flash-logo-removed = Логотип удалён.
 
 # Публичная целевая страница (public_landing.html)
-orgs-public-landing-note = Чтобы войти, откройте приложение, предоставленное вашей командой. Вход выполняется оттуда.
+orgs-public-landing-note = Войдите ниже или создайте аккаунт, чтобы начать.
 orgs-public-landing-register = Создать аккаунт
+orgs-public-landing-signin = Войти
 
 # Подтверждение присоединения (join_confirm.html)
 join-confirm-page-title = Присоединиться к организации
@@ -169,3 +170,4 @@ join-confirm-heading = Присоединиться к { $org }
 join-confirm-body = Вы присоединяетесь к { $org }. Продолжить?
 join-confirm-cta = Присоединиться
 join-confirm-register-cta = Зарегистрироваться, чтобы присоединиться к { $org }
+join-confirm-decline = Продолжить без присоединения

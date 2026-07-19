@@ -160,8 +160,9 @@ flash-logo-updated = تم تحديث الشعار.
 flash-logo-removed = تمت إزالة الشعار.
 
 # صفحة الهبوط العامة (public_landing.html)
-orgs-public-landing-note = لتسجيل الدخول، افتح التطبيق الذي وفّره فريقك. يتم تسجيل الدخول من هناك.
+orgs-public-landing-note = سجّل الدخول أدناه، أو أنشئ حسابًا للبدء.
 orgs-public-landing-register = إنشاء حساب
+orgs-public-landing-signin = تسجيل الدخول
 
 # تأكيد الانضمام (join_confirm.html)
 join-confirm-page-title = الانضمام إلى المؤسسة
@@ -169,3 +170,4 @@ join-confirm-heading = الانضمام إلى { $org }
 join-confirm-body = أنت على وشك الانضمام إلى { $org }. هل تريد المتابعة؟
 join-confirm-cta = انضمام
 join-confirm-register-cta = سجّل للانضمام إلى { $org }
+join-confirm-decline = المتابعة دون الانضمام

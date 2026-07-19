@@ -160,8 +160,9 @@ flash-logo-updated = อัปเดตโลโก้แล้ว
 flash-logo-removed = ลบโลโก้แล้ว
 
 # หน้า Landing สาธารณะ (public_landing.html)
-orgs-public-landing-note = หากต้องการเข้าสู่ระบบ ให้เปิดแอปพลิเคชันที่ทีมของคุณจัดเตรียมไว้ การเข้าสู่ระบบจะทำจากที่นั่น
+orgs-public-landing-note = เข้าสู่ระบบด้านล่าง หรือสร้างบัญชีเพื่อเริ่มต้นใช้งาน
 orgs-public-landing-register = สร้างบัญชี
+orgs-public-landing-signin = เข้าสู่ระบบ
 
 # ยืนยันการเข้าร่วม (join_confirm.html)
 join-confirm-page-title = เข้าร่วมองค์กร
@@ -169,3 +170,4 @@ join-confirm-heading = เข้าร่วม { $org }
 join-confirm-body = คุณกำลังจะเข้าร่วม { $org } ดำเนินการต่อหรือไม่?
 join-confirm-cta = เข้าร่วม
 join-confirm-register-cta = ลงทะเบียนเพื่อเข้าร่วม { $org }
+join-confirm-decline = ดำเนินการต่อโดยไม่เข้าร่วม

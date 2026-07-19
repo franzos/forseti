@@ -97,7 +97,31 @@ The cookie is never trusted on its own. `active_org()` (`src/orgs/mod.rs:137-153
 
 The cookie is only *written* by `POST /orgs/switch` (`src/orgs/settings_page/switch.rs`) — a CSRF-protected target behind the nav dropdown that re-verifies membership before emitting the `Set-Cookie`. Default TTL is 30 days (`[orgs].active_org_cookie_ttl_seconds`).
 
-Downstream apps can also pin the active org at auth time with the `organization_id=<id>` parameter on the `/oauth2/auth` URL. If the user isn't a member of the named org, the param is silently ignored (no error UX), so a stale link from a deactivated member doesn't break login.
+Downstream apps can also pin the active org at auth time with the `organization_id=<ref>` parameter on the `/oauth2/auth` URL, where `<ref>` is either the canonical org id or its slug (`org_by_ref()`, `src/orgs/db.rs`, tries id first, then slug). What happens next depends on the subject's membership:
+
+- **Member of the pinned org** — the active-org cookie is set for it at `/oauth/login`, so the `org`/`groups` claims and the nav match without a manual `/orgs/switch`.
+- **Non-member, org is `external` + `public_login_enabled = 1`** — `/oauth/login` redirects to a one-time `/join/confirm` interstitial instead of accepting the login challenge outright, so the app-scoped context is offered before the flow completes. See [Join interstitial for the OAuth pin](#join-interstitial-for-the-oauth-pin) below.
+- **Non-member, org is `internal` or has public login disabled, or the ref doesn't resolve** — the pin is silently ignored (no error UX), same as before: a stale link from a deactivated member, a typo, or a private org just falls through to plain login.
+
+The pin is resolved again, independently, when the consent challenge is finalized — see [Claim resolution is point-in-time](#claim-resolution-is-point-in-time) below.
+
+### Join interstitial for the OAuth pin
+
+Placement can't happen on the Hydra consent Allow (Hydra remembers consent, so Allow fires at most once and never again for a returning or skip-consent user) and it can't happen silently at `/oauth/login` (that's a GET; writing membership off a CSRF-forgeable request is the same class of bug the rest of this doc treats as a hard invariant elsewhere). So the pin is anchored on membership state instead, via a real interstitial page:
+
+1. `resolve_pin_action()` (`src/oauth/login.rs`) decides, for a signed-in subject with an unresolved pin: already a member → `PinAction::Cookie`; eligible non-member → `PinAction::Interstitial`; anything else (unknown ref, ineligible org, or a declined pin) → `PinAction::Ignore`. No write happens in this function or anywhere in `/oauth/login`.
+2. On `PinAction::Interstitial`, `/oauth/login` redirects to `/join/confirm?org=<slug>&return_to=<self /oauth/login URL, re-carrying login_challenge>`, plus `&client_id=<hydra client id>` when Hydra's login request carries one — advisory, front-channel, used only for audit attribution, never trusted for access control.
+3. `/join/confirm` (`src/orgs/join.rs`) is the same two-step GET-then-POST used by the [public self-serve join flow](#public-self-serve-join-flow); reaching it from the OAuth pin vs. from `/o/{slug}` differs only in whether `client_id` and `return_to` are present. The POST is the **only** place that calls `join_org_race_safe()` for this path — `/oauth/login` and `finalize_consent` never write membership. `tests/oauth_no_membership_write.rs` asserts this statically (greps `src/oauth/login.rs` / `src/oauth/consent.rs` for the join call).
+4. On success, the join is audited as `org.member.added` with `via=oauth_interstitial` and the advisory `client_id` in metadata (vs. `via=self_serve` for a direct `/o/{slug}` join), then the browser is bounced back to `return_to`, which resumes the OAuth flow at `/oauth/login` — this time the subject is a member, so `resolve_pin_action()` returns `PinAction::Cookie` and the login challenge is accepted normally.
+5. **Decline** — the confirm page also renders a "continue without joining" link built by `decline_target()`: the sanitized `return_to` with `&skip_org_join=1` appended. It's a stateless, forgeable marker by design (it can only *decline* a join, never force one); `/oauth/login` reads it and short-circuits `resolve_pin_action()` to `Ignore` so the user isn't re-prompted on the same round trip. Login then completes with no membership change and no `org`/`groups` claims for that org.
+
+Private orgs, and external orgs with public login disabled, are never eligible for the interstitial — `is_signup_eligible()` (`src/orgs/join.rs`, shared with `/o/{slug}`) is the single source of truth for that check, so the pin and the public landing page can't drift on what counts as "joinable".
+
+Both `/join/confirm` and `/oauth/consent` carry a strict `frame-ancestors 'none'` CSP plus `X-Frame-Options: DENY`, applied by a dedicated middleware layer (`strict_frame_for_sensitive`, `src/app.rs`) that runs outermost and overrides the operator's global `[security].frame_ancestors`/`x_frame_options` setting. Both are CSRF-protected state-changing POSTs, so they must never be framable regardless of what the operator allows elsewhere.
+
+### Claim resolution is point-in-time
+
+`finalize_consent()` (`src/oauth/consent.rs`) re-resolves the pin independently of `/oauth/login`, via the same `org_by_ref()` id-or-slug lookup, to a canonical org id. If the subject is (by then) a member of that org, `org`/`groups` claims are pinned to it for this token; otherwise they fall back to the active-org cookie, then the first membership, then are suppressed entirely if the subject has none. This resolution happens once, at authorize/consent time — a later join, leave, or role change doesn't retroactively change an already-issued token; the subject gets the current picture on their next authorization.
 
 ## Invites
 
@@ -257,6 +281,8 @@ Flipping a licensed, non-Default org to `External` (`orgs::db::set_access_mode`)
 ### Public self-serve join flow
 
 `GET /o/{slug}` (`src/orgs/public_landing.rs::landing`) renders the themed landing page for any slug; `register_href()` binds the CTA to `/join/confirm?org=<slug>` only when `resolve_signup_org()` (`src/orgs/join.rs`) resolves the slug live — `External` **and** `public_login_enabled = 1`, re-checked at render time. Unknown/internal/disabled slugs fall through to the byte-identical global-theme fallback (anti-enumeration).
+
+The page also renders a **sign-in CTA** (`login_href()`, `/login?organization_id=<slug>`) whenever the slug resolved to *any* branded org — including internal ones — since signing in doesn't carry the signup eligibility restriction: it just threads the slug into the login pin described above, so a returning member lands pre-selected into the org they already belong to. Unknown/disabled slugs keep `login_href` at `None`, preserving the anti-enumeration fallback.
 
 `/join/confirm` (`src/orgs/join.rs`) is a two-step GET-then-POST:
 
