@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.1.14] - 2026-07-19
 
 ### Added
 - OAuth `organization_id` pin accepts an org slug as well as an id
