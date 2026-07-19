@@ -8,7 +8,7 @@ Forseti is multi-org from the ground up. OSS ships exactly **one** org — the a
 
 On the app side, [Stackpit](https://github.com/franzos/stackpit) (a self-hosted, single-binary Sentry alternative) is a first-class consumer of these claims: it maps your Forseti orgs and their owner/member roles straight into its own per-org access model, so SSO users land in the right org with the right role automatically. If you want to see the org claims doing real work in a downstream app, that's the reference pairing.
 
-For app developers consuming org claims over OIDC, see the [integration guide](../integration-guide.md). For the implementation details, see [`dev/organizations-internals.md`](../dev/organizations-internals.md).
+For app developers consuming org claims over OIDC, see the [integration guide](../integration-guide.md). For the implementation details, see [`dev/organizations-internals.md`](https://github.com/franzos/forseti/blob/master/docs/dev/organizations-internals.md).
 
 ## Free vs paid
 
@@ -131,4 +131,4 @@ The maximum number of orgs (`max_orgs`) is **not** a config knob — it comes fr
 - [Commercial features](./index.md) — licensing model and the free/paid boundary.
 - [Enterprise SAML SSO](./saml.md) — per-org SSO against a corporate IdP.
 - [Integration guide](../integration-guide.md#scope-reference) — consuming `org` / `orgs` claims in your apps.
-- [Organizations internals](../dev/organizations-internals.md) — contributor reference (data model, gate call sites).
+- [Organizations internals](https://github.com/franzos/forseti/blob/master/docs/dev/organizations-internals.md) — contributor reference (data model, gate call sites).

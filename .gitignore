@@ -48,6 +48,9 @@ tests/fixtures/license/
 # Superpowers process artifacts (specs/plans) — not part of the product repo
 docs/superpowers/
 
+# mdBook build output
+docs/book/
+
 # Real-Linux harness ephemera (infra/linux-test/): seeded env file +
 # generated ssh keypair, regenerated each `make test-linux-host` run.
 infra/linux-test/.seed.env

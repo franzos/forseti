@@ -173,6 +173,9 @@ For the full OAuth2 dance — register a Hydra client, run an auth-code flow, ex
 
 ## Documentation
 
+Full documentation is published at **<https://franzos.github.io/forseti/>**.
+
+- [User guide](docs/user-guide.md) — for people using an account: signing in, registration, recovery, MFA, account settings
 - [Operator guide](docs/operator-guide.md) — deployment topology, Kratos/Hydra config, secrets, backups
 - [Operator guide — reverse proxy](docs/operator-guide-proxy.md) — proxy topology, cookies, CSRF, CORS
 - [Integration guide](docs/integration-guide.md) — consuming Forseti as an OIDC provider

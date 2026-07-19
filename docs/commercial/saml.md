@@ -122,5 +122,5 @@ When the license is past expiry but inside the fixed 30-day grace window, SSO lo
 ## Related
 
 - [Organizations](./organizations.md) — orgs are the tenancy unit each SAML connection attaches to.
-- [Flow internals](../dev/flows.md#enterprise-saml-sso-commercial) — sequence diagrams and handler references.
+- [Flow internals](https://github.com/franzos/forseti/blob/master/docs/dev/flows.md#enterprise-saml-sso-commercial) — sequence diagrams and handler references.
 - [Integration guide](../integration-guide.md#enterprise-sso-saml) — what SAML means for downstream apps (spoiler: nothing — they keep doing OIDC).
