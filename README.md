@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="assets/icon.svg" alt="Forseti" width="120" height="120" />
+  <img src="assets/logo.png" alt="Forseti" width="128" />
 
   # Forseti
 
