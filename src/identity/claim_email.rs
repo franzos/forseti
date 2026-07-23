@@ -180,7 +180,7 @@ async fn claim_post(
                 target_identity = %target.id,
                 "claim-email: refused — target email is in admin.allowed_emails",
             );
-            decoy_token()
+            decoy_token_with_write(&state).await
         }
         None => {
             let state_label = if verified_exists {
@@ -193,7 +193,7 @@ async fn claim_post(
                 state = state_label,
                 "claim-email: no actionable unverified identity; serving decoy",
             );
-            decoy_token()
+            decoy_token_with_write(&state).await
         }
     };
 
@@ -207,6 +207,19 @@ fn decoy_token() -> String {
     use rand::Rng;
     let bytes: [u8; 16] = rand::rng().random();
     hex::encode(bytes)
+}
+
+/// Decoy that mirrors the found-unverified branch's synchronous `store_secret_reveal`
+/// write so the two paths can't be told apart by response latency (anti-enumeration).
+/// The stored row is orphaned — the returned token is unrelated, so confirm sees an
+/// unknown token and renders the same expired-claim UX — and is pruned by TTL.
+async fn decoy_token_with_write(state: &AppState) -> String {
+    let reveal = SecretReveal::ClaimEmailCode {
+        code: mint_six_digit_code(),
+        identity_id: String::new(),
+    };
+    let _ = flash::store_secret_reveal(&state.db, state.cfg.flash.reveal_ttl_seconds, reveal).await;
+    decoy_token()
 }
 
 fn render_claim_error(

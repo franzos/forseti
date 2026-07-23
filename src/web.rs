@@ -21,6 +21,12 @@ pub(crate) fn safe_return_to<'a>(cfg: &AppConfig, raw: &'a str) -> &'a str {
     if raw.is_empty() {
         return "/";
     }
+    // Control chars (e.g. CR/LF from a decoded `%0d%0a`) would panic `Redirect::to` when it
+    // builds the `HeaderValue`; reject before either branch can hand `raw` back to a caller.
+    if raw.bytes().any(|b| b < 0x20 || b == 0x7f) {
+        tracing::warn!("rejected return_to with control characters");
+        return "/";
+    }
     // Path-only: `/` but not `//` (scheme-relative) or `/\` (browsers may normalise backslash as slash).
     if let Some(rest) = raw.strip_prefix('/') {
         if rest.starts_with('/') || rest.starts_with('\\') {
@@ -186,6 +192,15 @@ mod tests {
             safe_return_to(&cfg, "https://forseti.example.com.evil.com/x"),
             "/"
         );
+    }
+
+    #[test]
+    fn safe_return_to_rejects_control_chars() {
+        let cfg = cfg_with_self_url("https://forseti.example.com");
+        // A decoded `%0d%0a` reaching `Redirect::to` would panic on the invalid HeaderValue.
+        assert_eq!(safe_return_to(&cfg, "/foo\r\nSet-Cookie: x=1"), "/");
+        assert_eq!(safe_return_to(&cfg, "/foo\x00bar"), "/");
+        assert_eq!(safe_return_to(&cfg, "/foo\x7f"), "/");
     }
 
     #[test]
