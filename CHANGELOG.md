@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.1.15] - 2026-07-26
+
+### Added
+- Per-client logo, uploaded by an operator and shown on the consent screen
+
+### Security
+- `return_to` values carrying control characters are rejected
+- Split cookie headers are joined before parsing
+- Claim-email decoy path now mirrors the real write
+
 ## [0.1.14] - 2026-07-19
 
 ### Added
