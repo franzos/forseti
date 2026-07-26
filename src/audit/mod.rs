@@ -122,6 +122,8 @@ pub mod action {
     pub const ADMIN_CLIENT_SECRET_ROTATED: &str = "oauth.client.secret_rotated";
     pub const ADMIN_CLIENT_VERIFIED: &str = "oauth.client.verified";
     pub const ADMIN_CLIENT_UNVERIFIED: &str = "oauth.client.unverified";
+    pub const ADMIN_CLIENT_LOGO_UPLOADED: &str = "oauth.client.logo_uploaded";
+    pub const ADMIN_CLIENT_LOGO_REMOVED: &str = "oauth.client.logo_removed";
     pub const ADMIN_IDENTITY_DISABLED: &str = "admin.identity.disabled";
     pub const ADMIN_IDENTITY_ENABLED: &str = "admin.identity.enabled";
     pub const ADMIN_IDENTITY_DELETED: &str = "admin.identity.deleted";

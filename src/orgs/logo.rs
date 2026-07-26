@@ -159,7 +159,8 @@ pub(crate) async fn serve(
         return shared_not_found();
     }
 
-    let cached = state.logo_cache.lock().await.get(&org.id);
+    let cache_key = crate::logo_cache::org_key(&org.id);
+    let cached = state.logo_cache.lock().await.get(&cache_key);
     let logo = match cached {
         Some(logo) => logo,
         None => match get(&state.db, &org.id).await {
@@ -173,7 +174,7 @@ pub(crate) async fn serve(
                     .logo_cache
                     .lock()
                     .await
-                    .insert(org.id.clone(), Arc::clone(&logo));
+                    .insert(cache_key, Arc::clone(&logo));
                 logo
             }
             Ok(None) => return shared_not_found(),

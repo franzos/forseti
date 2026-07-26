@@ -151,6 +151,22 @@ pub fn router() -> Router<AppState> {
         )
         // License (commercial); handlers self-gate via RequireAdmin like the rest.
         .merge(crate::commercial::settings_page::router())
+        .merge(client_logo_router())
+}
+
+/// Body-size cap for the client-logo multipart sub-router: headroom over the
+/// 256 KB validated logo cap for multipart boundary/field overhead.
+const CLIENT_LOGO_UPLOAD_BODY_LIMIT_BYTES: usize = 512 * 1024;
+
+/// `POST /admin/clients/{id}/logo` on a dedicated sub-router so the multipart
+/// body-size cap doesn't apply to the rest of `/admin` (precedent:
+/// `src/orgs/settings_page/mod.rs` `logo_router`).
+fn client_logo_router() -> Router<AppState> {
+    Router::new()
+        .route("/admin/clients/{id}/logo", post(clients::logo_upload))
+        .layer(axum::extract::DefaultBodyLimit::max(
+            CLIENT_LOGO_UPLOAD_BODY_LIMIT_BYTES,
+        ))
 }
 
 /// `/admin` → `/admin/status`. Saves operators a click on the bookmark.

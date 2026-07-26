@@ -1,4 +1,7 @@
-//! Bounded in-process cache for org logo blobs, keyed by org id.
+//! Bounded in-process cache for served logo blobs.
+//!
+//! Shared by org logos and OAuth-client logos; keys are namespaced by
+//! [`org_key`] / [`client_key`] so the two id spaces can't collide.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -7,6 +10,14 @@ use axum::body::Bytes;
 
 pub(crate) const DEFAULT_MAX_ENTRIES: usize = 200;
 pub(crate) const DEFAULT_MAX_TOTAL_BYTES: usize = 64 * 1024 * 1024;
+
+pub(crate) fn org_key(org_id: &str) -> String {
+    format!("org:{org_id}")
+}
+
+pub(crate) fn client_key(client_id: &str) -> String {
+    format!("client:{client_id}")
+}
 
 pub(crate) struct CachedLogo {
     pub(crate) etag: String,
@@ -78,6 +89,11 @@ mod tests {
             content_type: "image/png".to_string(),
             bytes: Bytes::from(vec![0u8; bytes]),
         })
+    }
+
+    #[test]
+    fn key_namespaces_dont_collide() {
+        assert_ne!(org_key("x"), client_key("x"));
     }
 
     #[test]

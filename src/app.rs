@@ -191,6 +191,10 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         ))
         .merge(crate::legal::router(&state.cfg.proxy))
         .merge(orgs::logo::router(&state.cfg.orgs, &state.cfg.proxy))
+        .merge(crate::client_logo::router(
+            &state.cfg.orgs,
+            &state.cfg.proxy,
+        ))
         // Public JWKS for outbound webhook signature verification (RFC 8417 SETs); outside the CSRF layer.
         .route(
             "/.well-known/webhook-jwks.json",

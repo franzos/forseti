@@ -51,6 +51,13 @@ struct ConsentTemplate {
     /// row exists (legacy clients default to verified). Drives the consent
     /// badge: verified shows a checkmark, unverified a caution banner.
     verified: bool,
+    /// Client id, for the logo URL. Empty when Hydra didn't give us one,
+    /// which also forces `has_logo` false.
+    client_id: String,
+    /// True when an operator uploaded a logo for this client. Independent of
+    /// `verified`: an unverified client still shows its logo, the caution
+    /// banner carries the trust signal.
+    has_logo: bool,
     /// Other accounts remembered on this device (current subject excluded);
     /// each offers a one-click switch via the OAuth restart.
     known_accounts: Vec<ConsentAccountView>,
@@ -241,6 +248,20 @@ pub(crate) async fn oauth_consent(
         }
     };
 
+    // Operator-uploaded, so it's safe to show before the user has decided;
+    // a probe failure just falls back to the generic icon.
+    let has_logo = !client_id_lookup.is_empty()
+        && crate::client_logo::exists(&state.db, client_id_lookup)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    error = ?e,
+                    client_id = %client_id_lookup,
+                    "consent: client logo probe failed; falling back to the generic icon"
+                );
+                false
+            });
+
     let known_ids = crate::accounts::cookie::read_known_account_ids(
         &headers,
         &state.cookie_secret,
@@ -284,6 +305,8 @@ pub(crate) async fn oauth_consent(
         challenge,
         scopes,
         verified,
+        client_id: client_id_lookup.to_string(),
+        has_logo,
         known_accounts,
     })
 }

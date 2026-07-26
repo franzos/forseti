@@ -107,6 +107,44 @@
 
 <section class="mb-stack-lg">
   <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest">
+    {{ chrome.t("admin-client-section-logo") }}
+  </h2>
+  <p class="font-body-sm text-body-sm text-on-surface-variant mb-stack-md">
+    {{ chrome.t("admin-client-logo-intro") }}
+  </p>
+  <form method="POST"
+        enctype="multipart/form-data"
+        action="/admin/clients/{{ row.id }}/logo"
+        class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4 flex flex-col gap-stack-md">
+    <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+    {% if has_logo %}
+      <div class="flex items-center gap-stack-md">
+        <img src="/clients/{{ row.id }}/logo"
+             alt=""
+             class="w-12 h-12 rounded-lg object-contain bg-surface-container-high">
+        <label class="flex items-center gap-stack-sm">
+          <input type="checkbox" name="remove" value="1">
+          <span class="font-body-md text-body-md text-on-surface">{{ chrome.t("admin-client-logo-remove") }}</span>
+        </label>
+      </div>
+    {% endif %}
+    <label class="flex flex-col gap-1">
+      <span class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-client-logo-file") }}</span>
+      <input type="file"
+             name="logo"
+             accept="image/png,image/jpeg,image/webp"
+             class="border border-outline-variant rounded-lg px-3 py-2 bg-surface-container-low">
+      <span class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-client-logo-hint") }}</span>
+    </label>
+    <div>
+      <button type="submit"
+              class="bg-primary text-on-primary rounded-lg px-4 py-2 font-label-md text-label-md">{{ chrome.t("admin-client-logo-save") }}</button>
+    </div>
+  </form>
+</section>
+
+<section class="mb-stack-lg">
+  <h2 class="font-label-sm text-label-sm text-on-surface-variant mb-stack-md uppercase tracking-widest">
     {{ chrome.t("admin-client-section-connection") }}
   </h2>
   <p class="font-body-sm text-body-sm text-on-surface-variant mb-stack-md">

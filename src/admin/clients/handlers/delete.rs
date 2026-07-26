@@ -45,6 +45,16 @@ pub async fn delete(
     }
     match ory::hydra::delete_client(&state.ory, &id).await {
         Ok(()) => {
+            // Best-effort: an orphaned blob is only wasted storage, not a
+            // reason to fail a delete Hydra already accepted.
+            if let Err(e) = crate::client_logo::delete(&state.db, &id).await {
+                tracing::warn!(error = ?e, id, "admin: client logo cleanup after delete failed");
+            }
+            state
+                .logo_cache
+                .lock()
+                .await
+                .remove(&crate::logo_cache::client_key(&id));
             let _ = audit::log(
                 &state.db,
                 ctx.audit_event(action::ADMIN_CLIENT_DELETED, &actx)

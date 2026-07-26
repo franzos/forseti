@@ -1,7 +1,8 @@
 //! Diesel table definitions. Hand-written rather than emitted by `diesel
 //! print-schema` so they're identical for both backends — every column is
 //! `Text` / `Nullable<Text>` / `Integer`, with timestamps as ISO-8601 UTC
-//! strings, except `org_logos.bytes` which is `Binary` (`BLOB`/`BYTEA`).
+//! strings, except the `bytes` columns on `org_logos` / `client_logos`
+//! which are `Binary` (`BLOB`/`BYTEA`).
 //! See `migrations/{sqlite,postgres}/...` for the SQL.
 
 diesel::table! {
@@ -331,6 +332,16 @@ diesel::table! {
         identity_id -> Text,
         provider -> Text,
         first_seen_at -> Text,
+    }
+}
+
+diesel::table! {
+    client_logos (client_id) {
+        client_id -> Text,
+        bytes -> Binary,
+        content_type -> Text,
+        etag -> Text,
+        updated_at -> Text,
     }
 }
 

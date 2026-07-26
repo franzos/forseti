@@ -3,6 +3,14 @@
 {% block title %}{{ chrome.tv1("consent-card-title", "app", &client_name) }} &middot; {{ chrome.brand.name }}{% endblock %}
 
 {% block card_icon %}
+  {# The app's own logo when an operator uploaded one: this screen is where
+     the user decides who receives their data, so it names and shows the
+     recipient. The surrounding chrome stays operator/org branded. #}
+  {% if has_logo %}
+  <img src="/clients/{{ client_id }}/logo"
+       alt=""
+       class="w-12 h-12 rounded-lg object-contain bg-surface-container-high mb-stack-sm">
+  {% else %}
   <div class="w-12 h-12 bg-primary rounded-lg flex items-center justify-center mb-stack-sm"
        aria-hidden="true">
     <svg xmlns="http://www.w3.org/2000/svg"
@@ -17,26 +25,29 @@
       <circle cx="12" cy="12" r="10" />
     </svg>
   </div>
+  {% endif %}
 {% endblock %}
 
 {% block card_title %}{{ chrome.tv1("consent-card-title", "app", &client_name) }}{% endblock %}
 {% block card_subtitle %}{{ consent_intro }}{% endblock %}
 
 {% block card_body %}
-  <p class="font-body-sm text-body-sm text-on-surface-variant">
-    {{ chrome.t("consent-signed-in-as-prefix") }} <strong class="text-on-surface"><bdi>{{ subject_email }}</bdi></strong>.
-  </p>
+  <div class="flex flex-col gap-stack-sm">
+    <p class="font-body-sm text-body-sm text-on-surface-variant">
+      {{ chrome.t("consent-signed-in-as-prefix") }} <strong class="text-on-surface"><bdi>{{ subject_email }}</bdi></strong>.
+    </p>
 
-  <form method="POST" action="/oauth/consent">
-    <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
-    <input type="hidden" name="consent_challenge" value="{{ challenge }}">
-    <button type="submit"
-            name="decision"
-            value="switch_account"
-            class="font-label-sm text-label-sm text-primary underline hover:text-primary-hover focus:outline-none focus:ring-2 focus:ring-primary rounded">
-      {{ chrome.t("consent-switch-account") }}
-    </button>
-  </form>
+    <form method="POST" action="/oauth/consent">
+      <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+      <input type="hidden" name="consent_challenge" value="{{ challenge }}">
+      <button type="submit"
+              name="decision"
+              value="switch_account"
+              class="font-label-sm text-label-sm text-primary underline hover:text-primary-hover focus:outline-none focus:ring-2 focus:ring-primary rounded">
+        {{ chrome.t("consent-switch-account") }}
+      </button>
+    </form>
+  </div>
 
   {% if !known_accounts.is_empty() %}
     <div class="flex flex-col gap-stack-sm">

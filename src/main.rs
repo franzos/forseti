@@ -4,6 +4,7 @@ mod app;
 mod audit;
 mod auth;
 mod cli;
+mod client_logo;
 mod commercial;
 mod config;
 mod config_cli;

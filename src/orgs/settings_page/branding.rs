@@ -15,7 +15,7 @@ use crate::orgs::{self, logo, Org};
 use crate::page_chrome::{PageChrome, ThemedChrome};
 use crate::render::render;
 use crate::state::AppState;
-use crate::theming::{self, color::parse_color, derive, image, TokenOverrides};
+use crate::theming::{self, color::parse_color, derive, TokenOverrides};
 
 use super::{
     build_nav, require_org_license, require_org_owner_with_license, resolve_org_or_404,
@@ -431,14 +431,7 @@ pub(super) async fn branding_save(
     state.flash_redirect(&target_url, &msg)
 }
 
-const MAX_LOGO_BYTES: usize = 256 * 1024;
-
-fn validate_logo(bytes: &[u8]) -> Result<&'static str, &'static str> {
-    if bytes.len() > MAX_LOGO_BYTES {
-        return Err("logo file exceeds 256 KB");
-    }
-    image::detect(bytes).ok_or("unsupported image type")
-}
+use crate::theming::image::{validate_logo, MAX_LOGO_BYTES};
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn logo_upload(
@@ -517,7 +510,11 @@ pub(super) async fn logo_upload(
             tracing::error!(error = ?e, "logo_upload: delete failed");
             return (StatusCode::INTERNAL_SERVER_ERROR, "remove failed").into_response();
         }
-        state.logo_cache.lock().await.remove(&org_id);
+        state
+            .logo_cache
+            .lock()
+            .await
+            .remove(&crate::logo_cache::org_key(&org_id));
         let _ = audit::log(
             &state.db,
             AuditEvent::new(action::ORG_LOGO_REMOVED)
@@ -543,7 +540,11 @@ pub(super) async fn logo_upload(
         tracing::error!(error = ?e, "logo_upload: upsert failed");
         return (StatusCode::INTERNAL_SERVER_ERROR, "save failed").into_response();
     }
-    state.logo_cache.lock().await.remove(&org_id);
+    state
+        .logo_cache
+        .lock()
+        .await
+        .remove(&crate::logo_cache::org_key(&org_id));
 
     let _ = audit::log(
         &state.db,
@@ -692,26 +693,5 @@ mod tests {
         let f = form("", "", "", "", None);
         let t = validate_theme_form(&f, &brand()).expect("should validate");
         assert_eq!(t.public_login_enabled, 0);
-    }
-
-    #[test]
-    fn validate_logo_accepts_small_png() {
-        let mut png = vec![0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n'];
-        png.extend_from_slice(&[0u8; 32]);
-        assert_eq!(validate_logo(&png), Ok("image/png"));
-    }
-
-    #[test]
-    fn validate_logo_rejects_oversize() {
-        let mut png = vec![0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n'];
-        png.resize(8 + MAX_LOGO_BYTES + 1, 0);
-        let err = validate_logo(&png).unwrap_err();
-        assert_eq!(err, "logo file exceeds 256 KB");
-    }
-
-    #[test]
-    fn validate_logo_rejects_non_image() {
-        let err = validate_logo(b"<svg xmlns=...>").unwrap_err();
-        assert_eq!(err, "unsupported image type");
     }
 }

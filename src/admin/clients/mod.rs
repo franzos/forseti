@@ -20,6 +20,6 @@ mod projection;
 mod scope;
 
 pub(crate) use handlers::{
-    create, delete, delete_confirm, list, new, rotate, rotate_confirm, show, unverify,
+    create, delete, delete_confirm, list, logo_upload, new, rotate, rotate_confirm, show, unverify,
     unverify_confirm, update, verify,
 };

@@ -115,6 +115,9 @@ struct ClientShowTemplate {
     /// `resource=` URL (or fallback audience) seen at consent time.
     /// Empty when never captured.
     provenance_resource_url: String,
+    /// True when a `client_logos` row exists — drives the preview + remove
+    /// checkbox on the logo card.
+    has_logo: bool,
     /// Provider endpoints for the integrator-facing connection card.
     conn: ConnectionDetails,
     /// False only on a cold discovery failure (no cached doc) → the card
@@ -180,6 +183,13 @@ pub async fn show(
     let show_path = format!("/admin/clients/{id}");
     let (flash_msg, clear_flash) = state.take_flash(&headers, &show_path);
 
+    let has_logo = crate::client_logo::exists(&state.db, &id)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = ?e, id, "admin: client logo probe failed; hiding preview");
+            false
+        });
+
     let chrome = ctx.chrome(&csrf);
     let (disc, discovery_ok) = state.openid_configuration().await;
     let tpl = build_show_view(
@@ -191,6 +201,7 @@ pub async fn show(
         flash_msg,
         disc,
         discovery_ok,
+        has_logo,
     );
     let resp = render(&tpl);
     attach_set_cookie(resp, clear_flash)
@@ -210,6 +221,7 @@ fn build_show_view(
     flash_msg: String,
     discovery: crate::ory::discovery::OidcDiscovery,
     discovery_ok: bool,
+    has_logo: bool,
 ) -> ClientShowTemplate {
     // Lift provenance off the metadata row before `project_row` discards it;
     // the show page is the only consumer.
@@ -310,6 +322,7 @@ fn build_show_view(
         flash: flash_msg,
         provenance_audience,
         provenance_resource_url,
+        has_logo,
         conn,
         discovery_ok,
     }
