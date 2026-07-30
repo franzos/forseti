@@ -48,6 +48,13 @@ pub(crate) const SETTINGS: &[Setting] = &[
         targets: &["kratos.yml"],
     },
     Setting {
+        key: "oidc.apple",
+        group: "Sign-in providers",
+        title: "Apple sign-in",
+        description: "Registers Forseti as an upstream OIDC client of Sign in with Apple. In the Apple Developer portal, enable Sign in with Apple on an App ID, create a Services ID (that string is the `client_id`, not the Team ID or Bundle ID), register `https://<kratos-public-host>/self-service/methods/oidc/callback/apple` as its return URL, then create a Sign in with Apple key and keep the `.p8`. Apple issues no client secret: Kratos signs one per handshake from `apple_team_id`, `apple_private_key_id`, and `apple_private_key`. The provider id must be exactly `apple` — Apple replies with `response_mode=form_post`, and Kratos only exempts that callback from CSRF for the `apple` id. Apple rejects localhost and plain-HTTP return URLs, so local testing needs a tunnel on a domain registered against the Services ID.",
+        targets: &["kratos.yml"],
+    },
+    Setting {
         key: "audit.webhook-token",
         group: "Secrets & delivery",
         title: "Audit webhook token",
@@ -103,6 +110,7 @@ pub(crate) fn status_of(
                 "oidc.google" => provider_status(kratos, "google", config_dir),
                 "oidc.github" => provider_status(kratos, "github", config_dir),
                 "oidc.microsoft" => provider_status(kratos, "microsoft", config_dir),
+                "oidc.apple" => provider_status(kratos, "apple", config_dir),
                 "audit.webhook-token" => webhook_token_status(kratos, forseti_toml),
                 "kratos.secrets" => kratos_secrets_status(kratos),
                 "hydra.system" => hydra_system_status(hydra),
@@ -151,14 +159,23 @@ fn provider_status(kratos: &Value, id: &str, config_dir: &Path) -> (String, Stri
         .filter(|f| f.key == base || f.key.starts_with(&format!("{base}.")))
         .collect();
 
+    // Apple's credential is the .p8 key trio, not a client_secret.
+    let credential_keys: &[&str] = if id == "apple" {
+        &["client_id", "apple_team_id", "apple_private_key_id"]
+    } else {
+        &["client_id", "client_secret"]
+    };
     let credential_bad = provider_findings.iter().any(|f| {
         f.severity == Severity::Fail
-            && (f.key == format!("{base}.client_id") || f.key == format!("{base}.client_secret"))
+            && credential_keys
+                .iter()
+                .any(|k| f.key == format!("{base}.{k}"))
     });
     if credential_bad {
+        let names = credential_keys.join("/");
         return (
             "placeholder".to_string(),
-            "client_id/client_secret unset or still a placeholder".to_string(),
+            format!("{names} unset or still a placeholder"),
         );
     }
 
@@ -178,12 +195,18 @@ fn provider_status(kratos: &Value, id: &str, config_dir: &Path) -> (String, Stri
         return ("warn".to_string(), format!("{}: {}", f.key, f.current));
     }
 
-    let fp = dig_str(provider, &["client_secret"])
-        .map(fingerprint)
-        .unwrap_or_default();
+    let (label, value) = if id == "apple" {
+        (
+            "apple_private_key",
+            dig_str(provider, &["apple_private_key"]),
+        )
+    } else {
+        ("client_secret", dig_str(provider, &["client_secret"]))
+    };
+    let fp = value.map(fingerprint).unwrap_or_default();
     (
         "ok".to_string(),
-        format!("configured; client_secret sha256[:8]={fp}"),
+        format!("configured; {label} sha256[:8]={fp}"),
     )
 }
 
@@ -378,8 +401,8 @@ oidc:
 "#;
 
     #[test]
-    fn status_of_reports_seven_settings() {
-        assert_eq!(SETTINGS.len(), 7);
+    fn status_of_reports_eight_settings() {
+        assert_eq!(SETTINGS.len(), 8);
     }
 
     #[test]
@@ -396,6 +419,7 @@ oidc:
         assert_eq!(find(&statuses, "oidc.google").state, "missing");
         assert_eq!(find(&statuses, "oidc.github").state, "missing");
         assert_eq!(find(&statuses, "oidc.microsoft").state, "missing");
+        assert_eq!(find(&statuses, "oidc.apple").state, "missing");
 
         let webhook = find(&statuses, "audit.webhook-token");
         assert!(
@@ -464,6 +488,83 @@ selfservice:
             microsoft.state, "ok",
             "microsoft_tenant: common must not report ok, got detail: {}",
             microsoft.detail
+        );
+    }
+
+    // A fully-configured Apple provider has no client_secret at all. The
+    // status probe must read the key trio instead of reporting a missing
+    // credential.
+    #[test]
+    fn provider_status_for_apple_does_not_demand_a_client_secret() {
+        let dir =
+            std::env::temp_dir().join(format!("forseti-catalog-apple-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("oidc.apple.jsonnet"),
+            super::super::modify::MAPPER_APPLE,
+        )
+        .unwrap();
+
+        let kratos: Value = serde_yaml_ng::from_str(
+            r#"
+selfservice:
+  methods:
+    oidc:
+      config:
+        providers:
+          - id: apple
+            provider: apple
+            client_id: com.example.accounts.service
+            apple_team_id: ABCDE12345
+            apple_private_key_id: XYZ9876543
+            apple_private_key: "-----BEGIN PRIVATE KEY-----\nMIGTAgEAdeadbeef\n-----END PRIVATE KEY-----\n"
+            issuer_url: https://appleid.apple.com
+            mapper_url: file:///etc/config/kratos/oidc.apple.jsonnet
+"#,
+        )
+        .unwrap();
+        let hydra: Value = serde_yaml_ng::from_str("secrets: {}").unwrap();
+
+        let statuses = status_of(&kratos, &hydra, None, &dir);
+        let apple = find(&statuses, "oidc.apple");
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(
+            apple.state, "ok",
+            "apple without client_secret must report ok, got detail: {}",
+            apple.detail
+        );
+        assert!(
+            apple.detail.contains("apple_private_key"),
+            "detail should fingerprint the key, got: {}",
+            apple.detail
+        );
+    }
+
+    #[test]
+    fn provider_status_is_not_ok_when_apple_key_trio_is_incomplete() {
+        let kratos: Value = serde_yaml_ng::from_str(
+            r#"
+selfservice:
+  methods:
+    oidc:
+      config:
+        providers:
+          - id: apple
+            provider: apple
+            client_id: com.example.accounts.service
+            apple_team_id: ABCDE12345
+            mapper_url: file:///etc/config/kratos/oidc.apple.jsonnet
+"#,
+        )
+        .unwrap();
+        let hydra: Value = serde_yaml_ng::from_str("secrets: {}").unwrap();
+
+        let statuses = status_of(&kratos, &hydra, None, Path::new("/nonexistent-config-dir"));
+        let apple = find(&statuses, "oidc.apple");
+        assert_ne!(
+            apple.state, "ok",
+            "a missing apple_private_key must not report ok, got detail: {}",
+            apple.detail
         );
     }
 

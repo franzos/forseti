@@ -32,6 +32,7 @@ pub(crate) fn icon_svg(provider_id: &str) -> &'static str {
         "github" => GITHUB,
         "google" => GOOGLE,
         "microsoft" => MICROSOFT,
+        "apple" => APPLE,
         _ => FALLBACK,
     }
 }
@@ -41,6 +42,8 @@ const GITHUB: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="18" heigh
 const GOOGLE: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12.24 10.4v3.32h4.62c-.2 1.2-.83 2.22-1.77 2.9v2.4h2.86c1.68-1.55 2.65-3.83 2.65-6.54 0-.63-.06-1.24-.16-1.82H12.24z"/><path d="M12.24 21c2.4 0 4.41-.8 5.88-2.16l-2.86-2.22c-.8.54-1.82.86-3.02.86-2.32 0-4.29-1.57-4.99-3.68H4.29v2.31C5.75 18.98 8.77 21 12.24 21z"/><path d="M7.25 13.8a5.4 5.4 0 0 1 0-3.44V8.05H4.29A8.96 8.96 0 0 0 3.34 12c0 1.45.35 2.82.95 4.03l2.96-2.23z"/><path d="M12.24 6.58c1.31 0 2.48.45 3.4 1.33l2.54-2.54C16.65 3.9 14.64 3 12.24 3 8.77 3 5.75 5.02 4.29 7.97l2.96 2.31c.7-2.11 2.67-3.7 4.99-3.7z"/></svg>"#;
 
 const MICROSOFT: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M3 3h8.5v8.5H3V3zm9.5 0H21v8.5h-8.5V3zM3 12.5h8.5V21H3v-8.5zm9.5 0H21V21h-8.5v-8.5z"/></svg>"#;
+
+const APPLE: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M16.37 12.77c.02 2.4 2.1 3.2 2.13 3.21-.02.06-.33 1.14-1.1 2.26-.66.97-1.35 1.93-2.44 1.95-1.07.02-1.41-.63-2.63-.63-1.22 0-1.6.61-2.61.65-1.05.04-1.85-1.05-2.51-2.01-1.36-1.97-2.4-5.57-1-8 .69-1.2 1.93-1.97 3.28-1.99 1.03-.02 2 .69 2.63.69.63 0 1.81-.86 3.05-.73.52.02 1.98.21 2.92 1.58-.08.05-1.74 1.02-1.72 3.02M14.4 5.2c.56-.67.94-1.61.84-2.55-.81.03-1.79.54-2.36 1.22-.51.6-.96 1.55-.84 2.47.9.07 1.81-.46 2.36-1.14"/></svg>"#;
 
 const FALLBACK: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="2" y1="12" x2="22" y2="12"></line><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path></svg>"#;
 
@@ -64,6 +67,7 @@ mod tests {
     #[test]
     fn icon_svg_known_and_fallback() {
         assert_eq!(icon_svg("github"), GITHUB);
+        assert_eq!(icon_svg("apple"), APPLE);
         // Unknown provider gets the generic globe mark.
         assert_eq!(icon_svg("okta"), FALLBACK);
     }

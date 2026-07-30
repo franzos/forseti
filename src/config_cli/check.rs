@@ -463,7 +463,19 @@ pub(crate) fn check_oidc_providers(root: &Value, config_dir: &Path) -> Vec<Findi
         let id = dig_str(provider, &["id"]).unwrap_or("<unnamed>");
         let base = format!("selfservice.methods.oidc.config.providers[{idx}]");
 
-        for field in ["client_id", "client_secret"] {
+        // Apple has no client secret: Kratos mints one per handshake as a JWT
+        // signed with the .p8 key, so the three `apple_*` fields carry the
+        // credential instead. Requiring `client_secret` here would FAIL every
+        // correctly-configured Apple provider.
+        let is_apple = dig_str(provider, &["provider"]).unwrap_or(id) == "apple";
+        // `apple_private_key` is linted on its own below: it needs a PEM shape
+        // check too, and one key must yield exactly one finding.
+        let required: &[&str] = if is_apple {
+            &["client_id", "apple_team_id", "apple_private_key_id"]
+        } else {
+            &["client_id", "client_secret"]
+        };
+        for field in required {
             let key = format!("{base}.{field}");
             match dig_str(provider, &[field]) {
                 Some(v) if !is_placeholder(v) => findings.push(Finding::ok(&key, "<set>")),
@@ -475,6 +487,39 @@ pub(crate) fn check_oidc_providers(root: &Value, config_dir: &Path) -> Vec<Findi
                         "provider `{id}` has no usable `{field}` — sign-in with {id} will fail at the OAuth handshake."
                     ),
                 )),
+            }
+        }
+
+        if is_apple {
+            let key = format!("{base}.apple_private_key");
+            match dig_str(provider, &["apple_private_key"]) {
+                Some(pem) if pem.contains("BEGIN PRIVATE KEY") => {
+                    findings.push(Finding::ok(&key, "<set>"))
+                }
+                Some(pem) if !is_placeholder(pem) => findings.push(Finding::fail(
+                    &key,
+                    // A path to the .p8 rather than its contents is the likely
+                    // mistake, and is short enough to echo back usefully.
+                    if pem.len() > 64 { "<malformed>" } else { pem },
+                    "the unmodified contents of Apple's .p8 (a PKCS#8 PEM)",
+                    "this isn't a PKCS#8 PEM, so Kratos can't sign Apple's client-secret JWT — every Apple sign-in fails at the token exchange.",
+                )),
+                other => findings.push(Finding::fail(
+                    &key,
+                    other.unwrap_or("<unset>"),
+                    "the unmodified contents of Apple's .p8 (a PKCS#8 PEM)",
+                    &format!(
+                        "provider `{id}` has no usable `apple_private_key` — Kratos can't mint Apple's client secret, so sign-in fails at the token exchange."
+                    ),
+                )),
+            }
+            if dig_str(provider, &["client_secret"]).is_some() {
+                findings.push(Finding::warn(
+                    &format!("{base}.client_secret"),
+                    "<set>",
+                    "no client_secret (Kratos signs Apple's from the .p8 key)",
+                    "Apple providers don't use a static client secret; Kratos ignores this value, so it's a stale credential sitting in the config for no reason.",
+                ));
             }
         }
 
@@ -1555,6 +1600,132 @@ selfservice:
                 "selfservice.methods.oidc.config.providers[0].client_id"
             ),
             Some(Severity::Fail)
+        );
+    }
+
+    // Kratos signs Apple's client secret per handshake from the .p8 key, so
+    // requiring a static client_secret would FAIL every correct Apple setup.
+    #[test]
+    fn apple_provider_without_client_secret_is_not_a_failure() {
+        let v = parse(
+            r#"
+selfservice:
+  methods:
+    oidc:
+      config:
+        providers:
+          - id: apple
+            provider: apple
+            client_id: com.example.accounts.service
+            apple_team_id: ABCDE12345
+            apple_private_key_id: XYZ9876543
+            apple_private_key: "-----BEGIN PRIVATE KEY-----\nMIGTAgEAdeadbeef\n-----END PRIVATE KEY-----\n"
+            mapper_url: file:///etc/config/kratos/oidc.apple.jsonnet
+"#,
+        );
+        let findings = check_oidc_providers(&v, Path::new("/nonexistent"));
+        assert_eq!(
+            severity_of(
+                &findings,
+                "selfservice.methods.oidc.config.providers[0].client_secret"
+            ),
+            None,
+            "apple must not be linted for a client_secret it never uses"
+        );
+        for field in ["apple_team_id", "apple_private_key_id", "apple_private_key"] {
+            assert_eq!(
+                severity_of(
+                    &findings,
+                    &format!("selfservice.methods.oidc.config.providers[0].{field}")
+                ),
+                Some(Severity::Ok),
+                "{field} should be OK"
+            );
+        }
+    }
+
+    #[test]
+    fn apple_provider_missing_key_id_fails() {
+        let v = parse(
+            r#"
+selfservice:
+  methods:
+    oidc:
+      config:
+        providers:
+          - id: apple
+            provider: apple
+            client_id: com.example.accounts.service
+            apple_team_id: ABCDE12345
+            apple_private_key: "-----BEGIN PRIVATE KEY-----\nMIGTAgEAdeadbeef\n-----END PRIVATE KEY-----\n"
+            mapper_url: file:///etc/config/kratos/oidc.apple.jsonnet
+"#,
+        );
+        let findings = check_oidc_providers(&v, Path::new("/nonexistent"));
+        assert_eq!(
+            severity_of(
+                &findings,
+                "selfservice.methods.oidc.config.providers[0].apple_private_key_id"
+            ),
+            Some(Severity::Fail)
+        );
+    }
+
+    #[test]
+    fn apple_private_key_that_is_not_a_pem_fails() {
+        let v = parse(
+            r#"
+selfservice:
+  methods:
+    oidc:
+      config:
+        providers:
+          - id: apple
+            provider: apple
+            client_id: com.example.accounts.service
+            apple_team_id: ABCDE12345
+            apple_private_key_id: XYZ9876543
+            apple_private_key: /etc/config/kratos/AuthKey_XYZ9876543.p8
+            mapper_url: file:///etc/config/kratos/oidc.apple.jsonnet
+"#,
+        );
+        let findings = check_oidc_providers(&v, Path::new("/nonexistent"));
+        // A path instead of the key contents is the likely operator mistake.
+        assert_eq!(
+            severity_of(
+                &findings,
+                "selfservice.methods.oidc.config.providers[0].apple_private_key"
+            ),
+            Some(Severity::Fail)
+        );
+    }
+
+    #[test]
+    fn apple_provider_with_a_stale_client_secret_warns() {
+        let v = parse(
+            r#"
+selfservice:
+  methods:
+    oidc:
+      config:
+        providers:
+          - id: apple
+            provider: apple
+            client_id: com.example.accounts.service
+            client_secret: left-over-from-another-provider
+            apple_team_id: ABCDE12345
+            apple_private_key_id: XYZ9876543
+            apple_private_key: "-----BEGIN PRIVATE KEY-----\nMIGTAgEAdeadbeef\n-----END PRIVATE KEY-----\n"
+            mapper_url: file:///etc/config/kratos/oidc.apple.jsonnet
+"#,
+        );
+        let findings = check_oidc_providers(&v, Path::new("/nonexistent"));
+        assert_eq!(
+            severity_of(
+                &findings,
+                "selfservice.methods.oidc.config.providers[0].client_secret"
+            ),
+            Some(Severity::Warn)
         );
     }
 

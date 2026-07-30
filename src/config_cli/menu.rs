@@ -29,7 +29,7 @@ use super::check::{
 };
 use super::init;
 use super::io::{read_secret, resolve_target, SecretSource};
-use super::modify::{self, LineSource, ModifyCtx, OidcEnableInput};
+use super::modify::{self, AppleCreds, LineSource, ModifyCtx, OidcEnableInput};
 use super::yamlutil::{dig_str, load_yaml};
 
 // ---------------------------------------------------------------------------
@@ -320,7 +320,7 @@ fn prompt(io: &mut MenuIo, label: Option<&str>) -> Option<String> {
 
 fn detail_actions_line(key: &str) -> &'static str {
     match key {
-        "oidc.google" | "oidc.github" | "oidc.microsoft" => {
+        "oidc.google" | "oidc.github" | "oidc.microsoft" | "oidc.apple" => {
             "[e] enable/edit  [d] disable  [b] back"
         }
         "audit.webhook-token" => "[r] rotate  [p] prune  [b] back",
@@ -356,11 +356,11 @@ fn run_detail(
 
         match (setting.key, cmd.as_str()) {
             (_, "b") => return,
-            ("oidc.google" | "oidc.github" | "oidc.microsoft", "e") => {
+            ("oidc.google" | "oidc.github" | "oidc.microsoft" | "oidc.apple", "e") => {
                 run_oidc_enable(io, paths, setting.key.trim_start_matches("oidc."));
                 return;
             }
-            ("oidc.google" | "oidc.github" | "oidc.microsoft", "d") => {
+            ("oidc.google" | "oidc.github" | "oidc.microsoft" | "oidc.apple", "d") => {
                 run_oidc_disable(
                     io,
                     paths,
@@ -478,11 +478,18 @@ fn run_oidc_enable(io: &mut MenuIo, paths: &PathArgs, provider: &str) {
         return;
     }
 
-    let client_secret = match read_secret((io.secret_source)("client_secret")) {
-        Ok(s) => s,
-        Err(e) => {
-            let _ = writeln!(io.output, "error: {e}");
-            return;
+    // Apple authenticates with a signed assertion, so there's no secret to
+    // read; the .p8 comes in by path instead (a masked single-line prompt
+    // can't take a PEM).
+    let client_secret = if provider == "apple" {
+        String::new()
+    } else {
+        match read_secret((io.secret_source)("client_secret")) {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = writeln!(io.output, "error: {e}");
+                return;
+            }
         }
     };
 
@@ -495,11 +502,42 @@ fn run_oidc_enable(io: &mut MenuIo, paths: &PathArgs, provider: &str) {
         None
     };
 
+    let apple = if provider == "apple" {
+        let Some(team_id) = prompt(io, Some("apple_team_id")) else {
+            return; // EOF
+        };
+        let Some(key_id) = prompt(io, Some("apple_key_id")) else {
+            return; // EOF
+        };
+        let Some(key_path) = prompt(io, Some("apple_private_key_file (.p8 path)")) else {
+            return; // EOF
+        };
+        if key_path.is_empty() {
+            let _ = writeln!(io.output, "error: apple_private_key_file must not be empty");
+            return;
+        }
+        let private_key = match read_secret(SecretSource::File(PathBuf::from(key_path))) {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = writeln!(io.output, "error: {e}");
+                return;
+            }
+        };
+        Some(AppleCreds {
+            team_id,
+            key_id,
+            private_key,
+        })
+    } else {
+        None
+    };
+
     let input = OidcEnableInput {
         provider: provider.to_string(),
         client_id,
         client_secret,
         microsoft_tenant,
+        apple,
         keep_mapper: false,
     };
     run_ctx_action(io, paths, |ctx| modify::oidc_enable(ctx, input));

@@ -140,16 +140,38 @@ pub struct SecretSourceArgs {
     pub client_secret_stdin: bool,
 }
 
+/// Apple's `.p8` signing key. Apple has no client secret: Kratos mints one as
+/// a JWT from this key, so it travels on its own flag group rather than
+/// through `SecretSourceArgs`. No prompt fallback — a PEM doesn't survive a
+/// masked single-line read, so one of these is required for `apple`.
+#[derive(Clone, Args)]
+pub struct AppleKeySourceArgs {
+    // at most one; none => rejected post-parse for apple
+    #[arg(long, group = "apple_key_src")]
+    pub apple_private_key_env: Option<String>,
+    #[arg(long, group = "apple_key_src")]
+    pub apple_private_key_file: Option<PathBuf>,
+    #[arg(long, group = "apple_key_src")]
+    pub apple_private_key_stdin: bool,
+}
+
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)] // parsed once at startup; boxing costs clap's derive
 pub enum OidcCmd {
     Enable {
-        provider: String, // validated post-parse: google|github|microsoft
+        provider: String, // validated post-parse: google|github|microsoft|apple
         #[arg(long)]
         client_id: Option<String>, // Option so the menu can prompt; non-interactive requires it post-parse
         #[command(flatten)]
         secret: SecretSourceArgs,
         #[arg(long)]
         microsoft_tenant: Option<String>, // required iff provider == microsoft, post-parse
+        #[arg(long)]
+        apple_team_id: Option<String>, // required iff provider == apple, post-parse
+        #[arg(long)]
+        apple_key_id: Option<String>, // required iff provider == apple, post-parse
+        #[command(flatten)]
+        apple_key: AppleKeySourceArgs,
         #[arg(long)]
         keep_mapper: bool,
     },
@@ -242,6 +264,62 @@ mod tests {
             "--client-secret-stdin",
         ]);
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn apple_key_source_flags_are_mutually_exclusive() {
+        let err = Cli::try_parse_from([
+            "forseti",
+            "config",
+            "oidc",
+            "enable",
+            "apple",
+            "--apple-private-key-file",
+            "AuthKey.p8",
+            "--apple-private-key-stdin",
+        ]);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn apple_enable_parses_the_full_flag_set() {
+        let cli = Cli::try_parse_from([
+            "forseti",
+            "config",
+            "oidc",
+            "enable",
+            "apple",
+            "--client-id",
+            "com.example.accounts.service",
+            "--apple-team-id",
+            "ABCDE12345",
+            "--apple-key-id",
+            "XYZ9876543",
+            "--apple-private-key-file",
+            "AuthKey.p8",
+        ])
+        .unwrap();
+        let Some(Cmd::Config(c)) = cli.cmd else {
+            panic!("wrong variant")
+        };
+        let Some(ConfigCmd::Oidc {
+            cmd:
+                OidcCmd::Enable {
+                    apple_team_id,
+                    apple_key_id,
+                    apple_key,
+                    ..
+                },
+        }) = c.cmd
+        else {
+            panic!("wrong variant")
+        };
+        assert_eq!(apple_team_id.as_deref(), Some("ABCDE12345"));
+        assert_eq!(apple_key_id.as_deref(), Some("XYZ9876543"));
+        assert_eq!(
+            apple_key.apple_private_key_file.unwrap().to_str().unwrap(),
+            "AuthKey.p8"
+        );
     }
 
     #[test]

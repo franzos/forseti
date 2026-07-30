@@ -908,6 +908,7 @@ Bare `forseti config` (no subcommand) drops into an interactive menu when stdin 
 | `forseti config check [--strict]` | The linter described above |
 | `forseti config init ...` | The generator described above |
 | `forseti config oidc enable <google\|github\|microsoft> --client-id <id> (--client-secret-env/-file/-stdin) [--microsoft-tenant <id>] [--keep-mapper]` | Add/replace an upstream sign-in provider |
+| `forseti config oidc enable apple --client-id <services-id> --apple-team-id <id> --apple-key-id <id> (--apple-private-key-env/-file/-stdin) [--keep-mapper]` | Add/replace Sign in with Apple |
 | `forseti config oidc disable <id>` | Remove a provider |
 | `forseti config rotate webhook-token` | Stage a new audit webhook token (accept-list, zero-loss) |
 | `forseti config rotate kratos-secrets [--cookie \| --cipher]` | Prepend a new Kratos cookie and/or cipher secret |
@@ -926,6 +927,8 @@ Every mutating subcommand backs up the file it's about to change first (see [Bac
 ### Enabling and disabling OIDC providers
 
 `forseti config oidc enable <provider> --client-id <id> --client-secret-env <VAR>` writes the provider block into `kratos.yml` (literal `client_id`/`client_secret`: see the `${VAR}` note under [Kratos configuration → oidc](#oidc) above) and drops a reviewed mapper jsonnet next to it, gated on `email_verified` (Microsoft/Google) or treated as always-unverified (GitHub, which doesn't reliably send `email_verified`). The secret can come from an env var, a file, stdin, or (interactively) a masked prompt: never a bare CLI argument, so it doesn't end up in shell history or `ps`. Microsoft requires `--microsoft-tenant <tenant-id>`; `common` is refused (the nOAuth account-takeover class, see the note above).
+
+Apple is the exception to the client-secret shape. Apple issues no static secret: Kratos mints one per handshake as a JWT signed with the `.p8` key from the Apple Developer portal, so `enable apple` takes `--apple-team-id`, `--apple-key-id`, and the key itself through its own `--apple-private-key-env/-file/-stdin` group (no masked-prompt fallback: a PEM doesn't survive a single-line read). `--client-secret-*` is refused for Apple, and the `--apple-*` flags are refused for everyone else. The key lands in `kratos.yml` as a literal PEM block, and the diff `enable` prints redacts it line by line. `config check` knows the difference too: it lints Apple's three key fields instead of demanding a `client_secret`, and warns if a stale one is left behind.
 
 If the target mapper file already exists with content that doesn't match Forseti's pinned body, `enable` refuses and asks for `--keep-mapper` to proceed without touching it: it won't silently clobber a mapper you've customized.
 
@@ -1074,7 +1077,7 @@ selfservice:
 
 #### `oidc`
 
-Upstream OIDC providers (Google, GitHub, Microsoft). Operators register one OAuth app per provider on the provider's side; Forseti's `forseti config oidc enable` writes the client credentials into `kratos.yml` and renders one "Sign in with X" button per configured provider. See [Managing configuration with forseti config](#managing-configuration-with-forseti-config) below: that's the supported path for adding a provider; the manual YAML shape here is for reference (e.g. reading an existing `kratos.yml`) or for providers the CLI doesn't cover yet.
+Upstream OIDC providers (Google, GitHub, Microsoft, Apple). Operators register one OAuth app per provider on the provider's side; Forseti's `forseti config oidc enable` writes the client credentials into `kratos.yml` and renders one "Sign in with X" button per configured provider. See [Managing configuration with forseti config](#managing-configuration-with-forseti-config) below: that's the supported path for adding a provider; the manual YAML shape here is for reference (e.g. reading an existing `kratos.yml`) or for providers the CLI doesn't cover yet.
 
 **`${VAR}` is not interpolated.** Kratos does **not** expand `${VAR}`-style environment references anywhere in `kratos.yml`: that's a common assumption carried over from tools like Docker Compose or Helm, but Kratos's own config loader has no such substitution step (confirmed against the upstream config loader; there's no `${...}` expansion pass on the parsed YAML). Every value, including `client_id` and `client_secret`, must be the literal string Kratos will use. `forseti config oidc enable` writes secrets in literal, plaintext form (redacted only in this CLI's own diff output) for exactly this reason. If you want secrets sourced from the environment at *deploy* time rather than baked into the file, template `kratos.yml` through your deploy tooling (Helm, Terraform, a `sops`/`envsubst` pre-render step) before Kratos ever reads it. Kratos itself never does that substitution.
 
@@ -1083,7 +1086,7 @@ Worked example for Google, via the CLI:
 1. Go to <https://console.cloud.google.com/apis/credentials> and create an OAuth 2.0 Client ID.
 2. Authorized redirect URI: `https://accounts.example.com/self-service/methods/oidc/callback/google`. Substitute `accounts.example.com` for your Kratos public hostname: the path is fixed by Kratos.
 3. Capture the client ID and client secret.
-4. `forseti config oidc enable google --client-id <id> --client-secret-env GOOGLE_CLIENT_SECRET` (export the secret into that env var first, or use `--client-secret-file`/`--client-secret-stdin`; omit the flag entirely and the CLI prompts, masked, on a TTY). This writes the `providers` entry into `kratos.yml`, including `requested_claims.id_token.email`/`email_verified` as essential, and drops the reviewed mapper jsonnet next to it.
+4. `forseti config oidc enable google --client-id <id> --client-secret-env GOOGLE_CLIENT_SECRET` (export the secret into that env var first, or use `--client-secret-file`/`--client-secret-stdin`; omit the flag entirely and the CLI prompts, masked, on a TTY). This writes the `providers` entry into `kratos.yml` and drops the reviewed mapper jsonnet next to it.
 
 The resulting YAML looks like this (shown here so you know what to expect, or if you're reading an existing config by hand):
 
@@ -1100,13 +1103,40 @@ selfservice:
             client_secret: GOCSPX-actual-secret-value
             mapper_url: file:///etc/config/kratos/oidc.google.jsonnet
             scope: [openid, email, profile]
-            requested_claims:
-              id_token:
-                email: { essential: true }
-                email_verified: { essential: true }
 ```
 
 The mapper CLI-writes at `oidc.google.jsonnet` gates the `email` trait on `claims.email_verified`: copying `email` without that gate is an account-takeover vector (anyone who controls an unverified alias at the provider could claim the matching Forseti account). Don't hand-edit the mapper unless you understand that invariant; `forseti config check` warns if a provider's mapper doesn't match Forseti's reviewed pinned body.
+
+Apple is the one provider that doesn't fit that shape. Worked example:
+
+1. In the [Apple Developer portal](https://developer.apple.com/account/resources/identifiers/list), enable **Sign in with Apple** on an App ID.
+2. Create a **Services ID**. That string (e.g. `com.example.accounts.service`) is the `client_id` — not the Team ID, not the Bundle ID.
+3. Configure the Services ID's domain and return URL: `https://accounts.example.com/self-service/methods/oidc/callback/apple`. Apple rejects `localhost` and plain HTTP, so testing against a dev box needs a tunnel on a domain registered here.
+4. Create a **Sign in with Apple** key, download the `.p8` (Apple lets you download it once), and note the Key ID and your Team ID.
+5. `forseti config oidc enable apple --client-id com.example.accounts.service --apple-team-id ABCDE12345 --apple-key-id XYZ9876543 --apple-private-key-file ./AuthKey_XYZ9876543.p8`
+
+```yaml
+selfservice:
+  methods:
+    oidc:
+      enabled: true
+      config:
+        providers:
+          - id: apple
+            provider: apple
+            client_id: com.example.accounts.service
+            mapper_url: file:///etc/config/kratos/oidc.apple.jsonnet
+            scope: [email]
+            apple_team_id: ABCDE12345
+            apple_private_key_id: XYZ9876543
+            apple_private_key: |-
+              -----BEGIN PRIVATE KEY-----
+              ...contents of the .p8...
+              -----END PRIVATE KEY-----
+            issuer_url: https://appleid.apple.com
+```
+
+No `client_secret`: Kratos signs one per handshake from those three fields. The provider id must stay `apple` — Apple replies with `response_mode=form_post`, and Kratos only exempts that callback path from CSRF for the `apple` id. Apple's pinned mapper differs from the other three by one line, `local claims = { email_verified: false } + std.extVar('claims')`: Apple omits the claim entirely on some responses, and jsonnet errors on a missing field rather than treating it as false, so without the default a sign-in would hard-fail instead of falling back to Forseti's own verification flow. Two behaviours worth telling your support desk about: users who pick "Hide My Email" arrive as an `@privaterelay.appleid.com` address that breaks if they later revoke the app, and Apple only sends the name claim on the very first authorization.
 
 GitHub and Microsoft (Azure AD) follow the same `forseti config oidc enable <github|microsoft>` shape. GitHub's claims don't reliably carry `email_verified`, and the pinned mapper drops the `email` trait whenever `email_verified` is absent or false, the same gate it uses for Google and Microsoft, so such GitHub identities fall back to Forseti's own email verification flow. Microsoft requires `--microsoft-tenant <tenant-id>`: `common` (any Azure AD tenant or personal Microsoft account) is refused outright, since it opens the [nOAuth](https://www.descope.com/blog/post/noauth) account-takeover class where an attacker edits their own account's email in a tenant Microsoft doesn't verify.
 

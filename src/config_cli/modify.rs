@@ -12,7 +12,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde_yaml_ng::{Mapping, Value};
 use toml_edit::DocumentMut;
 
-use crate::cli::{OidcCmd, PathArgs, SecretSourceArgs, SmtpCmd};
+use crate::cli::{AppleKeySourceArgs, OidcCmd, PathArgs, SecretSourceArgs, SmtpCmd};
 
 use super::check::{
     check_hydra, check_kratos, check_oidc_providers, extract_hook_token, redact_uri,
@@ -48,12 +48,27 @@ pub(crate) const MAPPER_GOOGLE: &str = r#"local claims = std.extVar('claims');
 pub(crate) const MAPPER_GITHUB: &str = MAPPER_GOOGLE;
 pub(crate) const MAPPER_MICROSOFT: &str = MAPPER_GOOGLE;
 
+/// Apple's variant of the same gate. Apple omits `email_verified` entirely on
+/// some responses, and jsonnet errors on a missing field rather than treating
+/// it as false — without the default the mapper would hard-fail the sign-in
+/// instead of falling back to Forseti's own verification flow.
+pub(crate) const MAPPER_APPLE: &str = r#"local claims = { email_verified: false } + std.extVar('claims');
+{
+  identity: {
+    traits: {
+      [if 'email' in claims && claims.email_verified then 'email' else null]: claims.email,
+    },
+  },
+}
+"#;
+
 /// The pinned mapper body for a provider. Providers without a dedicated pin
-/// fall back to the shared body (the three supported providers are identical).
+/// fall back to the shared body (google/github/microsoft are identical).
 pub(crate) fn pinned_mapper(provider: &str) -> &'static str {
     match provider {
         "github" => MAPPER_GITHUB,
         "microsoft" => MAPPER_MICROSOFT,
+        "apple" => MAPPER_APPLE,
         _ => MAPPER_GOOGLE,
     }
 }
@@ -61,10 +76,10 @@ pub(crate) fn pinned_mapper(provider: &str) -> &'static str {
 /// Whether `provider` is one Forseti ships a pinned mapper for. Used by the
 /// linter to decide whether a mapper-vs-pinned hash mismatch is meaningful.
 pub(crate) fn known_pinned_provider(provider: &str) -> bool {
-    matches!(provider, "google" | "github" | "microsoft")
+    matches!(provider, "google" | "github" | "microsoft" | "apple")
 }
 
-const SUPPORTED_PROVIDERS: &[&str] = &["google", "github", "microsoft"];
+const SUPPORTED_PROVIDERS: &[&str] = &["google", "github", "microsoft", "apple"];
 
 // ---------------------------------------------------------------------------
 // Context + outcomes.
@@ -124,9 +139,18 @@ pub(crate) enum WriteOutcome {
 pub(crate) struct OidcEnableInput {
     pub provider: String,
     pub client_id: String,
+    /// Empty for `apple`, which authenticates with a signed assertion instead.
     pub client_secret: String,
     pub microsoft_tenant: Option<String>,
+    pub apple: Option<AppleCreds>,
     pub keep_mapper: bool,
+}
+
+/// The three values Kratos needs to mint Apple's client secret JWT.
+pub(crate) struct AppleCreds {
+    pub team_id: String,
+    pub key_id: String,
+    pub private_key: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -198,7 +222,45 @@ fn validate_oidc_enable_input(input: &OidcEnableInput) -> Result<(), String> {
     let provider = input.provider.as_str();
     if !SUPPORTED_PROVIDERS.contains(&provider) {
         return Err(format!(
-            "unknown provider `{provider}`; expected one of google, github, microsoft"
+            "unknown provider `{provider}`; expected one of google, github, microsoft, apple"
+        ));
+    }
+    if provider == "apple" {
+        let Some(apple) = &input.apple else {
+            return Err(
+                "apple requires --apple-team-id, --apple-key-id, and one of \
+                 --apple-private-key-file/--apple-private-key-env/--apple-private-key-stdin"
+                    .to_string(),
+            );
+        };
+        if apple.team_id.trim().is_empty() {
+            return Err("apple requires --apple-team-id (the Apple Developer Team ID)".to_string());
+        }
+        if apple.key_id.trim().is_empty() {
+            return Err(
+                "apple requires --apple-key-id (the Key ID of the Sign in with Apple key)"
+                    .to_string(),
+            );
+        }
+        // Kratos signs the client-secret JWT with this key at every handshake;
+        // a non-PEM value fails at sign-in time, far from the config change.
+        if !apple.private_key.contains("BEGIN PRIVATE KEY") {
+            return Err(
+                "apple private key doesn't look like a PKCS#8 PEM (no `BEGIN PRIVATE KEY` line); \
+                 pass the .p8 file Apple issued, contents unmodified"
+                    .to_string(),
+            );
+        }
+        if !input.client_secret.is_empty() {
+            return Err(
+                "apple has no client secret — Kratos mints one from the .p8 key; drop \
+                 --client-secret-* and pass --apple-private-key-* instead"
+                    .to_string(),
+            );
+        }
+    } else if input.apple.is_some() {
+        return Err(format!(
+            "--apple-* flags only apply to the apple provider, not `{provider}`"
         ));
     }
     if provider == "microsoft" {
@@ -223,6 +285,29 @@ fn validate_oidc_enable_input(input: &OidcEnableInput) -> Result<(), String> {
     Ok(())
 }
 
+/// Every value `write_yaml`'s diff must never print for this enable. The
+/// serializer renders a PEM as one double-quoted line with escaped newlines,
+/// so the whole-key string alone would never match: each base64 body line goes
+/// in separately, which does match both the on-disk and the escaped form.
+fn oidc_redaction_targets(input: &OidcEnableInput) -> Vec<String> {
+    let mut targets = Vec::new();
+    if !input.client_secret.is_empty() {
+        targets.push(input.client_secret.clone());
+    }
+    if let Some(apple) = &input.apple {
+        targets.push(apple.private_key.clone());
+        targets.extend(
+            apple
+                .private_key
+                .lines()
+                .map(str::trim)
+                .filter(|l| l.len() >= 16 && !l.starts_with("-----"))
+                .map(str::to_string),
+        );
+    }
+    targets
+}
+
 /// Applies the enable mutation to `root`. Returns whether the no-`web_hook`
 /// fallback was used (the caller-visible signal to warn about the audit gap).
 fn apply_oidc_enable(
@@ -241,21 +326,37 @@ fn apply_oidc_enable(
 
     *dig_mut_or_insert(root, &["selfservice", "methods", "oidc", "enabled"]) = Value::Bool(true);
 
-    let scope = if provider == "github" {
-        string_seq(&["user:email"])
-    } else {
-        string_seq(&["openid", "email", "profile"])
+    let scope = match provider {
+        "github" => string_seq(&["user:email"]),
+        // Apple only issues `email` and `name`, and only `email` reaches the
+        // id_token on repeat sign-ins; asking for openid/profile errors out.
+        "apple" => string_seq(&["email"]),
+        _ => string_seq(&["openid", "email", "profile"]),
     };
     let mut pairs = vec![
         ("id", Value::String(provider.to_string())),
         ("provider", Value::String(provider.to_string())),
         ("client_id", Value::String(input.client_id.clone())),
-        ("client_secret", Value::String(input.client_secret.clone())),
-        ("mapper_url", Value::String(mapper_url.to_string())),
-        ("scope", scope),
     ];
+    if provider != "apple" {
+        pairs.push(("client_secret", Value::String(input.client_secret.clone())));
+    }
+    pairs.push(("mapper_url", Value::String(mapper_url.to_string())));
+    pairs.push(("scope", scope));
     if let Some(t) = tenant {
         pairs.push(("microsoft_tenant", Value::String(t)));
+    }
+    if let Some(apple) = &input.apple {
+        pairs.push(("apple_team_id", Value::String(apple.team_id.clone())));
+        pairs.push(("apple_private_key_id", Value::String(apple.key_id.clone())));
+        pairs.push((
+            "apple_private_key",
+            Value::String(apple.private_key.clone()),
+        ));
+        pairs.push((
+            "issuer_url",
+            Value::String("https://appleid.apple.com".to_string()),
+        ));
     }
     let entry = mapping(pairs);
 
@@ -789,10 +890,26 @@ pub(crate) fn oidc_enable(ctx: &mut ModifyCtx, input: OidcEnableInput) -> anyhow
             )?;
         }
 
+        if input.provider == "apple" {
+            writeln!(
+                ctx.out,
+                "note: register `https://<kratos-public-host>/self-service/methods/oidc/callback/\
+                 apple` as the return URL on the Services ID. Apple rejects localhost and \
+                 non-HTTPS return URLs, so local testing needs a tunnel on a registered domain."
+            )?;
+            writeln!(
+                ctx.out,
+                "note: users who pick \"Hide My Email\" arrive as an @privaterelay.appleid.com \
+                 address, and Apple only sends the name claim on the very first authorization."
+            )?;
+        }
+
         let target = Target {
             path: ctx.kratos.path.clone(),
         };
-        let outcome = write_yaml(ctx, &target, &old_text, &root, &[&input.client_secret])?;
+        let redact = oidc_redaction_targets(&input);
+        let redact_refs: Vec<&str> = redact.iter().map(String::as_str).collect();
+        let outcome = write_yaml(ctx, &target, &old_text, &root, &redact_refs)?;
         match outcome {
             WriteOutcome::DryRun => Ok(0),
             WriteOutcome::Written { check_failed } => {
@@ -2055,6 +2172,20 @@ fn secret_source(args: &SecretSourceArgs) -> SecretSource {
     }
 }
 
+/// No `Prompt` arm: a masked single-line read can't take a PEM, so an absent
+/// source is an error the caller reports rather than something to fall back on.
+fn apple_key_source(args: &AppleKeySourceArgs) -> Option<SecretSource> {
+    if let Some(name) = &args.apple_private_key_env {
+        Some(SecretSource::Env(name.clone()))
+    } else if let Some(path) = &args.apple_private_key_file {
+        Some(SecretSource::File(path.clone()))
+    } else if args.apple_private_key_stdin {
+        Some(SecretSource::Stdin)
+    } else {
+        None
+    }
+}
+
 fn build_ctx(paths: &PathArgs) -> anyhow::Result<ModifyCtx> {
     let (kratos_path, _) = resolve_config_path(
         paths.kratos.as_deref(),
@@ -2092,11 +2223,15 @@ pub(crate) async fn run_oidc(cmd: OidcCmd, paths: &PathArgs) -> i32 {
             client_id,
             secret,
             microsoft_tenant,
+            apple_team_id,
+            apple_key_id,
+            apple_key,
             keep_mapper,
         } => {
             if !SUPPORTED_PROVIDERS.contains(&provider.as_str()) {
                 eprintln!(
-                    "error: unknown provider `{provider}`; expected google, github, or microsoft"
+                    "error: unknown provider `{provider}`; expected google, github, microsoft, \
+                     or apple"
                 );
                 return 2;
             }
@@ -2104,12 +2239,57 @@ pub(crate) async fn run_oidc(cmd: OidcCmd, paths: &PathArgs) -> i32 {
                 eprintln!("error: missing --client-id");
                 return 2;
             };
-            let client_secret = match read_secret(secret_source(&secret)) {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("error: {e}");
-                    return 1;
+            let is_apple = provider == "apple";
+            // Reject flag misuse before reading anything: a secret source that
+            // prompts or shells out shouldn't run for a command that's about
+            // to be refused, and the operator wants the flag error, not
+            // whatever the wrong source happened to fail on.
+            let apple_key_src = apple_key_source(&apple_key);
+            if !is_apple
+                && (apple_team_id.is_some() || apple_key_id.is_some() || apple_key_src.is_some())
+            {
+                eprintln!("error: --apple-* flags only apply to the apple provider");
+                return 2;
+            }
+            if is_apple && apple_key_src.is_none() {
+                eprintln!(
+                    "error: apple requires one of --apple-private-key-file, \
+                     --apple-private-key-env, or --apple-private-key-stdin"
+                );
+                return 2;
+            }
+
+            // Apple's flags and the client-secret flags are mutually exclusive
+            // per provider, so only ever read the source that provider uses —
+            // otherwise a non-apple run would block on Apple's prompt-less
+            // source, and an apple run on the client_secret TTY prompt.
+            let client_secret = if is_apple {
+                String::new()
+            } else {
+                match read_secret(secret_source(&secret)) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        return 1;
+                    }
                 }
+            };
+            let apple = match apple_key_src {
+                Some(src) => {
+                    let private_key = match read_secret(src) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            eprintln!("error: {e}");
+                            return 1;
+                        }
+                    };
+                    Some(AppleCreds {
+                        team_id: apple_team_id.unwrap_or_default(),
+                        key_id: apple_key_id.unwrap_or_default(),
+                        private_key,
+                    })
+                }
+                None => None,
             };
             let mut ctx = match build_ctx(paths) {
                 Ok(c) => c,
@@ -2123,6 +2303,7 @@ pub(crate) async fn run_oidc(cmd: OidcCmd, paths: &PathArgs) -> i32 {
                 client_id,
                 client_secret,
                 microsoft_tenant,
+                apple,
                 keep_mapper,
             };
             match oidc_enable(&mut ctx, input) {
@@ -2377,8 +2558,39 @@ mod tests {
             client_id: "cid".into(),
             client_secret: "sec".into(),
             microsoft_tenant: tenant.map(str::to_string),
+            apple: None,
             keep_mapper: false,
         }
+    }
+
+    const TEST_P8: &str = "-----BEGIN PRIVATE KEY-----\n\
+                           MIGTAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBHkwdwIBAQQgVeryABCDEFghijkl\n\
+                           mnopQRSTUVwxyz0123456789abcdefghij=\n\
+                           -----END PRIVATE KEY-----\n";
+
+    fn apple_input(key: &str) -> OidcEnableInput {
+        OidcEnableInput {
+            provider: "apple".into(),
+            client_id: "com.example.accounts.service".into(),
+            client_secret: String::new(),
+            microsoft_tenant: None,
+            apple: Some(AppleCreds {
+                team_id: "ABCDE12345".into(),
+                key_id: "XYZ9876543".into(),
+                private_key: key.into(),
+            }),
+            keep_mapper: false,
+        }
+    }
+
+    fn first_provider(root: &Value) -> &Value {
+        dig(
+            root,
+            &["selfservice", "methods", "oidc", "config", "providers"],
+        )
+        .and_then(Value::as_sequence)
+        .and_then(|s| s.first())
+        .expect("a provider entry")
     }
 
     fn unique_tmp_dir(label: &str) -> PathBuf {
@@ -2445,6 +2657,143 @@ mod tests {
                 .all(|f| f.severity != Severity::Fail || f.key.contains("mapper")),
             "unexpected non-mapper FAIL: {findings:?}"
         );
+    }
+
+    #[test]
+    fn enable_apple_writes_key_trio_and_no_client_secret() {
+        let mut root = render_default_kratos();
+        apply_oidc_enable(
+            &mut root,
+            &apple_input(TEST_P8),
+            "file:///etc/config/kratos/oidc.apple.jsonnet",
+        )
+        .unwrap();
+
+        let p = first_provider(&root);
+        assert_eq!(dig_str(p, &["id"]), Some("apple"));
+        assert_eq!(dig_str(p, &["apple_team_id"]), Some("ABCDE12345"));
+        assert_eq!(dig_str(p, &["apple_private_key_id"]), Some("XYZ9876543"));
+        assert_eq!(dig_str(p, &["apple_private_key"]), Some(TEST_P8));
+        assert_eq!(
+            dig_str(p, &["issuer_url"]),
+            Some("https://appleid.apple.com")
+        );
+        // Kratos signs Apple's secret per handshake; a static one would be a
+        // stale credential that Kratos ignores.
+        assert!(
+            dig(p, &["client_secret"]).is_none(),
+            "apple entry must not carry a client_secret"
+        );
+
+        let scope = dig(p, &["scope"]).and_then(Value::as_sequence).unwrap();
+        assert_eq!(scope.len(), 1);
+        assert_eq!(scope[0].as_str(), Some("email"));
+
+        // The Apple entry must not trip the credential lint that requires a
+        // client_secret for every other provider.
+        let findings = check_oidc_providers(&root, Path::new("."));
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.severity != Severity::Fail || f.key.contains("mapper")),
+            "unexpected non-mapper FAIL: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn enable_apple_rejects_a_key_that_is_not_a_pem() {
+        let mut root = render_default_kratos();
+        let err = apply_oidc_enable(
+            &mut root,
+            &apple_input("AuthKey_XYZ9876543.p8"),
+            "file:///etc/config/kratos/oidc.apple.jsonnet",
+        )
+        .unwrap_err();
+        assert!(err.contains("PKCS#8 PEM"), "err: {err}");
+    }
+
+    #[test]
+    fn enable_apple_requires_team_and_key_ids() {
+        for (team, key) in [("", "XYZ9876543"), ("ABCDE12345", "")] {
+            let mut input = apple_input(TEST_P8);
+            input.apple = Some(AppleCreds {
+                team_id: team.into(),
+                key_id: key.into(),
+                private_key: TEST_P8.into(),
+            });
+            let mut root = render_default_kratos();
+            let err = apply_oidc_enable(&mut root, &input, "file:///x.jsonnet").unwrap_err();
+            assert!(
+                err.contains("--apple-team-id") || err.contains("--apple-key-id"),
+                "err: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn enable_apple_refuses_a_client_secret() {
+        let mut input = apple_input(TEST_P8);
+        input.client_secret = "sec".into();
+        let mut root = render_default_kratos();
+        let err = apply_oidc_enable(&mut root, &input, "file:///x.jsonnet").unwrap_err();
+        assert!(err.contains("no client secret"), "err: {err}");
+    }
+
+    #[test]
+    fn apple_credentials_are_refused_for_other_providers() {
+        let mut input = apple_input(TEST_P8);
+        input.provider = "google".into();
+        input.client_secret = "sec".into();
+        let mut root = render_default_kratos();
+        let err = apply_oidc_enable(&mut root, &input, "file:///x.jsonnet").unwrap_err();
+        assert!(
+            err.contains("only apply to the apple provider"),
+            "err: {err}"
+        );
+    }
+
+    // The serializer renders the PEM as one double-quoted line with escaped
+    // newlines, so redacting only the whole-key string would silently leak it
+    // into the diff every enable prints.
+    #[test]
+    fn apple_private_key_is_redacted_out_of_the_serialized_diff() {
+        let mut root = render_default_kratos();
+        apply_oidc_enable(
+            &mut root,
+            &apple_input(TEST_P8),
+            "file:///etc/config/kratos/oidc.apple.jsonnet",
+        )
+        .unwrap();
+        let new_text = serde_yaml_ng::to_string(&root).unwrap();
+
+        let input = apple_input(TEST_P8);
+        let targets = oidc_redaction_targets(&input);
+        let refs: Vec<&str> = targets.iter().map(String::as_str).collect();
+        let diff = redacted_diff("kratos.yml", "", &new_text, &refs);
+
+        for line in TEST_P8
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.starts_with("-----"))
+        {
+            assert!(
+                !diff.contains(line),
+                "diff leaked a private key line: {line}\n{diff}"
+            );
+        }
+    }
+
+    #[test]
+    fn apple_pins_a_mapper_that_defaults_email_verified() {
+        // Apple omits the claim outright on some responses, and jsonnet errors
+        // on a missing field — without the default the mapper hard-fails the
+        // sign-in instead of falling back to Forseti's own verification.
+        assert!(
+            pinned_mapper("apple").contains("{ email_verified: false }"),
+            "apple mapper must default the claim"
+        );
+        assert!(known_pinned_provider("apple"));
+        assert_ne!(pinned_mapper("apple"), pinned_mapper("google"));
     }
 
     #[test]
@@ -2640,6 +2989,7 @@ mod tests {
                 client_id: "cid".into(),
                 client_secret: "sec".into(),
                 microsoft_tenant: None,
+                apple: None,
                 keep_mapper: false,
             },
         )
@@ -2667,6 +3017,7 @@ mod tests {
                 client_id: "cid".into(),
                 client_secret: "sec".into(),
                 microsoft_tenant: None,
+                apple: None,
                 keep_mapper: true,
             },
         )
@@ -2703,6 +3054,7 @@ mod tests {
                 client_id: "x".into(),
                 client_secret: "dummysecret".into(),
                 microsoft_tenant: None,
+                apple: None,
                 keep_mapper: false,
             },
         )
@@ -2804,6 +3156,7 @@ mod tests {
                 client_id: "cid".into(),
                 client_secret: FIXTURE_SECRET.into(),
                 microsoft_tenant: None,
+                apple: None,
                 keep_mapper: false,
             },
             "file:///etc/config/kratos/oidc.google.jsonnet",
@@ -2841,6 +3194,7 @@ mod tests {
                 client_id: "cid".into(),
                 client_secret: OLD_SECRET.into(),
                 microsoft_tenant: None,
+                apple: None,
                 keep_mapper: false,
             },
             "file:///etc/config/kratos/oidc.google.jsonnet",
@@ -2861,6 +3215,7 @@ mod tests {
                 client_id: "cid2".into(),
                 client_secret: NEW_SECRET.into(),
                 microsoft_tenant: None,
+                apple: None,
                 keep_mapper: false,
             },
         )
@@ -2890,6 +3245,7 @@ mod tests {
                 client_id: "cid".into(),
                 client_secret: "sec".into(),
                 microsoft_tenant: None,
+                apple: None,
                 keep_mapper: false,
             },
         )
@@ -2954,6 +3310,7 @@ mod tests {
                 client_id: "cid".into(),
                 client_secret: "sec".into(),
                 microsoft_tenant: Some("common".into()),
+                apple: None,
                 keep_mapper: false,
             },
         )
@@ -2996,6 +3353,7 @@ mod tests {
                 client_id: "cid".into(),
                 client_secret: "sec".into(),
                 microsoft_tenant: None,
+                apple: None,
                 keep_mapper: false,
             },
         )

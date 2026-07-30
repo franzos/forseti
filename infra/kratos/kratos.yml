@@ -74,10 +74,11 @@ selfservice:
           origins:
             - http://localhost:3000
 
-    # OIDC upstream providers (Google / GitHub / Microsoft) aren't configured
-    # in the playground. Use `forseti config oidc enable <google|github|microsoft>`
-    # to add one — see docs/operator-guide.md's "Managing configuration with
-    # forseti config" section.
+    # OIDC upstream providers (Google / GitHub / Microsoft / Apple) aren't
+    # configured in the playground. Use
+    # `forseti config oidc enable <google|github|microsoft|apple>` to add one
+    # — see docs/operator-guide.md's "Managing configuration with forseti
+    # config" section.
 
   flows:
     error:
