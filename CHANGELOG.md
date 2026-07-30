@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.1.16] - 2026-07-30
+
+### Added
+- Sign in with Apple, via `forseti config oidc enable apple`
+- Apple brand mark on the sign-in button
+
 ## [0.1.15] - 2026-07-26
 
 ### Added
