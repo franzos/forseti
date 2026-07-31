@@ -44,6 +44,10 @@ The trigger button's `onclick` comes straight from Kratos (`InputView::onclick`,
 
 The Kratos config ships OIDC providers commented out (`infra/kratos/kratos.yml:60-90`) — no real credentials in the playground. When enabled, providers surface as `groups.oidc` and the template renders one button per provider beneath an "Or continue with" divider (`templates/registration.html:75-86`). Submitting redirects the browser through Kratos's OAuth dance with the upstream IdP; the same `session` hook auto-logs the resulting identity in.
 
+**What the upstream email is worth.** The pinned jsonnet mappers (`src/config_cli/modify.rs`) decide this, and there are two shapes. All four supported providers gate the `email` trait on `claims.email_verified`, so an address the upstream didn't verify never becomes a trait — the identity schema requires `traits.email`, so registration fails validation and Kratos re-renders the form for the user to supply an address themselves. Google and Apple additionally emit `identity.verified_addresses`, which Kratos honours in `processRegistration` to store the address already-verified; GitHub and Microsoft don't, so their users go through `/verification`.
+
+Two things to hold onto when touching this. Kratos merges mapper traits with the user-submitted registration form and the *form* wins, which is why `verified_addresses` must sit behind the same gate as the trait — ungated, an address the user typed on the bounce-back form would match it. And the carry-over runs at identity creation only: it does nothing on login, nothing on linking a provider to an existing identity, and nothing retroactive.
+
 ```mermaid
 sequenceDiagram
     participant U as User
@@ -262,6 +266,8 @@ Three template states (`templates/verification.html:5-15`):
 **Logged-in short-circuit.** The handler does an optional `whoami` (`src/auth/verification.rs:43`). When the request carries a valid session and the flow is sitting at `choose_method` with an unverified address on that identity, Forseti POSTs `method=code` + the session email + the flow's CSRF token to Kratos's `ui.action` server-side (`submit_email_method`, `src/auth/verification.rs:138`), then bounces the browser back to the same flow ID — by then Kratos has transitioned the flow to `sent_email` and the user lands directly on the code-entry screen. Failure (transport, CSRF mismatch, etc.) falls through to the regular template render, so the worst-case UX is the form they'd see today. The footer's back link follows the same signal: `is_logged_in` switches "Back to sign in" → "Back to dashboard".
 
 Verification is **not enforced** at sign-in time (`infra/kratos/kratos.yml:122-128`). The playground deliberately uses a soft prompt: `session_needs_verification` (`src/flow_view.rs:540`) returns true while any of the identity's `verifiable_addresses` has `verified=false`. The dashboard renders a banner that links to `/verification`, and the profile page (`templates/settings_profile.html`) surfaces a "Not verified · Send verification email →" hint below the email field via the `email_verified` flag on `SettingsProfileTemplate`. Operators who need hard enforcement (banks, healthcare) can add `{ hook: show_verification_ui }` to each registration method.
+
+Users who registered through Google or Apple never see either prompt — their address arrives already verified (see [OIDC / social registration](#oidc--social-registration)), so there's nothing for them to confirm. GitHub and Microsoft users get the banner like password registrations do.
 
 Kratos's verification config has `after.default_browser_return_url: /` (`infra/kratos/kratos.yml:107-108`), so a successful submission lands the user back on the dashboard.
 

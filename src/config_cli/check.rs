@@ -525,12 +525,12 @@ pub(crate) fn check_oidc_providers(root: &Value, config_dir: &Path) -> Vec<Findi
 
         if let Some(tenant) = dig_str(provider, &["microsoft_tenant"]) {
             let key = format!("{base}.microsoft_tenant");
-            if tenant == "common" {
+            if matches!(tenant, "common" | "organizations" | "consumers") {
                 findings.push(Finding::fail(
                     &key,
-                    "common",
-                    "a specific tenant ID (or `organizations`/`consumers` if intentional)",
-                    "`common` accepts sign-in from ANY Azure AD tenant or personal Microsoft account — any organization's users can authenticate, not just yours.",
+                    tenant,
+                    "a specific tenant ID",
+                    "this pseudo-tenant accepts sign-in from tenants you don't control, and Entra's `email` claim is a mutable directory attribute any tenant admin can point at any address — the nOAuth account-takeover class.",
                 ));
             } else {
                 findings.push(Finding::ok(&key, tenant));
@@ -572,6 +572,9 @@ fn check_mapper_url(provider: &Value, id: &str, base: &str, config_dir: &Path) -
     let mapper_path = config_dir.join(basename);
     match std::fs::read_to_string(&mapper_path) {
         Ok(content) => {
+            let is_pinned = super::modify::known_pinned_provider(id)
+                && fingerprint(&content) == fingerprint(super::modify::pinned_mapper(id));
+
             if content.contains("email") && !content.contains("email_verified") {
                 findings.push(Finding::warn(
                     &format!("{mapper_key}.email_verified"),
@@ -580,15 +583,34 @@ fn check_mapper_url(provider: &Value, id: &str, base: &str, config_dir: &Path) -
                     "an upstream provider that allows unverified emails lets an attacker claim any address and take over the matching Forseti account — this is a real account-takeover vector, not a cosmetic one.",
                 ));
             }
-            if super::modify::known_pinned_provider(id)
-                && fingerprint(&content) != fingerprint(super::modify::pinned_mapper(id))
-            {
+            // Kratos merges mapper traits with the user-submitted registration
+            // form and the form wins, so an ungated `verified_addresses` lets a
+            // user who reaches that form have any address they type marked
+            // verified. Only flag unreviewed bodies — the pinned ones gate it.
+            if !is_pinned && content.contains("verified_addresses") {
                 findings.push(Finding::warn(
-                    &format!("{mapper_key}.pinned"),
-                    "differs from Forseti's pinned mapper",
-                    "regenerate with `forseti config oidc enable`, or restore the pinned body",
-                    "this provider's mapper doesn't match Forseti's reviewed pinned body; if it emits `email` without gating on `email_verified` it's an account-takeover vector — review it against the pinned mapper.",
+                    &format!("{mapper_key}.verified_addresses"),
+                    "emits `verified_addresses` from an unreviewed mapper",
+                    "emit it only inside the same `claims.email_verified` gate as the trait",
+                    "Kratos lets the registration form override mapper traits, so a `verified_addresses` entry emitted outside the `email_verified` gate can be matched by an address the user typed themselves — marking an address verified that nobody proved they control.",
                 ));
+            }
+            if super::modify::known_pinned_provider(id) && !is_pinned {
+                if super::modify::is_superseded_mapper(&content) {
+                    findings.push(Finding::warn(
+                        &format!("{mapper_key}.pinned"),
+                        "matches an older Forseti pinned mapper",
+                        &format!("regenerate with `forseti config oidc enable {id}`"),
+                        "this is Forseti's own pinned body from an earlier release, not a hand-rolled mapper: it still gates the `email` trait on `email_verified`, but an unverified upstream hard-fails the sign-in instead of falling back to Forseti's verification flow.",
+                    ));
+                } else {
+                    findings.push(Finding::warn(
+                        &format!("{mapper_key}.pinned"),
+                        "differs from Forseti's pinned mapper",
+                        "regenerate with `forseti config oidc enable`, or restore the pinned body",
+                        "this provider's mapper doesn't match Forseti's reviewed pinned body; if it emits `email` without gating on `email_verified` it's an account-takeover vector — review it against the pinned mapper.",
+                    ));
+                }
             }
         }
         Err(_) => {
@@ -1849,6 +1871,122 @@ selfservice:
             "expected no WARN, got: {findings:?}"
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A single-provider kratos.yml pointing at `oidc.<id>.jsonnet`.
+    fn one_provider(id: &str) -> Value {
+        parse(&format!(
+            r#"
+selfservice:
+  methods:
+    oidc:
+      config:
+        providers:
+          - id: {id}
+            provider: {id}
+            client_id: real-id
+            client_secret: real-secret
+            mapper_url: file:///etc/config/kratos/oidc.{id}.jsonnet
+"#
+        ))
+    }
+
+    #[test]
+    fn superseded_mapper_warns_without_the_takeover_accusation() {
+        // Every deployment on <= v0.1.16 has this on disk. It must not be
+        // reported as a hand-rolled account-takeover vector.
+        let dir = unique_tmp_dir("mapper-superseded");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("oidc.google.jsonnet"),
+            "local claims = std.extVar('claims');\n{\n  identity: {\n    traits: {\n      [if 'email' in claims && claims.email_verified then 'email' else null]: claims.email,\n    },\n  },\n}\n",
+        )
+        .unwrap();
+
+        let findings = check_oidc_providers(&one_provider("google"), &dir);
+        let pinned = findings
+            .iter()
+            .find(|f| f.key == "selfservice.methods.oidc.config.providers[0].mapper_url.pinned")
+            .expect("expected a pinned finding");
+        assert_eq!(pinned.severity, Severity::Warn);
+        assert!(
+            pinned.current.contains("older Forseti pinned mapper"),
+            "got: {pinned:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn ungated_verified_addresses_in_an_unreviewed_mapper_warns() {
+        // The dangerous shape: Kratos lets the registration form override the
+        // trait, so an unconditional address entry can match one the user typed.
+        let dir = unique_tmp_dir("mapper-ungated-va");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("oidc.google.jsonnet"),
+            "local claims = std.extVar('claims');\n{ identity: { traits: { [if claims.email_verified then 'email' else null]: claims.email }, verified_addresses: [{ value: claims.email, via: 'email' }] } }\n",
+        )
+        .unwrap();
+
+        let findings = check_oidc_providers(&one_provider("google"), &dir);
+        assert_eq!(
+            severity_of(
+                &findings,
+                "selfservice.methods.oidc.config.providers[0].mapper_url.verified_addresses"
+            ),
+            Some(Severity::Warn)
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn pinned_carryover_mapper_draws_no_verified_addresses_warning() {
+        let dir = unique_tmp_dir("mapper-pinned-va");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("oidc.apple.jsonnet"),
+            super::super::modify::MAPPER_APPLE,
+        )
+        .unwrap();
+
+        let findings = check_oidc_providers(&one_provider("apple"), &dir);
+        assert_eq!(
+            severity_of(
+                &findings,
+                "selfservice.methods.oidc.config.providers[0].mapper_url.verified_addresses"
+            ),
+            None
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn microsoft_pseudo_tenants_all_fail() {
+        for tenant in ["common", "organizations", "consumers"] {
+            let v = parse(&format!(
+                r#"
+selfservice:
+  methods:
+    oidc:
+      config:
+        providers:
+          - id: microsoft
+            provider: microsoft
+            client_id: real-id
+            client_secret: real-secret
+            microsoft_tenant: {tenant}
+            mapper_url: file:///etc/config/kratos/oidc.microsoft.jsonnet
+"#
+            ));
+            assert_eq!(
+                severity_of(
+                    &check_oidc_providers(&v, Path::new("/nonexistent")),
+                    "selfservice.methods.oidc.config.providers[0].microsoft_tenant"
+                ),
+                Some(Severity::Fail),
+                "{tenant} must FAIL"
+            );
+        }
     }
 
     // -----------------------------------------------------------------

@@ -208,13 +208,14 @@ The id_token is a JWT signed with RS256 by Hydra's signing key. The claims depen
 | Claim            | Type    | Description                                                          |
 |------------------|---------|----------------------------------------------------------------------|
 | `email`          | string  | The user's primary email address.                                    |
-| `email_verified` | boolean | Whether Kratos has verified the address via the verification flow.   |
+| `email_verified` | boolean | Whether the address is verified: either the user completed Forseti's own verification flow, or they signed in with a provider whose verification the operator trusts (Google, Apple). |
 
 #### Membership and verification are not the same
 
 Forseti will issue a token for a user whose email is **not** verified (`email_verified: false`), and that user can already be a member of an org: everyone belongs to at least the Default home org, and an external org's public signup admits anyone without a verification step. So:
 
 - **Never authorize on `email` without checking `email_verified == true`.** An unverified `email` claim only says "the user typed this address", not "the user controls it".
+- **`email_verified: true` means Forseti's operator vouches for the address, not that Forseti mailed it.** For social sign-ins it may originate upstream (Google, Apple), so the assurance is that provider's, inherited. Treat it the way you'd treat any federated assertion: good enough to key a profile on, not a substitute for your own step-up if you're guarding something sensitive. Use `sub` — never `email` — as the stable user identifier.
 - **A membership claim is not identity proof.** Do not treat an `org` claim — least of all `org.id = "default"` — as evidence of who the user is or that they belong to your organization in a trusted sense. Membership of the Default home org and of open external orgs is not gated on verification.
 - Membership that *is* email-gated (domain auto-join, invite acceptance) always requires a verified address, but you cannot tell from the token which door a user came through, so apply the two rules above uniformly.
 
@@ -682,7 +683,7 @@ Drop this in an anchor on your account page:
 
 Account deletion is **intentionally** not in the whitelist — users navigate there from inside Forseti's settings nav, in a context they chose. Sending a user there from an external app would be a confusing UX at best and a social-engineering vector at worst.
 
-The verb → path mapping is the public contract. Internal routes can be renamed without breaking your integration; the action names won't change. The current verb list is also machine-readable as `handoff_actions_supported` on the [Forseti discovery document](#portal-discovery-document).
+The verb → path mapping is the public contract. Internal routes can be renamed without breaking your integration; the action names won't change. The current verb list is also machine-readable as `handoff_actions_supported` on the [Forseti discovery document](#forseti-discovery-document).
 
 ### What the user sees
 
@@ -1027,7 +1028,7 @@ Decoded claims:
 
 On each delivery:
 
-1. Fetch Forseti's signing JWKS from `https://portal.example.com/.well-known/webhook-jwks.json` (also advertised as `webhook_jwks_uri` on the [Forseti discovery document](#portal-discovery-document)). The endpoint advertises `Cache-Control: max-age=86400`; cache locally by `kid` and refetch on miss.
+1. Fetch Forseti's signing JWKS from `https://portal.example.com/.well-known/webhook-jwks.json` (also advertised as `webhook_jwks_uri` on the [Forseti discovery document](#forseti-discovery-document)). The endpoint advertises `Cache-Control: max-age=86400`; cache locally by `kid` and refetch on miss.
 2. Read the `kid` from the incoming JWT header, look it up in your cached JWKS, and verify the signature with EdDSA (Ed25519).
 3. Check claims:
    - `iss` equals Forseti's URL you've configured (pin this string; don't trust the JWT body to tell you who it's from).

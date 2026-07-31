@@ -1,8 +1,9 @@
 //! The guarded write pipeline (`write_yaml`) plus `config oidc enable/disable`.
 //! The mapper bodies here are pinned and reviewed: they only ever emit an
 //! `email` trait when the upstream marks it verified, which is what stops the
-//! unverified-email account-takeover class. `write_yaml` re-serializes the
-//! whole document, so it confirms before dropping comments and always prints a
+//! unverified-email account-takeover class, and only Google and Apple carry
+//! that verification into Kratos. `write_yaml` re-serializes the whole
+//! document, so it confirms before dropping comments and always prints a
 //! secret-redacted diff.
 
 use std::io::{ErrorKind, IsTerminal as _, Write};
@@ -32,11 +33,46 @@ use super::yamlutil::{
 // Pinned identity mappers.
 // ---------------------------------------------------------------------------
 
-/// The reviewed jsonnet mapper. The `[if ... else null]` key means the `email`
-/// trait is only ever written when the upstream sets `email_verified` — an
-/// unverified address never lands as a trait, so it can't be used to claim the
-/// matching Forseti account. Google/GitHub/Microsoft share the exact body.
-pub(crate) const MAPPER_GOOGLE: &str = r#"local claims = std.extVar('claims');
+/// The reviewed jsonnet mapper for providers whose `email_verified` Forseti
+/// trusts enough to carry into Kratos.
+///
+/// Both pinned bodies default `email_verified` before reading it. Kratos tags
+/// the claim `json:"email_verified,omitempty"`, so an upstream `false` arrives
+/// as a *missing* field, and jsonnet errors on a missing-field lookup rather
+/// than treating it as false — without the default an unverified upstream
+/// hard-fails the sign-in instead of falling through to Forseti's own
+/// verification flow.
+///
+/// The `[if ... else null]` key means the `email` trait is only ever written
+/// when the upstream marks it verified, so an unverified address can't be used
+/// to claim the matching Forseti account.
+///
+/// `verified_addresses` is read by Kratos at identity-creation time only: a
+/// matching address is stored already-verified, skipping Forseti's own
+/// verification mail. The `else []` branch is load-bearing. Kratos merges the
+/// mapper's traits with the user-submitted registration form and the *form*
+/// wins, so a user bounced to that form can set `traits.email` to anything;
+/// emitting the address unconditionally would let it match and be marked
+/// verified. Gated, the value only ever matches what the upstream verified.
+pub(crate) const MAPPER_CARRYOVER: &str = r#"local claims = { email_verified: false } + std.extVar('claims');
+local verified = 'email' in claims && claims.email_verified;
+{
+  identity: {
+    traits: {
+      [if verified then 'email' else null]: claims.email,
+    },
+    verified_addresses: if verified then [{ value: claims.email, via: 'email' }] else [],
+  },
+}
+"#;
+
+/// The same gate without the carry-over, for providers whose verified flag
+/// Forseti won't promote to a Kratos-verified address: GitHub (not an OIDC
+/// provider — Kratos synthesizes the flag from a REST field with no spec
+/// contract behind it) and Microsoft (Entra emits no `email_verified` at all;
+/// its equivalent is the `xms_edov` optional claim, which Kratos doesn't read).
+/// Users of these providers verify through Forseti's own flow.
+pub(crate) const MAPPER_GATE_ONLY: &str = r#"local claims = { email_verified: false } + std.extVar('claims');
 {
   identity: {
     traits: {
@@ -45,14 +81,21 @@ pub(crate) const MAPPER_GOOGLE: &str = r#"local claims = std.extVar('claims');
   },
 }
 "#;
-pub(crate) const MAPPER_GITHUB: &str = MAPPER_GOOGLE;
-pub(crate) const MAPPER_MICROSOFT: &str = MAPPER_GOOGLE;
 
-/// Apple's variant of the same gate. Apple omits `email_verified` entirely on
-/// some responses, and jsonnet errors on a missing field rather than treating
-/// it as false — without the default the mapper would hard-fail the sign-in
-/// instead of falling back to Forseti's own verification flow.
-pub(crate) const MAPPER_APPLE: &str = r#"local claims = { email_verified: false } + std.extVar('claims');
+pub(crate) const MAPPER_GOOGLE: &str = MAPPER_CARRYOVER;
+pub(crate) const MAPPER_APPLE: &str = MAPPER_CARRYOVER;
+pub(crate) const MAPPER_GITHUB: &str = MAPPER_GATE_ONLY;
+pub(crate) const MAPPER_MICROSOFT: &str = MAPPER_GATE_ONLY;
+
+/// Pinned mapper bodies shipped by earlier Forseti releases. A mapper matching
+/// one of these is Forseti's own prior output rather than something the
+/// operator hand-rolled, so the upgrade path regenerates it with a plain
+/// explanation instead of refusing and accusing them of an account-takeover
+/// vector. Checked only after the current pinned body doesn't match.
+const SUPERSEDED_MAPPERS: &[&str] = &[
+    // <= v0.1.16, google/github/microsoft: no `email_verified` default, so an
+    // unverified upstream hard-failed the sign-in (jsonnet missing field).
+    r#"local claims = std.extVar('claims');
 {
   identity: {
     traits: {
@@ -60,10 +103,21 @@ pub(crate) const MAPPER_APPLE: &str = r#"local claims = { email_verified: false 
     },
   },
 }
-"#;
+"#,
+    // <= v0.1.16, apple: identical to today's MAPPER_GATE_ONLY, which is why
+    // this is only ever consulted after the current-pinned check.
+    r#"local claims = { email_verified: false } + std.extVar('claims');
+{
+  identity: {
+    traits: {
+      [if 'email' in claims && claims.email_verified then 'email' else null]: claims.email,
+    },
+  },
+}
+"#,
+];
 
-/// The pinned mapper body for a provider. Providers without a dedicated pin
-/// fall back to the shared body (google/github/microsoft are identical).
+/// The pinned mapper body for a provider.
 pub(crate) fn pinned_mapper(provider: &str) -> &'static str {
     match provider {
         "github" => MAPPER_GITHUB,
@@ -71,6 +125,12 @@ pub(crate) fn pinned_mapper(provider: &str) -> &'static str {
         "apple" => MAPPER_APPLE,
         _ => MAPPER_GOOGLE,
     }
+}
+
+/// Whether `body` is a pinned mapper Forseti shipped in an earlier release.
+pub(crate) fn is_superseded_mapper(body: &str) -> bool {
+    let fp = fingerprint(body);
+    SUPERSEDED_MAPPERS.iter().any(|m| fingerprint(m) == fp)
 }
 
 /// Whether `provider` is one Forseti ships a pinned mapper for. Used by the
@@ -271,13 +331,17 @@ fn validate_oidc_enable_input(input: &OidcEnableInput) -> Result<(), String> {
                         .to_string(),
                 );
             }
-            Some("common") => {
-                return Err(
-                    "microsoft_tenant `common` accepts sign-in from ANY Azure AD tenant or personal \
-                     Microsoft account (the nOAuth account-takeover class); set a specific tenant ID \
-                     (or `organizations`/`consumers` if that is genuinely intended)."
-                        .to_string(),
-                );
+            // `organizations` (every Entra tenant) and `consumers` (every
+            // personal Microsoft account) are the same nOAuth exposure as
+            // `common` — Entra's `email` is a mutable directory attribute, so
+            // any tenant admin can assert any address.
+            Some(t @ ("common" | "organizations" | "consumers")) => {
+                return Err(format!(
+                    "microsoft_tenant `{t}` accepts sign-in from tenants you don't control, and \
+                     Entra's `email` claim is a mutable directory attribute any tenant admin can \
+                     set to any address (the nOAuth account-takeover class); pass a specific \
+                     tenant ID."
+                ));
             }
             Some(_) => {}
         }
@@ -781,6 +845,42 @@ fn write_toml(
 // Mapper file handling.
 // ---------------------------------------------------------------------------
 
+/// Whether this provider's pinned mapper carries the upstream verification
+/// into Kratos, rather than only gating the `email` trait on it.
+fn carries_verification(provider: &str) -> bool {
+    pinned_mapper(provider) == MAPPER_CARRYOVER
+}
+
+/// Write a pinned mapper, honouring `--dry-run`. `verb` distinguishes a first
+/// write from replacing an earlier release's body.
+fn write_mapper(
+    ctx: &mut ModifyCtx,
+    mapper_file: &Path,
+    body: &str,
+    verb: &str,
+) -> anyhow::Result<()> {
+    if ctx.dry_run {
+        writeln!(
+            ctx.out,
+            "(dry-run: would have {verb} the pinned mapper at {})",
+            mapper_file.display()
+        )?;
+        return Ok(());
+    }
+    atomic_write(
+        &Target {
+            path: mapper_file.to_path_buf(),
+        },
+        body.as_bytes(),
+    )?;
+    writeln!(
+        ctx.out,
+        "{verb} pinned mapper at {} (0600)",
+        mapper_file.display()
+    )?;
+    Ok(())
+}
+
 fn handle_mapper(
     ctx: &mut ModifyCtx,
     mapper_file: &Path,
@@ -796,12 +896,40 @@ fn handle_mapper(
                     "mapper {} already matches Forseti's pinned body; leaving it.",
                     mapper_file.display()
                 )?;
+            } else if is_superseded_mapper(&existing) {
+                // Forseti's own output from an earlier release: safe to
+                // replace, and refusing here would strand every upgrade.
+                if keep_mapper {
+                    writeln!(
+                        ctx.out,
+                        "note: mapper {} is Forseti's pinned body from an earlier release; keeping \
+                         it (--keep-mapper). It still gates the `email` trait on `email_verified`, \
+                         but an unverified upstream hard-fails the sign-in instead of falling back \
+                         to Forseti's verification flow. Drop --keep-mapper to regenerate.",
+                        mapper_file.display()
+                    )?;
+                } else {
+                    write_mapper(ctx, mapper_file, pinned, "regenerated")?;
+                    writeln!(
+                        ctx.out,
+                        "note: replaced Forseti's pinned mapper from an earlier release. It now \
+                         defaults `email_verified` (an unverified upstream falls back to Forseti's \
+                         verification flow instead of failing the sign-in){}.",
+                        if carries_verification(provider) {
+                            ", and a verified upstream address is stored already-verified rather \
+                             than triggering Forseti's verification mail"
+                        } else {
+                            ""
+                        }
+                    )?;
+                }
             } else if keep_mapper {
                 writeln!(
                     ctx.out,
                     "warning: mapper {} differs from the pinned body; keeping it (--keep-mapper). \
-                     Review it — a mapper that emits `email` without gating on `email_verified` is \
-                     an account-takeover vector.",
+                     Review it — a mapper that emits `email` without gating on `email_verified`, or \
+                     that emits `verified_addresses` outside that gate, is an account-takeover \
+                     vector.",
                     mapper_file.display()
                 )?;
             } else {
@@ -815,25 +943,7 @@ fn handle_mapper(
             }
         }
         Err(e) if e.kind() == ErrorKind::NotFound => {
-            if ctx.dry_run {
-                writeln!(
-                    ctx.out,
-                    "(dry-run: would write the pinned mapper to {})",
-                    mapper_file.display()
-                )?;
-            } else {
-                atomic_write(
-                    &Target {
-                        path: mapper_file.to_path_buf(),
-                    },
-                    pinned.as_bytes(),
-                )?;
-                writeln!(
-                    ctx.out,
-                    "wrote pinned mapper to {} (0600)",
-                    mapper_file.display()
-                )?;
-            }
+            write_mapper(ctx, mapper_file, pinned, "wrote")?;
         }
         Err(e) => anyhow::bail!("{}: {e}", mapper_file.display()),
     }
@@ -865,7 +975,10 @@ pub(crate) fn oidc_enable(ctx: &mut ModifyCtx, input: OidcEnableInput) -> anyhow
     let mapper_file = config_dir.join(format!("oidc.{}.jsonnet", input.provider));
     let mapper_url = format!("file:///etc/config/kratos/oidc.{}.jsonnet", input.provider);
 
-    let mapper_existed_before = mapper_file.exists();
+    // Kept so a failed kratos.yml write doesn't leave a regenerated mapper
+    // behind: Kratos would pick the new body up on its next read even though
+    // the config change the operator asked for never landed.
+    let mapper_before = std::fs::read_to_string(&mapper_file).ok();
 
     let result = (|| -> anyhow::Result<i32> {
         handle_mapper(ctx, &mapper_file, &input.provider, input.keep_mapper)?;
@@ -881,12 +994,40 @@ pub(crate) fn oidc_enable(ctx: &mut ModifyCtx, input: OidcEnableInput) -> anyhow
             )?;
         }
 
+        if carries_verification(&input.provider) {
+            writeln!(
+                ctx.out,
+                "note: an address this provider marks verified is stored as a verified Kratos \
+                 address, so the user skips Forseti's own verification mail and is immediately \
+                 eligible for verified-only features (org invites, verified-domain auto-join). \
+                 Addresses the provider does NOT mark verified still go through Forseti's flow."
+            )?;
+        } else {
+            writeln!(
+                ctx.out,
+                "note: Forseti does not carry this provider's verification status into Kratos; \
+                 its users verify through Forseti's own flow before verified-only features \
+                 (org invites, verified-domain auto-join) open up."
+            )?;
+        }
+
         if input.provider == "github" {
             writeln!(
                 ctx.out,
                 "note: GitHub only returns an email when the `user:email` scope is granted, and \
-                 its claims don't reliably carry `email_verified`; Forseti treats GitHub emails \
-                 as unverified until the user verifies through Forseti's own flow."
+                 Kratos reads the verified flag off the account's primary address rather than an \
+                 id_token claim — accounts with an unverified primary arrive without an email at \
+                 all and are asked for one during registration."
+            )?;
+        }
+
+        if input.provider == "microsoft" {
+            writeln!(
+                ctx.out,
+                "note: Entra ID issues no `email_verified` claim, so its equivalent (the \
+                 `xms_edov` optional claim) is not something Kratos can read. Sign-in works, but \
+                 every Microsoft user is asked for an email during registration and verifies it \
+                 through Forseti's own flow."
             )?;
         }
 
@@ -899,8 +1040,11 @@ pub(crate) fn oidc_enable(ctx: &mut ModifyCtx, input: OidcEnableInput) -> anyhow
             )?;
             writeln!(
                 ctx.out,
-                "note: users who pick \"Hide My Email\" arrive as an @privaterelay.appleid.com \
-                 address, and Apple only sends the name claim on the very first authorization."
+                "note: users who pick \"Hide My Email\" arrive at a relay address (@privaterelay\
+                 .appleid.com or @icloud.com), and Apple only sends the name claim on the very \
+                 first authorization. Relay addresses only receive mail if you registered your \
+                 outbound domains and SPF with Apple — carrying Apple's verification over is what \
+                 keeps those users out of a dead end where no Forseti mail can reach them."
             )?;
         }
 
@@ -930,8 +1074,17 @@ pub(crate) fn oidc_enable(ctx: &mut ModifyCtx, input: OidcEnableInput) -> anyhow
 
     // write_yaml failing or the operator declining its comment-drop prompt
     // must not leave behind a mapper this run created.
-    if result.is_err() && !mapper_existed_before && mapper_file.exists() {
-        std::fs::remove_file(&mapper_file).ok();
+    if result.is_err() {
+        match &mapper_before {
+            Some(body) => {
+                std::fs::write(&mapper_file, body).ok();
+            }
+            None => {
+                if mapper_file.exists() {
+                    std::fs::remove_file(&mapper_file).ok();
+                }
+            }
+        }
     }
     result
 }
@@ -2784,16 +2937,72 @@ mod tests {
     }
 
     #[test]
-    fn apple_pins_a_mapper_that_defaults_email_verified() {
-        // Apple omits the claim outright on some responses, and jsonnet errors
-        // on a missing field — without the default the mapper hard-fails the
-        // sign-in instead of falling back to Forseti's own verification.
+    fn every_pinned_mapper_defaults_email_verified() {
+        // Kratos tags the claim `omitempty`, so an upstream `false` arrives as
+        // a missing field and jsonnet errors on the lookup. Without the default
+        // an unverified upstream hard-fails the sign-in instead of falling back
+        // to Forseti's own verification flow.
+        for provider in SUPPORTED_PROVIDERS {
+            assert!(
+                pinned_mapper(provider).contains("{ email_verified: false }"),
+                "{provider} mapper must default the claim"
+            );
+            assert!(known_pinned_provider(provider));
+        }
+    }
+
+    #[test]
+    fn only_google_and_apple_carry_verification_over() {
+        assert!(carries_verification("google"));
+        assert!(carries_verification("apple"));
+        assert!(!carries_verification("github"));
+        assert!(!carries_verification("microsoft"));
+
+        for provider in SUPPORTED_PROVIDERS {
+            let body = pinned_mapper(provider);
+            assert_eq!(
+                body.contains("verified_addresses"),
+                carries_verification(provider),
+                "{provider}: verified_addresses presence must match the carry-over decision"
+            );
+        }
+    }
+
+    #[test]
+    fn carry_over_is_gated_on_the_same_claim_as_the_trait() {
+        // Load-bearing: Kratos lets the registration form override mapper
+        // traits, so an ungated `verified_addresses` would match an address the
+        // user typed rather than one the upstream verified.
+        let body = MAPPER_CARRYOVER;
         assert!(
-            pinned_mapper("apple").contains("{ email_verified: false }"),
-            "apple mapper must default the claim"
+            body.contains("local verified = 'email' in claims && claims.email_verified;"),
+            "the gate must be computed from the claim"
         );
-        assert!(known_pinned_provider("apple"));
-        assert_ne!(pinned_mapper("apple"), pinned_mapper("google"));
+        assert!(
+            body.contains("verified_addresses: if verified then"),
+            "verified_addresses must sit behind the gate"
+        );
+        assert!(
+            body.contains("else [],"),
+            "the ungated branch must emit no addresses at all"
+        );
+        assert!(
+            !body.contains("verified_addresses: [{"),
+            "verified_addresses must never be emitted unconditionally"
+        );
+    }
+
+    #[test]
+    fn superseded_mappers_are_recognised_but_current_ones_are_not() {
+        // The <= v0.1.16 apple body is byte-identical to today's gate-only
+        // body, so the current-pinned check has to run first.
+        let old_google = "local claims = std.extVar('claims');\n{\n  identity: {\n    traits: {\n      [if 'email' in claims && claims.email_verified then 'email' else null]: claims.email,\n    },\n  },\n}\n";
+        assert!(is_superseded_mapper(old_google));
+        assert!(is_superseded_mapper(MAPPER_GATE_ONLY));
+        assert!(!is_superseded_mapper(MAPPER_CARRYOVER));
+        assert!(!is_superseded_mapper(
+            "local claims = std.extVar('claims'); {}"
+        ));
     }
 
     #[test]
@@ -2898,6 +3107,22 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("common"), "err: {err}");
+    }
+
+    #[test]
+    fn microsoft_organizations_and_consumers_refused_too() {
+        // Same nOAuth exposure as `common`: sign-in from tenants the operator
+        // doesn't control, with a tenant-admin-mutable `email` claim.
+        for tenant in ["organizations", "consumers"] {
+            let mut root = render_default_kratos();
+            let err = apply_oidc_enable(
+                &mut root,
+                &enable_input("microsoft", Some(tenant)),
+                "file:///etc/config/kratos/oidc.microsoft.jsonnet",
+            )
+            .unwrap_err();
+            assert!(err.contains(tenant), "{tenant} must be refused; err: {err}");
+        }
     }
 
     #[test]
@@ -3095,6 +3320,89 @@ mod tests {
         assert_eq!(mode, 0o600);
         assert_eq!(std::fs::read_to_string(&mapper).unwrap(), MAPPER_GOOGLE);
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A `ModifyCtx` writing into `dir`, with output discarded.
+    fn mapper_ctx(dir: &Path) -> ModifyCtx {
+        ModifyCtx {
+            kratos: Target {
+                path: dir.join("kratos.yml"),
+            },
+            hydra: Target {
+                path: dir.join("hydra.yml"),
+            },
+            forseti: None,
+            dry_run: false,
+            yes: true,
+            out: Box::new(std::io::sink()),
+            input: Box::new(std::io::empty()),
+        }
+    }
+
+    #[test]
+    fn upgrade_regenerates_a_superseded_mapper_instead_of_refusing() {
+        // Every deployment on <= v0.1.16 has this body on disk. Refusing here
+        // would strand the upgrade behind an account-takeover warning aimed at
+        // Forseti's own previous output.
+        let dir = unique_tmp_dir("mapper-upgrade");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mapper = dir.join("oidc.google.jsonnet");
+        let old = "local claims = std.extVar('claims');\n{\n  identity: {\n    traits: {\n      [if 'email' in claims && claims.email_verified then 'email' else null]: claims.email,\n    },\n  },\n}\n";
+        std::fs::write(&mapper, old).unwrap();
+
+        let mut ctx = mapper_ctx(&dir);
+        handle_mapper(&mut ctx, &mapper, "google", false).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&mapper).unwrap(), MAPPER_CARRYOVER);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn upgrade_keeps_a_superseded_mapper_under_keep_mapper() {
+        let dir = unique_tmp_dir("mapper-upgrade-keep");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mapper = dir.join("oidc.google.jsonnet");
+        let old = "local claims = std.extVar('claims');\n{\n  identity: {\n    traits: {\n      [if 'email' in claims && claims.email_verified then 'email' else null]: claims.email,\n    },\n  },\n}\n";
+        std::fs::write(&mapper, old).unwrap();
+
+        let mut ctx = mapper_ctx(&dir);
+        handle_mapper(&mut ctx, &mapper, "google", true).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&mapper).unwrap(), old);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn hand_rolled_mapper_still_refuses_without_keep_mapper() {
+        let dir = unique_tmp_dir("mapper-handrolled");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mapper = dir.join("oidc.google.jsonnet");
+        let ungated = "local claims = std.extVar('claims');\n{ identity: { traits: { email: claims.email } } }\n";
+        std::fs::write(&mapper, ungated).unwrap();
+
+        let mut ctx = mapper_ctx(&dir);
+        let err = handle_mapper(&mut ctx, &mapper, "google", false).unwrap_err();
+        assert!(err.to_string().contains("differs"), "err: {err}");
+        assert_eq!(std::fs::read_to_string(&mapper).unwrap(), ungated);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn gate_only_provider_upgrade_is_a_no_op_on_the_current_body() {
+        // The <= v0.1.16 apple body and today's gate-only body are identical,
+        // so github/microsoft must match as pinned rather than be treated as
+        // superseded and rewritten.
+        let dir = unique_tmp_dir("mapper-gate-only");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mapper = dir.join("oidc.github.jsonnet");
+        std::fs::write(&mapper, MAPPER_GATE_ONLY).unwrap();
+
+        let mut ctx = mapper_ctx(&dir);
+        handle_mapper(&mut ctx, &mapper, "github", false).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&mapper).unwrap(), MAPPER_GATE_ONLY);
         std::fs::remove_dir_all(&dir).ok();
     }
 
