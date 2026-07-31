@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.1.17] - 2026-07-31
+
+### Added
+- Ten UI languages: English, German, French, Spanish, Italian, Portuguese, Russian, Thai, Arabic and Chinese (Simplified)
+- User-chosen username, emitted as the `preferred_username` claim
+- Profile language picker lists every shipped locale
+
+### Changed
+- Google and Apple email verification carries into Kratos, skipping verification mail
+- Microsoft `organizations` and `consumers` pseudo-tenants are now refused
+
+### Fixed
+- Only English and German could be saved as a language preference
+- Legal-page strings were missing from the seven non-English/German locales
+
 ## [0.1.16] - 2026-07-30
 
 ### Added
