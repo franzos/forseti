@@ -1,7 +1,7 @@
-nav-dashboard = แดชบอร์ด
-nav-settings = การตั้งค่า
-nav-admin = ผู้ดูแลระบบ
-nav-language-label = ภาษา
+nav-dashboard = 仪表板
+nav-settings = 设置
+nav-admin = 管理
+nav-language-label = 语言
 nav-language-en = English
 nav-language-de = Deutsch
 nav-language-fr = Français

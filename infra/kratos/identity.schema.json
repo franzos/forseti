@@ -46,7 +46,7 @@
         "preferred_language": {
           "type": "string",
           "title": "Preferred language",
-          "enum": ["en", "de"]
+          "enum": ["en", "de", "fr", "es", "it", "pt", "ru", "th", "ar", "zh"]
         }
       },
       "required": ["email"],

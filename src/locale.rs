@@ -12,7 +12,7 @@ pub(crate) use unic_langid::LanguageIdentifier;
 use crate::state::AppState;
 
 pub(crate) const LOCALE_COOKIE: &str = "forseti_locale";
-pub(crate) const SUPPORTED: &[&str] = &["en", "de", "fr", "es", "it", "pt", "ru", "th", "ar"];
+pub(crate) const SUPPORTED: &[&str] = &["en", "de", "fr", "es", "it", "pt", "ru", "th", "ar", "zh"];
 
 pub(crate) fn default_locale() -> LanguageIdentifier {
     langid!("en")
@@ -28,7 +28,7 @@ fn supported_langids() -> Vec<LanguageIdentifier> {
 /// Best supported match for the requested list, else the default.
 // `fluent_langneg::negotiate_languages` is not used here because fluent-langneg 0.14
 // switched its LanguageIdentifier to icu_locid, which is incompatible with unic_langid.
-// A language-subtag match is sufficient for our two-locale set.
+// A language-subtag match is sufficient because SUPPORTED holds one entry per language.
 pub(crate) fn negotiate(requested: &[LanguageIdentifier]) -> LanguageIdentifier {
     let available = supported_langids();
     for req in requested {
@@ -141,6 +141,18 @@ mod tests {
             "de".parse::<LanguageIdentifier>().unwrap()
         );
         assert_eq!(from_accept_language(None), default_locale());
+    }
+
+    #[test]
+    fn supported_matches_shipped_catalogs() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("locales");
+        let shipped: std::collections::BTreeSet<String> = std::fs::read_dir(dir)
+            .expect("locales dir readable")
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        let supported: std::collections::BTreeSet<String> =
+            SUPPORTED.iter().map(|s| (*s).to_string()).collect();
+        assert_eq!(supported, shipped);
     }
 
     #[test]

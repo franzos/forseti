@@ -11,3 +11,4 @@ nav-language-pt = Português
 nav-language-ru = Русский
 nav-language-th = ไทย
 nav-language-ar = العربية
+nav-language-zh = 简体中文

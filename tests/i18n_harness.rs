@@ -151,7 +151,7 @@ fn kratos_placeables_match_across_locales() {
     let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("locales");
     let en = kratos_vars(&base.join("en").join("kratos.ftl"));
     let mut mismatches = Vec::new();
-    for locale in ["de", "fr", "es", "it", "pt", "ru", "th", "ar"] {
+    for locale in ["de", "fr", "es", "it", "pt", "ru", "th", "ar", "zh"] {
         let de = kratos_vars(&base.join(locale).join("kratos.ftl"));
         for (id, en_vars) in &en {
             match de.get(id) {
@@ -170,11 +170,40 @@ fn kratos_placeables_match_across_locales() {
     );
 }
 
+/// Kratos rejects a `preferred_language` trait outside this enum, so a locale
+/// that ships a catalog but is missing here can be previewed via `?lang=` and
+/// never persisted.
+#[test]
+fn identity_schema_language_enum_covers_every_locale() {
+    let base = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let schema: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(base.join("infra/kratos/identity.schema.json")).unwrap(),
+    )
+    .expect("identity schema parses");
+    let allowed: BTreeSet<String> = schema["properties"]["traits"]["properties"]
+        ["preferred_language"]["enum"]
+        .as_array()
+        .expect("preferred_language enum is an array")
+        .iter()
+        .map(|v| v.as_str().expect("enum entries are strings").to_string())
+        .collect();
+
+    let shipped: BTreeSet<String> = fs::read_dir(base.join("locales"))
+        .expect("locales dir readable")
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+
+    assert_eq!(
+        allowed, shipped,
+        "identity.schema.json preferred_language enum must match the shipped locale dirs"
+    );
+}
+
 #[test]
 fn locales_have_identical_key_sets() {
     let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("locales");
     let en = keys_for_locale(&base.join("en"));
-    for locale in ["de", "fr", "es", "it", "pt", "ru", "th", "ar"] {
+    for locale in ["de", "fr", "es", "it", "pt", "ru", "th", "ar", "zh"] {
         let other = keys_for_locale(&base.join(locale));
         let missing: Vec<_> = en.difference(&other).collect();
         let extra: Vec<_> = other.difference(&en).collect();

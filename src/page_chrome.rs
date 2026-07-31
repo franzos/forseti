@@ -350,9 +350,29 @@ impl PageChrome {
         self.locale.language.as_str() == tag
     }
 
+    /// Every supported locale, labelled with its endonym, for the picker.
+    pub(crate) fn languages(&self) -> Vec<LanguageChoice> {
+        crate::locale::SUPPORTED
+            .iter()
+            .map(|tag| LanguageChoice {
+                tag,
+                label: self.t(&format!("nav-language-{tag}")),
+                selected: self.is_locale(tag),
+            })
+            .collect()
+    }
+
     pub(crate) fn dir(&self) -> &'static str {
         dir_for(&self.locale)
     }
+}
+
+/// One option in the language picker. Endonyms stay untranslated, so the label
+/// is readable to a speaker of that language whatever the current locale is.
+pub(crate) struct LanguageChoice {
+    pub(crate) tag: &'static str,
+    pub(crate) label: String,
+    pub(crate) selected: bool,
 }
 
 /// Extractor that builds a [`PageChrome`] from the current request:
