@@ -28,6 +28,7 @@ pub(crate) struct SettingsProfileTemplate {
     pub(crate) flow_messages: Vec<MessageView>,
     pub(crate) groups: GroupedNodes,
     pub(crate) profiles_enabled: bool,
+    pub(crate) username: String,
     pub(crate) bio: String,
     pub(crate) location: String,
     pub(crate) pronouns: String,
@@ -70,6 +71,8 @@ pub(crate) async fn settings_profile(
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct ExtendedProfileForm {
+    #[serde(default)]
+    pub(crate) username: String,
     #[serde(default)]
     pub(crate) bio: String,
     #[serde(default)]
@@ -130,6 +133,28 @@ pub(crate) async fn settings_profile_extended_save(
         }
     }
 
+    // Empty clears the handle; anything else must survive validation before it
+    // can reach an RP as `preferred_username`.
+    let username = if form.username.trim().is_empty() {
+        String::new()
+    } else {
+        match profiles::username::validate(&form.username) {
+            Ok(u) => u,
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    crate::i18n::lookup(&locale, "settings-profile-username-invalid"),
+                )
+                    .into_response();
+            }
+        }
+    };
+
+    let previous = profiles::fetch(&state.db, &sess.identity_id)
+        .await
+        .ok()
+        .and_then(|p| p.username);
+
     if let Err(e) = profiles::upsert(
         &state.db,
         profiles::ProfileInput {
@@ -140,16 +165,24 @@ pub(crate) async fn settings_profile_extended_save(
             website: form.website.trim(),
             avatar_url: form.avatar_url.trim(),
             links: &links,
+            username: &username,
         },
     )
     .await
     {
-        tracing::error!(error = ?e, "settings_profile_extended_save: upsert failed");
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            crate::i18n::lookup(&locale, "settings-save-failed"),
-        )
-            .into_response();
+        let (status, key) = match e {
+            profiles::SaveError::UsernameTaken => {
+                (StatusCode::CONFLICT, "settings-profile-username-taken")
+            }
+            profiles::SaveError::UsernameCooldown => {
+                (StatusCode::CONFLICT, "settings-profile-username-cooldown")
+            }
+            profiles::SaveError::Other(err) => {
+                tracing::error!(error = ?err, "settings_profile_extended_save: upsert failed");
+                (StatusCode::INTERNAL_SERVER_ERROR, "settings-save-failed")
+            }
+        };
+        return (status, crate::i18n::lookup(&locale, key)).into_response();
     }
 
     let _ = audit::log(
@@ -166,6 +199,27 @@ pub(crate) async fn settings_profile_extended_save(
             )),
     )
     .await;
+
+    // Separate row: an RP may have provisioned a local account from the old
+    // handle, so operators need the before/after without diffing profile saves.
+    let new_username = (!username.is_empty()).then_some(username.as_str());
+    if previous.as_deref() != new_username {
+        let _ = audit::log(
+            &state.db,
+            AuditEvent::new(action::PROFILE_USERNAME_CHANGED)
+                .actor_user(&sess.identity_id, &sess.email)
+                .target(
+                    crate::audit::target_kind::IDENTITY,
+                    sess.identity_id.clone(),
+                )
+                .with_ctx(&actx)
+                .metadata(audit_metadata!(
+                    "from" => previous.as_deref().unwrap_or(""),
+                    "to" => new_username.unwrap_or(""),
+                )),
+        )
+        .await;
+    }
 
     Redirect::to("/settings/profile?profile_saved=1").into_response()
 }

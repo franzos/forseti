@@ -163,6 +163,7 @@ pub mod action {
     pub const ADMIN_WEBHOOK_DISCARDED: &str = "admin.webhook.discarded";
     // profiles
     pub const PROFILE_UPDATED: &str = "profile.updated";
+    pub const PROFILE_USERNAME_CHANGED: &str = "profile.username_changed";
     // orgs
     pub const ORG_INVITE_CREATED: &str = "org.invite.created";
     pub const ORG_INVITE_ACCEPTED: &str = "org.invite.accepted";

@@ -871,7 +871,8 @@ fn project_group_slugs(raw: &[String], cap: usize) -> (Vec<String>, bool) {
 }
 
 /// Fold identity traits into id_token claims, scoped by granted scope.
-/// `email` adds `email`/`email_verified`; `profile` adds `name`/`picture`/`website`/`locale`;
+/// `email` adds `email`/`email_verified`; `profile` adds
+/// `name`/`picture`/`website`/`locale`/`preferred_username`/`updated_at`;
 /// `extended_profile` adds `bio`/`pronouns`/`links`; `org` adds the active-org
 /// object; `orgs` adds the (capped) membership list; "groups" adds the active-org team slugs.
 #[allow(clippy::too_many_arguments)]
@@ -1027,6 +1028,23 @@ fn build_id_token_claims(
                 claims.insert(
                     "website".to_string(),
                     serde_json::Value::String(w.to_string()),
+                );
+            }
+            // Omitted rather than defaulted when unset: OIDC Core 5.3.2 wants
+            // an absent claim over an empty one, and synthesising the email
+            // here would leak it past the `email` scope and hand RPs an
+            // email-shaped value they'd key accounts on.
+            if let Some(u) = p.username.as_deref().filter(|s| !s.is_empty()) {
+                claims.insert(
+                    "preferred_username".to_string(),
+                    serde_json::Value::String(u.to_string()),
+                );
+            }
+            // Drift signal for RPs that cached an earlier handle.
+            if let Ok(t) = chrono::DateTime::parse_from_rfc3339(&p.updated_at) {
+                claims.insert(
+                    "updated_at".to_string(),
+                    serde_json::Value::Number(t.timestamp().into()),
                 );
             }
         }
@@ -1419,6 +1437,87 @@ mod tests {
             v.get("orgs_truncated").unwrap(),
             &serde_json::Value::Bool(true)
         );
+    }
+
+    fn bare_identity() -> ory::Identity {
+        ory::Identity {
+            id: "id".to_string(),
+            traits: Some(serde_json::json!({"email": "x@example.com"})),
+            ..ory::Identity::new(
+                "id".to_string(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+            )
+        }
+    }
+
+    #[test]
+    fn preferred_username_omitted_when_unset() {
+        // Absent, not defaulted to the email: a synthesised email-shaped
+        // handle is what RPs key accounts on (OIDC Core 5.7).
+        let profile = crate::profiles::Profile {
+            updated_at: "2026-07-31T10:00:00+00:00".to_string(),
+            ..Default::default()
+        };
+        let v = build_id_token_claims(
+            Some(&bare_identity()),
+            &["openid".to_string(), "profile".to_string()],
+            &[],
+            None,
+            Some(&profile),
+            &[],
+            false,
+            false,
+            &en(),
+        );
+        assert!(v.get("preferred_username").is_none());
+        assert_eq!(v.get("updated_at").unwrap(), &serde_json::json!(1785492000));
+    }
+
+    #[test]
+    fn preferred_username_emitted_under_profile_scope() {
+        let profile = crate::profiles::Profile {
+            username: Some("j.doe".to_string()),
+            updated_at: "2026-07-31T10:00:00+00:00".to_string(),
+            ..Default::default()
+        };
+        let v = build_id_token_claims(
+            Some(&bare_identity()),
+            &["openid".to_string(), "profile".to_string()],
+            &[],
+            None,
+            Some(&profile),
+            &[],
+            false,
+            false,
+            &en(),
+        );
+        assert_eq!(
+            v.get("preferred_username").unwrap(),
+            &serde_json::json!("j.doe")
+        );
+    }
+
+    #[test]
+    fn preferred_username_absent_without_profile_scope() {
+        let profile = crate::profiles::Profile {
+            username: Some("j.doe".to_string()),
+            ..Default::default()
+        };
+        let v = build_id_token_claims(
+            Some(&bare_identity()),
+            &["openid".to_string(), "email".to_string()],
+            &[],
+            None,
+            Some(&profile),
+            &[],
+            false,
+            false,
+            &en(),
+        );
+        assert!(v.get("preferred_username").is_none());
+        assert!(v.get("updated_at").is_none());
     }
 
     #[test]

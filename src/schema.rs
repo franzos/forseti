@@ -176,6 +176,16 @@ diesel::table! {
         avatar_url -> Nullable<Text>,
         links_json -> Nullable<Text>,
         updated_at -> Text,
+        username -> Nullable<Text>,
+        username_lc -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
+    member_username_history (username_lc) {
+        username_lc -> Text,
+        identity_id -> Text,
+        released_at -> Text,
     }
 }
 

@@ -36,6 +36,7 @@ struct ProfileViewTemplate {
     /// From Kratos traits; empty falls back to the email in the template.
     display_name: String,
     email: String,
+    username: String,
     bio: String,
     location: String,
     pronouns: String,
@@ -226,6 +227,7 @@ pub(crate) async fn show_profile(
         identicon,
         display_name,
         email,
+        username: profile.username.unwrap_or_default(),
         bio: profile.bio.unwrap_or_default(),
         location: profile.location.unwrap_or_default(),
         pronouns: profile.pronouns.unwrap_or_default(),

@@ -488,6 +488,7 @@ fn render_settings(
                 flow_messages: msgs,
                 groups,
                 profiles_enabled: state.cfg.profiles.enabled,
+                username: p.username.unwrap_or_default(),
                 bio: p.bio.unwrap_or_default(),
                 location: p.location.unwrap_or_default(),
                 pronouns: p.pronouns.unwrap_or_default(),

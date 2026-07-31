@@ -33,6 +33,9 @@
             {% endif %}
           </h1>
           <div class="flex flex-wrap items-baseline gap-stack-sm">
+            {% if !username.is_empty() %}
+              <span class="font-body-md text-body-md text-on-surface font-mono"><bdi>@{{ username }}</bdi></span>
+            {% endif %}
             {% if !display_name.is_empty() %}
               <span class="font-body-md text-body-md text-on-surface-variant font-mono"><bdi>{{ email }}</bdi></span>
             {% endif %}

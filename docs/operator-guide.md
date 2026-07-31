@@ -1672,11 +1672,11 @@ Place templates at `/etc/config/kratos/email-templates/<flow>/<template>.gotmpl`
 
 Off by default. When `[profiles].enabled = true`:
 
-- `/settings/profile` grows a **Public profile** form (bio, location, pronouns, website, avatar URL, links).
+- `/settings/profile` grows a **Public profile** form (username, bio, location, pronouns, website, avatar URL, links).
 - `/users/{identity_id}` renders a profile view — only when the viewer shares at least one org with the target. Anonymous viewers and non-sharing viewers see a 404 (not 403; no "this page exists" leak).
 - The members roster on `/settings/organization/members` links each row with a non-empty profile to that view page.
 - Avatar: external `avatar_url` only — no upload pipeline. When unset, a deterministic SVG identicon (hash → 5-cell mirrored pattern) renders as fallback.
-- Audit: `profile.updated` event on each save. No view-events.
+- Audit: `profile.updated` event on each save, plus `profile.username_changed` (with the old and new handle) whenever the username field changes. No view-events.
 
 ```toml
 [profiles]
@@ -1685,10 +1685,24 @@ enabled = true
 
 ### OIDC exposure
 
-The `profile` scope picks up two additional standard OIDC claims when `[profiles].enabled` is on AND the user filled the fields:
+The `profile` scope picks up additional standard OIDC claims when `[profiles].enabled` is on AND the user filled the fields:
 
 - `picture` — the `avatar_url` value
 - `website` — the `website` value
+- `preferred_username` — the handle the user chose, omitted when unset
+- `updated_at` — seconds since the epoch, last change to any portal-owned profile field
+
+#### Usernames
+
+The username field is what downstream apps read as `preferred_username`. Several of them provision a local account from it — Forgejo and Gitea derive the local username from this claim, and with `ACCOUNT_LINKING = auto` they will match an *existing* local account by it. That makes a recycled handle an account-takeover path, so Forseti is stricter than OIDC Core requires:
+
+- 2 to 39 characters, ASCII letters, digits, `.`, `_`, `-`, starting and ending alphanumeric. No `@`, so a handle can never be confused with an email address.
+- Unique case-insensitively across the deployment, enforced by a unique index rather than an application check.
+- Released handles are tombstoned and never reassigned; only the previous holder can reclaim one.
+- At most one change per 30 days per user.
+- A short denylist covers role words (`admin`, `root`, `support`, `security`, `postmaster`, …) and the vendor names already denied to self-registered clients.
+
+Forseti never defaults the claim to the user's email. Apps that want an email-derived local username should configure that on their own side (in Forgejo, `[oauth2_client] USERNAME = email`).
 
 A new `extended_profile` scope exposes Forseti-specific claims:
 

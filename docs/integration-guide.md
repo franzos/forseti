@@ -226,8 +226,25 @@ Forseti will issue a token for a user whose email is **not** verified (`email_ve
 | `name`        | string | Full name, if present in the identity schema.              |
 | `given_name`  | string | First name, if present.                                    |
 | `family_name` | string | Surname, if present.                                       |
+| `preferred_username` | string | The handle the user chose under Settings → Profile. Omitted when they haven't set one. |
+| `updated_at`  | number | Seconds since the epoch, last time the user's portal profile changed. |
 
 These come from the identity's `traits.*` fields as configured by the operator's identity schema. Absent fields are omitted from the token.
+
+#### `preferred_username`
+
+Forseti omits this claim entirely when the user hasn't chosen a handle. It never falls back to the email address: that would leak the address to apps that asked for `profile` but not `email`, and hand you an email-shaped value you'd be tempted to key accounts on. Plan for it to be absent.
+
+**Do not use it as an account identifier.** OIDC Core §5.7 is explicit: `sub` and `iss` together are the only stable, unique identifier, and `preferred_username`, like `email` and `name`, "MUST NOT be used as unique identifiers for the End-User". Key your local records on `sub`; treat this claim as a display string or a signup suggestion. Mapping accounts by username is the [nOAuth](https://www.descope.com/blog/post/noauth) bug class, and it bypasses every control on the IdP side.
+
+Forseti applies restrictions the spec doesn't require, because apps key on the value anyway:
+
+- 2 to 39 characters, ASCII letters, digits, `.`, `_` and `-`, starting and ending alphanumeric. No `@`, so a handle can never be mistaken for an email address.
+- Unique, case-insensitively, across the deployment.
+- **Never reassigned.** A released handle is tombstoned and only its previous holder can reclaim it.
+- Changeable at most once every 30 days, with a `profile.username_changed` audit row recording the old and new value.
+
+`updated_at` moves whenever any portal-owned profile field changes, so it is a drift signal rather than a username-change signal. Both claims are snapshotted into the consent session, so a change only reaches you at the next authorization — see [Freshness cheatsheet](#freshness-cheatsheet).
 
 ### With `groups` scope
 
@@ -1119,7 +1136,7 @@ Forseti is not a single point of failure if your app degrades gracefully.
 |-----------|---------------------------------------------------------------------------|
 | `openid`  | Required for OIDC. Causes Hydra to return an id_token.                    |
 | `email`   | Adds `email` and `email_verified` claims.                                 |
-| `profile` | Adds `name`, `given_name`, `family_name` (if present in the identity).    |
+| `profile` | Adds `name`, `given_name`, `family_name` (if present in the identity), plus `preferred_username` and `updated_at` when the user set a handle. |
 | `offline_access` | Adds a `refresh_token` to the token response. Hydra also accepts the bare `offline` alias for back-compat — prefer `offline_access` (OIDC Core 1.0 §11). |
 | `org`     | Adds an `org` claim — `{ id, slug, role, name }`. When the auth request carries `organization_id=<id>`, the claim is pinned to that org (or omitted entirely if the user isn't a member — see below); otherwise it reflects the user's currently-active org (the signed `active_org` cookie, else their first membership). |
 | `orgs`    | Adds an `orgs` claim — an array of `{ id, slug, role, name }` — listing every org the user belongs to. Capped at 32 entries. Apps that show a tenant picker request this. |
