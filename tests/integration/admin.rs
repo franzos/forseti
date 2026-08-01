@@ -678,6 +678,74 @@ async fn admin_client_update_persists_name_change() {
     hydra_delete_client(&client_id).await;
 }
 
+/// The admin clients form must not be able to make the PAM device-auth client
+/// public.
+///
+/// `none` is a shipped preset on that form and nothing used to exclude
+/// `forseti-linux-pam` from it. Forseti holds the Hydra `device_code` on behalf
+/// of every enrolled host, so a token endpoint that needs no credential turns
+/// each of those codes into a complete login for whoever holds it — one
+/// dropdown away, from a page an org admin already has.
+#[tokio::test]
+async fn admin_cannot_make_the_pam_client_public() {
+    if !portal_reachable().await || !pam_device_client_ready().await {
+        return;
+    }
+    let Some(client) = admin_client_or_skip().await else {
+        return;
+    };
+
+    let res = client
+        .get(format!("{PORTAL}/admin/clients/forseti-linux-pam"))
+        .send()
+        .await
+        .expect("GET the PAM client's admin page");
+    assert_eq!(res.status().as_u16(), 200);
+    let body = res.text().await.unwrap_or_default();
+    let csrf = extract_form_csrf(&body).expect("csrf in the PAM client edit form");
+
+    let res = client
+        .post(format!("{PORTAL}/admin/clients/forseti-linux-pam"))
+        .form(&[
+            ("_csrf", csrf.as_str()),
+            ("name", "Forseti Linux PAM (device auth)"),
+            (
+                "grant_types",
+                "urn:ietf:params:oauth:grant-type:device_code",
+            ),
+            ("response_types", "code"),
+            ("scope", "openid"),
+            ("redirect_uris", ""),
+            ("post_logout_redirect_uris", ""),
+            ("token_endpoint_auth_method", "none"),
+            ("account_deletion_url", ""),
+        ])
+        .send()
+        .await
+        .expect("POST the downgrade");
+    let body = res.text().await.unwrap_or_default();
+    assert!(
+        body.contains("Client must stay confidential"),
+        "the downgrade must be refused with an explanation; got {body}"
+    );
+
+    // The refusal has to have stopped the write, not just rendered a warning.
+    let probe = browser_client();
+    let v: serde_json::Value = probe
+        .get(format!("{HYDRA_ADMIN}/admin/clients/forseti-linux-pam"))
+        .send()
+        .await
+        .expect("hydra get PAM client")
+        .json()
+        .await
+        .expect("client json");
+    assert_ne!(
+        v["token_endpoint_auth_method"].as_str(),
+        Some("none"),
+        "the PAM client must still require a credential at the token endpoint"
+    );
+}
+
 /// Extract the value of the `_csrf` hidden input from a rendered HTML form.
 /// Used by the admin happy-path tests to pull the portal-issued CSRF token
 /// out of the response body so the follow-up POST passes the double-submit

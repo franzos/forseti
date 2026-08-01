@@ -357,6 +357,29 @@ pub async fn update(
         }
     };
     let payload = form.to_oauth2_client(Some(existing));
+
+    // Checked on the merged payload, not the raw form: an empty field means
+    // "leave alone", so only the effective value says whether this edit
+    // actually downgrades the client.
+    if id == state.cfg.posix.pam_client_id
+        && !crate::oauth::device::is_confidential_auth_method(
+            payload
+                .token_endpoint_auth_method
+                .as_deref()
+                .unwrap_or_default(),
+        )
+    {
+        tracing::warn!(client_id = %id, "admin: refused to make the PAM device-auth client public");
+        return render_admin_error(
+            &state,
+            "Client must stay confidential",
+            "This is the OAuth client Forseti drives Linux PAM device auth as. Forseti redeems \
+             its device codes on every enrolled host's behalf, so a token endpoint that needs no \
+             credential would let anyone who obtained one of those codes complete a login. Pick \
+             client_secret_basic or client_secret_post.",
+        );
+    }
+
     // Read the client_type back off the payload so the audit row matches
     // what actually got persisted (handles legacy edits where the form
     // didn't carry a `client_type` input).

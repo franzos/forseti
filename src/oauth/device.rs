@@ -18,6 +18,39 @@ use ory_client::models::OAuth2Client;
 
 const DEVICE_CODE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
 
+/// The one `token_endpoint_auth_method` that makes a client public. Everything
+/// else Hydra accepts (`client_secret_basic`/`_post`, `private_key_jwt`, the
+/// mTLS methods) requires a credential at the token endpoint.
+const PUBLIC_AUTH_METHOD: &str = "none";
+
+/// Whether `method` still requires a credential at Hydra's token endpoint. An
+/// empty value is confidential: OIDC Core defaults an omitted method to
+/// `client_secret_basic`.
+///
+/// This must hold for the PAM client. Forseti hands each host an opaque code of
+/// its own and redeems Hydra's `device_code` itself (see
+/// [`crate::posix::device`]); downgrading the client to `none` would make that
+/// `device_code` redeemable by anyone who obtained it, collapsing the whole
+/// binding in `evaluate_binding` back to "possession of a code".
+pub fn is_confidential_auth_method(method: &str) -> bool {
+    !method.trim().eq_ignore_ascii_case(PUBLIC_AUTH_METHOD)
+}
+
+/// Boot-time check that Hydra still reports the PAM client as confidential.
+///
+/// Deliberately three-valued: `Ok(())` when it's confidential *or* when we
+/// can't tell (Hydra still starting, client not provisioned yet), and `Err`
+/// only when Hydra positively reports a public client. A transient Hydra
+/// outage must not stop the portal booting.
+pub async fn pam_client_is_public(ory: &OryClients, posix: &PosixConfig) -> bool {
+    match hydra::get_client(ory, &posix.pam_client_id).await {
+        Ok(c) => !is_confidential_auth_method(
+            c.token_endpoint_auth_method.as_deref().unwrap_or_default(),
+        ),
+        Err(_) => false,
+    }
+}
+
 /// Build the `forseti-linux-pam` client model. `secret` is the plaintext
 /// Hydra hashes on store. Scope is `openid` only: the device path needs just
 /// `sub`/`acr`/`amr` from the id_token.
@@ -106,6 +139,19 @@ mod tests {
             c.token_endpoint_auth_method.as_deref(),
             Some("client_secret_basic")
         );
+    }
+
+    #[test]
+    fn only_none_counts_as_a_public_auth_method() {
+        assert!(is_confidential_auth_method("client_secret_basic"));
+        assert!(is_confidential_auth_method("client_secret_post"));
+        assert!(is_confidential_auth_method("private_key_jwt"));
+        // Omitted → Hydra applies the OIDC default, which is confidential.
+        assert!(is_confidential_auth_method(""));
+        assert!(!is_confidential_auth_method("none"));
+        // Casing/whitespace must not smuggle a downgrade past the guard.
+        assert!(!is_confidential_auth_method("None"));
+        assert!(!is_confidential_auth_method(" none "));
     }
 
     #[test]

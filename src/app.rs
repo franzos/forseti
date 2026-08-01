@@ -81,6 +81,22 @@ pub(crate) async fn run() -> anyhow::Result<()> {
 
     let ory = OryClients::from_config(&cfg);
 
+    // Refuse to serve POSIX device auth against a PAM client Hydra reports as
+    // public: Forseti holds the `device_code` on every host's behalf, so a
+    // credential-less token endpoint hands that grant to anyone. Only fires
+    // when device auth is actually configured and Hydra positively answers.
+    if cfg.posix.pam_client_secret.is_some()
+        && crate::oauth::device::pam_client_is_public(&ory, &cfg.posix).await
+    {
+        eprintln!(
+            "config error: OAuth client '{}' has token_endpoint_auth_method = none. \
+             POSIX device auth requires a confidential client; reset it to \
+             client_secret_basic in Hydra and restart.",
+            cfg.posix.pam_client_id
+        );
+        std::process::exit(1);
+    }
+
     let db = DbPool::init(&cfg.database)?;
     db.ping().await?;
     maybe_run_migrations(&db, &cfg.database).await?;
