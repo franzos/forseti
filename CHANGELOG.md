@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.1.19] - 2026-08-01
+
+### Fixed
+- Granting consent left the browser on an unchanged page (0.1.18 only)
+- Confirming an RP-initiated logout had the same failure (0.1.18 only)
+
 ## [0.1.18] - 2026-08-01
 
 ### Added
