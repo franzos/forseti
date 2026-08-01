@@ -309,6 +309,7 @@ diesel::table! {
         identity_id -> Nullable<Text>,
         created_at -> Text,
         expires_at -> Text,
+        client_code_hash -> Text,
     }
 }
 

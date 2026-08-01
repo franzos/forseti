@@ -48,6 +48,14 @@ pub struct DeviceInitRequest {
 
 #[derive(Debug, Serialize)]
 struct DeviceInitResponse {
+    /// A code Forseti minted, NOT the one Hydra issued. The response keeps RFC
+    /// 8628 §3.2's field name so the daemon (and any off-the-shelf device-flow
+    /// client) reads it as the code to poll with, but the value is opaque and
+    /// only redeemable at [`device_poll`]. Hydra's `device_code` is the grant
+    /// credential of the confidential `forseti-linux-pam` client, which Forseti
+    /// owns; shipping it to every enrolled host would put an AS credential in a
+    /// sphere that cannot use it and must not hold it.
+    device_code: String,
     user_code: String,
     verification_uri: String,
     /// Omitted for `force_mfa` hosts (R1): forces manual code entry and defeats
@@ -56,6 +64,18 @@ struct DeviceInitResponse {
     verification_uri_complete: Option<String>,
     interval: i64,
     expires_in: i64,
+}
+
+/// Mint the opaque code handed to the daemon: 32 CSPRNG bytes, base64url
+/// unpadded. At least as strong as the Hydra `device_code` it stands in for
+/// (RFC 8628 §5.2 asks for high entropy precisely because possession is the
+/// grant).
+fn mint_client_code() -> String {
+    use base64::Engine;
+    use rand::Rng;
+    let mut bytes = [0u8; 32];
+    rand::rng().fill(&mut bytes);
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
 #[derive(Debug, Deserialize)]
@@ -169,6 +189,7 @@ async fn device_init(
     // A code UNIQUE collision (Ok(false)) is a rare Hydra clash; reject so the
     // daemon restarts the flow, never 500.
     let expires_at = (Utc::now() + chrono::Duration::seconds(authz.expires_in)).to_rfc3339();
+    let client_code = mint_client_code();
     match db::insert_device_session(
         &state.db,
         &authz.device_code,
@@ -176,6 +197,7 @@ async fn device_init(
         &host.host_id,
         &username,
         &expires_at,
+        &crate::oauth::register::hash_token(&client_code),
     )
     .await
     {
@@ -209,6 +231,7 @@ async fn device_init(
     };
 
     Json(DeviceInitResponse {
+        device_code: client_code,
         user_code: authz.user_code,
         verification_uri: authz.verification_uri,
         verification_uri_complete,
@@ -233,8 +256,11 @@ async fn device_poll(
     let now = Utc::now();
 
     // Session must belong to THIS host (else 404, don't leak another host's flow).
+    // `req.device_code` is the code minted in `device_init`, not Hydra's; it is
+    // stored hashed, so a DB read never yields a redeemable code.
     let _ = db::lazy_prune_expired(&state.db, &now.to_rfc3339()).await;
-    let session = match db::device_session_by_code(&state.db, &req.device_code).await {
+    let presented = crate::oauth::register::hash_token(&req.device_code);
+    let session = match db::device_session_by_client_code_hash(&state.db, &presented).await {
         Ok(Some(s)) if s.host_id == host.host_id => s,
         Ok(_) => return json_error(StatusCode::NOT_FOUND),
         Err(e) => {
@@ -626,6 +652,19 @@ mod tests {
         inputs.host_force_mfa = true;
         inputs.auth_time = None;
         assert_eq!(evaluate_binding(&inputs, 1000, 300), Err("mfa_required"));
+    }
+
+    #[test]
+    fn minted_client_codes_are_unique_and_full_entropy() {
+        let a = mint_client_code();
+        let b = mint_client_code();
+        assert_ne!(a, b);
+        // 32 bytes base64url-unpadded.
+        assert_eq!(a.len(), 43);
+        assert!(
+            a.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        );
     }
 
     #[test]

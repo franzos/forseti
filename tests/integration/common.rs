@@ -1335,6 +1335,9 @@ pub fn device_session_status_by_user_code(user_code: &str) -> Option<String> {
 /// Read a `device_sessions.device_code` (the PK) by `user_code`. The init
 /// response never carries the device_code (it's the Hydra bearer secret); a
 /// test driving the daemon's poll leg pulls it from the DB.
+/// Hydra's `device_code` for a flow. This is the credential that must NEVER
+/// reach the daemon — tests read it straight from the DB precisely so they can
+/// assert it is not redeemable over the wire.
 pub fn device_code_for_user_code(user_code: &str) -> Option<String> {
     let conn = forseti_db_conn();
     conn.query_row(

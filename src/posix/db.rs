@@ -1134,6 +1134,7 @@ struct NewDeviceSession<'a> {
     status: &'a str,
     created_at: String,
     expires_at: &'a str,
+    client_code_hash: &'a str,
 }
 
 /// Insert a `pending` device session. Returns `Ok(false)` on a
@@ -1146,12 +1147,14 @@ pub async fn insert_device_session(
     host_id: &str,
     requested_username: &str,
     expires_at: &str,
+    client_code_hash: &str,
 ) -> anyhow::Result<bool> {
     let dc = device_code.to_string();
     let uc = user_code.to_string();
     let host = host_id.to_string();
     let user = requested_username.to_string();
     let exp = expires_at.to_string();
+    let cch = client_code_hash.to_string();
     let now = Utc::now().to_rfc3339();
     let res: Result<(), diesel::result::Error> = db_interact!(db, |conn| {
         diesel::insert_into(device_sessions::table)
@@ -1163,6 +1166,7 @@ pub async fn insert_device_session(
                 status: device_status::PENDING,
                 created_at: now,
                 expires_at: &exp,
+                client_code_hash: &cch,
             })
             .execute(conn)
             .map(|_| ())
@@ -1185,6 +1189,24 @@ pub async fn device_session_by_code(
     let row: Option<DeviceSession> = db_interact!(db, |conn| {
         device_sessions::table
             .filter(device_sessions::device_code.eq(&dc))
+            .select(DeviceSession::as_select())
+            .first(conn)
+            .optional()
+    })?;
+    Ok(row)
+}
+
+/// Look a session up by the SHA-256 of the code the daemon was handed. This is
+/// the only lookup the poll path uses: Hydra's `device_code` never leaves this
+/// process, so a caller can only ever present the server-minted one.
+pub async fn device_session_by_client_code_hash(
+    db: &DbPool,
+    client_code_hash: &str,
+) -> anyhow::Result<Option<DeviceSession>> {
+    let h = client_code_hash.to_string();
+    let row: Option<DeviceSession> = db_interact!(db, |conn| {
+        device_sessions::table
+            .filter(device_sessions::client_code_hash.eq(&h))
             .select(DeviceSession::as_select())
             .first(conn)
             .optional()
@@ -1496,11 +1518,21 @@ mod tests {
     }
 
     /// A pending session for `username` on `host`, expiring far in the future.
+    /// `code` stands in for all three codes; the client-code hash only has to be
+    /// unique per row for these tests.
     async fn pending_session(db: &DbPool, code: &str, host: &str, username: &str) {
         assert!(
-            insert_device_session(db, code, code, host, username, "2099-01-01T00:00:00+00:00")
-                .await
-                .expect("insert session")
+            insert_device_session(
+                db,
+                code,
+                code,
+                host,
+                username,
+                "2099-01-01T00:00:00+00:00",
+                &crate::oauth::register::hash_token(code),
+            )
+            .await
+            .expect("insert session")
         );
     }
 

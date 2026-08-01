@@ -1301,6 +1301,12 @@ async fn device_init(host_id: &str, secret: &str, username: &str) -> (reqwest::S
 
 /// One `device/poll` round-trip. Returns the parsed JSON `{status: ...}`.
 async fn device_poll(host_id: &str, secret: &str, device_code: &str) -> Value {
+    device_poll_status(host_id, secret, device_code).await.1
+}
+
+/// `device_poll` keeping the HTTP status, for the paths where a rejection is the
+/// assertion (an unknown handle is a 404 with no body).
+async fn device_poll_status(host_id: &str, secret: &str, device_code: &str) -> (StatusCode, Value) {
     let client = reqwest::Client::new();
     let res = client
         .post(format!("{INTERNAL}/posix/v1/device/poll"))
@@ -1309,7 +1315,8 @@ async fn device_poll(host_id: &str, secret: &str, device_code: &str) -> Value {
         .send()
         .await
         .expect("POST device/poll");
-    res.json().await.unwrap_or(Value::Null)
+    let status = res.status();
+    (status, res.json().await.unwrap_or(Value::Null))
 }
 
 /// Script the browser approval as `approver` (a signed-in Forseti user).
@@ -1424,11 +1431,12 @@ async fn device_auth_happy_path_binds_and_approves() {
         .as_str()
         .expect("verification_uri")
         .to_string();
-    let device_code = {
-        // device_code never leaves Forseti in the init response — read it from
-        // the DB by user_code so the test can poll on behalf of the daemon.
-        device_code_for_user_code(&user_code).expect("device_code row")
-    };
+    // Poll with exactly what the daemon was handed: the server-minted code the
+    // init response carries as `device_code`, not Hydra's.
+    let device_code = body["device_code"]
+        .as_str()
+        .expect("init response must carry a device_code the daemon can poll with")
+        .to_string();
 
     let approved = browser_approve(&approver, &verification_uri, &user_code).await;
     assert!(approved, "browser approval chain should complete");
@@ -1455,6 +1463,67 @@ async fn device_auth_happy_path_binds_and_approves() {
     delete_host_enrollment(&host_id);
     delete_org_membership(&org_id, &approver.identity_id);
     approver.cleanup().await;
+}
+
+/// Forseti is the RFC 8628 client: it holds `[posix].pam_client_secret` and does
+/// the token exchange, so Hydra's `device_code` must never reach a host. `init`
+/// hands back a server-minted code under the same field name, and only that code
+/// is redeemable at `poll`.
+///
+/// Without this the AS's grant credential would sit on every enrolled host, one
+/// `token_endpoint_auth_method: none` edit (reachable from the admin clients UI)
+/// away from bypassing the whole binding in `evaluate_binding`.
+#[tokio::test]
+async fn device_init_hands_out_its_own_code_and_poll_rejects_hydras() {
+    if !portal_reachable().await || !pam_device_client_ready().await {
+        return;
+    }
+    let user = register_test_user("dev-code").await;
+    let seed = chrono::Utc::now().timestamp_millis() % 50_000;
+    let username = format!("devcode{seed}");
+    let org_id = format!("dev-org-code-{seed}");
+    seed_posix_account(&user.identity_id, &username, 76_000 + seed, 76_000 + seed);
+    seed_org_membership(&org_id, &user.identity_id, "member");
+
+    let host_id = format!("dev-host-code-{seed}");
+    let secret = "s3cret-dev-code";
+    seed_host_enrollment(&host_id, "code.example", secret, &org_id);
+
+    let (status, body) = device_init(&host_id, secret, &username).await;
+    assert_eq!(status, StatusCode::OK, "device/init: {status} {body}");
+
+    let issued = body["device_code"]
+        .as_str()
+        .expect("init must return a device_code")
+        .to_string();
+    let user_code = body["user_code"].as_str().expect("user_code").to_string();
+    let hydra_code = device_code_for_user_code(&user_code).expect("device_code row");
+
+    assert_ne!(
+        issued, hydra_code,
+        "the code handed to the host must not be Hydra's grant credential"
+    );
+
+    // The code we did hand out is accepted (pending, since nobody approved yet).
+    let mine = device_poll(&host_id, secret, &issued).await;
+    assert_eq!(
+        mine["status"], "pending",
+        "the server-minted code must be the one poll accepts"
+    );
+
+    // Hydra's code is not a valid handle here, even from the owning host with
+    // valid host credentials.
+    let (leaked_status, _) = device_poll_status(&host_id, secret, &hydra_code).await;
+    assert_eq!(
+        leaked_status,
+        StatusCode::NOT_FOUND,
+        "Hydra's device_code must not be redeemable at Forseti's poll endpoint"
+    );
+
+    delete_device_sessions_for_host(&host_id);
+    delete_host_enrollment(&host_id);
+    delete_org_membership(&org_id, &user.identity_id);
+    user.cleanup().await;
 }
 
 /// Wrong-user-approves: the flow names alice, but bob (a different signed-in
@@ -1487,12 +1556,30 @@ async fn device_auth_wrong_user_denied() {
     assert_eq!(status, StatusCode::OK);
     let user_code = body["user_code"].as_str().unwrap().to_string();
     let verification_uri = body["verification_uri"].as_str().unwrap().to_string();
-    let device_code = device_code_for_user_code(&user_code).expect("device_code row");
+    let device_code = body["device_code"].as_str().unwrap().to_string();
 
-    browser_approve(&bob, &verification_uri, &user_code).await;
+    // Bob cannot get the approval through at all: `approver_is_target` refuses
+    // him at the verification screen, so Hydra's user code is never accepted and
+    // no token is ever minted for the wrong identity. (Before the approval was
+    // bound to the session, bob COULD accept and the mismatch was only caught at
+    // poll time as `denied{binding}` — after a token had already been issued.)
+    let approved = browser_approve(&bob, &verification_uri, &user_code).await;
+    assert!(
+        !approved,
+        "a non-target must not be able to complete the approval chain"
+    );
 
-    let outcome = poll_until_terminal(&host_id, secret, &device_code, 10).await;
-    assert_eq!(outcome, "denied", "approver != named target must be denied");
+    // The flow therefore never becomes approved; it stays pending until expiry.
+    let outcome = poll_until_terminal(&host_id, secret, &device_code, 3).await;
+    assert_ne!(
+        outcome, "approved",
+        "a flow named for alice must never approve off bob's session"
+    );
+    assert_eq!(
+        device_session_status_by_user_code(&user_code).as_deref(),
+        Some("pending"),
+        "no token was issued, so nothing bound and nothing was denied"
+    );
 
     delete_device_sessions_for_host(&host_id);
     delete_host_enrollment(&host_id);
@@ -1531,7 +1618,7 @@ async fn device_auth_force_mfa_aal1_denied() {
     );
     let user_code = body["user_code"].as_str().unwrap().to_string();
     let verification_uri = body["verification_uri"].as_str().unwrap().to_string();
-    let device_code = device_code_for_user_code(&user_code).expect("device_code row");
+    let device_code = body["device_code"].as_str().unwrap().to_string();
 
     browser_approve(&approver, &verification_uri, &user_code).await;
 
