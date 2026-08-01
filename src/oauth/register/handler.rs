@@ -208,6 +208,17 @@ pub(crate) async fn register(
                     "The provided initial access token is revoked, expired, or has no remaining uses.",
                 );
             }
+            IatConsume::DatabaseError => {
+                // Same reasoning as the `IatCheck::DatabaseError` arm above:
+                // 503 so the caller retries instead of discarding a token that
+                // is still perfectly good.
+                tracing::error!(iat_id = %row.id, "dcr: IAT consume unavailable; returning 503");
+                return error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "server_error",
+                    "Token validation is temporarily unavailable. Retry shortly.",
+                );
+            }
             IatConsume::DailyLimit { count } => {
                 tracing::warn!(
                     iat_id = %row.id,

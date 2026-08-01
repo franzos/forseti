@@ -213,6 +213,15 @@ pub async fn insert_admin_verified(
 /// connection types, and a shared helper would need full dual-backend bounds.
 macro_rules! ensure_row_and_prior {
     ($c:expr_2021, $id:expr_2021, $now:expr_2021) => {{
+        // Claim the write lock before reading. Both callers read this row and
+        // then write it, and sqlite refuses to upgrade a read lock to a write
+        // lock mid-transaction rather than waiting out `busy_timeout` — see
+        // `crate::db::is_retryable_tx_error`. Without this a concurrent write
+        // makes the whole transaction fail, and the verify/unverify handlers
+        // log the error and still report success to the admin.
+        diesel::update(ocm::table.filter(ocm::client_id.eq($id)))
+            .set(ocm::verification.eq(ocm::verification))
+            .execute($c)?;
         let existing: Option<Row> = ocm::table
             .filter(ocm::client_id.eq($id))
             .select(Row::as_select())
