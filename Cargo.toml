@@ -172,6 +172,13 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "form", "rustls", "cookies"] }
 serde_json = "1"
 regex = "1"
+# The Linux client's own wire types, so the POSIX device tests decode live
+# responses with exactly what the daemon parses them with instead of a
+# hand-kept copy that can drift. `forseti-unix` is a separate workspace; this
+# is a path dep into it, not a member. Deliberately the thin `proto` crate
+# (serde only) and not the daemon, which would drag tokio/rusqlite/reqwest
+# into every test build.
+forseti-unix-proto = { path = "forseti-unix/proto" }
 # DCR integration tests reach into the Forseti-owned sqlite DB to mint IATs
 # and flip verification state without driving the admin UI. `bundled` mirrors
 # the main `libsqlite3-sys` choice so we don't need system sqlite headers.

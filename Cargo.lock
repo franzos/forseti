@@ -1309,6 +1309,7 @@ dependencies = [
  "figment",
  "fluent-syntax",
  "fluent-templates",
+ "forseti-unix-proto",
  "futures",
  "futures-util",
  "hex",
@@ -1351,6 +1352,14 @@ dependencies = [
  "unicode-security",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "forseti-unix-proto"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

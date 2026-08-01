@@ -79,10 +79,14 @@ const DEFAULT_DEVICE_VERIFY_RATE_PER_HOUR: u32 = 120;
 /// the throttle wraps only this route, not the unthrottled `/oauth/device/done`
 /// terminal page.
 fn device_router(oauth_cfg: &OAuthConfig, proxy_cfg: &ProxyConfig) -> Router<AppState> {
-    let r = Router::new().route(
-        "/oauth/device",
-        get(device_verify::device_verify).post(device_verify::device_verify_submit),
-    );
+    // `cancel` shares the bucket: it's another `user_code`-keyed action, so it
+    // shouldn't hand out an unthrottled way to probe codes.
+    let r = Router::new()
+        .route(
+            "/oauth/device",
+            get(device_verify::device_verify).post(device_verify::device_verify_submit),
+        )
+        .route("/oauth/device/cancel", post(device_verify::device_cancel));
 
     let per_minute = oauth_cfg
         .device_verify_ip_rate_per_minute

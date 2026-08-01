@@ -52,30 +52,54 @@
   </form>
 
   {% when None %}
-  {# No backing session for this code: bare code-entry prompt. We cannot #}
-  {# show the host-bound panel for a code we don't recognise. #}
-  <p class="font-body-md text-body-md text-on-surface-variant mb-stack-md">
-    {{ chrome.t("device-verify-code-prompt") }}
-  </p>
-  <form method="GET"
-        action="/oauth/device"
-        class="flex flex-col gap-stack-sm">
-    {% if device_challenge.is_empty() %}
-    {% else %}
-      <input type="hidden" name="device_challenge" value="{{ device_challenge }}">
-    {% endif %}
-    <input type="text"
-           name="user_code"
-           value="{{ user_code }}"
-           autocomplete="off"
-           autocapitalize="characters"
-           spellcheck="false"
-           placeholder="ABCD-EFGH"
-           class="font-mono text-title-md tracking-widest text-center px-4 py-2 rounded-lg border border-outline-variant bg-surface-container-high text-on-surface">
-    <button type="submit"
-            class="bg-primary text-on-primary font-label-md text-label-md font-bold px-4 py-2 rounded-lg hover:opacity-90 transition-opacity">
-      {{ chrome.t("device-verify-code-submit") }}
-    </button>
-  </form>
+  {% if foreign %}
+    {# A session exists but names another account. Offer the only useful action: #}
+    {# end it, so the waiting terminal gets an answer instead of a timeout. #}
+    <div class="rounded-lg border border-outline-variant bg-surface-container-high p-4 mb-stack-md">
+      <p class="font-title-md text-title-md text-on-surface font-bold mb-stack-xs">{{ chrome.t("device-verify-foreign-prompt") }}</p>
+      <p class="font-body-md text-body-md text-on-surface">{{ chrome.t("device-verify-foreign-body") }}</p>
+    </div>
+
+    <form method="POST"
+          action="/oauth/device/cancel"
+          class="flex flex-col gap-stack-sm">
+      <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+      <input type="hidden" name="user_code" value="{{ user_code }}">
+      <button type="submit"
+              class="bg-primary text-on-primary font-label-md text-label-md font-bold px-4 py-2 rounded-lg hover:opacity-90 transition-opacity">
+        {{ chrome.t("device-verify-foreign-cancel") }}
+      </button>
+      <a href="/"
+         class="font-label-md text-label-md text-on-surface-variant border border-outline-variant rounded-lg px-4 py-2 text-center hover:bg-surface-container-high transition-colors">
+        {{ chrome.t("device-verify-cancel") }}
+      </a>
+    </form>
+  {% else %}
+    {# No backing session for this code: bare code-entry prompt. We cannot #}
+    {# show the host-bound panel for a code we don't recognise. #}
+    <p class="font-body-md text-body-md text-on-surface-variant mb-stack-md">
+      {{ chrome.t("device-verify-code-prompt") }}
+    </p>
+    <form method="GET"
+          action="/oauth/device"
+          class="flex flex-col gap-stack-sm">
+      {% if device_challenge.is_empty() %}
+      {% else %}
+        <input type="hidden" name="device_challenge" value="{{ device_challenge }}">
+      {% endif %}
+      <input type="text"
+             name="user_code"
+             value="{{ user_code }}"
+             autocomplete="off"
+             autocapitalize="characters"
+             spellcheck="false"
+             placeholder="ABCD-EFGH"
+             class="font-mono text-title-md tracking-widest text-center px-4 py-2 rounded-lg border border-outline-variant bg-surface-container-high text-on-surface">
+      <button type="submit"
+              class="bg-primary text-on-primary font-label-md text-label-md font-bold px-4 py-2 rounded-lg hover:opacity-90 transition-opacity">
+        {{ chrome.t("device-verify-code-submit") }}
+      </button>
+    </form>
+  {% endif %}
 {% endmatch %}
 {% endblock %}

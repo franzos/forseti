@@ -10,6 +10,16 @@ device-verify-cancel = No, cancel
 device-verify-code-prompt = Enter the code shown on your terminal to continue.
 device-verify-code-submit = Continue
 
+# Shown when the signed-in account is not the one the login was started for.
+# Deliberately names neither the target account nor the host.
+device-verify-foreign-prompt = This login isn't for your account.
+device-verify-foreign-body = Someone started this login for a different account. If it was you, sign in as that account and open the link again.
+device-verify-foreign-cancel = Cancel this login
+
+device-done-title-cancelled = Login cancelled
+device-done-card-title-cancelled = Login cancelled
+device-done-body-cancelled = The terminal that started this login has been told it was refused.
+
 device-done-title-error = Login not approved
 device-done-title-ok = Login approved
 device-done-card-title-error = We couldn't approve that login

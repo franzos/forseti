@@ -5,6 +5,12 @@
 //! Two protocols share the one socket and codec:
 //! - `ClientRequest`/`ClientResponse` — FROZEN NSS/keys wire types; do not extend.
 //! - `PamRequest`/`PamResponse` — the separate PAM device-auth protocol.
+//!
+//! [`server`] carries a third, unrelated protocol: the daemon's HTTP contract
+//! with Forseti. It lives here so the server can test against the same
+//! definitions the daemon parses with — see that module's docs.
+
+pub mod server;
 
 use std::io::{self, Read, Write};
 

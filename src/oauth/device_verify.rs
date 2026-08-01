@@ -44,6 +44,11 @@ struct DeviceVerifyTemplate {
     /// the `user_code`; the template then shows a plain code-entry prompt
     /// without the host-bound consent panel.
     target: Option<VerifyTarget>,
+    /// A pending session matched the `user_code` but names someone else. The
+    /// template swaps the consent panel for a cancel prompt, so the person
+    /// holding the code can end the flow instead of leaving the terminal to
+    /// hang until expiry. Nothing about the target is disclosed.
+    foreign: bool,
 }
 
 struct VerifyTarget {
@@ -57,6 +62,27 @@ struct VerifyTarget {
 struct DeviceDoneTemplate {
     chrome: PageChrome,
     error: bool,
+    /// Deliberately refused rather than failed. Kept apart from `error` so the
+    /// page doesn't tell someone who just cancelled that their code expired.
+    cancelled: bool,
+}
+
+impl DeviceDoneTemplate {
+    fn error(chrome: PageChrome) -> Self {
+        Self {
+            chrome,
+            error: true,
+            cancelled: false,
+        }
+    }
+
+    fn cancelled(chrome: PageChrome) -> Self {
+        Self {
+            chrome,
+            error: false,
+            cancelled: true,
+        }
+    }
 }
 
 /// `GET /oauth/device` — render the verification screen, showing the host +
@@ -75,6 +101,7 @@ pub(crate) async fn device_verify(
     let user_code = query.user_code.unwrap_or_default();
     let device_challenge = query.device_challenge.unwrap_or_default();
 
+    let mut foreign = false;
     let target = if user_code.is_empty() {
         None
     } else {
@@ -87,6 +114,7 @@ pub(crate) async fn device_verify(
                         identity_id = %session.identity_id,
                         "device_verify: signed-in identity is not the named target; hiding it"
                     );
+                    foreign = true;
                     None
                 }
             }
@@ -99,6 +127,7 @@ pub(crate) async fn device_verify(
         device_challenge,
         user_code,
         target,
+        foreign,
     })
 }
 
@@ -119,10 +148,7 @@ pub(crate) async fn device_verify_submit(
     // Re-load by user_code so a tampered POST can't accept a code with no
     // backing session.
     let Some(target) = load_target(&state, &form.user_code).await else {
-        return render(&DeviceDoneTemplate {
-            chrome: anon_chrome(&state, locale),
-            error: true,
-        });
+        return render(&DeviceDoneTemplate::error(anon_chrome(&state, locale)));
     };
 
     if !approver_is_target(&state, &session.identity_id, &target).await {
@@ -130,10 +156,7 @@ pub(crate) async fn device_verify_submit(
             identity_id = %session.identity_id,
             "device_verify: refusing approval by an identity that is not the named target"
         );
-        return render(&DeviceDoneTemplate {
-            chrome: anon_chrome(&state, locale),
-            error: true,
-        });
+        return render(&DeviceDoneTemplate::error(anon_chrome(&state, locale)));
     }
 
     match ory::hydra::accept_user_code_request(&state.ory, &form.device_challenge, &form.user_code)
@@ -145,10 +168,56 @@ pub(crate) async fn device_verify_submit(
         Ok(_) => Redirect::to("/oauth/device/done").into_response(),
         Err(e) => {
             tracing::warn!(error = %e, "device_verify: accept_user_code_request failed");
-            render(&DeviceDoneTemplate {
-                chrome: anon_chrome(&state, locale),
-                error: true,
-            })
+            render(&DeviceDoneTemplate::error(anon_chrome(&state, locale)))
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct DeviceCancelForm {
+    user_code: String,
+}
+
+/// `POST /oauth/device/cancel` — refuse a flow that names someone else.
+///
+/// Without this the wrong signed-in user has no way to answer: approval is
+/// (correctly) refused, but the session stays `pending` and the terminal that
+/// started it hangs until the code expires. Denying the Forseti row is enough
+/// for the daemon to fail fast — `device_poll` reports a settled `denied`
+/// before it ever asks Hydra — so Hydra's own request is left to expire.
+///
+/// Restricted to non-targets. Someone who holds the `user_code` and is signed
+/// in as anyone else can end that flow, which is the point; the target's own
+/// "no, that wasn't me" is the existing decline path on the approval screen.
+pub(crate) async fn device_cancel(
+    State(state): State<AppState>,
+    session: RequireSession,
+    ReqLocale(locale): ReqLocale,
+    CsrfForm(form): CsrfForm<DeviceCancelForm>,
+) -> Response {
+    let chrome = anon_chrome(&state, locale);
+    let Some(target) = load_target(&state, &form.user_code).await else {
+        return render(&DeviceDoneTemplate::error(chrome));
+    };
+    if approver_is_target(&state, &session.identity_id, &target).await {
+        return render(&DeviceDoneTemplate::error(chrome));
+    }
+
+    let device_code = match db::device_session_by_user_code(&state.db, &form.user_code).await {
+        Ok(Some(s)) => s.device_code,
+        _ => return render(&DeviceDoneTemplate::error(chrome)),
+    };
+    match db::deny_device_session(&state.db, &device_code).await {
+        Ok(_) => {
+            tracing::info!(
+                identity_id = %session.identity_id,
+                "device_verify: non-target cancelled a device login"
+            );
+            render(&DeviceDoneTemplate::cancelled(chrome))
+        }
+        Err(e) => {
+            tracing::error!(error = ?e, "device_verify: cancel failed to deny the session");
+            render(&DeviceDoneTemplate::error(chrome))
         }
     }
 }
@@ -168,6 +237,7 @@ pub(crate) async fn device_done(
     render(&DeviceDoneTemplate {
         chrome,
         error: query.error.is_some(),
+        cancelled: false,
     })
 }
 

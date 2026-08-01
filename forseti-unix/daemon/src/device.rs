@@ -7,7 +7,6 @@
 use anyhow::{Context, Result};
 use base64::Engine;
 use reqwest::StatusCode;
-use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -17,26 +16,10 @@ use std::time::{Duration, Instant};
 /// flows a single misbehaving caller can pin open.
 pub const MAX_SESSIONS: usize = 256;
 
-/// Forseti's `device/init` success body.
-#[derive(Debug, Deserialize)]
-pub struct InitResponse {
-    pub device_code: String,
-    pub user_code: String,
-    pub verification_uri: String,
-    pub interval: u32,
-    pub expires_in: u32,
-}
-
-/// Forseti's `device/poll` body. `status` is one of
-/// `pending | approved | denied | expired`.
-#[derive(Debug, Deserialize)]
-pub struct PollResponse {
-    pub status: String,
-    #[serde(default)]
-    pub interval: Option<u32>,
-    #[serde(default)]
-    pub reason: Option<String>,
-}
+/// Forseti's `device/init` / `device/poll` bodies. Defined in `proto` so the
+/// server can decode its own responses into them in its test suite; see
+/// `forseti_unix_proto::server`.
+pub use forseti_unix_proto::server::{InitResponse, PollResponse};
 
 /// Outcome of an init call, distinguishing the 404 "not a Forseti user here"
 /// case (→ PAM_IGNORE) from a transport/server failure (→ PAM_AUTHINFO_UNAVAIL).

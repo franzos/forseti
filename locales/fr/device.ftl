@@ -10,6 +10,14 @@ device-verify-cancel = Non, annuler
 device-verify-code-prompt = Saisissez le code affiché sur votre terminal pour continuer.
 device-verify-code-submit = Continuer
 
+device-verify-foreign-prompt = Cette connexion ne concerne pas votre compte.
+device-verify-foreign-body = Quelqu'un a lancé cette connexion pour un autre compte. Si c'était vous, connectez-vous avec ce compte et rouvrez le lien.
+device-verify-foreign-cancel = Annuler cette connexion
+
+device-done-title-cancelled = Connexion annulée
+device-done-card-title-cancelled = Connexion annulée
+device-done-body-cancelled = Le terminal qui a lancé cette connexion a été informé de son refus.
+
 device-done-title-error = Connexion non approuvée
 device-done-title-ok = Connexion approuvée
 device-done-card-title-error = Nous n'avons pas pu approuver cette connexion

@@ -10,6 +10,14 @@ device-verify-cancel = لا، إلغاء
 device-verify-code-prompt = أدخل الرمز المعروض على طرفيتك للمتابعة.
 device-verify-code-submit = متابعة
 
+device-verify-foreign-prompt = تسجيل الدخول هذا ليس لحسابك.
+device-verify-foreign-body = بدأ أحدهم تسجيل الدخول هذا لحساب آخر. إذا كنت أنت، فسجّل الدخول بذلك الحساب ثم افتح الرابط من جديد.
+device-verify-foreign-cancel = إلغاء تسجيل الدخول هذا
+
+device-done-title-cancelled = تم إلغاء تسجيل الدخول
+device-done-card-title-cancelled = تم إلغاء تسجيل الدخول
+device-done-body-cancelled = أُبلغت الطرفية التي بدأت تسجيل الدخول هذا بأنه رُفض.
+
 device-done-title-error = لم تتم الموافقة على تسجيل الدخول
 device-done-title-ok = تمت الموافقة على تسجيل الدخول
 device-done-card-title-error = تعذّرت الموافقة على تسجيل الدخول ذاك

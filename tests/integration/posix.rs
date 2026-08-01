@@ -1384,10 +1384,20 @@ async fn browser_approve(
                 .expect("POST /oauth/consent");
             return res.status().is_success();
         }
-        // No consent leg surfaced (already granted) — treat the confirm as done.
-        return confirm_ok;
+        // No consent leg surfaced (already granted) — treat the confirm as
+        // done, unless the confirm itself rendered the refusal page. Both are
+        // 200s, so the status alone says nothing.
+        return confirm_ok && !is_device_refusal_page(&body);
     }
     false
+}
+
+/// Whether a rendered page is the "we couldn't approve that login" card. The
+/// refusal is a 200 with an error body, so [`browser_approve`] can't read the
+/// outcome off the status code. Keyed on the form the approval screen posts:
+/// the refusal page has no form at all.
+fn is_device_refusal_page(html: &str) -> bool {
+    !html.contains("name=\"device_challenge\"") && !html.contains("/oauth/consent")
 }
 
 /// Poll until terminal (approved/denied/expired) or `max` pending rounds.
@@ -1408,7 +1418,7 @@ async fn poll_until_terminal(host_id: &str, secret: &str, device_code: &str, max
 /// (single-use is asserted via the negative tests below).
 #[tokio::test]
 async fn device_auth_happy_path_binds_and_approves() {
-    if !portal_reachable().await || !pam_device_client_ready().await {
+    if !device_stack_ready().await {
         return;
     }
     let approver = register_test_user("dev-ok").await;
@@ -1475,7 +1485,7 @@ async fn device_auth_happy_path_binds_and_approves() {
 /// away from bypassing the whole binding in `evaluate_binding`.
 #[tokio::test]
 async fn device_init_hands_out_its_own_code_and_poll_rejects_hydras() {
-    if !portal_reachable().await || !pam_device_client_ready().await {
+    if !device_stack_ready().await {
         return;
     }
     let user = register_test_user("dev-code").await;
@@ -1526,11 +1536,168 @@ async fn device_init_hands_out_its_own_code_and_poll_rejects_hydras() {
     user.cleanup().await;
 }
 
+/// Contract: the live `device/{init,poll}` bodies must deserialize into the
+/// exact structs the Linux daemon parses them with.
+///
+/// `forseti-unix` is a separate workspace, so nothing else makes the server's
+/// `Serialize` and the daemon's `Deserialize` agree. They already disagreed
+/// once — `device_code` was absent from the response and required by
+/// `InitResponse`, so every PAM login failed at "device/init decode failed"
+/// while both suites stayed green. Decoding through `forseti_unix_proto` (the
+/// crate the daemon re-exports these from) is what turns that class of drift
+/// into a test failure.
+#[tokio::test]
+async fn device_wire_bodies_deserialize_into_the_daemon_types() {
+    use forseti_unix_proto::server::{InitResponse, PollResponse};
+
+    if !device_stack_ready().await {
+        return;
+    }
+    let user = register_test_user("dev-wire").await;
+    let seed = chrono::Utc::now().timestamp_millis() % 50_000;
+    let username = format!("devwire{seed}");
+    let org_id = format!("dev-org-wire-{seed}");
+    seed_posix_account(&user.identity_id, &username, 77_000 + seed, 77_000 + seed);
+    seed_org_membership(&org_id, &user.identity_id, "member");
+
+    let host_id = format!("dev-host-wire-{seed}");
+    let secret = "s3cret-dev-wire";
+    seed_host_enrollment(&host_id, "wire.example", secret, &org_id);
+
+    let (status, body) = device_init(&host_id, secret, &username).await;
+    assert_eq!(status, StatusCode::OK, "device/init: {status} {body}");
+    let init: InitResponse = serde_json::from_value(body.clone())
+        .unwrap_or_else(|e| panic!("device/init body is not a daemon InitResponse: {e}\n{body}"));
+
+    // Every field the daemon goes on to use must actually carry a value; a
+    // present-but-empty `device_code` would decode fine and strand the login.
+    assert!(
+        !init.device_code.is_empty(),
+        "device_code must be populated"
+    );
+    assert!(!init.user_code.is_empty(), "user_code must be populated");
+    assert!(
+        init.verification_uri.starts_with("http"),
+        "verification_uri must be a URL the daemon can show; got {:?}",
+        init.verification_uri
+    );
+    assert!(init.interval > 0, "daemon divides its backoff by interval");
+    assert!(init.expires_in > 0, "daemon sets its hard expiry from this");
+
+    // `pending` — the shape the daemon sees on every poll but the last.
+    let pending = device_poll(&host_id, secret, &init.device_code).await;
+    let pending: PollResponse = serde_json::from_value(pending.clone()).unwrap_or_else(|e| {
+        panic!("device/poll body is not a daemon PollResponse: {e}\n{pending}")
+    });
+    assert_eq!(pending.status, "pending");
+    assert!(
+        pending.interval.is_some_and(|i| i > 0),
+        "pending must carry the interval the daemon backs off by; got {:?}",
+        pending.interval
+    );
+
+    // `denied` — the other shape, carrying the coarse reason tag.
+    deny_device_session_by_user_code(&init.user_code);
+    let denied = device_poll(&host_id, secret, &init.device_code).await;
+    let denied: PollResponse = serde_json::from_value(denied.clone()).unwrap_or_else(|e| {
+        panic!("denied device/poll is not a daemon PollResponse: {e}\n{denied}")
+    });
+    assert_eq!(denied.status, "denied");
+    assert!(
+        denied.reason.is_some(),
+        "denied must carry a reason tag; got {denied:?}"
+    );
+
+    delete_device_sessions_for_host(&host_id);
+    delete_host_enrollment(&host_id);
+    delete_org_membership(&org_id, &user.identity_id);
+    user.cleanup().await;
+}
+
+/// A non-target holding the code can end the flow outright, so the terminal
+/// gets an answer instead of hanging until the code expires. The approval path
+/// stays shut either way — this only adds a way to say no.
+#[tokio::test]
+async fn device_auth_non_target_can_cancel() {
+    if !device_stack_ready().await {
+        return;
+    }
+    let alice = register_test_user("dev-c-alice").await;
+    let bob = register_test_user("dev-c-bob").await;
+    let seed = chrono::Utc::now().timestamp_millis() % 50_000;
+    let alice_name = format!("devcalice{seed}");
+    let bob_name = format!("devcbob{seed}");
+    let org_id = format!("dev-org-cancel-{seed}");
+    seed_posix_account(
+        &alice.identity_id,
+        &alice_name,
+        78_000 + seed,
+        78_000 + seed,
+    );
+    seed_posix_account(&bob.identity_id, &bob_name, 79_000 + seed, 79_000 + seed);
+    seed_org_membership(&org_id, &alice.identity_id, "member");
+
+    let host_id = format!("dev-host-cancel-{seed}");
+    let secret = "s3cret-cancel";
+    seed_host_enrollment(&host_id, "cancel.example", secret, &org_id);
+
+    // Named for alice; bob is the one who ends up looking at the screen.
+    let (status, body) = device_init(&host_id, secret, &alice_name).await;
+    assert_eq!(status, StatusCode::OK);
+    let user_code = body["user_code"].as_str().unwrap().to_string();
+    let device_code = body["device_code"].as_str().unwrap().to_string();
+
+    // Bob's verification screen offers the cancel form instead of the
+    // host-bound approval panel, and still names neither alice nor the host.
+    let page = bob
+        .client
+        .get(format!("{PORTAL}/oauth/device?user_code={user_code}"))
+        .send()
+        .await
+        .expect("GET /oauth/device as a non-target");
+    assert!(page.status().is_success());
+    let html = page.text().await.unwrap_or_default();
+    assert!(
+        html.contains("/oauth/device/cancel"),
+        "a non-target must be offered the cancel form"
+    );
+    assert!(
+        !html.contains(&alice_name) && !html.contains("cancel.example"),
+        "the cancel screen must not disclose the target account or host"
+    );
+
+    let csrf = extract_form_csrf(&html).expect("csrf token on the cancel form");
+    let res = bob
+        .client
+        .post(format!("{PORTAL}/oauth/device/cancel"))
+        .form(&[("_csrf", csrf.as_str()), ("user_code", user_code.as_str())])
+        .send()
+        .await
+        .expect("POST /oauth/device/cancel");
+    assert!(res.status().is_success(), "cancel: {}", res.status());
+
+    assert_eq!(
+        device_session_status_by_user_code(&user_code).as_deref(),
+        Some("denied"),
+        "cancelling must settle the session, not leave it pending"
+    );
+    // The point of the whole exercise: the waiting daemon now gets a terminal
+    // answer on its very next poll.
+    let outcome = poll_until_terminal(&host_id, secret, &device_code, 3).await;
+    assert_eq!(outcome, "denied", "the daemon must see the cancel promptly");
+
+    delete_device_sessions_for_host(&host_id);
+    delete_host_enrollment(&host_id);
+    delete_org_membership(&org_id, &alice.identity_id);
+    alice.cleanup().await;
+    bob.cleanup().await;
+}
+
 /// Wrong-user-approves: the flow names alice, but bob (a different signed-in
 /// user) approves → `denied{binding}`.
 #[tokio::test]
 async fn device_auth_wrong_user_denied() {
-    if !portal_reachable().await || !pam_device_client_ready().await {
+    if !device_stack_ready().await {
         return;
     }
     let alice = register_test_user("dev-alice").await;
@@ -1593,7 +1760,7 @@ async fn device_auth_wrong_user_denied() {
 /// here is exactly the AAL1 case a force_mfa host must reject.
 #[tokio::test]
 async fn device_auth_force_mfa_aal1_denied() {
-    if !portal_reachable().await || !pam_device_client_ready().await {
+    if !device_stack_ready().await {
         return;
     }
     let approver = register_test_user("dev-mfa").await;

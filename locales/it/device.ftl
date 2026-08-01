@@ -10,6 +10,14 @@ device-verify-cancel = No, annulla
 device-verify-code-prompt = Inserisci il codice mostrato nel tuo terminale per continuare.
 device-verify-code-submit = Continua
 
+device-verify-foreign-prompt = Questo accesso non riguarda il tuo account.
+device-verify-foreign-body = Qualcuno ha avviato questo accesso per un altro account. Se sei stato tu, accedi con quell'account e riapri il link.
+device-verify-foreign-cancel = Annulla questo accesso
+
+device-done-title-cancelled = Accesso annullato
+device-done-card-title-cancelled = Accesso annullato
+device-done-body-cancelled = Il terminale che ha avviato questo accesso è stato informato del rifiuto.
+
 device-done-title-error = Accesso non approvato
 device-done-title-ok = Accesso approvato
 device-done-card-title-error = Non è stato possibile approvare questo accesso

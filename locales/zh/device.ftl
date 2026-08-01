@@ -10,6 +10,14 @@ device-verify-cancel = 不是，取消
 device-verify-code-prompt = 输入终端上显示的代码以继续。
 device-verify-code-submit = 继续
 
+device-verify-foreign-prompt = 这次登录不属于你的账户。
+device-verify-foreign-body = 有人为另一个账户发起了这次登录。如果是你本人，请改用该账户登录后重新打开链接。
+device-verify-foreign-cancel = 取消这次登录
+
+device-done-title-cancelled = 登录已取消
+device-done-card-title-cancelled = 登录已取消
+device-done-body-cancelled = 已通知发起这次登录的终端：请求被拒绝。
+
 device-done-title-error = 登录未获批准
 device-done-title-ok = 登录已批准
 device-done-card-title-error = 无法批准该登录

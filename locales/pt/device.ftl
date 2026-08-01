@@ -10,6 +10,14 @@ device-verify-cancel = Não, cancelar
 device-verify-code-prompt = Introduza o código apresentado no seu terminal para continuar.
 device-verify-code-submit = Continuar
 
+device-verify-foreign-prompt = Este início de sessão não é da sua conta.
+device-verify-foreign-body = Alguém iniciou este acesso para outra conta. Se foi você, inicie sessão com essa conta e abra a ligação novamente.
+device-verify-foreign-cancel = Cancelar este início de sessão
+
+device-done-title-cancelled = Início de sessão cancelado
+device-done-card-title-cancelled = Início de sessão cancelado
+device-done-body-cancelled = O terminal que iniciou este acesso foi informado de que foi recusado.
+
 device-done-title-error = Início de sessão não aprovado
 device-done-title-ok = Início de sessão aprovado
 device-done-card-title-error = Não foi possível aprovar esse início de sessão

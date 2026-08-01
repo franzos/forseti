@@ -1332,6 +1332,17 @@ pub fn device_session_status_by_user_code(user_code: &str) -> Option<String> {
     .ok()
 }
 
+/// Force a device session to `denied` without driving a browser. Lets a test
+/// observe the denied wire shape directly instead of waiting out an expiry.
+pub fn deny_device_session_by_user_code(user_code: &str) {
+    let conn = forseti_db_conn();
+    conn.execute(
+        "UPDATE device_sessions SET status = 'denied' WHERE user_code = ?1",
+        params![user_code],
+    )
+    .unwrap_or_else(|e| panic!("deny device_session: {e}"));
+}
+
 /// Read a `device_sessions.device_code` (the PK) by `user_code`. The init
 /// response never carries the device_code (it's the Hydra bearer secret); a
 /// test driving the daemon's poll leg pulls it from the DB.
@@ -2260,11 +2271,30 @@ pub async fn portal_reachable() -> bool {
         .unwrap_or(false)
 }
 
-/// The device-grant flow needs the `forseti-linux-pam` OAuth client provisioned
-/// in Hydra by `forseti posix-init-client`. `make stack-up` / `seed-admin` don't
-/// do that, so tests that reach Hydra's `device/auth` skip cleanly when it's
-/// absent rather than failing on a 502 from `device/init`. CI provisions it (see
-/// `make seed-posix-client`).
+/// Guard for tests that drive the RFC 8628 device grant.
+///
+/// Skips (returns `false`) only when there is no stack at all, matching how the
+/// rest of the suite behaves. When the portal *is* up but the
+/// `forseti-linux-pam` client is missing it panics instead, because the flows
+/// below would otherwise return green having exercised nothing — the state this
+/// suite sat in until the client was provisioned by hand. The stack being up
+/// means the gap is one command away, so say which one.
+pub async fn device_stack_ready() -> bool {
+    if !portal_reachable().await {
+        return false;
+    }
+    assert!(
+        pam_device_client_ready().await,
+        "the portal is up but the 'forseti-linux-pam' OAuth client is missing from Hydra. \
+         Run `forseti posix-init-client` (CI: `make seed-posix-client`) and re-run. \
+         Skipping here would report a pass for a device flow that never ran."
+    );
+    true
+}
+
+/// Whether the `forseti-linux-pam` OAuth client `forseti posix-init-client`
+/// creates is present in Hydra. `make stack-up` / `seed-admin` don't provision
+/// it; prefer [`device_stack_ready`] over calling this directly.
 pub async fn pam_device_client_ready() -> bool {
     let client = browser_client();
     client

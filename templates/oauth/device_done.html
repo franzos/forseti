@@ -1,7 +1,9 @@
 {% extends "card.html" %}
 
 {% block title %}
-  {% if error %}
+  {% if cancelled %}
+    {{ chrome.t("device-done-title-cancelled") }}
+  {% else if error %}
     {{ chrome.t("device-done-title-error") }}
   {% else %}
     {{ chrome.t("device-done-title-ok") }}
@@ -10,7 +12,9 @@
 {% endblock %}
 
 {% block card_title %}
-  {% if error %}
+  {% if cancelled %}
+    {{ chrome.t("device-done-card-title-cancelled") }}
+  {% else if error %}
     {{ chrome.t("device-done-card-title-error") }}
   {% else %}
     {{ chrome.t("device-done-card-title-ok") }}
@@ -18,7 +22,10 @@
 {% endblock %}
 
 {% block card_body %}
-  {% if error %}
+  {% if cancelled %}
+    <p class="font-body-md text-body-md text-on-surface">{{ chrome.t("device-done-body-cancelled") }}</p>
+    <p class="font-body-sm text-body-sm text-on-surface-variant mt-stack-xs">{{ chrome.t("device-done-body-safe") }}</p>
+  {% else if error %}
     <p class="font-body-md text-body-md text-on-surface-variant">{{ chrome.t("device-done-body-error") }}</p>
   {% else %}
     <p class="font-body-md text-body-md text-on-surface">{{ chrome.t("device-done-body-ok") }}</p>

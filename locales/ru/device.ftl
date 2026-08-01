@@ -10,6 +10,14 @@ device-verify-cancel = Нет, отменить
 device-verify-code-prompt = Введите код, показанный в вашем терминале, чтобы продолжить.
 device-verify-code-submit = Продолжить
 
+device-verify-foreign-prompt = Этот вход относится не к вашей учётной записи.
+device-verify-foreign-body = Кто-то начал этот вход для другой учётной записи. Если это были вы, войдите под ней и откройте ссылку снова.
+device-verify-foreign-cancel = Отменить этот вход
+
+device-done-title-cancelled = Вход отменён
+device-done-card-title-cancelled = Вход отменён
+device-done-body-cancelled = Терминал, из которого начали этот вход, уведомлён об отказе.
+
 device-done-title-error = Вход не подтверждён
 device-done-title-ok = Вход подтверждён
 device-done-card-title-error = Не удалось подтвердить этот вход
