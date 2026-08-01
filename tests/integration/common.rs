@@ -350,6 +350,11 @@ impl RegisteredUser {
     /// (via stderr) but not propagated, since a flaky delete shouldn't fail
     /// an otherwise-green test.
     pub async fn cleanup(&self) {
+        // Drop any POSIX rows first. Deleting the Kratos identity alone leaves
+        // them orphaned until `posix-reconcile` runs, and they keep counting
+        // against the free-tier seat cap — enough runs of this suite and every
+        // provisioning test starts failing on a playground nobody changed.
+        delete_posix_account(&self.identity_id);
         let _ = delete_test_identity(&self.identity_id).await;
     }
 }
