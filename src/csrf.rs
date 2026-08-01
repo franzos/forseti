@@ -189,22 +189,29 @@ fn is_safe_method(method: &Method) -> bool {
 }
 
 /// Same-origin gate for state-changing requests, layered under the double-submit check: it is what
-/// stops a sibling subdomain from replaying a token Forseti minted for it. A present `Origin` must
-/// equal Forseti's own; otherwise an explicit non-same-origin `Sec-Fetch-Site` rejects. Neither
-/// header present passes — non-browser clients send neither, and the double-submit token still
-/// gates them. An unparseable `[self].url` leaves nothing to compare against and falls through to
-/// `Sec-Fetch-Site` rather than 403ing every POST.
+/// stops a sibling subdomain from replaying a token Forseti minted for it.
+///
+/// `Sec-Fetch-Site` decides whenever the browser sent it: it is a forbidden header (page JS cannot
+/// set it) and it distinguishes `same-origin` from the `same-site` sibling-subdomain case, which is
+/// exactly the threat here. It is also the only signal that survives our own `Referrer-Policy:
+/// no-referrer` — per Fetch, a non-CORS request under that policy serializes its `Origin` as the
+/// literal `null`, so every form POST from a Forseti page arrives with `Origin: null` and comparing
+/// that against `[self].url` would 403 the entire write surface.
+///
+/// `Origin` is only the fallback for clients that send it without `Sec-Fetch-Site`, and the opaque
+/// `null` is treated as absent rather than as a mismatch. Neither header present passes —
+/// non-browser clients send neither, and the double-submit token still gates them.
 fn origin_allowed(headers: &HeaderMap, self_origin: Option<&str>) -> bool {
-    if let (Some(origin), Some(expected)) = (
+    if let Some(site) = headers.get(SEC_FETCH_SITE).and_then(|v| v.to_str().ok()) {
+        return matches!(site, "same-origin" | "none");
+    }
+    match (
         headers.get(ORIGIN).and_then(|v| v.to_str().ok()),
         self_origin,
     ) {
-        return origin.eq_ignore_ascii_case(expected);
+        (Some(origin), Some(expected)) if origin != "null" => origin.eq_ignore_ascii_case(expected),
+        _ => true,
     }
-    !matches!(
-        headers.get(SEC_FETCH_SITE).and_then(|v| v.to_str().ok()),
-        Some("cross-site" | "same-site")
-    )
 }
 
 /// Drop CSRF cookies this deployment didn't mint from the request's `Cookie` header, so downstream
@@ -337,6 +344,9 @@ pub async fn middleware(State(state): State<AppState>, mut req: Request, next: N
         if !origin_allowed(req.headers(), self_origin.as_deref()) {
             tracing::warn!(
                 path = %req.uri().path(),
+                origin = ?req.headers().get(ORIGIN),
+                sec_fetch_site = ?req.headers().get(SEC_FETCH_SITE),
+                expected = ?self_origin,
                 "rejected cross-origin state-changing request"
             );
             return crate::extractors::forbid_response();
@@ -564,6 +574,14 @@ mod tests {
         h
     }
 
+    fn headers_of(pairs: &[(&'static str, &str)]) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        for (name, value) in pairs {
+            h.insert(*name, value.parse().unwrap());
+        }
+        h
+    }
+
     #[test]
     fn origin_allowed_matches_self_origin() {
         let expected = Some("https://id.example.com");
@@ -575,7 +593,44 @@ mod tests {
             &headers_with("origin", "https://evil.example.com"),
             expected
         ));
-        assert!(!origin_allowed(&headers_with("origin", "null"), expected));
+    }
+
+    /// What Chrome actually sends for a same-origin form POST from a Forseti page: our own
+    /// `Referrer-Policy: no-referrer` makes Fetch serialize `Origin` as the opaque `null`, so the
+    /// gate has to read `Sec-Fetch-Site` or it 403s every form in the app.
+    #[test]
+    fn origin_allowed_accepts_null_origin_when_sec_fetch_site_is_same_origin() {
+        assert!(origin_allowed(
+            &headers_of(&[("origin", "null"), ("sec-fetch-site", "same-origin")]),
+            Some("http://localhost:3000")
+        ));
+    }
+
+    /// The sibling-subdomain cookie-tossing case still loses: `Origin: null` hides the attacker's
+    /// host, but `Sec-Fetch-Site` reports `same-site` and decides.
+    #[test]
+    fn origin_allowed_rejects_null_origin_when_sec_fetch_site_is_same_site() {
+        assert!(!origin_allowed(
+            &headers_of(&[("origin", "null"), ("sec-fetch-site", "same-site")]),
+            Some("https://id.example.com")
+        ));
+        assert!(!origin_allowed(
+            &headers_of(&[("origin", "null"), ("sec-fetch-site", "cross-site")]),
+            Some("https://id.example.com")
+        ));
+    }
+
+    /// `Sec-Fetch-Site` is a forbidden header, so when the browser sent it, it outranks an `Origin`
+    /// the page could have influenced.
+    #[test]
+    fn origin_allowed_prefers_sec_fetch_site_over_origin() {
+        assert!(!origin_allowed(
+            &headers_of(&[
+                ("origin", "https://id.example.com"),
+                ("sec-fetch-site", "cross-site"),
+            ]),
+            Some("https://id.example.com")
+        ));
     }
 
     #[test]
