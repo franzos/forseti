@@ -22,12 +22,11 @@ fn now_secs() -> i64 {
 
 impl Cache {
     pub fn open(path: &Path) -> Result<Self> {
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent)
                     .with_context(|| format!("creating cache dir {}", parent.display()))?;
             }
-        }
         let conn = Connection::open(path)
             .with_context(|| format!("opening cache db {}", path.display()))?;
         conn.execute_batch(
@@ -71,11 +70,9 @@ impl Cache {
     pub fn get_any(&self, key: &str) -> Option<ClientResponse> {
         let conn = self.conn.lock().ok()?;
         let value: Option<String> = conn
-            .query_row(
-                "SELECT value FROM cache WHERE key = ?1",
-                [key],
-                |r| r.get(0),
-            )
+            .query_row("SELECT value FROM cache WHERE key = ?1", [key], |r| {
+                r.get(0)
+            })
             .ok();
         serde_json::from_str(&value?).ok()
     }

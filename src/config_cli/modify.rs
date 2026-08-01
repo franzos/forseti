@@ -16,13 +16,14 @@ use toml_edit::DocumentMut;
 use crate::cli::{AppleKeySourceArgs, OidcCmd, PathArgs, SecretSourceArgs, SmtpCmd};
 
 use super::check::{
-    check_hydra, check_kratos, check_oidc_providers, extract_hook_token, redact_uri,
-    resolve_config_path, resolve_forseti_toml_path, webhook_token_entries, Finding, Severity,
-    DEFAULT_FORSETI_TOML, DEFAULT_HYDRA, DEFAULT_KRATOS, ENV_HYDRA, ENV_KRATOS, PLACEHOLDER_TOKENS,
+    DEFAULT_FORSETI_TOML, DEFAULT_HYDRA, DEFAULT_KRATOS, ENV_HYDRA, ENV_KRATOS, Finding,
+    PLACEHOLDER_TOKENS, Severity, check_hydra, check_kratos, check_oidc_providers,
+    extract_hook_token, redact_uri, resolve_config_path, resolve_forseti_toml_path,
+    webhook_token_entries,
 };
 use super::io::{
-    atomic_write, backup, fingerprint, is_git_tracked, list_backups, lock_config_dir, read_secret,
-    redacted_diff, resolve_target, SecretSource, Target,
+    SecretSource, Target, atomic_write, backup, fingerprint, is_git_tracked, list_backups,
+    lock_config_dir, read_secret, redacted_diff, resolve_target,
 };
 use super::yamlutil::{
     dig, dig_mut, dig_mut_or_insert, dig_str, load_yaml, random_secret, reject_control_chars,
@@ -240,10 +241,10 @@ fn string_seq(items: &[&str]) -> Value {
 fn first_web_hook_config(v: &Value) -> Option<Value> {
     match v {
         Value::Mapping(map) => {
-            if dig_str(v, &["hook"]) == Some("web_hook") {
-                if let Some(cfg) = v.get("config") {
-                    return Some(cfg.clone());
-                }
+            if dig_str(v, &["hook"]) == Some("web_hook")
+                && let Some(cfg) = v.get("config")
+            {
+                return Some(cfg.clone());
             }
             map.iter().find_map(|(_, val)| first_web_hook_config(val))
         }
@@ -257,14 +258,14 @@ fn first_web_hook_config(v: &Value) -> Option<Value> {
 /// oidc flow's action.
 fn web_hook_entry(config: &Value, action: &str) -> Value {
     let mut cfg = config.clone();
-    if let Some(slot) = dig_mut(&mut cfg, &["url"]) {
-        if let Some(url) = slot.as_str() {
-            let new = match url.split_once("?action=") {
-                Some((base, _)) => format!("{base}?action={action}"),
-                None => format!("{url}?action={action}"),
-            };
-            *slot = Value::String(new);
-        }
+    if let Some(slot) = dig_mut(&mut cfg, &["url"])
+        && let Some(url) = slot.as_str()
+    {
+        let new = match url.split_once("?action=") {
+            Some((base, _)) => format!("{base}?action={action}"),
+            None => format!("{url}?action={action}"),
+        };
+        *slot = Value::String(new);
     }
     mapping(vec![
         ("hook", Value::String("web_hook".into())),
@@ -540,11 +541,11 @@ fn walk_rewrite_hook_tokens(value: &mut Value, new_token: &str, count: &mut usiz
         let is_hook_token_node = dig_str(value, &["hook"]) == Some("web_hook")
             && dig_str(value, &["config", "auth", "type"]) == Some("api_key")
             && dig_str(value, &["config", "auth", "config", "name"]) == Some("Authorization");
-        if is_hook_token_node {
-            if let Some(slot) = dig_mut(value, &["config", "auth", "config", "value"]) {
-                *slot = Value::String(format!("Bearer {new_token}"));
-                *count += 1;
-            }
+        if is_hook_token_node
+            && let Some(slot) = dig_mut(value, &["config", "auth", "config", "value"])
+        {
+            *slot = Value::String(format!("Bearer {new_token}"));
+            *count += 1;
         }
     }
     match value {
@@ -574,7 +575,7 @@ pub(crate) fn toml_get_webhook_tokens(doc: &DocumentMut) -> Vec<String> {
 /// existing `[audit]` table in place — `toml_edit` is lossless, so any
 /// comments elsewhere in the document (including on this key) survive.
 pub(crate) fn toml_set_webhook_tokens(doc: &mut DocumentMut, tokens: &[String]) {
-    use toml_edit::{value, Array};
+    use toml_edit::{Array, value};
     let item = if tokens.len() == 1 {
         value(tokens[0].as_str())
     } else {
@@ -1132,8 +1133,7 @@ pub(crate) async fn oidc_disable(
                 writeln!(ctx.out, "fix the FAIL above before restarting Kratos.")?;
                 Ok(1)
             } else {
-                let l1 =
-                    "Kratos reloads its config file automatically; verify with: forseti config check";
+                let l1 = "Kratos reloads its config file automatically; verify with: forseti config check";
                 let l2 = format!("changed: {}", target.path.display());
                 print_runbook(&mut *ctx.out, &["Kratos"], &[l1, &l2]);
                 Ok(0)
@@ -1202,16 +1202,16 @@ fn warn_env_shadow(ctx: &mut ModifyCtx, toml_path: &Path) -> anyhow::Result<()> 
              at boot, so Forseti won't see the accept list this command writes until it's unset."
         )?;
     }
-    if let Some(env_path) = std::env::var_os("FORSETI_CONFIG_PATH") {
-        if Path::new(&env_path) != toml_path {
-            writeln!(
-                ctx.out,
-                "warning: $FORSETI_CONFIG_PATH ({}) differs from the config.toml being edited \
+    if let Some(env_path) = std::env::var_os("FORSETI_CONFIG_PATH")
+        && Path::new(&env_path) != toml_path
+    {
+        writeln!(
+            ctx.out,
+            "warning: $FORSETI_CONFIG_PATH ({}) differs from the config.toml being edited \
                  ({}); Forseti will load the env path, not this one.",
-                Path::new(&env_path).display(),
-                toml_path.display()
-            )?;
-        }
+            Path::new(&env_path).display(),
+            toml_path.display()
+        )?;
     }
     Ok(())
 }
@@ -1604,8 +1604,7 @@ pub(crate) fn rotate_kratos_secrets(
                 writeln!(ctx.out, "fix the FAIL above before restarting Kratos.")?;
                 Ok(1)
             } else {
-                let l1 =
-                    "Kratos reloads its config file automatically; verify with: forseti config check";
+                let l1 = "Kratos reloads its config file automatically; verify with: forseti config check";
                 let l2 = format!("changed: {}", target.path.display());
                 print_runbook(&mut *ctx.out, &["Kratos"], &[l1, &l2]);
                 Ok(0)
@@ -1696,8 +1695,7 @@ pub(crate) fn prune_kratos_secrets(
                 writeln!(ctx.out, "fix the FAIL above before restarting Kratos.")?;
                 Ok(1)
             } else {
-                let l1 =
-                    "Kratos reloads its config file automatically; verify with: forseti config check";
+                let l1 = "Kratos reloads its config file automatically; verify with: forseti config check";
                 let l2 = format!("changed: {}", target.path.display());
                 print_runbook(&mut *ctx.out, &["Kratos"], &[l1, &l2]);
                 Ok(0)
@@ -2010,8 +2008,7 @@ pub(crate) fn smtp_set(
                 writeln!(ctx.out, "fix the FAIL above before restarting Kratos.")?;
                 Ok(1)
             } else {
-                let l1 =
-                    "Kratos reloads its config file automatically; verify with: forseti config check";
+                let l1 = "Kratos reloads its config file automatically; verify with: forseti config check";
                 let l2 = format!("changed: {}", target.path.display());
                 print_runbook(&mut *ctx.out, &["Kratos"], &[l1, &l2]);
                 Ok(0)
@@ -2691,7 +2688,7 @@ pub(crate) fn run_restore(paths: &PathArgs, from: Option<String>) -> i32 {
 mod tests {
     use super::*;
     use crate::config_cli::check::check_secret_lists;
-    use crate::config_cli::init::{render_configs, InitInputs};
+    use crate::config_cli::init::{InitInputs, render_configs};
     use crate::config_cli::yamlutil::{dig, dig_bool};
     use std::path::PathBuf;
 
@@ -3055,11 +3052,13 @@ mod tests {
             Some(false)
         );
         assert!(dig(&root, &["selfservice", "flows", "login", "after", "oidc"]).is_none());
-        assert!(dig(
-            &root,
-            &["selfservice", "flows", "registration", "after", "oidc"]
-        )
-        .is_none());
+        assert!(
+            dig(
+                &root,
+                &["selfservice", "flows", "registration", "after", "oidc"]
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -3128,12 +3127,14 @@ mod tests {
     #[test]
     fn microsoft_without_tenant_refused() {
         let mut root = render_default_kratos();
-        assert!(apply_oidc_enable(
-            &mut root,
-            &enable_input("microsoft", None),
-            "file:///etc/config/kratos/oidc.microsoft.jsonnet",
-        )
-        .is_err());
+        assert!(
+            apply_oidc_enable(
+                &mut root,
+                &enable_input("microsoft", None),
+                "file:///etc/config/kratos/oidc.microsoft.jsonnet",
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -3235,18 +3236,20 @@ mod tests {
             out: Box::new(std::io::sink()),
             input: Box::new(std::io::empty()),
         };
-        assert!(oidc_enable(
-            &mut c2,
-            OidcEnableInput {
-                provider: "github".into(),
-                client_id: "cid".into(),
-                client_secret: "sec".into(),
-                microsoft_tenant: None,
-                apple: None,
-                keep_mapper: true,
-            },
-        )
-        .is_ok());
+        assert!(
+            oidc_enable(
+                &mut c2,
+                OidcEnableInput {
+                    provider: "github".into(),
+                    client_id: "cid".into(),
+                    client_secret: "sec".into(),
+                    microsoft_tenant: None,
+                    apple: None,
+                    keep_mapper: true,
+                },
+            )
+            .is_ok()
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }

@@ -656,10 +656,12 @@ mod tests {
         add_pending_domain(&db, "o1", "acme.com", "dns_txt", "tok1", None)
             .await
             .unwrap();
-        assert!(lookup_proven_org_by_domain(&db, "acme.com")
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            lookup_proven_org_by_domain(&db, "acme.com")
+                .await
+                .unwrap()
+                .is_none()
+        );
         mark_domain_verified(&db, "o1", "acme.com").await.unwrap();
         let org = lookup_proven_org_by_domain(&db, "acme.com")
             .await

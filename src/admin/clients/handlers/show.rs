@@ -8,12 +8,12 @@ use axum::{
 use serde::Deserialize;
 
 use crate::admin::with_org;
-use crate::admin::{render_admin_error, AdminSection};
-use crate::audit::{self, action, target_kind, AuditCtx};
+use crate::admin::{AdminSection, render_admin_error};
+use crate::audit::{self, AuditCtx, action, target_kind};
 use crate::audit_metadata;
 use crate::csrf::CsrfForm;
 use crate::extractors::Csrf;
-use crate::flash::{self, attach_set_cookie, SecretReveal};
+use crate::flash::{self, SecretReveal, attach_set_cookie};
 use crate::oauth_client_metadata;
 use crate::ory;
 use crate::page_chrome::PageChrome;
@@ -22,7 +22,7 @@ use crate::state::AppState;
 
 use crate::admin::clients::form::ClientForm;
 use crate::admin::clients::projection::{
-    project_row, read_client_type, read_require_pkce, ClientRow,
+    ClientRow, project_row, read_client_type, read_require_pkce,
 };
 use crate::admin::clients::scope::RequireClientInScope;
 

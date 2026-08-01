@@ -2,11 +2,11 @@
 //! non-OIDC surfaces (account-management URI, handoff deep-links, webhook JWKS + supported RISC events).
 //! Kept separate from Hydra's OIDC discovery so Forseti's discoverability isn't tied to Hydra's response shape.
 
+use axum::Router;
 use axum::extract::State;
-use axum::http::{header, StatusCode};
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use axum::Router;
 use serde_json::json;
 
 use crate::handoff::HANDOFF_ACTIONS;

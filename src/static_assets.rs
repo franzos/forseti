@@ -2,12 +2,12 @@
 //! Whole-tree embed (not file-by-file) because logos are referenced
 //! dynamically from templates as `/static/logos/{src}`.
 
+use axum::Router;
 use axum::extract::Path;
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use axum::Router;
-use include_dir::{include_dir, Dir};
+use include_dir::{Dir, include_dir};
 use sha2::{Digest, Sha256};
 
 use crate::state::AppState;
@@ -25,10 +25,10 @@ async fn serve(Path(path): Path<String>, headers: HeaderMap) -> Response {
     let bytes = file.contents();
 
     let etag = format!("\"{}\"", hex::encode(Sha256::digest(bytes)));
-    if let Some(inm) = headers.get(header::IF_NONE_MATCH) {
-        if inm.as_bytes() == etag.as_bytes() {
-            return (StatusCode::NOT_MODIFIED, [(header::ETAG, etag)]).into_response();
-        }
+    if let Some(inm) = headers.get(header::IF_NONE_MATCH)
+        && inm.as_bytes() == etag.as_bytes()
+    {
+        return (StatusCode::NOT_MODIFIED, [(header::ETAG, etag)]).into_response();
     }
 
     // Fonts are filename-versioned (cache forever); css/js/svg sit at stable URLs, so revalidate via ETag.

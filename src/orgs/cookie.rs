@@ -7,7 +7,7 @@
 
 use axum::http::HeaderMap;
 
-use crate::signed_cookie::{unix_seconds_now, SignedCookie};
+use crate::signed_cookie::{SignedCookie, unix_seconds_now};
 
 const ACTIVE_ORG_COOKIE: &str = "forseti_active_org";
 const ACTIVE_ORG_SALT: &[u8] = b"forseti::active_org::v1";

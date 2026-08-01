@@ -3,12 +3,12 @@
 
 use std::sync::{Arc, Mutex};
 
-use axum::response::Response;
 use axum::Router;
+use axum::response::Response;
 use tokio_util::sync::CancellationToken;
+use tower_governor::GovernorLayer;
 use tower_governor::governor::GovernorConfigBuilder;
 use tower_governor::key_extractor::{GlobalKeyExtractor, PeerIpKeyExtractor, SmartIpKeyExtractor};
-use tower_governor::GovernorLayer;
 
 use crate::state::AppState;
 

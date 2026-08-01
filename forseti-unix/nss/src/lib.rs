@@ -11,10 +11,10 @@
 use forseti_unix_client::query;
 use forseti_unix_proto::{self as proto, ClientRequest, ClientResponse};
 use libnss::group::{Group, GroupHooks};
+use libnss::interop::Response;
 use libnss::libnss_group_hooks;
 use libnss::libnss_passwd_hooks;
 use libnss::passwd::{Passwd, PasswdHooks};
-use libnss::interop::Response;
 use std::time::Duration;
 
 const DEFAULT_SOCKET: &str = "/run/forseti/unixd.sock";

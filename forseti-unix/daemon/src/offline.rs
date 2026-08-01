@@ -207,7 +207,12 @@ fn parse_verifier(phc: &str) -> Result<ParsedVerifier> {
 
 /// Raw Argon2id hash of `passphrase` under the stored salt/params, with output
 /// length matching the stored tag. `None` on any KDF failure (never panics).
-fn argon2id_raw(passphrase: &str, salt: &[u8], params: Argon2Params, out_len: usize) -> Option<Vec<u8>> {
+fn argon2id_raw(
+    passphrase: &str,
+    salt: &[u8],
+    params: Argon2Params,
+    out_len: usize,
+) -> Option<Vec<u8>> {
     let p = Params::new(params.m_kib, params.t, params.p, Some(out_len)).ok()?;
     let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, p);
     let mut out = vec![0u8; out_len];
@@ -254,12 +259,11 @@ impl Keystore {
     /// timeout, and ensure the schema. The caller is responsible for the file
     /// being `forseti-unixd`-owned `0600` (see `check_credentials_dir`).
     pub fn open(path: &Path, lockout_max: u32, max_lifetime_secs: u64) -> Result<Self> {
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent)
                     .with_context(|| format!("creating credentials dir {}", parent.display()))?;
             }
-        }
         let conn = Connection::open(path)
             .with_context(|| format!("opening credentials db {}", path.display()))?;
         conn.busy_timeout(std::time::Duration::from_secs(5))
@@ -603,9 +607,9 @@ impl Keystore {
         let Ok(conn) = self.lock() else {
             return Vec::new();
         };
-        let mut stmt = match conn.prepare(
-            "SELECT id, event_json FROM offline_audit_queue ORDER BY id ASC LIMIT ?1",
-        ) {
+        let mut stmt = match conn
+            .prepare("SELECT id, event_json FROM offline_audit_queue ORDER BY id ASC LIMIT ?1")
+        {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!(error = %e, "preparing drain_audit failed");
@@ -661,8 +665,8 @@ mod tests {
     use super::*;
 
     fn mint(passphrase: &str) -> String {
-        use argon2::password_hash::{PasswordHasher, SaltString};
         use argon2::password_hash::rand_core::OsRng;
+        use argon2::password_hash::{PasswordHasher, SaltString};
         let salt = SaltString::generate(&mut OsRng);
         let params = Params::new(65536, 3, 1, None).unwrap();
         let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
@@ -694,7 +698,10 @@ mod tests {
 
     #[test]
     fn gate_happy_path() {
-        assert_eq!(evaluate_offline_gate(&base_inputs()), OfflineDecision::Verify);
+        assert_eq!(
+            evaluate_offline_gate(&base_inputs()),
+            OfflineDecision::Verify
+        );
     }
 
     #[test]
@@ -754,7 +761,8 @@ mod tests {
     fn verify_correct_passphrase() {
         let (_d, ks) = store();
         let phc = mint("correct horse battery");
-        ks.upsert_cred("alice", &phc, 10_000, 1000, 1, 1000).unwrap();
+        ks.upsert_cred("alice", &phc, 10_000, 1000, 1, 1000)
+            .unwrap();
         assert_eq!(
             ks.verify("alice", "correct horse battery", 2000),
             OfflineVerifyOutcome::Ok
@@ -765,7 +773,8 @@ mod tests {
     fn verify_incorrect_passphrase() {
         let (_d, ks) = store();
         let phc = mint("correct horse battery");
-        ks.upsert_cred("alice", &phc, 10_000, 1000, 1, 1000).unwrap();
+        ks.upsert_cred("alice", &phc, 10_000, 1000, 1, 1000)
+            .unwrap();
         // A first wrong attempt is a plain miss, not a lockout.
         assert_eq!(
             ks.verify("alice", "wrong passphrase", 2000),
@@ -831,7 +840,8 @@ mod tests {
         let (_d, ks) = store();
         let phc = mint("correct horse battery");
         let parsed = parse_verifier(&phc).unwrap();
-        ks.upsert_cred("alice", &phc, 10_000, 1000, 1, 1000).unwrap();
+        ks.upsert_cred("alice", &phc, 10_000, 1000, 1, 1000)
+            .unwrap();
         let conn = ks.conn.lock().unwrap();
         let tag: Vec<u8> = conn
             .query_row(
@@ -884,7 +894,8 @@ mod tests {
     fn success_resets_lockout() {
         let (_d, ks) = store();
         let phc = mint("correct horse battery");
-        ks.upsert_cred("alice", &phc, 10_000, 1000, 1, 1000).unwrap();
+        ks.upsert_cred("alice", &phc, 10_000, 1000, 1, 1000)
+            .unwrap();
         ks.verify("alice", "wrong", 2000);
         ks.verify("alice", "wrong", 2000);
         // Past the short backoff window, a correct passphrase resets the counter.
@@ -994,7 +1005,8 @@ mod tests {
     fn set_last_online_auth_updates_existing_row() {
         let (_d, ks) = store();
         let phc = mint("correct horse battery");
-        ks.upsert_cred("alice", &phc, 10_000, 1000, 1, 1000).unwrap();
+        ks.upsert_cred("alice", &phc, 10_000, 1000, 1, 1000)
+            .unwrap();
         ks.set_last_online_auth("alice", 5000).unwrap();
         let conn = ks.conn.lock().unwrap();
         let loa: i64 = conn

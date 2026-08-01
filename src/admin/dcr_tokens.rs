@@ -25,15 +25,15 @@
 
 use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Redirect, Response};
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{Duration, Utc};
 use diesel::prelude::*;
 use rand::Rng;
 use serde::Deserialize;
 use uuid::Uuid;
 
-use crate::admin::{render_admin_error, AdminSection, ConfirmForm, ConfirmTemplate};
-use crate::audit::{self, action, target_kind, AuditCtx};
+use crate::admin::{AdminSection, ConfirmForm, ConfirmTemplate, render_admin_error};
+use crate::audit::{self, AuditCtx, action, target_kind};
 use crate::audit_metadata;
 use crate::csrf::CsrfForm;
 use crate::db_interact;
@@ -261,7 +261,7 @@ pub async fn issue(
             _ => {
                 return rerender(
                     "TTL must be a positive number of hours, or blank for no expiry.".to_string(),
-                )
+                );
             }
         },
     };
@@ -272,7 +272,7 @@ pub async fn issue(
             _ => {
                 return rerender(
                     "Max uses must be a positive integer, or blank for unlimited.".to_string(),
-                )
+                );
             }
         },
     };

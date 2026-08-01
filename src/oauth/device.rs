@@ -11,8 +11,8 @@
 //! the private key) so there's no shared secret at rest.
 
 use crate::config::PosixConfig;
-use crate::ory::hydra;
 use crate::ory::OryClients;
+use crate::ory::hydra;
 use anyhow::Result;
 use ory_client::models::OAuth2Client;
 
@@ -79,8 +79,8 @@ pub async fn ensure_pam_client(ory: &OryClients, posix: &PosixConfig) -> Result<
 
 /// 40 alphanumerics ≈ 238 bits — same shape as Hydra's own client secrets.
 fn generate_secret() -> String {
-    use rand::distr::Alphanumeric;
     use rand::Rng;
+    use rand::distr::Alphanumeric;
     rand::rng()
         .sample_iter(&Alphanumeric)
         .take(40)

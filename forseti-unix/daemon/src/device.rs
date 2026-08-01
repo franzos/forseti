@@ -320,24 +320,28 @@ mod tests {
     fn store_caps_concurrent_sessions() {
         let store = SessionStore::new();
         for _ in 0..MAX_SESSIONS {
-            assert!(store
+            assert!(
+                store
+                    .insert(DeviceFlowState {
+                        device_code: "dc".into(),
+                        interval: 5,
+                        expires_at: Instant::now() + Duration::from_secs(60),
+                        username: None,
+                    })
+                    .is_some()
+            );
+        }
+        // one over the cap is refused
+        assert!(
+            store
                 .insert(DeviceFlowState {
                     device_code: "dc".into(),
                     interval: 5,
                     expires_at: Instant::now() + Duration::from_secs(60),
                     username: None,
                 })
-                .is_some());
-        }
-        // one over the cap is refused
-        assert!(store
-            .insert(DeviceFlowState {
-                device_code: "dc".into(),
-                interval: 5,
-                expires_at: Instant::now() + Duration::from_secs(60),
-                username: None,
-            })
-            .is_none());
+                .is_none()
+        );
     }
 
     #[test]
@@ -345,9 +349,10 @@ mod tests {
         let a = new_session_id().unwrap();
         let b = new_session_id().unwrap();
         assert_ne!(a, b);
-        assert!(a
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+        assert!(
+            a.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        );
     }
 
     use wiremock::matchers::{method, path};

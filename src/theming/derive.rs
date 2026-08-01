@@ -1,4 +1,4 @@
-use crate::theming::color::{parse_color, Color};
+use crate::theming::color::{Color, parse_color};
 
 const DARK_SURFACE: (u8, u8, u8) = (0x13, 0x13, 0x14);
 const DARK_ON_LIGHT: (u8, u8, u8) = (0x1b, 0x1b, 0x1d);

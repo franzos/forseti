@@ -29,64 +29,76 @@ macro_rules! pam_hooks {
                     .unwrap_or(PamResultCode::PAM_AUTHINFO_UNAVAIL)
             }
 
-            #[no_mangle]
+            #[unsafe(no_mangle)]
             pub extern "C" fn pam_sm_acct_mgmt(
                 pamh: *const PamHandle,
                 flags: PamFlag,
                 _argc: c_int,
                 _argv: *const *const c_char,
             ) -> PamResultCode {
-                guarded(pamh, |pamh| super::$ident::acct_mgmt(pamh, Vec::new(), flags))
+                guarded(pamh, |pamh| {
+                    super::$ident::acct_mgmt(pamh, Vec::new(), flags)
+                })
             }
 
-            #[no_mangle]
+            #[unsafe(no_mangle)]
             pub extern "C" fn pam_sm_authenticate(
                 pamh: *const PamHandle,
                 flags: PamFlag,
                 _argc: c_int,
                 _argv: *const *const c_char,
             ) -> PamResultCode {
-                guarded(pamh, |pamh| super::$ident::sm_authenticate(pamh, Vec::new(), flags))
+                guarded(pamh, |pamh| {
+                    super::$ident::sm_authenticate(pamh, Vec::new(), flags)
+                })
             }
 
-            #[no_mangle]
+            #[unsafe(no_mangle)]
             pub extern "C" fn pam_sm_chauthtok(
                 pamh: *const PamHandle,
                 flags: PamFlag,
                 _argc: c_int,
                 _argv: *const *const c_char,
             ) -> PamResultCode {
-                guarded(pamh, |pamh| super::$ident::sm_chauthtok(pamh, Vec::new(), flags))
+                guarded(pamh, |pamh| {
+                    super::$ident::sm_chauthtok(pamh, Vec::new(), flags)
+                })
             }
 
-            #[no_mangle]
+            #[unsafe(no_mangle)]
             pub extern "C" fn pam_sm_close_session(
                 pamh: *const PamHandle,
                 flags: PamFlag,
                 _argc: c_int,
                 _argv: *const *const c_char,
             ) -> PamResultCode {
-                guarded(pamh, |pamh| super::$ident::sm_close_session(pamh, Vec::new(), flags))
+                guarded(pamh, |pamh| {
+                    super::$ident::sm_close_session(pamh, Vec::new(), flags)
+                })
             }
 
-            #[no_mangle]
+            #[unsafe(no_mangle)]
             pub extern "C" fn pam_sm_open_session(
                 pamh: *const PamHandle,
                 flags: PamFlag,
                 _argc: c_int,
                 _argv: *const *const c_char,
             ) -> PamResultCode {
-                guarded(pamh, |pamh| super::$ident::sm_open_session(pamh, Vec::new(), flags))
+                guarded(pamh, |pamh| {
+                    super::$ident::sm_open_session(pamh, Vec::new(), flags)
+                })
             }
 
-            #[no_mangle]
+            #[unsafe(no_mangle)]
             pub extern "C" fn pam_sm_setcred(
                 pamh: *const PamHandle,
                 flags: PamFlag,
                 _argc: c_int,
                 _argv: *const *const c_char,
             ) -> PamResultCode {
-                guarded(pamh, |pamh| super::$ident::sm_setcred(pamh, Vec::new(), flags))
+                guarded(pamh, |pamh| {
+                    super::$ident::sm_setcred(pamh, Vec::new(), flags)
+                })
             }
         }
     };

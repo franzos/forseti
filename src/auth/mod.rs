@@ -1,8 +1,8 @@
 //! Public Kratos self-service flow handlers: registration, login, recovery,
 //! verification, logout, and the `/error` landing page.
 
-use axum::routing::{get, post};
 use axum::Router;
+use axum::routing::{get, post};
 
 use crate::config::{AuthConfig, ProxyConfig};
 use crate::rate_limit;

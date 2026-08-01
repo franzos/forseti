@@ -180,13 +180,13 @@ fn identity_schema_language_enum_covers_every_locale() {
         &fs::read_to_string(base.join("infra/kratos/identity.schema.json")).unwrap(),
     )
     .expect("identity schema parses");
-    let allowed: BTreeSet<String> = schema["properties"]["traits"]["properties"]
-        ["preferred_language"]["enum"]
-        .as_array()
-        .expect("preferred_language enum is an array")
-        .iter()
-        .map(|v| v.as_str().expect("enum entries are strings").to_string())
-        .collect();
+    let allowed: BTreeSet<String> =
+        schema["properties"]["traits"]["properties"]["preferred_language"]["enum"]
+            .as_array()
+            .expect("preferred_language enum is an array")
+            .iter()
+            .map(|v| v.as_str().expect("enum entries are strings").to_string())
+            .collect();
 
     let shipped: BTreeSet<String> = fs::read_dir(base.join("locales"))
         .expect("locales dir readable")

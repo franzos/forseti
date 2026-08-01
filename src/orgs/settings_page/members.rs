@@ -6,7 +6,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use serde::{Deserialize, Serialize};
 
-use crate::audit::{self, action, target_kind, AuditCtx, AuditEvent};
+use crate::audit::{self, AuditCtx, AuditEvent, action, target_kind};
 use crate::audit_metadata;
 use crate::csrf::CsrfForm;
 use crate::extractors::{Csrf, RequireSession};
@@ -16,8 +16,8 @@ use crate::render::render;
 use crate::state::AppState;
 
 use super::{
-    build_nav, require_org_license, require_org_owner_with_license, resolve_org_or_404,
-    settings_ctx, OrgSlug, SettingsCtx,
+    OrgSlug, SettingsCtx, build_nav, require_org_license, require_org_owner_with_license,
+    resolve_org_or_404, settings_ctx,
 };
 
 /// External orgs hard-enforce an admins-only member directory (spec §4); any
@@ -483,12 +483,11 @@ pub(super) async fn members_remove(
         // Floor maintenance: leaving a genuine last non-default org re-homes the
         // ex-member into Default (as Member). No-op for an operator who still
         // holds a Default Owner row (the swallowed duplicate keeps Owner).
-        if org_id != orgs::DEFAULT_ORG_ID {
-            if let Err(e) =
+        if org_id != orgs::DEFAULT_ORG_ID
+            && let Err(e) =
                 crate::orgs::db::add_default_floor_member_txn(&state.db, &target_identity).await
-            {
-                tracing::error!(error = ?e, identity_id = %target_identity, "failed to re-add Default floor on member removal");
-            }
+        {
+            tracing::error!(error = ?e, identity_id = %target_identity, "failed to re-add Default floor on member removal");
         }
         let _ = audit::log(
             &state.db,
@@ -508,8 +507,8 @@ pub(super) async fn members_remove(
 #[cfg(test)]
 mod visibility_allowed_tests {
     use super::visibility_allowed;
-    use crate::orgs::visibility::MemberVisibility;
     use crate::orgs::AccessMode;
+    use crate::orgs::visibility::MemberVisibility;
 
     #[test]
     fn external_admins_only_allowed() {

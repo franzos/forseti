@@ -8,8 +8,8 @@ use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Redirect, Response};
 use serde::Deserialize;
 
-use crate::admin::{render_admin_error, AdminCtx, AdminSection, ConfirmForm, ConfirmTemplate};
-use crate::audit::{self, action, target_kind, AuditCtx};
+use crate::admin::{AdminCtx, AdminSection, ConfirmForm, ConfirmTemplate, render_admin_error};
+use crate::audit::{self, AuditCtx, action, target_kind};
 use crate::audit_metadata;
 use crate::commercial::license::{Feature, FeatureStatus};
 use crate::commercial::upsell::render_upsell;
@@ -256,7 +256,7 @@ pub async fn create(
 
     // async render_new_page can't be awaited from a closure, hence the macro.
     macro_rules! rerender {
-        ($msg:expr) => {
+        ($msg:expr_2021) => {
             return render_new_page(
                 &state,
                 &ctx,

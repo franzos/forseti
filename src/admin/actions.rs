@@ -3,7 +3,7 @@
 //! Centralises the "delete identity + write audit row" recipe so call sites
 //! outside the admin handlers (e.g. `identity::claim_email`) reuse one shape.
 
-use crate::audit::{self, action, target_kind, AuditCtx, AuditEvent, SafeMetadata};
+use crate::audit::{self, AuditCtx, AuditEvent, SafeMetadata, action, target_kind};
 use crate::ory;
 use crate::state::AppState;
 

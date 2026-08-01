@@ -133,8 +133,8 @@ fn generate_and_persist(path: &Path) -> anyhow::Result<EdSigningKey> {
     // Bypass the version mismatch by drawing a 32-byte seed from the OS
     // CSPRNG explicitly and feeding it to `from_bytes`, which is what
     // `generate` does internally anyway.
-    use rand::rngs::OsRng;
     use rand::TryRngCore;
+    use rand::rngs::OsRng;
     let mut seed = [0u8; 32];
     OsRng
         .try_fill_bytes(&mut seed)
@@ -152,12 +152,12 @@ fn persist_new_key(path: &Path, key: &EdSigningKey) -> anyhow::Result<()> {
     use std::io::Write as _;
     use std::os::unix::fs::OpenOptionsExt as _;
 
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                anyhow::anyhow!("create parent dir {parent:?} for webhook signing key: {e}")
-            })?;
-        }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            anyhow::anyhow!("create parent dir {parent:?} for webhook signing key: {e}")
+        })?;
     }
     let pem = key
         .to_pkcs8_pem(LineEnding::LF)
@@ -374,10 +374,12 @@ mod tests {
         assert_eq!(key.jwk["use"], "sig");
         assert_eq!(key.jwk["alg"], "EdDSA");
         assert_eq!(key.jwk["kid"], key.kid);
-        assert!(key.jwk["x"]
-            .as_str()
-            .map(|s| !s.is_empty())
-            .unwrap_or(false));
+        assert!(
+            key.jwk["x"]
+                .as_str()
+                .map(|s| !s.is_empty())
+                .unwrap_or(false)
+        );
     }
 
     #[test]

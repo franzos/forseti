@@ -7,10 +7,10 @@
 use chrono::{DateTime, TimeZone, Utc};
 use ed25519_dalek::VerifyingKey;
 use signetlib::claims::Claims;
-use signetlib::codec::{decode_and_verify as signet_decode, DecodeError};
+use signetlib::codec::{DecodeError, decode_and_verify as signet_decode};
 
-use crate::commercial::license::{Feature, License};
 use crate::commercial::PUBLIC_KEY_BYTES;
+use crate::commercial::license::{Feature, License};
 
 #[derive(Debug)]
 pub enum VerifyError {

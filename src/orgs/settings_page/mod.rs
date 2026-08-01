@@ -5,14 +5,14 @@
 //! 2. `/settings/organizations/{slug}/*`: plural, multi-org, gated on
 //!    `feature(Orgs)`.
 
+use axum::Router;
 use axum::extract::{DefaultBodyLimit, FromRequestParts, Path};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::Router;
 
-use crate::extractors::{gate_orgs_feature_or_upsell, RequireSession};
+use crate::extractors::{RequireSession, gate_orgs_feature_or_upsell};
 use crate::orgs::{self, Org, Role};
 use crate::state::AppState;
 

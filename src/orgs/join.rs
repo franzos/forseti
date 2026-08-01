@@ -2,20 +2,20 @@
 //! CSRF-confirmed `/join/confirm` handler.
 
 use askama::Template;
+use axum::Router;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::get;
-use axum::Router;
 use serde::Deserialize;
 
-use crate::audit::{self, action, target_kind, AuditCtx, AuditEvent};
+use crate::audit::{self, AuditCtx, AuditEvent, action, target_kind};
 use crate::audit_metadata;
 use crate::csrf::CsrfForm;
 use crate::db::DbPool;
 use crate::extractors::{Csrf, OptionalSession};
 use crate::orgs::db::Org;
-use crate::orgs::{self, parse_access_mode, Role};
+use crate::orgs::{self, Role, parse_access_mode};
 use crate::ory;
 use crate::page_chrome::{PageChrome, ReqLocale};
 use crate::render::render;
@@ -334,9 +334,11 @@ mod tests {
             orgs::org_role(&db, "ident-1", "acme-id").await,
             Some(Role::Member)
         );
-        assert!(orgs::org_role(&db, "ident-1", DEFAULT_ORG_ID)
-            .await
-            .is_none());
+        assert!(
+            orgs::org_role(&db, "ident-1", DEFAULT_ORG_ID)
+                .await
+                .is_none()
+        );
     }
 
     #[test]

@@ -382,10 +382,10 @@ pub(crate) fn collect_default_hidden(flow: &serde_json::Value) -> Vec<InputView>
         if g != "default" {
             continue;
         }
-        if let Some(input) = node_to_input(node) {
-            if input.input_type == "hidden" {
-                out.push(input);
-            }
+        if let Some(input) = node_to_input(node)
+            && input.input_type == "hidden"
+        {
+            out.push(input);
         }
     }
     out
@@ -458,21 +458,21 @@ pub(crate) fn lookup_codes(flow: &serde_json::Value) -> Vec<String> {
                         if !s.is_empty() {
                             out.push(s.to_string());
                         }
-                    } else if let Some(s) = item.get("secret").and_then(|v| v.as_str()) {
-                        if !s.is_empty() {
-                            out.push(s.to_string());
-                        }
+                    } else if let Some(s) = item.get("secret").and_then(|v| v.as_str())
+                        && !s.is_empty()
+                    {
+                        out.push(s.to_string());
                     }
                 }
             }
             // Fallback: comma-joined plain text.
-            if out.is_empty() {
-                if let Some(s) = text.get("text").and_then(|v| v.as_str()) {
-                    for code in s.split(|c: char| c == ',' || c.is_whitespace()) {
-                        let code = code.trim();
-                        if !code.is_empty() {
-                            out.push(code.to_string());
-                        }
+            if out.is_empty()
+                && let Some(s) = text.get("text").and_then(|v| v.as_str())
+            {
+                for code in s.split(|c: char| c == ',' || c.is_whitespace()) {
+                    let code = code.trim();
+                    if !code.is_empty() {
+                        out.push(code.to_string());
                     }
                 }
             }
@@ -587,12 +587,12 @@ fn trait_label_key(name: &str) -> Option<&'static str> {
 /// `label_id`. Also translates per-node messages recursively.
 pub(crate) fn translate_inputs(nodes: &mut [InputView], locale: &LanguageIdentifier) {
     for node in nodes {
-        if node.label_id > 0 {
-            if let Some(label) = &node.label {
-                let translated =
-                    crate::i18n::translate_ory(locale, node.label_id, &node.label_context, label);
-                node.label = Some(translated);
-            }
+        if node.label_id > 0
+            && let Some(label) = &node.label
+        {
+            let translated =
+                crate::i18n::translate_ory(locale, node.label_id, &node.label_context, label);
+            node.label = Some(translated);
         }
         // Schema-driven trait labels can't be reached by numeric id; override by name.
         if let Some(key) = trait_label_key(&node.name) {

@@ -70,10 +70,10 @@ pub fn effective_purchase_url(state: &AppState) -> String {
     if !cfg.purchase_url.is_empty() {
         return cfg.purchase_url.clone();
     }
-    if let Some(email) = &state.cfg.brand.support_email {
-        if !email.is_empty() {
-            return format!("mailto:{email}?subject=forseti%20commercial%20license");
-        }
+    if let Some(email) = &state.cfg.brand.support_email
+        && !email.is_empty()
+    {
+        return format!("mailto:{email}?subject=forseti%20commercial%20license");
     }
     // Nothing configured. Render an inert "#" link rather than a broken
     // mailto — operators see the upsell page works but no destination

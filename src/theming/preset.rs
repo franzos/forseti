@@ -1,4 +1,4 @@
-use crate::theming::color::{parse_color, Color};
+use crate::theming::color::{Color, parse_color};
 
 pub struct Preset {
     // Only used by tests to identify which preset a lookup returned.

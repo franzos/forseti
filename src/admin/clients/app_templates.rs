@@ -102,9 +102,13 @@ impl AppTemplate {
             audience_visible: true,
             self_audience: false,
             account_deletion_url: None,
-            note: Some("Add Stackpit's web audience (e.g. stackpit-web) to the audience allow-list below — it must match auth.oauth.web_audience."),
+            note: Some(
+                "Add Stackpit's web audience (e.g. stackpit-web) to the audience allow-list below — it must match auth.oauth.web_audience.",
+            ),
             logout_note: None,
-            post_create_note: Some("Before logging in, add Stackpit's web audience to this client's audience allow-list (edit form below) — auth fails without it."),
+            post_create_note: Some(
+                "Before logging in, add Stackpit's web audience to this client's audience allow-list (edit form below) — auth fails without it.",
+            ),
             logo: Some("stackpit.svg"),
             logo_dark: None,
         },
@@ -123,9 +127,13 @@ impl AppTemplate {
             audience_visible: true,
             self_audience: true,
             account_deletion_url: Some("https://YOUR_DOMAIN/v1/auth/oidc/account-deletion-webhook"),
-            note: Some("Formshive sends audience=<client_id> on the auth request — Forseti adds this client's ID to the audience allow-list automatically on creation."),
+            note: Some(
+                "Formshive sends audience=<client_id> on the auth request — Forseti adds this client's ID to the audience allow-list automatically on creation.",
+            ),
             logout_note: None,
-            post_create_note: Some("Fallback only: if creation couldn't set it, add THIS client's ID (shown above) to its own audience allow-list (edit form below) — Formshive sends audience=<client_id> and login fails without it."),
+            post_create_note: Some(
+                "Fallback only: if creation couldn't set it, add THIS client's ID (shown above) to its own audience allow-list (edit form below) — Formshive sends audience=<client_id> and login fails without it.",
+            ),
             logo: Some("formshive.svg"),
             logo_dark: None,
         },
@@ -165,7 +173,9 @@ impl AppTemplate {
             audience_visible: false,
             self_audience: false,
             account_deletion_url: None,
-            note: Some("Add 'groups' to the scope if you map GitLab roles from a groups claim. Forseti populates it from the user's active-org teams."),
+            note: Some(
+                "Add 'groups' to the scope if you map GitLab roles from a groups claim. Forseti populates it from the user's active-org teams.",
+            ),
             logout_note: None,
             post_create_note: None,
             logo: Some("gitlab.svg"),
@@ -179,15 +189,21 @@ impl AppTemplate {
             grant_types: &["authorization_code"],
             redirect_uris: &["https://YOUR_DOMAIN/_synapse/client/oidc/callback"],
             post_logout_redirect_uris: &[],
-            backchannel_logout_uri: Some("https://YOUR_DOMAIN/_synapse/client/oidc/backchannel_logout"),
+            backchannel_logout_uri: Some(
+                "https://YOUR_DOMAIN/_synapse/client/oidc/backchannel_logout",
+            ),
             scope: "openid profile email",
             token_endpoint_auth_method: "client_secret_basic",
             require_pkce: false,
             audience_visible: false,
             self_audience: false,
             account_deletion_url: None,
-            note: Some("Synapse needs a user_mapping_provider with at least localpart_template; the back-channel URI only applies when backchannel_logout_enabled: true."),
-            logout_note: Some("Back-channel logout is supported but opt-in: the URI below is pre-filled, but you must set backchannel_logout_enabled: true for the provider in Synapse. Front-channel logout isn't supported."),
+            note: Some(
+                "Synapse needs a user_mapping_provider with at least localpart_template; the back-channel URI only applies when backchannel_logout_enabled: true.",
+            ),
+            logout_note: Some(
+                "Back-channel logout is supported but opt-in: the URI below is pre-filled, but you must set backchannel_logout_enabled: true for the provider in Synapse. Front-channel logout isn't supported.",
+            ),
             post_create_note: None,
             logo: Some("matrix.svg"),
             logo_dark: None,
@@ -210,8 +226,12 @@ impl AppTemplate {
             audience_visible: false,
             self_audience: false,
             account_deletion_url: None,
-            note: Some("For the user_oidc app (not oidc_login). Disable server-side encryption — it is incompatible with OIDC."),
-            logout_note: Some("Back-channel logout is supported: the URI below is pre-filled — replace PROVIDER_NAME with your user_oidc provider identifier. Front-channel logout isn't supported."),
+            note: Some(
+                "For the user_oidc app (not oidc_login). Disable server-side encryption — it is incompatible with OIDC.",
+            ),
+            logout_note: Some(
+                "Back-channel logout is supported: the URI below is pre-filled — replace PROVIDER_NAME with your user_oidc provider identifier. Front-channel logout isn't supported.",
+            ),
             post_create_note: None,
             logo: Some("nextcloud.svg"),
             logo_dark: None,
@@ -231,7 +251,9 @@ impl AppTemplate {
             audience_visible: false,
             self_audience: false,
             account_deletion_url: None,
-            note: Some("Grafana requires an email claim. For refresh tokens, add 'offline_access' to the scope here AND add refresh_token to the grant types, then set use_refresh_token=true in Grafana."),
+            note: Some(
+                "Grafana requires an email claim. For refresh tokens, add 'offline_access' to the scope here AND add refresh_token to the grant types, then set use_refresh_token=true in Grafana.",
+            ),
             logout_note: None,
             post_create_note: None,
             logo: Some("grafana.svg"),
@@ -252,8 +274,12 @@ impl AppTemplate {
             audience_visible: false,
             self_audience: false,
             account_deletion_url: None,
-            note: Some("Add 'groups' to the scope for OAuth role management. Forseti populates the groups claim from the user's active-org teams."),
-            logout_note: Some("Back-channel logout is supported: the URI below is pre-filled, but you must set ENABLE_OAUTH_BACKCHANNEL_LOGOUT=true in Open WebUI. Front-channel logout isn't supported."),
+            note: Some(
+                "Add 'groups' to the scope for OAuth role management. Forseti populates the groups claim from the user's active-org teams.",
+            ),
+            logout_note: Some(
+                "Back-channel logout is supported: the URI below is pre-filled, but you must set ENABLE_OAUTH_BACKCHANNEL_LOGOUT=true in Open WebUI. Front-channel logout isn't supported.",
+            ),
             post_create_note: None,
             logo: Some("open_webui.svg"),
             logo_dark: Some("open_webui-light.svg"),
@@ -273,7 +299,9 @@ impl AppTemplate {
             audience_visible: false,
             self_audience: false,
             account_deletion_url: None,
-            note: Some("Note the dot in /auth/oidc.callback. offline_access is required — Outline errors without refresh tokens."),
+            note: Some(
+                "Note the dot in /auth/oidc.callback. offline_access is required — Outline errors without refresh tokens.",
+            ),
             logout_note: None,
             post_create_note: None,
             logo: Some("outline.svg"),
@@ -302,7 +330,9 @@ impl AppTemplate {
             audience_visible: false,
             self_audience: false,
             account_deletion_url: None,
-            note: Some("Three redirect URIs: web login, settings refresh, and the mobile relay. For native mobile via a custom scheme, Hydra must be configured to allow non-HTTPS redirects."),
+            note: Some(
+                "Three redirect URIs: web login, settings refresh, and the mobile relay. For native mobile via a custom scheme, Hydra must be configured to allow non-HTTPS redirects.",
+            ),
             logout_note: None,
             post_create_note: None,
             logo: Some("immich.svg"),
@@ -344,7 +374,9 @@ impl AppTemplate {
             audience_visible: false,
             self_audience: false,
             account_deletion_url: None,
-            note: Some("The 'groups' claim drives RBAC and is populated by Forseti from the user's active-org teams. The CLI needs a separate public client at http://localhost:8085/auth/callback."),
+            note: Some(
+                "The 'groups' claim drives RBAC and is populated by Forseti from the user's active-org teams. The CLI needs a separate public client at http://localhost:8085/auth/callback.",
+            ),
             logout_note: None,
             post_create_note: None,
             logo: Some("argocd.svg"),
@@ -365,7 +397,9 @@ impl AppTemplate {
             audience_visible: false,
             self_audience: false,
             account_deletion_url: None,
-            note: Some("Configure Parseable with P_OIDC_ISSUER, P_OIDC_CLIENT_ID, P_OIDC_CLIENT_SECRET, and P_ORIGIN_URI; the redirect is <P_ORIGIN_URI>/api/v1/o/code. The 'groups' claim is populated by Forseti from the user's active-org team slugs; create a role in Parseable whose name matches each team slug you want to grant."),
+            note: Some(
+                "Configure Parseable with P_OIDC_ISSUER, P_OIDC_CLIENT_ID, P_OIDC_CLIENT_SECRET, and P_ORIGIN_URI; the redirect is <P_ORIGIN_URI>/api/v1/o/code. The 'groups' claim is populated by Forseti from the user's active-org team slugs; create a role in Parseable whose name matches each team slug you want to grant.",
+            ),
             logout_note: None,
             post_create_note: None,
             logo: Some("parseable.svg"),
@@ -386,7 +420,9 @@ impl AppTemplate {
             audience_visible: false,
             self_audience: false,
             account_deletion_url: None,
-            note: Some("offline_access is needed for the Docker/Helm CLI secret to keep working past ID-token expiry. The groups claim is populated by Forseti from the user's active-org teams."),
+            note: Some(
+                "offline_access is needed for the Docker/Helm CLI secret to keep working past ID-token expiry. The groups claim is populated by Forseti from the user's active-org teams.",
+            ),
             logout_note: None,
             post_create_note: None,
             logo: Some("harbor.svg"),
@@ -420,10 +456,7 @@ impl AppTemplate {
             client_name: "BookStack",
             grant_types: &["authorization_code"],
             redirect_uris: &["https://YOUR_DOMAIN/oidc/callback"],
-            post_logout_redirect_uris: &[
-                "https://YOUR_DOMAIN",
-                "https://YOUR_DOMAIN/login",
-            ],
+            post_logout_redirect_uris: &["https://YOUR_DOMAIN", "https://YOUR_DOMAIN/login"],
             backchannel_logout_uri: None,
             scope: "openid profile email",
             token_endpoint_auth_method: "client_secret_basic",
@@ -452,7 +485,9 @@ impl AppTemplate {
             audience_visible: false,
             self_audience: false,
             account_deletion_url: None,
-            note: Some("The redirect is Portainer's web UI base URL (no trailing slash, no callback path); it must match the Redirect URL field in Portainer's OAuth settings exactly. Portainer sends credentials in the request body (client_secret_post). 'groups' (team sync) is populated by Forseti from the user's active-org teams."),
+            note: Some(
+                "The redirect is Portainer's web UI base URL (no trailing slash, no callback path); it must match the Redirect URL field in Portainer's OAuth settings exactly. Portainer sends credentials in the request body (client_secret_post). 'groups' (team sync) is populated by Forseti from the user's active-org teams.",
+            ),
             logout_note: None,
             post_create_note: None,
             logo: Some("portainer.svg"),
@@ -474,7 +509,9 @@ impl AppTemplate {
             audience_visible: false,
             self_audience: false,
             account_deletion_url: None,
-            note: Some("Redirect is the PVE web UI base (port 8006 by default; adjust if proxied on 443). Sources disagree on the trailing slash; if login fails with redirect_uri_mismatch, try adding one. 'groups' is populated by Forseti from the user's active-org teams for permission sync."),
+            note: Some(
+                "Redirect is the PVE web UI base (port 8006 by default; adjust if proxied on 443). Sources disagree on the trailing slash; if login fails with redirect_uri_mismatch, try adding one. 'groups' is populated by Forseti from the user's active-org teams for permission sync.",
+            ),
             logout_note: None,
             post_create_note: None,
             logo: Some("proxmox.svg"),
@@ -496,7 +533,9 @@ impl AppTemplate {
             audience_visible: false,
             self_audience: false,
             account_deletion_url: None,
-            note: Some("Replace PROVIDER_NAME with the authentication-source name you set in Gitea (Site Admin → Authentication Sources). Set OPENID_CONNECT_SCOPES = profile email in app.ini: left empty, Gitea requests only `openid` and auto-registration never gets a username or email. The local username comes from `preferred_username`, which users set under Settings → Profile."),
+            note: Some(
+                "Replace PROVIDER_NAME with the authentication-source name you set in Gitea (Site Admin → Authentication Sources). Set OPENID_CONNECT_SCOPES = profile email in app.ini: left empty, Gitea requests only `openid` and auto-registration never gets a username or email. The local username comes from `preferred_username`, which users set under Settings → Profile.",
+            ),
             logout_note: None,
             post_create_note: None,
             logo: Some("gitea.svg"),
@@ -517,7 +556,9 @@ impl AppTemplate {
             audience_visible: false,
             self_audience: false,
             account_deletion_url: None,
-            note: Some("Replace PROVIDER_NAME with the authentication-source name you set in Forgejo. Set OPENID_CONNECT_SCOPES = profile email in app.ini: left empty, Forgejo requests only `openid` and auto-registration never gets a username or email. The local username comes from `preferred_username`, which users set under Settings → Profile; without one Forgejo sends them to the account-linking page instead of registering them."),
+            note: Some(
+                "Replace PROVIDER_NAME with the authentication-source name you set in Forgejo. Set OPENID_CONNECT_SCOPES = profile email in app.ini: left empty, Forgejo requests only `openid` and auto-registration never gets a username or email. The local username comes from `preferred_username`, which users set under Settings → Profile; without one Forgejo sends them to the account-linking page instead of registering them.",
+            ),
             logout_note: None,
             post_create_note: None,
             logo: Some("forgejo.svg"),
@@ -538,7 +579,9 @@ impl AppTemplate {
             audience_visible: false,
             self_audience: false,
             account_deletion_url: None,
-            note: Some("Replace PROVIDER_NAME with your provider_id. The trailing slash is required."),
+            note: Some(
+                "Replace PROVIDER_NAME with your provider_id. The trailing slash is required.",
+            ),
             logout_note: None,
             post_create_note: None,
             logo: Some("paperless_ngx.svg"),
@@ -559,7 +602,9 @@ impl AppTemplate {
             audience_visible: false,
             self_audience: false,
             account_deletion_url: None,
-            note: Some("Replace PROVIDER_NAME with the (lowercased) provider key from auth.openid.providers in config.yml."),
+            note: Some(
+                "Replace PROVIDER_NAME with the (lowercased) provider key from auth.openid.providers in config.yml.",
+            ),
             logout_note: None,
             post_create_note: None,
             logo: Some("vikunja.svg"),
@@ -580,7 +625,9 @@ impl AppTemplate {
             audience_visible: false,
             self_audience: false,
             account_deletion_url: None,
-            note: Some("Uses the third-party jellyfin-plugin-sso. Replace PROVIDER_NAME with the provider name set in the plugin (case-sensitive). The groups claim (for role mapping) is populated by Forseti from the user's active-org teams."),
+            note: Some(
+                "Uses the third-party jellyfin-plugin-sso. Replace PROVIDER_NAME with the provider name set in the plugin (case-sensitive). The groups claim (for role mapping) is populated by Forseti from the user's active-org teams.",
+            ),
             logout_note: None,
             post_create_note: None,
             logo: Some("jellyfin.svg"),
@@ -601,7 +648,9 @@ impl AppTemplate {
             audience_visible: false,
             self_audience: false,
             account_deletion_url: None,
-            note: Some("This is the HedgeDoc 1.x path. HedgeDoc 2.x uses /api/private/auth/oidc/<name>/callback instead."),
+            note: Some(
+                "This is the HedgeDoc 1.x path. HedgeDoc 2.x uses /api/private/auth/oidc/<name>/callback instead.",
+            ),
             logout_note: None,
             post_create_note: None,
             logo: Some("hedgedoc.svg"),
@@ -623,7 +672,9 @@ impl AppTemplate {
             audience_visible: false,
             self_audience: false,
             account_deletion_url: None,
-            note: Some("Native SSO (free, unlike upstream Bitwarden) since v1.35.0 — set SSO_ENABLED=true. PKCE is on by default. Desktop/mobile clients also need the bitwarden://sso-callback scheme allow-listed; works cleanly only at the domain root."),
+            note: Some(
+                "Native SSO (free, unlike upstream Bitwarden) since v1.35.0 — set SSO_ENABLED=true. PKCE is on by default. Desktop/mobile clients also need the bitwarden://sso-callback scheme allow-listed; works cleanly only at the domain root.",
+            ),
             logout_note: None,
             post_create_note: None,
             logo: Some("vaultwarden.svg"),
@@ -644,7 +695,9 @@ impl AppTemplate {
             audience_visible: false,
             self_audience: false,
             account_deletion_url: None,
-            note: Some("Core discourse-openid-connect plugin. Register the callback with NO trailing slash. Set the client id/secret + discovery URL in Discourse site settings."),
+            note: Some(
+                "Core discourse-openid-connect plugin. Register the callback with NO trailing slash. Set the client id/secret + discovery URL in Discourse site settings.",
+            ),
             logout_note: None,
             post_create_note: None,
             logo: Some("discourse.svg"),
@@ -665,7 +718,9 @@ impl AppTemplate {
             audience_visible: false,
             self_audience: false,
             account_deletion_url: None,
-            note: Some("Replace PROVIDER_NAME with the `name` in your OAUTH_PROVIDERS entry (the path is hard-coded in Flask-AppBuilder). You usually need a custom SupersetSecurityManager oauth_user_info() to map claims and roles."),
+            note: Some(
+                "Replace PROVIDER_NAME with the `name` in your OAUTH_PROVIDERS entry (the path is hard-coded in Flask-AppBuilder). You usually need a custom SupersetSecurityManager oauth_user_info() to map claims and roles.",
+            ),
             logout_note: None,
             post_create_note: None,
             logo: Some("superset.svg"),
@@ -689,7 +744,9 @@ impl AppTemplate {
             audience_visible: false,
             self_audience: false,
             account_deletion_url: None,
-            note: Some("OpenID Connect Generic plugin. The default callback carries a query string some IdPs reject — enable 'Alternate Redirect URI' in the plugin and use the second URL, then flush permalinks."),
+            note: Some(
+                "OpenID Connect Generic plugin. The default callback carries a query string some IdPs reject — enable 'Alternate Redirect URI' in the plugin and use the second URL, then flush permalinks.",
+            ),
             logout_note: None,
             post_create_note: None,
             logo: Some("wordpress.svg"),
@@ -710,7 +767,9 @@ impl AppTemplate {
             audience_visible: false,
             self_audience: false,
             account_deletion_url: None,
-            note: Some("Set enable-login-with-oidc plus PENPOT_OIDC_BASE_URI (with trailing slash) and PENPOT_PUBLIC_URI. Containerized setups may need manual endpoint overrides for internal-vs-browser hostnames."),
+            note: Some(
+                "Set enable-login-with-oidc plus PENPOT_OIDC_BASE_URI (with trailing slash) and PENPOT_PUBLIC_URI. Containerized setups may need manual endpoint overrides for internal-vs-browser hostnames.",
+            ),
             logout_note: None,
             post_create_note: None,
             logo: Some("penpot.svg"),
@@ -731,7 +790,9 @@ impl AppTemplate {
             audience_visible: false,
             self_audience: false,
             account_deletion_url: None,
-            note: Some("python-social-auth generic OIDC backend (REMOTE_AUTH_BACKEND = oidc). The trailing slash is required; the SSO button shows literally 'oidc'. Group sync needs a custom pipeline."),
+            note: Some(
+                "python-social-auth generic OIDC backend (REMOTE_AUTH_BACKEND = oidc). The trailing slash is required; the SSO button shows literally 'oidc'. Group sync needs a custom pipeline.",
+            ),
             logout_note: None,
             post_create_note: None,
             logo: Some("netbox.svg"),
@@ -753,7 +814,9 @@ impl AppTemplate {
             audience_visible: false,
             self_audience: false,
             account_deletion_url: None,
-            note: Some("oic-auth plugin. The callback path is fixed — match http/https exactly. Back-channel logout needs the separate oidc-backchannel-logout plugin (/oidc-backchannel/logout)."),
+            note: Some(
+                "oic-auth plugin. The callback path is fixed — match http/https exactly. Back-channel logout needs the separate oidc-backchannel-logout plugin (/oidc-backchannel/logout).",
+            ),
             logout_note: None,
             post_create_note: None,
             logo: Some("jenkins.svg"),
@@ -774,7 +837,9 @@ impl AppTemplate {
             audience_visible: false,
             self_audience: false,
             account_deletion_url: None,
-            note: Some("Admin → Custom OAuth; replace PROVIDER_NAME with the (lowercased) unique name you give the service. Set the token + identity (userinfo) paths — an ID token alone isn't enough. Roles/groups need a claim mapping."),
+            note: Some(
+                "Admin → Custom OAuth; replace PROVIDER_NAME with the (lowercased) unique name you give the service. Set the token + identity (userinfo) paths — an ID token alone isn't enough. Roles/groups need a claim mapping.",
+            ),
             logout_note: None,
             post_create_note: None,
             logo: Some("rocketchat.svg"),
@@ -795,7 +860,9 @@ impl AppTemplate {
             audience_visible: false,
             self_audience: false,
             account_deletion_url: None,
-            note: Some("Generic OAuth2 in the free CE (ENABLE_OAUTH). The trailing slash is required. Set OAUTH_ATTRIBUTE_MAP to map email or accounts get blank emails. Single global IdP."),
+            note: Some(
+                "Generic OAuth2 in the free CE (ENABLE_OAUTH). The trailing slash is required. Set OAUTH_ATTRIBUTE_MAP to map email or accounts get blank emails. Single global IdP.",
+            ),
             logout_note: None,
             post_create_note: None,
             logo: Some("seafile.svg"),
@@ -816,7 +883,9 @@ impl AppTemplate {
             audience_visible: false,
             self_audience: false,
             account_deletion_url: None,
-            note: Some("Set authMethod=openid with discovery. The ID token must be RS256. Heads-up: the first user to log in via OIDC becomes the irreversible server owner — log in as the intended owner first."),
+            note: Some(
+                "Set authMethod=openid with discovery. The ID token must be RS256. Heads-up: the first user to log in via OIDC becomes the irreversible server owner — log in as the intended owner first.",
+            ),
             logout_note: None,
             post_create_note: None,
             logo: Some("actual_budget.svg"),
@@ -840,7 +909,9 @@ impl AppTemplate {
             audience_visible: false,
             self_audience: false,
             account_deletion_url: None,
-            note: Some("Register both the web callback and the mobile relay. The UserInfo signing algorithm must be unsigned ('none') or login fails. A groups claim for role mapping is optional."),
+            note: Some(
+                "Register both the web callback and the mobile relay. The UserInfo signing algorithm must be unsigned ('none') or login fails. A groups claim for role mapping is optional.",
+            ),
             logout_note: None,
             post_create_note: None,
             logo: Some("audiobookshelf.svg"),
@@ -864,7 +935,9 @@ impl AppTemplate {
             audience_visible: false,
             self_audience: false,
             account_deletion_url: None,
-            note: Some("The callback is /login (not a /callback route); register both /login and /login?direct=1 (logout). PKCE (S256) is required. Behind a proxy set --forwarded-allow-ips or the redirect reverts to http. This is the v2 config."),
+            note: Some(
+                "The callback is /login (not a /callback route); register both /login and /login?direct=1 (logout). PKCE (S256) is required. Behind a proxy set --forwarded-allow-ips or the redirect reverts to http. This is the v2 config.",
+            ),
             logout_note: None,
             post_create_note: None,
             logo: Some("mealie.svg"),
@@ -887,7 +960,9 @@ impl AppTemplate {
             audience_visible: false,
             self_audience: false,
             account_deletion_url: None,
-            note: Some("LoginOIDC plugin. The callback is a query-string URL — strict setups need a web-server rewrite. provider=oidc is the default. No PKCE."),
+            note: Some(
+                "LoginOIDC plugin. The callback is a query-string URL — strict setups need a web-server rewrite. provider=oidc is the default. No PKCE.",
+            ),
             logout_note: None,
             post_create_note: None,
             logo: Some("matomo.svg"),
@@ -908,7 +983,9 @@ impl AppTemplate {
             audience_visible: false,
             self_audience: false,
             account_deletion_url: None,
-            note: Some("Generic OIDC provider; the web origin is your base URL. For Keycloak 17+ the auto-discovered endpoints wrongly include /auth — override them. A groups + audience claim mapping drives RBAC."),
+            note: Some(
+                "Generic OIDC provider; the web origin is your base URL. For Keycloak 17+ the auto-discovered endpoints wrongly include /auth — override them. A groups + audience claim mapping drives RBAC.",
+            ),
             logout_note: None,
             post_create_note: None,
             logo: Some("rancher.svg"),
@@ -932,8 +1009,12 @@ impl AppTemplate {
             audience_visible: false,
             self_audience: false,
             account_deletion_url: None,
-            note: Some("OIDC requires an OpenProject Enterprise license. Replace PROVIDER_NAME with your provider slug — the callback becomes e.g. /auth/oidc-keycloak/callback."),
-            logout_note: Some("Back-channel logout is supported: the URI below is pre-filled — replace PROVIDER_NAME to match your provider slug."),
+            note: Some(
+                "OIDC requires an OpenProject Enterprise license. Replace PROVIDER_NAME with your provider slug — the callback becomes e.g. /auth/oidc-keycloak/callback.",
+            ),
+            logout_note: Some(
+                "Back-channel logout is supported: the URI below is pre-filled — replace PROVIDER_NAME to match your provider slug.",
+            ),
             post_create_note: None,
             logo: Some("openproject.svg"),
             logo_dark: None,
@@ -953,7 +1034,9 @@ impl AppTemplate {
             audience_visible: false,
             self_audience: false,
             account_deletion_url: None,
-            note: Some("OIDC requires a paid Plane tier (Pro/Business), configured via the God-Mode admin UI. The trailing slash on the callback is exact. Logout goes through the IdP end-session endpoint."),
+            note: Some(
+                "OIDC requires a paid Plane tier (Pro/Business), configured via the God-Mode admin UI. The trailing slash on the callback is exact. Logout goes through the IdP end-session endpoint.",
+            ),
             logout_note: None,
             post_create_note: None,
             logo: Some("plane.svg"),
@@ -974,7 +1057,9 @@ impl AppTemplate {
             audience_visible: false,
             self_audience: false,
             account_deletion_url: None,
-            note: Some("Generic OIDC requires a paid Mattermost tier (Entry/Professional/Enterprise). The free GitLab connector won't work against Forseti — it expects GitLab's API shape, not OIDC. OIDC and LDAP are mutually exclusive in Mattermost."),
+            note: Some(
+                "Generic OIDC requires a paid Mattermost tier (Entry/Professional/Enterprise). The free GitLab connector won't work against Forseti — it expects GitLab's API shape, not OIDC. OIDC and LDAP are mutually exclusive in Mattermost.",
+            ),
             logout_note: None,
             post_create_note: None,
             logo: Some("mattermost.svg"),
@@ -995,7 +1080,9 @@ impl AppTemplate {
             audience_visible: false,
             self_audience: false,
             account_deletion_url: None,
-            note: Some("Proprietary, paid Data Center tier only. The native 'SSO for Atlassian Data Center' app uses the SAME callback for Jira, Confluence, Bitbucket and Bamboo. Reverse-proxy proxyName/proxyPort must match the base URL. Do NOT use the miniOrange /plugins/servlet/oauth/callback path."),
+            note: Some(
+                "Proprietary, paid Data Center tier only. The native 'SSO for Atlassian Data Center' app uses the SAME callback for Jira, Confluence, Bitbucket and Bamboo. Reverse-proxy proxyName/proxyPort must match the base URL. Do NOT use the miniOrange /plugins/servlet/oauth/callback path.",
+            ),
             logout_note: None,
             post_create_note: None,
             logo: Some("atlassian.svg"),
@@ -1119,32 +1206,42 @@ mod tests {
     fn stackpit_grants_orgs_scope() {
         // Stackpit requests the `orgs` scope; a client built from this template
         // without it fails the authorize with invalid_scope.
-        assert!(AppTemplate::from_slug("stackpit")
-            .unwrap()
-            .scope
-            .split_whitespace()
-            .any(|s| s == "orgs"));
+        assert!(
+            AppTemplate::from_slug("stackpit")
+                .unwrap()
+                .scope
+                .split_whitespace()
+                .any(|s| s == "orgs")
+        );
     }
 
     #[test]
     fn logout_guidance_matches_support() {
-        assert!(AppTemplate::from_slug("stackpit")
-            .unwrap()
-            .logout_guidance()
-            .is_none());
-        assert!(AppTemplate::from_slug("matrix")
-            .unwrap()
-            .logout_guidance()
-            .unwrap()
-            .contains("opt-in"));
-        assert!(AppTemplate::from_slug("nextcloud")
-            .unwrap()
-            .backchannel_logout_uri
-            .is_some());
-        assert!(AppTemplate::from_slug("open_webui")
-            .unwrap()
-            .backchannel_logout_uri
-            .is_some());
+        assert!(
+            AppTemplate::from_slug("stackpit")
+                .unwrap()
+                .logout_guidance()
+                .is_none()
+        );
+        assert!(
+            AppTemplate::from_slug("matrix")
+                .unwrap()
+                .logout_guidance()
+                .unwrap()
+                .contains("opt-in")
+        );
+        assert!(
+            AppTemplate::from_slug("nextcloud")
+                .unwrap()
+                .backchannel_logout_uri
+                .is_some()
+        );
+        assert!(
+            AppTemplate::from_slug("open_webui")
+                .unwrap()
+                .backchannel_logout_uri
+                .is_some()
+        );
         assert_eq!(
             AppTemplate::from_slug("mastodon")
                 .unwrap()

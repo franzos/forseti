@@ -18,11 +18,11 @@ use serde::Deserialize;
 
 use crate::csrf::CsrfForm;
 
-use crate::admin::{render_admin_error, AdminSection, ConfirmForm, ConfirmTemplate};
-use crate::audit::{self, action, target_kind, AuditCtx};
+use crate::admin::{AdminSection, ConfirmForm, ConfirmTemplate, render_admin_error};
+use crate::audit::{self, AuditCtx, action, target_kind};
 use crate::audit_metadata;
-use crate::commercial::license::{seat_cap_allows, Feature};
 use crate::commercial::FeatureStatus;
+use crate::commercial::license::{Feature, seat_cap_allows};
 use crate::extractors::{Csrf, RequireAdmin};
 use crate::format::humanise_timestamp;
 use crate::ory;
@@ -402,7 +402,7 @@ async fn render_account(
                 state,
                 "Account not found",
                 "We couldn't find a POSIX account for that identity.",
-            )
+            );
         }
         Err(e) => {
             tracing::error!(error = ?e, id, "admin: account lookup failed");

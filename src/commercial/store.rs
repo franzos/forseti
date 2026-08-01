@@ -13,7 +13,7 @@
 use chrono::Utc;
 use diesel::prelude::*;
 
-use crate::commercial::license::{classify, License, LicenseStatus};
+use crate::commercial::license::{License, LicenseStatus, classify};
 use crate::commercial::verify;
 use crate::db::DbPool;
 use crate::db_interact;

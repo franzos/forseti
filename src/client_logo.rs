@@ -13,11 +13,11 @@
 
 use std::sync::Arc;
 
+use axum::Router;
 use axum::extract::{Path, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get as get_method;
-use axum::Router;
 use chrono::Utc;
 use diesel::prelude::*;
 
@@ -174,16 +174,16 @@ pub(crate) async fn serve(
         },
     };
 
-    if let Some(inm) = headers.get(header::IF_NONE_MATCH) {
-        if inm.as_bytes() == logo.etag.as_bytes() {
-            return Response::builder()
-                .status(StatusCode::NOT_MODIFIED)
-                .header(header::ETAG, logo.etag.as_str())
-                .header(header::CACHE_CONTROL, "private, max-age=300")
-                .header(header::VARY, "Cookie")
-                .body(axum::body::Body::empty())
-                .expect("client logo 304 response is well-formed");
-        }
+    if let Some(inm) = headers.get(header::IF_NONE_MATCH)
+        && inm.as_bytes() == logo.etag.as_bytes()
+    {
+        return Response::builder()
+            .status(StatusCode::NOT_MODIFIED)
+            .header(header::ETAG, logo.etag.as_str())
+            .header(header::CACHE_CONTROL, "private, max-age=300")
+            .header(header::VARY, "Cookie")
+            .body(axum::body::Body::empty())
+            .expect("client logo 304 response is well-formed");
     }
 
     Response::builder()

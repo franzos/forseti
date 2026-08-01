@@ -2,14 +2,14 @@
 //! `POST /orgs/domain-join` handler. Placement is always prompt-driven; there
 //! is no silent background join.
 
+use axum::Router;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::post;
-use axum::Router;
 use serde::Deserialize;
 
-use crate::audit::{self, action, target_kind, AuditCtx, AuditEvent};
+use crate::audit::{self, AuditCtx, AuditEvent, action, target_kind};
 use crate::audit_metadata;
 use crate::csrf::CsrfForm;
 use crate::db::DbPool;
@@ -98,10 +98,10 @@ async fn domain_join_post(
         return (StatusCode::NOT_FOUND, "not found").into_response();
     };
     // A form-supplied slug must match the re-resolved proven org; never trust it.
-    if let Some(slug) = form.org.as_deref().filter(|s| !s.is_empty()) {
-        if slug != proven.org.slug {
-            return (StatusCode::BAD_REQUEST, "org mismatch").into_response();
-        }
+    if let Some(slug) = form.org.as_deref().filter(|s| !s.is_empty())
+        && slug != proven.org.slug
+    {
+        return (StatusCode::BAD_REQUEST, "org mismatch").into_response();
     }
     let drop_default = !state.cfg.admin.is_admin(&email);
     if let Err(e) = orgs::db::join_org_race_safe(
@@ -136,7 +136,7 @@ async fn domain_join_post(
 mod tests {
     use super::*;
     use crate::orgs::db::{self, test_pool};
-    use crate::orgs::{AccessMode, DomainJoinPolicy, DEFAULT_ORG_ID};
+    use crate::orgs::{AccessMode, DEFAULT_ORG_ID, DomainJoinPolicy};
     use ory_client::models::verifiable_identity_address::ViaEnum;
     use ory_client::models::{Identity, Session, VerifiableIdentityAddress};
 
@@ -190,9 +190,11 @@ mod tests {
         let db = test_pool().await;
         auto_join_org(&db, "acme-id", "acme", "acme.com").await;
         let session = session_with("owner@acme.com", false);
-        assert!(resolve_prompt(&db, &session, "ident-1", "owner@acme.com")
-            .await
-            .is_none());
+        assert!(
+            resolve_prompt(&db, &session, "ident-1", "owner@acme.com")
+                .await
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -209,9 +211,11 @@ mod tests {
             .await
             .unwrap();
         let session = session_with("owner@acme.com", true);
-        assert!(resolve_prompt(&db, &session, "ident-1", "owner@acme.com")
-            .await
-            .is_none());
+        assert!(
+            resolve_prompt(&db, &session, "ident-1", "owner@acme.com")
+                .await
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -219,9 +223,11 @@ mod tests {
         let db = test_pool().await;
         auto_join_org(&db, "acme-id", "acme", "acme.com").await;
         let session = session_with("user@other.com", true);
-        assert!(resolve_prompt(&db, &session, "ident-1", "user@other.com")
-            .await
-            .is_none());
+        assert!(
+            resolve_prompt(&db, &session, "ident-1", "user@other.com")
+                .await
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -232,9 +238,11 @@ mod tests {
             .await
             .unwrap();
         let session = session_with("owner@acme.com", true);
-        assert!(resolve_prompt(&db, &session, "ident-1", "owner@acme.com")
-            .await
-            .is_none());
+        assert!(
+            resolve_prompt(&db, &session, "ident-1", "owner@acme.com")
+                .await
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -245,9 +253,11 @@ mod tests {
             .await
             .unwrap();
         let session = session_with("owner@acme.com", true);
-        assert!(resolve_prompt(&db, &session, "ident-1", "owner@acme.com")
-            .await
-            .is_none());
+        assert!(
+            resolve_prompt(&db, &session, "ident-1", "owner@acme.com")
+                .await
+                .is_none()
+        );
     }
 
     #[tokio::test]

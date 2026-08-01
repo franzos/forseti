@@ -9,15 +9,15 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use serde::Deserialize;
 
-use crate::audit::{self, action, AuditCtx, AuditEvent};
+use crate::FlowQuery;
+use crate::audit::{self, AuditCtx, AuditEvent, action};
 use crate::audit_metadata;
 use crate::flow_view::{GroupedNodes, MessageView};
 use crate::page_chrome::PageChrome;
 use crate::profiles::{self, ProfileLink};
 use crate::state::AppState;
-use crate::FlowQuery;
 
-use super::{settings_subpage, InlineRenderSection, ProfileSavedQuery};
+use super::{InlineRenderSection, ProfileSavedQuery, settings_subpage};
 
 #[derive(Template)]
 #[template(path = "settings_profile.html")]

@@ -41,7 +41,7 @@ pub mod upsell;
 pub mod verify;
 
 use license::Feature;
-pub use license::{FeatureStatus, LicenseStatus, GRACE_DAYS};
+pub use license::{FeatureStatus, GRACE_DAYS, LicenseStatus};
 
 use std::sync::Arc;
 

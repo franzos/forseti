@@ -2,7 +2,7 @@
 
 use axum::http::HeaderMap;
 
-use crate::signed_cookie::{unix_seconds_now, SignedCookie};
+use crate::signed_cookie::{SignedCookie, unix_seconds_now};
 
 const BRAND_HINT_COOKIE: &str = "forseti_brand_hint";
 const BRAND_HINT_SALT: &[u8] = b"forseti::brand_hint::v1";

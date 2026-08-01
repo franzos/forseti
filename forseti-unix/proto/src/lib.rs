@@ -48,13 +48,22 @@ pub enum ClientResponse {
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
 pub enum PamRequest {
-    AuthBegin { username: String },
-    AuthPoll { session_id: String },
-    AccountAllowed { username: String },
+    AuthBegin {
+        username: String,
+    },
+    AuthPoll {
+        session_id: String,
+    },
+    AccountAllowed {
+        username: String,
+    },
     /// Offline-auth step: the daemon verifies `secret` locally against its
     /// keystore when the server is unreachable. Only reached after the daemon
     /// signalled `OfflineAvailable`.
-    OfflineAuthStep { username: String, secret: String },
+    OfflineAuthStep {
+        username: String,
+        secret: String,
+    },
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
@@ -70,7 +79,9 @@ pub enum PamResponse {
     /// Approval still pending; PAM re-displays state and polls again.
     Pending,
     Success,
-    Denied { reason: String },
+    Denied {
+        reason: String,
+    },
     /// Username is not a Forseti-managed account → PAM maps to PAM_IGNORE.
     Unknown,
     /// Server unreachable but a usable offline credential exists; PAM prompts
@@ -79,7 +90,9 @@ pub enum PamResponse {
     /// Offline passphrase verified locally → PAM_SUCCESS.
     OfflineSuccess,
     /// Offline passphrase rejected or gate refused → PAM_AUTH_ERR.
-    OfflineDenied { reason: String },
+    OfflineDenied {
+        reason: String,
+    },
 }
 
 // Sanity cap for the response direction; a passwd_all dump won't exceed this.
@@ -261,8 +274,7 @@ mod tests {
         assert!(len < MAX_FRAME);
         let header = len.to_be_bytes();
         let mut cur = Cursor::new(header.to_vec());
-        let err =
-            read_message_capped::<ClientRequest, _>(&mut cur, MAX_REQUEST_FRAME).unwrap_err();
+        let err = read_message_capped::<ClientRequest, _>(&mut cur, MAX_REQUEST_FRAME).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 
@@ -313,10 +325,21 @@ mod tests {
             );
         }
 
-        let client_names = ["PasswdByName", "PasswdByUid", "PasswdAll", "GroupByName", "GroupByGid", "GroupAll", "SshKeys"];
+        let client_names = [
+            "PasswdByName",
+            "PasswdByUid",
+            "PasswdAll",
+            "GroupByName",
+            "GroupByGid",
+            "GroupAll",
+            "SshKeys",
+        ];
         let pam_names = ["AuthBegin", "AuthPoll", "AccountAllowed", "OfflineAuthStep"];
         for c in client_names {
-            assert!(!pam_names.contains(&c), "variant name {c} shared across enums");
+            assert!(
+                !pam_names.contains(&c),
+                "variant name {c} shared across enums"
+            );
         }
     }
 }

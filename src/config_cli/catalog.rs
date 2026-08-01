@@ -9,8 +9,8 @@ use serde_yaml_ng::Value;
 use toml_edit::DocumentMut;
 
 use super::check::{
-    check_oidc_providers, extract_hook_token, webhook_token_entries, Finding, Severity,
-    PLACEHOLDER_TOKENS,
+    Finding, PLACEHOLDER_TOKENS, Severity, check_oidc_providers, extract_hook_token,
+    webhook_token_entries,
 };
 use super::init::is_dev_smtp;
 use super::io::fingerprint;
@@ -241,14 +241,14 @@ fn webhook_token_status(kratos: &Value, doc: Option<&DocumentMut>) -> (String, S
     }
 
     let hook_token = extract_hook_token(kratos);
-    if let Some(hook_token) = &hook_token {
-        if !entries.iter().any(|e| e == hook_token) {
-            return (
-                "fail".to_string(),
-                "kratos.yml's hook token isn't in [audit].webhook_token — audit webhook calls will 401"
-                    .to_string(),
-            );
-        }
+    if let Some(hook_token) = &hook_token
+        && !entries.iter().any(|e| e == hook_token)
+    {
+        return (
+            "fail".to_string(),
+            "kratos.yml's hook token isn't in [audit].webhook_token — audit webhook calls will 401"
+                .to_string(),
+        );
     }
     if entries.len() > 1 {
         return (

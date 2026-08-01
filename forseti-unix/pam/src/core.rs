@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 use forseti_unix_proto::{PamRequest, PamResponse};
 
 use crate::pam::constants::{
-    PamMessageStyle, PamResultCode, PAM_ERROR_MSG, PAM_PROMPT_ECHO_OFF, PAM_PROMPT_ECHO_ON,
-    PAM_TEXT_INFO,
+    PAM_ERROR_MSG, PAM_PROMPT_ECHO_OFF, PAM_PROMPT_ECHO_ON, PAM_TEXT_INFO, PamMessageStyle,
+    PamResultCode,
 };
 
 /// Offline passphrase attempts before giving up. The daemon-side lockout is the
@@ -81,7 +81,10 @@ pub fn map_account_response(resp: &PamResponse) -> PamResultCode {
 /// - local account (real shadow hash) → `PAM_IGNORE` so `pam_unix` handles them.
 /// - NSS-only / unknown               → `PAM_AUTHINFO_UNAVAIL` so the control
 ///   map's `authinfo_unavail=die` fails the login closed.
-pub fn decide_account_unreachable(username: &str, is_local_user: impl Fn(&str) -> bool) -> PamResultCode {
+pub fn decide_account_unreachable(
+    username: &str,
+    is_local_user: impl Fn(&str) -> bool,
+) -> PamResultCode {
     if is_local_user(username) {
         PamResultCode::PAM_IGNORE
     } else {
@@ -154,9 +157,7 @@ where
         // Server unreachable but the daemon holds a usable offline credential:
         // switch to the local passphrase conversation. NEVER reached for the
         // daemon-down (None) or non-Forseti (Unknown) cases above.
-        Some(PamResponse::OfflineAvailable) => {
-            return run_offline_auth(conv, daemon, username)
-        }
+        Some(PamResponse::OfflineAvailable) => return run_offline_auth(conv, daemon, username),
         Some(PamResponse::ShowDeviceCode {
             session_id,
             verification_uri,
@@ -175,7 +176,10 @@ where
     // Show the code, then a prompt that doubles as the SSH info-text flush and
     // the user's cancel point.
     if conv
-        .send(PAM_TEXT_INFO, &device_code_message(&verification_uri, &user_code))
+        .send(
+            PAM_TEXT_INFO,
+            &device_code_message(&verification_uri, &user_code),
+        )
         .is_err()
     {
         return PamResultCode::PAM_AUTH_ERR;
@@ -306,9 +310,7 @@ mod tests {
             PamResultCode::PAM_SUCCESS
         );
         assert_eq!(
-            map_account_response(&PamResponse::Denied {
-                reason: "x".into()
-            }),
+            map_account_response(&PamResponse::Denied { reason: "x".into() }),
             PamResultCode::PAM_PERM_DENIED
         );
         assert_eq!(
@@ -364,7 +366,11 @@ mod tests {
         }
     }
     impl Conversation for MockConv {
-        fn send(&self, style: PamMessageStyle, _msg: &str) -> Result<Option<String>, PamResultCode> {
+        fn send(
+            &self,
+            style: PamMessageStyle,
+            _msg: &str,
+        ) -> Result<Option<String>, PamResultCode> {
             if style == PAM_PROMPT_ECHO_ON {
                 let mut p = self.prompts.borrow_mut();
                 *p += 1;
@@ -391,11 +397,7 @@ mod tests {
     impl Daemon for MockDaemon {
         fn query(&self, _req: &PamRequest) -> Option<PamResponse> {
             let mut r = self.responses.borrow_mut();
-            if r.is_empty() {
-                None
-            } else {
-                r.remove(0)
-            }
+            if r.is_empty() { None } else { r.remove(0) }
         }
     }
 
@@ -474,10 +476,18 @@ mod tests {
         }
     }
     impl Conversation for OfflineConv {
-        fn send(&self, style: PamMessageStyle, _msg: &str) -> Result<Option<String>, PamResultCode> {
+        fn send(
+            &self,
+            style: PamMessageStyle,
+            _msg: &str,
+        ) -> Result<Option<String>, PamResultCode> {
             if style == PAM_PROMPT_ECHO_OFF {
                 let mut s = self.secrets.borrow_mut();
-                match if s.is_empty() { None } else { Some(s.remove(0)) } {
+                match if s.is_empty() {
+                    None
+                } else {
+                    Some(s.remove(0))
+                } {
                     Some(Some(secret)) => Ok(Some(secret)),
                     // Queued None ⇒ simulate Ctrl-C/EOF on the prompt.
                     Some(None) => Err(PamResultCode::PAM_CONV_ERR),
@@ -542,7 +552,10 @@ mod tests {
 
     #[test]
     fn offline_denial_copy() {
-        assert_eq!(offline_denial_text("bad_passphrase"), "Incorrect offline passphrase.");
+        assert_eq!(
+            offline_denial_text("bad_passphrase"),
+            "Incorrect offline passphrase."
+        );
         assert!(offline_denial_text("locked_out").contains("locked"));
         assert!(offline_denial_text("expired").contains("expired"));
     }

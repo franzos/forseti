@@ -1,5 +1,5 @@
 use anyhow::Result;
-use forseti_unixd::{config, server, Config};
+use forseti_unixd::{Config, config, server};
 use std::path::Path;
 
 #[tokio::main]

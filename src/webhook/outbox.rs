@@ -29,7 +29,7 @@ use crate::db_interact;
 use crate::ory::OryClients;
 use crate::schema::webhook_outbox;
 
-use super::signing::{extract_subject_from_jws, sign_set, SigningKey};
+use super::signing::{SigningKey, extract_subject_from_jws, sign_set};
 
 /// Outbox row state. Stored as a `TEXT` column so the strings are the
 /// source of truth — no `#[repr]` games across the diesel boundary.

@@ -12,7 +12,7 @@ use crate::ory::{self, FlowKind};
 use crate::page_chrome::{Chrome, PageChrome};
 use crate::render::render;
 use crate::state::AppState;
-use crate::{render_error_boundary, FlowQuery};
+use crate::{FlowQuery, render_error_boundary};
 
 #[derive(Template)]
 #[template(path = "recovery.html")]

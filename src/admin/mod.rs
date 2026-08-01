@@ -14,10 +14,10 @@
 
 use askama::Template;
 use axum::{
-    http::{request::Parts, HeaderMap, StatusCode},
+    Router,
+    http::{HeaderMap, StatusCode, request::Parts},
     response::{IntoResponse, Redirect, Response},
     routing::{get, post},
-    Router,
 };
 use serde::Deserialize;
 
@@ -227,7 +227,7 @@ async fn gate_admin_prefix(
     parts: &mut Parts,
     path: &str,
 ) -> Result<(ory::Session, String, String), Response> {
-    use crate::extractors::{resolve_session_from_parts, SessionFailure};
+    use crate::extractors::{SessionFailure, resolve_session_from_parts};
     let session = match resolve_session_from_parts(state, parts, path).await {
         Ok(s) => *s,
         Err(SessionFailure::InsufficientAal(r)) | Err(SessionFailure::NoSession(r)) => {

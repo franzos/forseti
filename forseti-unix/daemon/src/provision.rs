@@ -165,8 +165,7 @@ impl Poller {
     /// Run until `shutdown` fires. Each tick is best-effort: a failure logs and
     /// the loop continues, never panicking and never tearing down the keystore.
     pub async fn run(self, shutdown: Arc<tokio::sync::Notify>) {
-        let mut interval =
-            tokio::time::interval(Duration::from_secs(self.poll_secs.max(1)));
+        let mut interval = tokio::time::interval(Duration::from_secs(self.poll_secs.max(1)));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {

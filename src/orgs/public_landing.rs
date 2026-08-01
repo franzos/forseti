@@ -4,10 +4,10 @@
 //! enumerate orgs.
 
 use askama::Template;
+use axum::Router;
 use axum::extract::{Path, State};
 use axum::response::Response;
 use axum::routing::get;
-use axum::Router;
 
 use crate::config::{BrandConfig, OrgsConfig, ProxyConfig};
 use crate::db::DbPool;
@@ -166,10 +166,10 @@ pub(crate) async fn landing(
         register_href,
         login_href,
     });
-    if let Some(cookie) = cookie {
-        if let Ok(v) = axum::http::HeaderValue::from_str(&cookie) {
-            resp.headers_mut().append(axum::http::header::SET_COOKIE, v);
-        }
+    if let Some(cookie) = cookie
+        && let Ok(v) = axum::http::HeaderValue::from_str(&cookie)
+    {
+        resp.headers_mut().append(axum::http::header::SET_COOKIE, v);
     }
     resp
 }
@@ -177,7 +177,7 @@ pub(crate) async fn landing(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
+    use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
 
     const TEST_MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations/sqlite");
     const SECRET: &[u8] = b"public-landing-test-secret";

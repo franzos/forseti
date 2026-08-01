@@ -1,7 +1,7 @@
 //! Kratos self-service wrappers.
 
 use super::*;
-use ory_client::apis::{courier_api, frontend_api, identity_api, metadata_api, Error as OryError};
+use ory_client::apis::{Error as OryError, courier_api, frontend_api, identity_api, metadata_api};
 
 /// Outcome of a `/sessions/whoami` call. Keeps Kratos's 401 (no session) and 403 (session below required AAL)
 /// distinct so callers route the step-up case to `/login?aal=aal2`; collapsing both livelocks AAL2-enrolled users.
@@ -205,15 +205,15 @@ pub fn browser_init_url_with(
     let base = public_url.trim_end_matches('/');
     let segment = kind.path_segment();
     let mut params: Vec<(&str, String)> = Vec::new();
-    if let Some(rt) = return_to {
-        if !rt.is_empty() {
-            params.push(("return_to", rt.to_string()));
-        }
+    if let Some(rt) = return_to
+        && !rt.is_empty()
+    {
+        params.push(("return_to", rt.to_string()));
     }
-    if let Some(a) = aal {
-        if !a.is_empty() {
-            params.push(("aal", a.to_string()));
-        }
+    if let Some(a) = aal
+        && !a.is_empty()
+    {
+        params.push(("aal", a.to_string()));
     }
     if matches!(refresh, Some(true)) {
         params.push(("refresh", "true".to_string()));

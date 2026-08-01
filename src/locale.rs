@@ -6,8 +6,8 @@ use axum::extract::{Request, State};
 use axum::http::HeaderMap;
 use axum::middleware::Next;
 use axum::response::Response;
-use unic_langid::langid;
 pub(crate) use unic_langid::LanguageIdentifier;
+use unic_langid::langid;
 
 use crate::state::AppState;
 

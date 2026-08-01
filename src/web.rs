@@ -36,10 +36,10 @@ pub(crate) fn safe_return_to<'a>(cfg: &AppConfig, raw: &'a str) -> &'a str {
         return raw;
     }
     // Compare canonical origins; string-prefix matching would be fooled by `https://forseti.example.com.attacker.tld`.
-    if let (Ok(forseti), Ok(candidate)) = (url::Url::parse(&cfg.self_.url), url::Url::parse(raw)) {
-        if candidate.origin() == forseti.origin() {
-            return raw;
-        }
+    if let (Ok(forseti), Ok(candidate)) = (url::Url::parse(&cfg.self_.url), url::Url::parse(raw))
+        && candidate.origin() == forseti.origin()
+    {
+        return raw;
     }
     tracing::warn!(return_to = raw, "rejected open-redirect return_to");
     "/"
@@ -85,11 +85,11 @@ where
 /// Append (never replace) an optional `Set-Cookie` so it composes with any cookie the response
 /// already carries. No-op on `None`; a malformed cookie string is dropped silently.
 pub(crate) fn append_set_cookie(resp: &mut Response, cookie: Option<String>) {
-    if let Some(value) = cookie {
-        if let Ok(hv) = axum::http::HeaderValue::from_str(&value) {
-            resp.headers_mut()
-                .append(axum::http::header::SET_COOKIE, hv);
-        }
+    if let Some(value) = cookie
+        && let Ok(hv) = axum::http::HeaderValue::from_str(&value)
+    {
+        resp.headers_mut()
+            .append(axum::http::header::SET_COOKIE, hv);
     }
 }
 

@@ -5,7 +5,7 @@ use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Redirect, Response};
 
-use crate::audit::{self, action, AuditCtx, AuditEvent};
+use crate::audit::{self, AuditCtx, AuditEvent, action};
 use crate::cookies;
 use crate::csrf;
 use crate::extractors::OptionalSession;

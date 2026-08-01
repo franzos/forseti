@@ -9,8 +9,8 @@ pub mod db;
 pub mod flow;
 pub mod jackson;
 
-use axum::routing::get;
 use axum::Router;
+use axum::routing::get;
 
 use crate::signed_cookie::SignedCookie;
 use crate::state::AppState;

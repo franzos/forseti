@@ -594,10 +594,10 @@ async fn dcr_per_iat_daily_limit_returns_429() {
         last_status = status;
         last_body = body.clone();
         last_headers = headers;
-        if status.is_success() {
-            if let Some(cid) = body["client_id"].as_str() {
-                created.push(cid.to_string());
-            }
+        if status.is_success()
+            && let Some(cid) = body["client_id"].as_str()
+        {
+            created.push(cid.to_string());
         }
     }
     for cid in &created {

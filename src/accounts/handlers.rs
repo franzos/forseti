@@ -1,13 +1,13 @@
 //! Account switch and forget handlers.
 
+use axum::Router;
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::post;
-use axum::Router;
 use serde::Deserialize;
 
-use crate::audit::{self, action, target_kind, AuditCtx, AuditEvent};
+use crate::audit::{self, AuditCtx, AuditEvent, action, target_kind};
 use crate::cookies;
 use crate::csrf::CsrfForm;
 use crate::orgs;

@@ -89,7 +89,7 @@ pub fn fold(username: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{fold, validate, UsernameError};
+    use super::{UsernameError, fold, validate};
 
     #[test]
     fn accepts_ordinary_handles() {

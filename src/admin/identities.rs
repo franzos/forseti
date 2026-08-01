@@ -10,11 +10,11 @@ use axum::{
 };
 use serde::Deserialize;
 
-use crate::admin::{render_admin_error, with_org, AdminSection, ConfirmForm, ConfirmTemplate};
-use crate::audit::{self, action, target_kind, AuditCtx};
+use crate::admin::{AdminSection, ConfirmForm, ConfirmTemplate, render_admin_error, with_org};
+use crate::audit::{self, AuditCtx, action, target_kind};
 use crate::csrf::CsrfForm;
 use crate::extractors::{Csrf, RequireAdminScoped};
-use crate::flash::{self, attach_set_cookie as attach_cookie_if_some, SecretReveal};
+use crate::flash::{self, SecretReveal, attach_set_cookie as attach_cookie_if_some};
 use crate::format::{humanise_timestamp, looks_like_uuid};
 use crate::ory;
 use crate::page_chrome::PageChrome;

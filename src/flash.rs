@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use crate::db::DbPool;
 use crate::db_interact;
 use crate::schema::secret_reveals;
-use crate::signed_cookie::{unix_seconds_now, SignedCookie};
+use crate::signed_cookie::{SignedCookie, unix_seconds_now};
 
 /// Revealed-secret payload, serialised as a `"kind"`-tagged JSON object in `secret_reveals.payload`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -318,8 +318,8 @@ pub(crate) fn attach_set_cookie(mut resp: Response, cookie: Option<String>) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::http::header::COOKIE;
     use axum::http::HeaderMap;
+    use axum::http::header::COOKIE;
 
     const SECRET: &[u8] = b"flash-test-secret";
     const TTL: u64 = 60;

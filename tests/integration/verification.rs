@@ -16,11 +16,7 @@ fn extract_uuid_after(haystack: &str, marker: &str) -> Option<String> {
         .take_while(|c| c.is_ascii_hexdigit() || *c == '-')
         .take(36)
         .collect();
-    if uuid.len() == 36 {
-        Some(uuid)
-    } else {
-        None
-    }
+    if uuid.len() == 36 { Some(uuid) } else { None }
 }
 
 #[tokio::test]

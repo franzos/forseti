@@ -3,8 +3,8 @@
 //! combining marks, bidi controls, cross-script homoglyphs) down to the
 //! ASCII shape the denylist checks against.
 
-use unicode_normalization::char::is_combining_mark;
 use unicode_normalization::UnicodeNormalization;
+use unicode_normalization::char::is_combining_mark;
 use unicode_security::skeleton;
 
 /// Default `client_name` denylist. Case-insensitive substring match so a

@@ -266,12 +266,11 @@ pub(crate) fn placeholder_findings(root: &Value, already: &[Finding]) -> Vec<Fin
     let mut out = Vec::new();
     walk_placeholders(root, &mut String::new(), &mut |path, value| {
         // Skip only OIDC provider fields that check_oidc_providers handles.
-        if path.starts_with(&format!("{OIDC_PROVIDERS_PATH}[")) {
-            if let Some(last_field) = path.rsplit('.').next() {
-                if OIDC_PROVIDER_FIELDS.contains(&last_field) {
-                    return;
-                }
-            }
+        if path.starts_with(&format!("{OIDC_PROVIDERS_PATH}["))
+            && let Some(last_field) = path.rsplit('.').next()
+            && OIDC_PROVIDER_FIELDS.contains(&last_field)
+        {
+            return;
         }
         let covered = already
             .iter()
@@ -684,16 +683,15 @@ fn walk_hook_tokens(value: &Value, path: &mut String, out: &mut Vec<(String, Str
         Value::Mapping(map) => {
             if dig_str(value, &["auth", "type"]) == Some("api_key")
                 && dig_str(value, &["auth", "config", "name"]) == Some("Authorization")
+                && let Some(v) = dig_str(value, &["auth", "config", "value"])
             {
-                if let Some(v) = dig_str(value, &["auth", "config", "value"]) {
-                    let base = path.len();
-                    if !path.is_empty() {
-                        path.push('.');
-                    }
-                    path.push_str("auth.config.value");
-                    out.push((path.clone(), v.to_string()));
-                    path.truncate(base);
+                let base = path.len();
+                if !path.is_empty() {
+                    path.push('.');
                 }
+                path.push_str("auth.config.value");
+                out.push((path.clone(), v.to_string()));
+                path.truncate(base);
             }
             for (k, v) in map {
                 let Some(key) = k.as_str() else { continue };
@@ -833,10 +831,10 @@ pub(crate) fn check_forseti_crosslink(kratos: &Value, doc: &DocumentMut) -> Vec<
 
 /// Strip any `user:pass@` userinfo so credentials never hit stdout/CI logs.
 pub(crate) fn redact_uri(uri: &str) -> String {
-    if let Some((scheme, rest)) = uri.split_once("://") {
-        if let Some((_userinfo, host)) = rest.split_once('@') {
-            return format!("{scheme}://***@{host}");
-        }
+    if let Some((scheme, rest)) = uri.split_once("://")
+        && let Some((_userinfo, host)) = rest.split_once('@')
+    {
+        return format!("{scheme}://***@{host}");
     }
     uri.to_string()
 }

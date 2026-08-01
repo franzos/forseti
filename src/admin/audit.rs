@@ -13,7 +13,7 @@ use axum::{
 };
 use serde::Deserialize;
 
-use crate::admin::{render_admin_error, AdminSection};
+use crate::admin::{AdminSection, render_admin_error};
 use crate::audit;
 use crate::extractors::{Csrf, RequireAdminScoped};
 use crate::format::humanise_timestamp;

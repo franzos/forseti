@@ -151,10 +151,10 @@ pub(crate) fn list_backups(target: &Target) -> anyhow::Result<Vec<PathBuf>> {
     for entry in entries {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        if let Some(suffix) = name.strip_prefix(&prefix) {
-            if let Ok(secs) = suffix.parse::<u64>() {
-                backups.push((secs, entry.path()));
-            }
+        if let Some(suffix) = name.strip_prefix(&prefix)
+            && let Ok(secs) = suffix.parse::<u64>()
+        {
+            backups.push((secs, entry.path()));
         }
     }
     backups.sort_by_key(|b| std::cmp::Reverse(b.0));

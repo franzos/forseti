@@ -14,7 +14,7 @@ use crate::ory::{self, FlowKind};
 use crate::page_chrome::{Chrome, PageChrome};
 use crate::render::render;
 use crate::state::AppState;
-use crate::{render_error_boundary, safe_return_to, FlowQuery};
+use crate::{FlowQuery, render_error_boundary, safe_return_to};
 
 #[derive(Template)]
 #[template(path = "login.html")]
@@ -145,7 +145,7 @@ mod tests {
     use crate::db::DbPool;
     use crate::page_chrome::PageChrome;
     use crate::theming::theme_chrome_for_org_id;
-    use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
+    use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
 
     const TEST_MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations/sqlite");
 

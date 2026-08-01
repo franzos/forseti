@@ -7,12 +7,12 @@ use axum::extract::{Query, State};
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Redirect, Response};
 
+use crate::FlowQuery;
 use crate::flow_view::{GroupedNodes, MessageView};
 use crate::page_chrome::PageChrome;
 use crate::state::AppState;
-use crate::FlowQuery;
 
-use super::{settings_subpage, InlineRenderSection};
+use super::{InlineRenderSection, settings_subpage};
 
 #[derive(Template)]
 #[template(path = "settings_password.html")]

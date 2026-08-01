@@ -114,15 +114,15 @@ pub(super) async fn lookup_iat(db: &DbPool, raw_token: &str) -> IatCheck {
             if row.revoked_at.is_some() {
                 return Ok(IatCheck::Exhausted { iat_id: row.id });
             }
-            if let Some(exp) = row.expires_at.as_deref() {
-                if exp <= now.as_str() {
-                    return Ok(IatCheck::Exhausted { iat_id: row.id });
-                }
+            if let Some(exp) = row.expires_at.as_deref()
+                && exp <= now.as_str()
+            {
+                return Ok(IatCheck::Exhausted { iat_id: row.id });
             }
-            if let Some(uses) = row.uses_remaining {
-                if uses <= 0 {
-                    return Ok(IatCheck::Exhausted { iat_id: row.id });
-                }
+            if let Some(uses) = row.uses_remaining
+                && uses <= 0
+            {
+                return Ok(IatCheck::Exhausted { iat_id: row.id });
             }
             Ok(IatCheck::Ok(row))
         })?;
@@ -172,15 +172,15 @@ pub(super) async fn consume_iat(db: &DbPool, row: &IatRow, daily_limit: u32) -> 
                 if current.revoked_at.is_some() {
                     return Ok(IatConsume::Exhausted);
                 }
-                if let Some(exp) = current.expires_at.as_deref() {
-                    if exp <= now_str.as_str() {
-                        return Ok(IatConsume::Exhausted);
-                    }
+                if let Some(exp) = current.expires_at.as_deref()
+                    && exp <= now_str.as_str()
+                {
+                    return Ok(IatConsume::Exhausted);
                 }
-                if let Some(rem) = current.uses_remaining {
-                    if rem <= 0 {
-                        return Ok(IatConsume::Exhausted);
-                    }
+                if let Some(rem) = current.uses_remaining
+                    && rem <= 0
+                {
+                    return Ok(IatConsume::Exhausted);
                 }
 
                 // Live only if `started_at` is set and within 24h; else reset.

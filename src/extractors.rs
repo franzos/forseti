@@ -5,7 +5,7 @@ use axum::extract::{FromRef, FromRequestParts, State};
 use axum::http::request::Parts;
 use axum::response::{IntoResponse, Redirect, Response};
 
-use crate::admin::{require_admin, require_admin_with_scope, AdminCtx};
+use crate::admin::{AdminCtx, require_admin, require_admin_with_scope};
 use crate::commercial::license::{Feature, FeatureStatus};
 use crate::commercial::upsell::render_upsell;
 use crate::cookies;

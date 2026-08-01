@@ -2,9 +2,9 @@
 //! targets. Forseti resolves the Kratos session, projects identity traits
 //! into id_token claims, and accepts (or rejects) the Hydra challenge.
 
+use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::routing::{get, post};
-use axum::Router;
 
 use crate::config::{OAuthConfig, ProxyConfig};
 use crate::rate_limit;

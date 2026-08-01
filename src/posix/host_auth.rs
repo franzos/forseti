@@ -4,9 +4,9 @@
 
 use axum::extract::{FromRef, FromRequestParts};
 use axum::http::request::Parts;
-use axum::http::{header, StatusCode};
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::{DateTime, Utc};
 use subtle::ConstantTimeEq;
 
@@ -85,10 +85,10 @@ where
             .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
             .map(|seen| (now - seen.with_timezone(&Utc)).num_seconds() > 60)
             .unwrap_or(true);
-        if stale {
-            if let Err(e) = db::touch_last_seen(&app_state.db, &host_id, &now.to_rfc3339()).await {
-                tracing::warn!(error = ?e, host_id, "posix host auth: last_seen touch failed");
-            }
+        if stale
+            && let Err(e) = db::touch_last_seen(&app_state.db, &host_id, &now.to_rfc3339()).await
+        {
+            tracing::warn!(error = ?e, host_id, "posix host auth: last_seen touch failed");
         }
 
         Ok(RequirePosixHost {

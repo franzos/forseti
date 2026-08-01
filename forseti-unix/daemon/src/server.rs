@@ -1,12 +1,12 @@
 use crate::cache::Cache;
 use crate::config::Config;
 use crate::device::{
-    capped_expiry, DeviceClient, DeviceFlowState, InitOutcome, SessionLookup, SessionStore,
+    DeviceClient, DeviceFlowState, InitOutcome, SessionLookup, SessionStore, capped_expiry,
 };
 use crate::upstream::Upstream;
 use anyhow::{Context, Result};
 use forseti_unix_proto::{
-    ClientRequest, ClientResponse, PamRequest, PamResponse, MAX_REQUEST_FRAME,
+    ClientRequest, ClientResponse, MAX_REQUEST_FRAME, PamRequest, PamResponse,
 };
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -101,29 +101,26 @@ impl Handler {
     async fn dispatch(&self, req: ClientRequest) -> ClientResponse {
         let key = cache_key(&req);
 
-        if let Some(k) = &key {
-            if let Some(hit) = self.cache.get(k, self.ttl_secs) {
+        if let Some(k) = &key
+            && let Some(hit) = self.cache.get(k, self.ttl_secs) {
                 return hit;
             }
-        }
 
         match self.fetch_upstream(&req).await {
             Ok(resp) => {
-                if let Some(k) = &key {
-                    if let Err(e) = self.cache.put(k, &resp) {
+                if let Some(k) = &key
+                    && let Err(e) = self.cache.put(k, &resp) {
                         tracing::warn!(error = %e, key = %k, "cache write failed");
                     }
-                }
                 resp
             }
             Err(e) => {
                 // Fail-soft: serve an unexpired cache entry if one exists, else "absent".
                 tracing::warn!(error = %e, "upstream request failed");
-                if let Some(k) = &key {
-                    if let Some(hit) = self.cache.get(k, self.ttl_secs) {
+                if let Some(k) = &key
+                    && let Some(hit) = self.cache.get(k, self.ttl_secs) {
                         return hit;
                     }
-                }
                 empty_response(&req)
             }
         }
@@ -239,7 +236,7 @@ impl Handler {
             SessionLookup::Expired => {
                 return PamResponse::Denied {
                     reason: "expired".into(),
-                }
+                };
             }
         };
 
@@ -257,11 +254,10 @@ impl Handler {
                     // Stamp the offline ceiling to this genuine ONLINE auth so
                     // offline_max_lifetime tracks the last real login. Best-effort
                     // and a no-op if the user has no provisioned cred yet.
-                    if let Some(u) = &state.username {
-                        if let Err(e) = self.keystore.set_last_online_auth(u, now_secs()) {
+                    if let Some(u) = &state.username
+                        && let Err(e) = self.keystore.set_last_online_auth(u, now_secs()) {
                             tracing::warn!(error = %e, "stamping last_online_auth failed");
                         }
-                    }
                     PamResponse::Success
                 }
                 "denied" | "expired" => {
@@ -909,7 +905,14 @@ mod tests {
             .await;
         let h = handler_for(&server.uri());
         h.keystore
-            .upsert_cred("alice", &mint_phc("correct horse battery"), 100_000, now_secs(), 1, now_secs())
+            .upsert_cred(
+                "alice",
+                &mint_phc("correct horse battery"),
+                100_000,
+                now_secs(),
+                1,
+                now_secs(),
+            )
             .unwrap();
         assert_eq!(h.auth_begin("alice").await, PamResponse::OfflineAvailable);
     }
@@ -944,7 +947,14 @@ mod tests {
         // Even with a usable cred, a server-reached 404 (Unknown) must NOT fall
         // back to offline — the server explicitly denied this user here.
         h.keystore
-            .upsert_cred("alice", &mint_phc("correct horse battery"), 100_000, now_secs(), 1, now_secs())
+            .upsert_cred(
+                "alice",
+                &mint_phc("correct horse battery"),
+                100_000,
+                now_secs(),
+                1,
+                now_secs(),
+            )
             .unwrap();
         assert_eq!(h.auth_begin("alice").await, PamResponse::Unknown);
     }
@@ -959,7 +969,9 @@ mod tests {
             .await;
         let h = handler_for(&server.uri());
         // Seed the last-known passwd entry; transport failure → answer Success.
-        h.cache.put("passwd_name:alice", &cached_passwd("alice")).unwrap();
+        h.cache
+            .put("passwd_name:alice", &cached_passwd("alice"))
+            .unwrap();
         assert_eq!(h.account_allowed("alice").await, PamResponse::Success);
     }
 
@@ -973,7 +985,9 @@ mod tests {
             .await;
         let h = handler_for(&server.uri());
         // A stale cache entry must NOT override a clean, server-reached 404.
-        h.cache.put("passwd_name:alice", &cached_passwd("alice")).unwrap();
+        h.cache
+            .put("passwd_name:alice", &cached_passwd("alice"))
+            .unwrap();
         assert_eq!(h.account_allowed("alice").await, PamResponse::Unknown);
     }
 }

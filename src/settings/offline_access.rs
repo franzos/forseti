@@ -12,7 +12,7 @@ use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 
-use crate::audit::{self, action, target_kind, AuditCtx, AuditEvent};
+use crate::audit::{self, AuditCtx, AuditEvent, action, target_kind};
 use crate::audit_metadata;
 use crate::flash;
 use crate::page_chrome::{PageChrome, ThemedChrome};

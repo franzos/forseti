@@ -477,7 +477,7 @@ mod tests {
     use super::*;
     use serde_yaml_ng::Value;
 
-    use crate::config_cli::check::{check_hydra, check_kratos, Severity};
+    use crate::config_cli::check::{Severity, check_hydra, check_kratos};
     use crate::config_cli::yamlutil::dig_str;
 
     #[test]

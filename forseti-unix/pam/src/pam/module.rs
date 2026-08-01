@@ -7,10 +7,10 @@ use std::ptr;
 
 use libc::c_char;
 
-use crate::pam::constants::{PamFlag, PamResultCode, PAM_TTY};
+use crate::pam::constants::{PAM_TTY, PamFlag, PamResultCode};
 use crate::pam::conv::PamConv;
 
-pub use crate::pam::constants::{PamItemType, PAM_CONV};
+pub use crate::pam::constants::{PAM_CONV, PamItemType};
 
 /// Opaque PAM handle. Passed to every `pam_sm_*` entrypoint and threaded back
 /// into the PAM API calls. Nomicon-style opaque FFI type: an empty enum is
@@ -32,7 +32,7 @@ struct PamItemT {
 // symbols resolve lazily from the host's loaded libpam at runtime. Linking it
 // would add a NEEDED libpam.so and force a build-time -lpam (and a store
 // RUNPATH), which we deliberately avoid — matching every stock pam_*.so.
-extern "C" {
+unsafe extern "C" {
     fn pam_get_item(
         pamh: *const PamHandle,
         item_type: PamItemType,

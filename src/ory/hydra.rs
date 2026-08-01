@@ -119,7 +119,7 @@ pub async fn accept_logout_request(
 // Wrappers driven by the Part-B device endpoints (`src/posix/device.rs`)
 // and the browser verification UI (`src/oauth/device_verify.rs`).
 mod device_grant {
-    use super::{o_auth2_api, OAuth2RedirectTo, OryClients, Result};
+    use super::{OAuth2RedirectTo, OryClients, Result, o_auth2_api};
 
     /// Projected device-authz response (RFC 8628 §3.2). All fields are
     /// required on a real Hydra response; we surface concrete types so the
@@ -393,7 +393,7 @@ mod device_grant {
         client_id: &str,
         iat_window_secs: u64,
     ) -> Result<IdTokenClaims> {
-        use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
+        use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 
         // Pin the alg from our side BEFORE trusting the header's. We still read
         // the header's `kid` to select the key, but reject anything whose
@@ -454,7 +454,7 @@ mod device_grant {
             _ => {
                 return Err(anyhow::anyhow!(
                     "id_token aud must be exactly [{client_id}]"
-                ))
+                ));
             }
         }
 
@@ -468,7 +468,7 @@ mod device_grant {
             Some(other) => {
                 return Err(anyhow::anyhow!(
                     "id_token azp {other} != expected client {client_id}"
-                ))
+                ));
             }
             None => {}
         }
@@ -516,11 +516,11 @@ mod device_grant {
 } // mod device_grant
 
 pub use device_grant::{
-    accept_user_code_request, device_authorization, poll_device_token, verify_id_token,
-    DeviceTokenOutcome, TokenSet,
+    DeviceTokenOutcome, TokenSet, accept_user_code_request, device_authorization,
+    poll_device_token, verify_id_token,
 };
 #[cfg(test)]
-use device_grant::{map_device_token_error, verify_id_token_with_jwks, IdTokenClaims};
+use device_grant::{IdTokenClaims, map_device_token_error, verify_id_token_with_jwks};
 
 // --- Admin surface ---------------------------------------------------
 
@@ -761,8 +761,8 @@ pub async fn signing_keys(clients: &OryClients) -> Result<Vec<JwkSummary>> {
 
 /// Generate a random client secret. 40 alphanumerics is about 238 bits of entropy, well above the OAuth2 spec's recommendation.
 fn generate_client_secret() -> String {
-    use rand::distr::Alphanumeric;
     use rand::Rng;
+    use rand::distr::Alphanumeric;
     rand::rng()
         .sample_iter(&Alphanumeric)
         .take(40)
@@ -890,7 +890,7 @@ SRZ/w8gQ2ALLGaApskC1zn5ojdqqjTvXWmW9bccCeGYJ8yOu4oWP/QLkNzM4WVKA\n\
     }
 
     fn mint(claims: &TestClaims, alg: jsonwebtoken::Algorithm) -> String {
-        use jsonwebtoken::{encode, EncodingKey, Header};
+        use jsonwebtoken::{EncodingKey, Header, encode};
         let mut header = Header::new(alg);
         header.kid = Some(TEST_KID.into());
         let key = EncodingKey::from_rsa_pem(TEST_PRIV_PEM.as_bytes()).unwrap();
@@ -949,7 +949,7 @@ SRZ/w8gQ2ALLGaApskC1zn5ojdqqjTvXWmW9bccCeGYJ8yOu4oWP/QLkNzM4WVKA\n\
             exp: i64,
             iat: i64,
         }
-        use jsonwebtoken::{encode, EncodingKey, Header};
+        use jsonwebtoken::{EncodingKey, Header, encode};
         let now = chrono::Utc::now().timestamp();
         let claims = MultiAud {
             sub: "ident-123".into(),
@@ -1018,7 +1018,7 @@ SRZ/w8gQ2ALLGaApskC1zn5ojdqqjTvXWmW9bccCeGYJ8yOu4oWP/QLkNzM4WVKA\n\
 
     #[test]
     fn id_token_unknown_kid_rejected() {
-        use jsonwebtoken::{encode, EncodingKey, Header};
+        use jsonwebtoken::{EncodingKey, Header, encode};
         let mut header = Header::new(jsonwebtoken::Algorithm::RS256);
         header.kid = Some("not-in-jwks".into());
         let key = EncodingKey::from_rsa_pem(TEST_PRIV_PEM.as_bytes()).unwrap();

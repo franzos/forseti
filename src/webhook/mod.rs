@@ -30,9 +30,9 @@ pub mod event_type {
 
 pub use jwks::jwks_endpoint;
 pub use outbox::{
-    abort_event, confirm_event, dead_letter_count, discard_dead, enqueue_pending, find_by_id,
-    list_dead, reconcile_pending, requeue_dead, WebhookTarget,
+    WebhookTarget, abort_event, confirm_event, dead_letter_count, discard_dead, enqueue_pending,
+    find_by_id, list_dead, reconcile_pending, requeue_dead,
 };
 pub use signing::SigningKey;
 pub use validate::{guarded_resolver, validate_webhook_url};
-pub use worker::{spawn_reconcile, spawn_worker, WorkerHandle};
+pub use worker::{WorkerHandle, spawn_reconcile, spawn_worker};

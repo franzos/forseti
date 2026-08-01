@@ -212,7 +212,7 @@ pub async fn insert_admin_verified(
 /// A macro, not a function: `db_interact!` monomorphizes the body for both
 /// connection types, and a shared helper would need full dual-backend bounds.
 macro_rules! ensure_row_and_prior {
-    ($c:expr, $id:expr, $now:expr) => {{
+    ($c:expr_2021, $id:expr_2021, $now:expr_2021) => {{
         let existing: Option<Row> = ocm::table
             .filter(ocm::client_id.eq($id))
             .select(Row::as_select())

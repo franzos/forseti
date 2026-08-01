@@ -18,13 +18,13 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use serde::Deserialize;
 
-use crate::audit::{self, action, target_kind, AuditCtx, AuditEvent};
+use crate::audit::{self, AuditCtx, AuditEvent, action, target_kind};
 use crate::audit_metadata;
 use crate::commercial::license::{Feature, FeatureStatus};
 use crate::config::SamlConfig;
 use crate::orgs;
-use crate::ory::kratos;
 use crate::ory::Identity;
+use crate::ory::kratos;
 use crate::page_chrome::PageChrome;
 use crate::render::render;
 use crate::saml::{db, jackson, state_cookie};
@@ -423,12 +423,12 @@ async fn resolve_identity(
     let subject_opt = (!subject.is_empty()).then_some(subject);
 
     // Durable subject lookup (org-scoped, cross-org-safe).
-    if let Some(subject) = subject_opt {
-        if let Some((linked, row_email)) = db::link_subject(&state.db, org_id, subject).await? {
-            match kratos::admin_get_identity_optional(&state.ory, &linked).await? {
-                Some(identity) => return Ok(Resolution::Identity(Box::new(identity))),
-                None => db::delete_link(&state.db, org_id, &row_email).await?,
-            }
+    if let Some(subject) = subject_opt
+        && let Some((linked, row_email)) = db::link_subject(&state.db, org_id, subject).await?
+    {
+        match kratos::admin_get_identity_optional(&state.ory, &linked).await? {
+            Some(identity) => return Ok(Resolution::Identity(Box::new(identity))),
+            None => db::delete_link(&state.db, org_id, &row_email).await?,
         }
     }
 

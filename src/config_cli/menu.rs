@@ -24,11 +24,11 @@ use crate::cli::{CheckArgs, InitArgs, PathArgs};
 
 use super::catalog::{self, Setting, SettingStatus};
 use super::check::{
-    self, load_forseti_toml, resolve_config_path, resolve_forseti_toml_path, state_marker,
-    DEFAULT_HYDRA, DEFAULT_KRATOS, ENV_HYDRA, ENV_KRATOS,
+    self, DEFAULT_HYDRA, DEFAULT_KRATOS, ENV_HYDRA, ENV_KRATOS, load_forseti_toml,
+    resolve_config_path, resolve_forseti_toml_path, state_marker,
 };
 use super::init;
-use super::io::{read_secret, resolve_target, SecretSource};
+use super::io::{SecretSource, read_secret, resolve_target};
 use super::modify::{self, AppleCreds, LineSource, ModifyCtx, OidcEnableInput};
 use super::yamlutil::{dig_str, load_yaml};
 
@@ -220,13 +220,14 @@ pub(crate) fn run_menu(io: &mut MenuIo, paths: &PathArgs) -> i32 {
             check::status(paths, false);
             continue;
         }
-        if let Ok(idx) = cmd.parse::<usize>() {
-            if idx >= 1 && idx <= catalog::SETTINGS.len() {
-                let setting = &catalog::SETTINGS[idx - 1];
-                let status = statuses.iter().find(|s| s.key == setting.key);
-                run_detail(io, paths, &kratos_path, setting, status);
-                continue;
-            }
+        if let Ok(idx) = cmd.parse::<usize>()
+            && idx >= 1
+            && idx <= catalog::SETTINGS.len()
+        {
+            let setting = &catalog::SETTINGS[idx - 1];
+            let status = statuses.iter().find(|s| s.key == setting.key);
+            run_detail(io, paths, &kratos_path, setting, status);
+            continue;
         }
         let _ = writeln!(io.output, "unknown command: {cmd}");
     }

@@ -15,10 +15,10 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 use askama::Template;
+use axum::Router;
 use axum::extract::State;
 use axum::response::Response;
 use axum::routing::get;
-use axum::Router;
 
 use crate::config::ProxyConfig;
 use crate::locale::default_locale;

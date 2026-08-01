@@ -5,14 +5,14 @@ use axum::http::HeaderMap;
 use axum::response::Response;
 
 use crate::admin::with_org;
-use crate::admin::{render_admin_error, AdminCtx};
-use crate::audit::{self, action, target_kind, AuditCtx};
+use crate::admin::{AdminCtx, render_admin_error};
+use crate::audit::{self, AuditCtx, action, target_kind};
 use crate::audit_metadata;
 use crate::client_logo;
 use crate::extractors::forbid_response;
 use crate::orgs::AdminScope;
 use crate::state::AppState;
-use crate::theming::image::{validate_logo, MAX_LOGO_BYTES};
+use crate::theming::image::{MAX_LOGO_BYTES, validate_logo};
 
 use crate::admin::clients::scope::RequireClientInScope;
 

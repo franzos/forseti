@@ -13,17 +13,17 @@ use axum::extract::{Query, State};
 use axum::http::HeaderMap;
 use axum::response::Response;
 
+use crate::FlowQuery;
 use crate::flow_view::{
-    collect_default_hidden, collect_input_nodes, flow_messages, form_target, session_email,
-    translate_inputs, translate_messages, InputView, MessageView,
+    InputView, MessageView, collect_default_hidden, collect_input_nodes, flow_messages,
+    form_target, session_email, translate_inputs, translate_messages,
 };
 use crate::ory;
 use crate::page_chrome::PageChrome;
 use crate::render::render;
 use crate::state::AppState;
-use crate::FlowQuery;
 
-use super::{fetch_settings_subpage, oidc_links_db, SettingsSection};
+use super::{SettingsSection, fetch_settings_subpage, oidc_links_db};
 
 /// What the right-hand side of a provider row offers.
 pub(crate) enum RowAction {
@@ -256,19 +256,19 @@ pub(crate) fn linked_provider_ids(identity: &serde_json::Value) -> BTreeSet<Stri
         .and_then(|p| p.as_array())
     {
         for p in arr {
-            if let Some(id) = p.get("provider").and_then(|v| v.as_str()) {
-                if !id.is_empty() {
-                    set.insert(id.to_string());
-                }
+            if let Some(id) = p.get("provider").and_then(|v| v.as_str())
+                && !id.is_empty()
+            {
+                set.insert(id.to_string());
             }
         }
     }
     if let Some(ids) = oidc.get("identifiers").and_then(|v| v.as_array()) {
         for id in ids {
-            if let Some((prov, _)) = id.as_str().and_then(|s| s.split_once(':')) {
-                if !prov.is_empty() {
-                    set.insert(prov.to_string());
-                }
+            if let Some((prov, _)) = id.as_str().and_then(|s| s.split_once(':'))
+                && !prov.is_empty()
+            {
+                set.insert(prov.to_string());
             }
         }
     }

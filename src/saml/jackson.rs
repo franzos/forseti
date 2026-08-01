@@ -2,7 +2,7 @@
 //! SSO flow drives, plus connection CRUD against Jackson's admin API.
 //! <https://www.ory.com/docs/polis/sso-flow>
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde::Deserialize;
 
 use crate::config::SamlConfig;

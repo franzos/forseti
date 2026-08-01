@@ -72,16 +72,16 @@
 //! operations.
 
 use axum::{
+    Router,
     extract::{Json, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::post,
-    Router,
 };
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
-use crate::audit::{self, action, target_kind, AuditEvent, SafeMetadata};
+use crate::audit::{self, AuditEvent, SafeMetadata, action, target_kind};
 use crate::state::AppState;
 
 /// Flag payloads whose `issued_at` is older than this as "stale". Covers

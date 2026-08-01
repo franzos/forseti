@@ -8,18 +8,18 @@ use axum::extract::{Query, State};
 use axum::http::HeaderMap;
 use axum::response::Response;
 
+use crate::FlowQuery;
 use crate::flow_view::{
-    collect_default_hidden, collect_input_nodes, collect_webauthn_scripts, flow_messages,
-    form_target, group_has_node, lookup_codes, session_email, totp_qr_and_secret, translate_inputs,
-    translate_messages, InputView, MessageView, ScriptView,
+    InputView, MessageView, ScriptView, collect_default_hidden, collect_input_nodes,
+    collect_webauthn_scripts, flow_messages, form_target, group_has_node, lookup_codes,
+    session_email, totp_qr_and_secret, translate_inputs, translate_messages,
 };
 use crate::ory;
 use crate::page_chrome::PageChrome;
 use crate::render::render;
 use crate::state::AppState;
-use crate::FlowQuery;
 
-use super::{fetch_settings_subpage, SettingsSection};
+use super::{SettingsSection, fetch_settings_subpage};
 
 #[derive(Template)]
 #[template(path = "settings_2fa.html")]

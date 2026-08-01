@@ -6,7 +6,7 @@ use axum::{
 };
 use serde::Deserialize;
 
-use crate::admin::{render_admin_error, AdminSection};
+use crate::admin::{AdminSection, render_admin_error};
 use crate::extractors::Csrf;
 use crate::format::looks_like_uuid;
 use crate::oauth_client_metadata;
@@ -17,7 +17,7 @@ use crate::render::render;
 use crate::state::AppState;
 
 use crate::admin::clients::presets::picker_cards;
-use crate::admin::clients::projection::{project_row, ClientRow};
+use crate::admin::clients::projection::{ClientRow, project_row};
 
 #[derive(askama::Template)]
 #[template(path = "admin/clients_list.html")]

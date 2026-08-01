@@ -6,20 +6,20 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 
-use crate::audit::{self, action, target_kind, AuditCtx, AuditEvent};
+use crate::audit::{self, AuditCtx, AuditEvent, action, target_kind};
 use crate::audit_metadata;
 use crate::config::BrandConfig;
 use crate::csrf::CsrfForm;
-use crate::extractors::{forbid_response, Csrf, RequireSession};
-use crate::orgs::{self, logo, Org};
+use crate::extractors::{Csrf, RequireSession, forbid_response};
+use crate::orgs::{self, Org, logo};
 use crate::page_chrome::{PageChrome, ThemedChrome};
 use crate::render::render;
 use crate::state::AppState;
-use crate::theming::{self, color::parse_color, derive, TokenOverrides};
+use crate::theming::{self, TokenOverrides, color::parse_color, derive};
 
 use super::{
-    build_nav, require_org_license, require_org_owner_with_license, resolve_org_or_404,
-    settings_ctx, OrgSlug, SettingsCtx,
+    OrgSlug, SettingsCtx, build_nav, require_org_license, require_org_owner_with_license,
+    resolve_org_or_404, settings_ctx,
 };
 
 #[derive(Template)]
@@ -251,10 +251,9 @@ fn validate_theme_form(
     if let (Some(p), Some(o)) = (
         derive::to_rgb(&resolved.primary),
         derive::to_rgb(&resolved.on_primary),
-    ) {
-        if derive::contrast_ratio(p, o) < 4.5 {
-            return Err("primary / text-on-primary contrast is too low (min 4.5:1)");
-        }
+    ) && derive::contrast_ratio(p, o) < 4.5
+    {
+        return Err("primary / text-on-primary contrast is too low (min 4.5:1)");
     }
 
     let public_login_enabled = i32::from(form.request_public_login.is_some());
@@ -431,7 +430,7 @@ pub(super) async fn branding_save(
     state.flash_redirect(&target_url, &msg)
 }
 
-use crate::theming::image::{validate_logo, MAX_LOGO_BYTES};
+use crate::theming::image::{MAX_LOGO_BYTES, validate_logo};
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn logo_upload(
@@ -489,7 +488,7 @@ pub(super) async fn logo_upload(
                         Ok(None) => break,
                         Err(_) => {
                             return (StatusCode::BAD_REQUEST, "malformed multipart body")
-                                .into_response()
+                                .into_response();
                         }
                     }
                 }

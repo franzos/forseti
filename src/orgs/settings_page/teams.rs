@@ -12,16 +12,16 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use serde::{Deserialize, Serialize};
 
-use crate::audit::{self, action, target_kind, AuditCtx, AuditEvent};
+use crate::audit::{self, AuditCtx, AuditEvent, action, target_kind};
 use crate::audit_metadata;
 use crate::csrf::CsrfForm;
-use crate::extractors::{gate_orgs_feature_or_upsell, Csrf, RequireSession};
-use crate::orgs::{self, teams, Org};
+use crate::extractors::{Csrf, RequireSession, gate_orgs_feature_or_upsell};
+use crate::orgs::{self, Org, teams};
 use crate::page_chrome::{PageChrome, ThemedChrome};
 use crate::render::render;
 use crate::state::AppState;
 
-use super::{build_nav, require_org_owner, resolve_org_or_404, settings_ctx, OrgSlug, SettingsCtx};
+use super::{OrgSlug, SettingsCtx, build_nav, require_org_owner, resolve_org_or_404, settings_ctx};
 
 #[derive(Serialize, Clone)]
 struct TeamRowView {
@@ -138,34 +138,34 @@ async fn render_teams(
     let mut selected_team = None;
     let mut members = Vec::new();
     let mut addable = Vec::new();
-    if let Some(sel) = selected {
-        if let Some((team, n)) = counts.iter().find(|(t, _)| t.id == sel) {
-            let roster = orgs::list_member_profiles(&state.db, &state.ory, org_id)
-                .await
-                .unwrap_or_default();
-            let member_ids: HashSet<String> = teams::team_member_ids(&state.db, &team.id)
-                .await
-                .unwrap_or_default()
-                .into_iter()
-                .collect();
-            for (m, email, display_name) in &roster {
-                let view = RosterView {
-                    identity_id: m.identity_id.clone(),
-                    email: email.clone(),
-                    display_name: display_name.clone(),
-                };
-                if member_ids.contains(&m.identity_id) {
-                    members.push(view);
-                } else {
-                    addable.push(view);
-                }
+    if let Some(sel) = selected
+        && let Some((team, n)) = counts.iter().find(|(t, _)| t.id == sel)
+    {
+        let roster = orgs::list_member_profiles(&state.db, &state.ory, org_id)
+            .await
+            .unwrap_or_default();
+        let member_ids: HashSet<String> = teams::team_member_ids(&state.db, &team.id)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        for (m, email, display_name) in &roster {
+            let view = RosterView {
+                identity_id: m.identity_id.clone(),
+                email: email.clone(),
+                display_name: display_name.clone(),
+            };
+            if member_ids.contains(&m.identity_id) {
+                members.push(view);
+            } else {
+                addable.push(view);
             }
-            selected_team = Some(TeamRowView {
-                id: team.id.clone(),
-                name: team.name.clone(),
-                member_count: *n,
-            });
         }
+        selected_team = Some(TeamRowView {
+            id: team.id.clone(),
+            name: team.name.clone(),
+            member_count: *n,
+        });
     }
 
     let nav = build_nav(state, headers, &ctx.identity_id, Some(memberships)).await;

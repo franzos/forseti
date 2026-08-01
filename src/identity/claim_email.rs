@@ -17,14 +17,14 @@
 //! Kratos doesn't ship this UX out of the box.
 
 use askama::Template;
+use axum::Router;
 use axum::extract::{Query, State};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::get;
-use axum::Router;
 use rand::Rng;
 use serde::Deserialize;
 
-use crate::admin::actions::{delete_identity_audited, DeleteActor, DeleteReason};
+use crate::admin::actions::{DeleteActor, DeleteReason, delete_identity_audited};
 use crate::audit_metadata;
 use crate::config::{ClaimEmailConfig, ProxyConfig};
 use crate::csrf::CsrfForm;

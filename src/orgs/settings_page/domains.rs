@@ -10,16 +10,16 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use serde::{Deserialize, Serialize};
 
-use crate::audit::{self, action, target_kind, AuditCtx, AuditEvent};
+use crate::audit::{self, AuditCtx, AuditEvent, action, target_kind};
 use crate::audit_metadata;
 use crate::csrf::{CsrfForm, NoPayload};
-use crate::extractors::{gate_orgs_feature_or_upsell, Csrf, RequireSession};
-use crate::orgs::{self, domains, Org};
+use crate::extractors::{Csrf, RequireSession, gate_orgs_feature_or_upsell};
+use crate::orgs::{self, Org, domains};
 use crate::page_chrome::{PageChrome, ThemedChrome};
 use crate::render::render;
 use crate::state::AppState;
 
-use super::{build_nav, require_org_owner, resolve_org_or_404, settings_ctx, OrgSlug, SettingsCtx};
+use super::{OrgSlug, SettingsCtx, build_nav, require_org_owner, resolve_org_or_404, settings_ctx};
 
 /// Owner + Default-forbidden + External-forbidden + license, mirroring
 /// `require_external_mode_writable`'s shape. Domain auto-join only makes
@@ -351,24 +351,23 @@ pub(super) async fn domains_verify(
                 .into_response();
         }
     };
-    if ok {
-        if let Ok(domains::DomainVerifyOutcome::Verified) =
+    if ok
+        && let Ok(domains::DomainVerifyOutcome::Verified) =
             domains::mark_domain_verified(&state.db, &org_id, &domain).await
-        {
-            let _ = audit::log(
-                &state.db,
-                AuditEvent::new(action::ORG_DOMAIN_VERIFIED)
-                    .actor_user(&sess.identity_id, &sess.email)
-                    .target(target_kind::ORG, org_id.clone())
-                    .with_ctx(&actx)
-                    .metadata(audit_metadata!(
-                        "org_id" => org_id.as_str(),
-                        "domain" => domain.as_str(),
-                        "method" => row.method.as_str(),
-                    )),
-            )
-            .await;
-        }
+    {
+        let _ = audit::log(
+            &state.db,
+            AuditEvent::new(action::ORG_DOMAIN_VERIFIED)
+                .actor_user(&sess.identity_id, &sess.email)
+                .target(target_kind::ORG, org_id.clone())
+                .with_ctx(&actx)
+                .metadata(audit_metadata!(
+                    "org_id" => org_id.as_str(),
+                    "domain" => domain.as_str(),
+                    "method" => row.method.as_str(),
+                )),
+        )
+        .await;
     }
     Redirect::to(&format!("{}/domains", target.base_path)).into_response()
 }

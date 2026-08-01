@@ -15,7 +15,7 @@ use crate::ory::{self, FlowKind};
 use crate::page_chrome::{Chrome, PageChrome};
 use crate::render::render;
 use crate::state::AppState;
-use crate::{render_error_boundary, safe_return_to, FlowQuery};
+use crate::{FlowQuery, render_error_boundary, safe_return_to};
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct PrefillQuery {
@@ -184,8 +184,8 @@ mod tests {
     use crate::db::DbPool;
     use crate::page_chrome::PageChrome;
     use crate::theming::brand_hint::set_brand_hint;
-    use axum::http::{header::COOKIE, HeaderMap};
-    use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
+    use axum::http::{HeaderMap, header::COOKIE};
+    use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
 
     const TEST_MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations/sqlite");
     const SECRET: &[u8] = b"registration-brand-hint-test-secret";

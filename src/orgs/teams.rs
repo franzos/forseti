@@ -452,7 +452,7 @@ mod tests {
         let db = temp_pool().await;
         let _a = create_team(&db, "org1", "Platform", None).await.unwrap(); // slug "platform"
         let b = create_team(&db, "org1", "SRE", None).await.unwrap(); // slug "sre"
-                                                                      // Renaming B to a name that slugifies to "platform" must be rejected.
+        // Renaming B to a name that slugifies to "platform" must be rejected.
         assert!(rename_team(&db, &b.id, "platform").await.is_err());
     }
 

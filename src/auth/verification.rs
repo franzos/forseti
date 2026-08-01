@@ -13,7 +13,7 @@ use crate::ory::{self, FlowKind};
 use crate::page_chrome::{Chrome, PageChrome};
 use crate::render::render;
 use crate::state::AppState;
-use crate::{render_error_boundary, FlowQuery};
+use crate::{FlowQuery, render_error_boundary};
 
 #[derive(Template)]
 #[template(path = "verification.html")]
@@ -49,20 +49,21 @@ pub(crate) async fn verification(
             // Logged-in user at `choose_method`: auto-submit the known address
             // server-side so the browser lands straight on code entry. Any
             // failure falls through to render the original form unchanged.
-            if let Some(session) = session_opt {
-                if flow_state(&flow) == "choose_method" && session_needs_verification(session) {
-                    let email = session_email(session);
-                    if !email.is_empty()
-                        && submit_email_method(&state, &flow, &email, &cookie)
-                            .await
-                            .is_ok()
-                    {
-                        return Redirect::to(&format!(
-                            "/verification?flow={}",
-                            ory_client::apis::urlencode(flow_id.unwrap_or_default())
-                        ))
-                        .into_response();
-                    }
+            if let Some(session) = session_opt
+                && flow_state(&flow) == "choose_method"
+                && session_needs_verification(session)
+            {
+                let email = session_email(session);
+                if !email.is_empty()
+                    && submit_email_method(&state, &flow, &email, &cookie)
+                        .await
+                        .is_ok()
+                {
+                    return Redirect::to(&format!(
+                        "/verification?flow={}",
+                        ory_client::apis::urlencode(flow_id.unwrap_or_default())
+                    ))
+                    .into_response();
                 }
             }
             render_verification(chrome, &flow, query.return_to.as_deref(), is_logged_in)

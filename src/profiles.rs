@@ -18,8 +18,8 @@ pub mod identicon;
 pub mod username;
 pub(crate) mod view;
 
-use axum::routing::get;
 use axum::Router;
+use axum::routing::get;
 
 pub(crate) fn router() -> Router<crate::state::AppState> {
     Router::new().route("/users/{identity_id}", get(view::show_profile))

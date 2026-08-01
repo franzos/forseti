@@ -171,10 +171,10 @@ pub(crate) async fn oauth_login(
     {
         Ok(redirect) => {
             let mut resp = Redirect::to(&redirect.redirect_to).into_response();
-            if let Some(cookie) = set_org_cookie {
-                if let Ok(v) = axum::http::HeaderValue::from_str(&cookie) {
-                    resp.headers_mut().append(axum::http::header::SET_COOKIE, v);
-                }
+            if let Some(cookie) = set_org_cookie
+                && let Ok(v) = axum::http::HeaderValue::from_str(&cookie)
+            {
+                resp.headers_mut().append(axum::http::header::SET_COOKIE, v);
             }
             resp
         }
@@ -287,7 +287,7 @@ mod tests {
 
 #[cfg(test)]
 mod pin_tests {
-    use super::{resolve_pin_action, PinAction};
+    use super::{PinAction, resolve_pin_action};
     use crate::orgs::db::{
         add_member_race_safe, create_org, set_access_mode, test_pool, update_theme,
     };

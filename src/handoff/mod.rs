@@ -33,15 +33,15 @@
 
 pub mod cookie;
 
+use axum::Router;
 use axum::extract::{FromRef, FromRequestParts, Query, State};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
-use axum::Router;
 use serde::Deserialize;
 
-use crate::audit::{self, action, target_kind, AuditCtx, AuditEvent};
+use crate::audit::{self, AuditCtx, AuditEvent, action, target_kind};
 use crate::audit_metadata;
 use crate::config::{HandoffConfig, ProxyConfig};
 use crate::csrf::CsrfForm;
@@ -50,7 +50,7 @@ use crate::ory;
 use crate::rate_limit;
 use crate::state::AppState;
 
-use cookie::{clear_referrer_cookie, read_referrer_cookie, set_referrer_cookie, ReferrerPayload};
+use cookie::{ReferrerPayload, clear_referrer_cookie, read_referrer_cookie, set_referrer_cookie};
 
 /// View-model for the "Continuing from <App>" banner, built from a verified
 /// [`ReferrerPayload`].
@@ -328,10 +328,10 @@ fn client_origin_matches(client: &ory_client::models::OAuth2Client, candidate_ur
         .as_ref()
         .map(|v| v.iter().filter_map(|u| parse_origin(u)).collect())
         .unwrap_or_default();
-    if let Some(c_uri) = client.client_uri.as_deref() {
-        if let Some(o) = parse_origin(c_uri) {
-            registered.push(o);
-        }
+    if let Some(c_uri) = client.client_uri.as_deref()
+        && let Some(o) = parse_origin(c_uri)
+    {
+        registered.push(o);
     }
     registered.iter().any(|o| o == &candidate)
 }

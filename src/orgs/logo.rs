@@ -2,11 +2,11 @@
 
 use std::sync::Arc;
 
+use axum::Router;
 use axum::extract::{Path, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get as get_method;
-use axum::Router;
 use chrono::Utc;
 use diesel::prelude::*;
 use sha2::{Digest, Sha256};
@@ -190,19 +190,19 @@ pub(crate) async fn serve(
         _ => "private, no-store",
     };
 
-    if let Some(inm) = headers.get(header::IF_NONE_MATCH) {
-        if inm.as_bytes() == logo.etag.as_bytes() {
-            let mut builder = Response::builder()
-                .status(StatusCode::NOT_MODIFIED)
-                .header(header::ETAG, logo.etag.as_str())
-                .header(header::CACHE_CONTROL, cache_control);
-            if !public {
-                builder = builder.header(header::VARY, "Cookie");
-            }
-            return builder
-                .body(axum::body::Body::empty())
-                .expect("logo 304 response is well-formed");
+    if let Some(inm) = headers.get(header::IF_NONE_MATCH)
+        && inm.as_bytes() == logo.etag.as_bytes()
+    {
+        let mut builder = Response::builder()
+            .status(StatusCode::NOT_MODIFIED)
+            .header(header::ETAG, logo.etag.as_str())
+            .header(header::CACHE_CONTROL, cache_control);
+        if !public {
+            builder = builder.header(header::VARY, "Cookie");
         }
+        return builder
+            .body(axum::body::Body::empty())
+            .expect("logo 304 response is well-formed");
     }
 
     let mut builder = Response::builder()

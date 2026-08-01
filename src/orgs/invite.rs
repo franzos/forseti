@@ -5,15 +5,15 @@
 //! after the row expires and gets pruned.
 
 use askama::Template;
+use axum::Router;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
-use axum::Router;
 use rand::Rng;
 use serde::Deserialize;
 
-use crate::audit::{self, action, target_kind, AuditCtx, AuditEvent};
+use crate::audit::{self, AuditCtx, AuditEvent, action, target_kind};
 use crate::audit_metadata;
 use crate::csrf::CsrfForm;
 use crate::extractors::{Csrf, OptionalSession};
@@ -98,12 +98,11 @@ async fn post_invite_for(
         return (StatusCode::FORBIDDEN, "owner role required").into_response();
     }
     // Named orgs require the license; Default org is OSS.
-    if org_id != orgs::DEFAULT_ORG_ID {
-        if let Err(r) =
+    if org_id != orgs::DEFAULT_ORG_ID
+        && let Err(r) =
             crate::extractors::gate_orgs_feature_or_upsell(&state, &csrf_token, &email_for_upsell)
-        {
-            return r;
-        }
+    {
+        return r;
     }
 
     let email = form.email.trim().to_lowercase();

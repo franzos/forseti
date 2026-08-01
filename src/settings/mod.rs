@@ -3,11 +3,11 @@
 //! sends every settings flow through. The shared gate / fetch /
 //! privileged-refresh dance lives here in `fetch_settings_subpage`.
 
+use axum::Router;
 use axum::extract::{Query, State};
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
-use axum::Router;
 
 use askama::Template;
 use serde::Deserialize;
@@ -23,7 +23,7 @@ use crate::ory::{self, FlowFetch, FlowKind};
 use crate::page_chrome::{PageChrome, ThemedChrome};
 use crate::render::render;
 use crate::state::AppState;
-use crate::{render_error_boundary, FlowQuery};
+use crate::{FlowQuery, render_error_boundary};
 
 pub(crate) mod account;
 pub(crate) mod authorized_apps;
@@ -200,13 +200,12 @@ fn is_recovery_handoff(flow: &serde_json::Value) -> bool {
     if url.contains("/self-service/recovery") {
         return true;
     }
-    if let Some(ctx) = flow.get("internal_context") {
-        if ctx.get("recovery_link_token").is_some()
+    if let Some(ctx) = flow.get("internal_context")
+        && (ctx.get("recovery_link_token").is_some()
             || ctx.get("RecoveryFlow").is_some()
-            || ctx.get("recovery_flow").is_some()
-        {
-            return true;
-        }
+            || ctx.get("recovery_flow").is_some())
+    {
+        return true;
     }
     false
 }
@@ -264,15 +263,13 @@ fn settings_section_from_flow(flow: &serde_json::Value) -> SettingsSection {
         return SettingsSection::Password;
     }
     let state = flow_state(flow);
-    if state == "show_form" {
-        if let Some(ctx) = flow.get("internal_context") {
-            if ctx.get("recovery_link_token").is_some()
-                || ctx.get("RecoveryFlow").is_some()
-                || ctx.get("recovery_flow").is_some()
-            {
-                return SettingsSection::Password;
-            }
-        }
+    if state == "show_form"
+        && let Some(ctx) = flow.get("internal_context")
+        && (ctx.get("recovery_link_token").is_some()
+            || ctx.get("RecoveryFlow").is_some()
+            || ctx.get("recovery_flow").is_some())
+    {
+        return SettingsSection::Password;
     }
 
     // Fall back to password: Kratos's code-based recovery hand-off (v1.3.1)

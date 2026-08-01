@@ -6,8 +6,8 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use std::collections::HashSet;
 
-use crate::commercial::license::Feature;
 use crate::commercial::FeatureStatus;
+use crate::commercial::license::Feature;
 use crate::extractors::{Csrf, RequireSession};
 use crate::orgs::Role;
 use crate::page_chrome::PageChrome;

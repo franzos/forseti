@@ -5,7 +5,7 @@
 
 use axum::http::HeaderMap;
 
-use crate::signed_cookie::{unix_seconds_now, SignedCookie};
+use crate::signed_cookie::{SignedCookie, unix_seconds_now};
 
 const KNOWN_ACCOUNTS_COOKIE: &str = "forseti_known_accounts";
 const KNOWN_ACCOUNTS_SALT: &[u8] = b"forseti::known_accounts::v1";
@@ -77,8 +77,8 @@ pub(crate) fn clear_known_accounts_cookie(secure: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::http::header::COOKIE;
     use axum::http::HeaderMap;
+    use axum::http::header::COOKIE;
 
     const SECRET: &[u8] = b"known-accounts-test-secret";
     const TTL: u64 = 60 * 60 * 24 * 90;

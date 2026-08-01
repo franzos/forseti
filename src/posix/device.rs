@@ -17,10 +17,10 @@ use axum::{Json, Router};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
-use crate::audit::{self, action, AuditCtx, AuditEvent};
+use crate::audit::{self, AuditCtx, AuditEvent, action};
 use crate::audit_metadata;
 use crate::ory::hydra;
-use crate::posix::db::{self, device_status, DeviceSession};
+use crate::posix::db::{self, DeviceSession, device_status};
 use crate::posix::host_auth::RequirePosixHost;
 use crate::posix::scope;
 use crate::rate_limit;
@@ -247,7 +247,7 @@ async fn device_poll(
     match session.status.as_str() {
         device_status::APPROVED => return Json(DevicePollResponse::Approved).into_response(),
         device_status::DENIED => {
-            return Json(DevicePollResponse::Denied { reason: "denied" }).into_response()
+            return Json(DevicePollResponse::Denied { reason: "denied" }).into_response();
         }
         _ => {}
     }
@@ -513,11 +513,7 @@ fn session_expired(session: &DeviceSession, now_rfc3339: &str) -> bool {
 /// Daemon poll interval: 5s base (RFC 8628 default), 10s on a Hydra `slow_down`
 /// so Forseti's own polling stays under Hydra's rate (R12).
 fn hydra_interval(slow_down: bool) -> i64 {
-    if slow_down {
-        10
-    } else {
-        5
-    }
+    if slow_down { 10 } else { 5 }
 }
 
 #[cfg(test)]

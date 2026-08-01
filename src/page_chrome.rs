@@ -16,8 +16,8 @@ use axum::http::request::Parts;
 use fluent_templates::fluent_bundle::FluentValue;
 
 use crate::config::BrandConfig;
-use crate::extractors::{app_state, Csrf, OptionalSession};
-use crate::locale::{dir_for, LanguageIdentifier};
+use crate::extractors::{Csrf, OptionalSession, app_state};
+use crate::locale::{LanguageIdentifier, dir_for};
 use crate::state::AppState;
 use crate::web::FORSETI_VERSION;
 

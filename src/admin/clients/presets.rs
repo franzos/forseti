@@ -74,8 +74,12 @@ impl Preset {
             Self::Mcp => {
                 "Model Context Protocol resource servers (Claude Desktop, claude.ai, ChatGPT). Public + PKCE with an audience allow-list."
             }
-            Self::M2M => "Backend services authenticating as themselves. Client credentials grant only.",
-            Self::Custom => "Escape hatch — every field exposed, no opinions. For unusual combinations.",
+            Self::M2M => {
+                "Backend services authenticating as themselves. Client credentials grant only."
+            }
+            Self::Custom => {
+                "Escape hatch — every field exposed, no opinions. For unusual combinations."
+            }
         }
     }
 
@@ -144,8 +148,7 @@ impl Preset {
                 token_endpoint_auth_method: "none",
                 require_pkce: true,
                 audience_visible: true,
-                redirect_uri_hint:
-                    "http://127.0.0.1:PORT/oauth/callback\nhttps://claude.ai/api/mcp/auth_callback",
+                redirect_uri_hint: "http://127.0.0.1:PORT/oauth/callback\nhttps://claude.ai/api/mcp/auth_callback",
                 // MCP servers don't host an end-user session — logout
                 // fan-out is not meaningful for them.
                 backchannel_logout_uri_hint: "",

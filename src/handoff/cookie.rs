@@ -8,7 +8,7 @@
 use axum::http::HeaderMap;
 use serde::{Deserialize, Serialize};
 
-use crate::signed_cookie::{unix_seconds_now, SignedCookie};
+use crate::signed_cookie::{SignedCookie, unix_seconds_now};
 
 const APP_REFERRER_COOKIE: &str = "forseti_app_referrer";
 const APP_REFERRER_SALT: &[u8] = b"forseti::app_referrer::v1";
