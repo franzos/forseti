@@ -94,6 +94,11 @@ support_email = "support@example.com"
 # or a spoofed forwarded-for header defeat the per-IP buckets. Defaults
 # are 40/min and 400/hour. Set to 0 to disable that bucket.
 #
+# `dcr_require_iat` closes anonymous dynamic client registration: with it
+# on, `POST /oauth2/register` without a valid initial access token is
+# rejected with 401. Off by default, so registration stays open unless the
+# operator closes it.
+#
 # `dcr_iat_daily_limit` caps successful registrations per IAT over a
 # rolling 24h window opened on the first successful use. Belt-and-
 # suspenders to `uses_remaining`: even an "unlimited" token (`uses=NULL`)
@@ -120,6 +125,7 @@ support_email = "support@example.com"
 # (there is no merge-with-extras mode by design; copy the entries you want
 # to keep).
 # [oauth]
+# dcr_require_iat = false
 # dcr_ip_rate_per_minute = 10
 # dcr_ip_rate_per_hour   = 100
 # dcr_global_rate_per_minute = 40

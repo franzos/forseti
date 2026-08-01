@@ -1635,9 +1635,9 @@ fn offline_verifier_usernames(body: &Value) -> Vec<String> {
 }
 
 /// `/posix/v1/offline_verifiers` projection on a team-SCOPED host: a member
-/// that is enabled + team-scoped + has an offline secret is included; disabled,
-/// de-scoped (org member but not a team member), and no-secret accounts are all
-/// excluded.
+/// that is enabled + team-scoped + has an offline secret + has logged in on
+/// this host is included; disabled, de-scoped (org member but not a team
+/// member), and no-secret accounts are all excluded.
 #[tokio::test]
 async fn offline_verifiers_includes_only_eligible() {
     if !portal_reachable().await {
@@ -1708,6 +1708,12 @@ async fn offline_verifiers_includes_only_eligible() {
     seed_host_enrollment(&host_id, "offl.example", secret, &org_id);
     set_host_allowed_team_ids(&host_id, &[team_id.as_str()]);
 
+    // All four have authenticated online here, so each exclusion below is
+    // attributable to its own reason rather than to the prior-login gate.
+    for id in [&member_id, &nosecret_id, &disabled_id, &descoped_id] {
+        seed_host_account_login(&host_id, id);
+    }
+
     let client = reqwest::Client::new();
     let res = client
         .get(format!("{INTERNAL}/posix/v1/offline_verifiers"))
@@ -1759,6 +1765,7 @@ async fn offline_verifiers_includes_only_eligible() {
     delete_offline_secret(&member_id);
     delete_offline_secret(&disabled_id);
     delete_offline_secret(&descoped_id);
+    delete_host_account_logins(&host_id);
     delete_host_enrollment(&host_id);
     delete_team(&team_id);
     for id in [&member_id, &nosecret_id, &disabled_id, &descoped_id] {
@@ -1768,6 +1775,96 @@ async fn offline_verifiers_includes_only_eligible() {
     nosecret.cleanup().await;
     disabled.cleanup().await;
     descoped.cleanup().await;
+}
+
+/// An account that is enabled, in scope and holds an offline secret is still
+/// withheld from a host it has never authenticated on: the host only ever
+/// receives crackable verifiers for the users it has actually seen, so one
+/// compromised host can't walk off with the whole org's corpus. A second
+/// account that HAS logged in there is served, so the pull isn't empty for
+/// unrelated reasons.
+#[tokio::test]
+async fn offline_verifiers_exclude_accounts_never_seen_on_this_host() {
+    if !portal_reachable().await {
+        eprintln!("portal not reachable; skipping");
+        return;
+    }
+
+    let seed = chrono::Utc::now().timestamp_millis() % 50_000;
+    let org_id = format!("offl-seen-org-{seed}");
+    const PHC: &str = "$argon2id$v=19$m=65536,t=3,p=1$c2FsdHNhbHQ$aGFzaGhhc2g";
+
+    let host_id = format!("offl-seen-host-{seed}");
+    let secret = "s3cret-offl-seen";
+    seed_host_enrollment(&host_id, "offlseen.example", secret, &org_id);
+
+    // seen: identical to `unseen` in every respect except the prior login here.
+    let seen = register_test_user("offl-seen").await;
+    let seen_id = seen.identity_id.clone();
+    let seen_name = format!("offlseen{seed}");
+    seed_posix_account(&seen_id, &seen_name, 95_000 + seed, 95_000 + seed);
+    seed_org_membership(&org_id, &seen_id, "member");
+    seed_offline_secret(&seen_id, PHC);
+    seed_host_account_login(&host_id, &seen_id);
+
+    let unseen = register_test_user("offl-unseen").await;
+    let unseen_id = unseen.identity_id.clone();
+    let unseen_name = format!("offlunseen{seed}");
+    seed_posix_account(&unseen_id, &unseen_name, 96_000 + seed, 96_000 + seed);
+    seed_org_membership(&org_id, &unseen_id, "member");
+    seed_offline_secret(&unseen_id, PHC);
+
+    // A login on a DIFFERENT host must not unlock this one.
+    let other_host_id = format!("offl-seen-other-{seed}");
+    seed_host_enrollment(&other_host_id, "offlseenother.example", secret, &org_id);
+    seed_host_account_login(&other_host_id, &unseen_id);
+
+    let client = reqwest::Client::new();
+    let res = client
+        .get(format!("{INTERNAL}/posix/v1/offline_verifiers"))
+        .basic_auth(&host_id, Some(secret))
+        .send()
+        .await
+        .expect("GET offline_verifiers");
+    assert_eq!(res.status(), StatusCode::OK);
+    let body: Value = res.json().await.expect("offline_verifiers json");
+    let names = offline_verifier_usernames(&body);
+
+    assert!(
+        names.contains(&seen_name),
+        "account with a prior online login here must be included; got {names:?}"
+    );
+    assert!(
+        !names.contains(&unseen_name),
+        "account never seen on this host must be excluded; got {names:?}"
+    );
+
+    // The first online login flips it: the same account is served afterwards.
+    seed_host_account_login(&host_id, &unseen_id);
+    let res = client
+        .get(format!("{INTERNAL}/posix/v1/offline_verifiers"))
+        .basic_auth(&host_id, Some(secret))
+        .send()
+        .await
+        .expect("GET offline_verifiers (after first login)");
+    assert_eq!(res.status(), StatusCode::OK);
+    let body: Value = res.json().await.expect("offline_verifiers json");
+    let names = offline_verifier_usernames(&body);
+    assert!(
+        names.contains(&unseen_name),
+        "after its first online login here the account must be served; got {names:?}"
+    );
+
+    delete_offline_secret(&seen_id);
+    delete_offline_secret(&unseen_id);
+    delete_host_account_logins(&host_id);
+    delete_host_account_logins(&other_host_id);
+    delete_host_enrollment(&host_id);
+    delete_host_enrollment(&other_host_id);
+    delete_org_membership(&org_id, &seen_id);
+    delete_org_membership(&org_id, &unseen_id);
+    seen.cleanup().await;
+    unseen.cleanup().await;
 }
 
 /// A `force_mfa` host gets an EMPTY offline-verifier set even when users
@@ -2225,6 +2322,10 @@ async fn offline_verifiers_are_org_bound() {
     let host_id = format!("iso6-host-{seed}");
     let secret = "s3cret-iso6";
     seed_host_enrollment(&host_id, "iso6.example", secret, &org_a1);
+    // Both have logged in here, so the org boundary is the only thing that can
+    // keep a2's member out.
+    seed_host_account_login(&host_id, &a1_id);
+    seed_host_account_login(&host_id, &a2_id);
 
     let client = reqwest::Client::new();
     let res = client
@@ -2247,6 +2348,7 @@ async fn offline_verifiers_are_org_bound() {
 
     delete_offline_secret(&a1_id);
     delete_offline_secret(&a2_id);
+    delete_host_account_logins(&host_id);
     delete_host_enrollment(&host_id);
     delete_org_membership(&org_a1, &a1_id);
     delete_org_membership(&org_a2, &a2_id);

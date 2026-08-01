@@ -4,29 +4,33 @@
 //! GET renders mint a `forseti_csrf` cookie ([`ensure_csrf_cookie`]) carrying `<random>.<hex hmac>`
 //! (HMAC-SHA256 over the random part, key HKDF-derived from the operator cookie secret with a
 //! CSRF-specific info string) and embed the same value in a hidden `_csrf` input; the POST handler
-//! compares them ([`verify_csrf`]), 403 on mismatch. The signature blocks cookie tossing: a sibling
-//! subdomain can plant a cookie but can't sign it. [`middleware`] strips unsigned/forged CSRF
-//! cookies off the request before handlers run, so [`verify_csrf`]'s plain equality only ever sees
-//! tokens Forseti minted — every verifying route must stay behind the middleware. Tokens are
-//! session-unbound on purpose: login/registration forms need CSRF before any session exists.
+//! compares them ([`verify_csrf`]), 403 on mismatch. The signature alone does NOT block cookie
+//! tossing — Forseti hands a validly signed token to any anonymous GET, so a sibling subdomain can
+//! replay one it was given rather than forge one. Two things in [`middleware`] block it instead:
+//! state-changing requests whose `Origin` (or, absent that, `Sec-Fetch-Site`) says they aren't
+//! same-origin are rejected, and every CSRF cookie whose name isn't the one this deployment mints
+//! is dropped off the request, so a `Domain=`-scoped `forseti_csrf` can never stand in for the
+//! `__Host-` cookie. The same pass drops unsigned/forged values, so [`verify_csrf`]'s plain equality
+//! only ever sees tokens Forseti minted — every verifying route must stay behind the middleware.
+//! Tokens are session-unbound on purpose: login/registration forms need CSRF before any session exists.
 //!
 //! On HTTPS deployments the cookie is named `__Host-forseti_csrf` (prefix pins Secure + Path=/ +
 //! no Domain in the browser); plain-http keeps `forseti_csrf`. The cookie is `SameSite=Lax;
 //! HttpOnly` (the token is rendered server-side, so no JS read is needed). The [`middleware`]
 //! mints/stashes the token in request extensions, read via the [`crate::extractors::Csrf`] extractor.
 
+use axum::RequestExt;
 use axum::body::{Body, Bytes};
 use axum::extract::{FromRequest, RawForm, Request, State};
-use axum::http::header::{CONTENT_TYPE, COOKIE};
+use axum::http::header::{CONTENT_TYPE, COOKIE, ORIGIN};
 use axum::http::{HeaderMap, HeaderValue, Method};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use axum::RequestExt;
 use axum_extra::extract::cookie::{Cookie, SameSite};
 use hkdf::Hkdf;
 use hmac::{Hmac, KeyInit, Mac};
-use rand::distr::Alphanumeric;
 use rand::Rng;
+use rand::distr::Alphanumeric;
 use serde::de::DeserializeOwned;
 use sha2::Sha256;
 
@@ -44,8 +48,11 @@ pub const CSRF_COOKIE_NAME_SECURE: &str = "__Host-forseti_csrf";
 /// HKDF info string, domain-separating the CSRF key from the signed-cookie keys.
 const CSRF_KEY_INFO: &[u8] = b"forseti::csrf::v1";
 
-/// The cookie name minted for this deployment mode. Verification accepts
-/// exactly the minted name (with a read fallback for scheme transitions).
+/// Not in `axum::http::header`; browsers send it on navigations alongside `Origin`.
+const SEC_FETCH_SITE: &str = "sec-fetch-site";
+
+/// The cookie name minted for this deployment mode. The only name that survives
+/// [`middleware`]: the other one is stripped off the request.
 pub(crate) fn csrf_cookie_name(secure: bool) -> &'static str {
     if secure {
         CSRF_COOKIE_NAME_SECURE
@@ -54,11 +61,19 @@ pub(crate) fn csrf_cookie_name(secure: bool) -> &'static str {
     }
 }
 
-/// Read the existing CSRF cookie value, if any. Prefers the `__Host-` name;
-/// falls back to the unprefixed one so plain-http deployments keep working.
+/// Read the existing CSRF cookie value, if any. Both names are accepted here because
+/// [`middleware`] has already dropped whichever one this deployment doesn't mint, so
+/// on HTTPS only the `__Host-` cookie can reach a handler.
 pub(crate) fn read_csrf_cookie(headers: &HeaderMap) -> Option<String> {
     crate::cookies::read_cookie(headers, CSRF_COOKIE_NAME_SECURE)
         .or_else(|| crate::cookies::read_cookie(headers, CSRF_COOKIE_NAME))
+}
+
+/// Reduce a URL to its `scheme://host[:port]` origin with default ports elided, matching
+/// how browsers serialize `Origin`. `None` for relative, malformed, or opaque-origin input.
+pub(crate) fn url_origin(url: &str) -> Option<String> {
+    let origin = url::Url::parse(url).ok()?.origin();
+    origin.is_tuple().then(|| origin.ascii_serialization())
 }
 
 fn derive_key(secret: &[u8]) -> [u8; 32] {
@@ -119,10 +134,10 @@ pub fn ensure_csrf_cookie(
     secure: bool,
 ) -> (String, Option<String>) {
     let name = csrf_cookie_name(secure);
-    if let Some(existing) = crate::cookies::read_cookie(headers, name) {
-        if token_is_valid(secret, &existing) {
-            return (existing, None);
-        }
+    if let Some(existing) = crate::cookies::read_cookie(headers, name)
+        && token_is_valid(secret, &existing)
+    {
+        return (existing, None);
     }
     let token = mint_token(secret);
     let cookie = build_csrf_cookie(name, &token, secure);
@@ -164,10 +179,42 @@ pub fn delete_csrf_cookie(secure: bool) -> String {
     s
 }
 
-/// Drop CSRF cookies that fail signature verification from the request's `Cookie` header, so
-/// downstream reads (equality in [`verify_csrf`], the [`crate::extractors::Csrf`] fallback) never
-/// see a tossed/forged value. Non-CSRF cookies pass through untouched.
-fn strip_invalid_csrf_cookies(headers: &mut HeaderMap, secret: &[u8]) {
+/// RFC 9110 safe methods. Everything else counts as state-changing and goes through
+/// [`origin_allowed`], so an unknown method fails closed rather than skipping the gate.
+fn is_safe_method(method: &Method) -> bool {
+    matches!(
+        *method,
+        Method::GET | Method::HEAD | Method::OPTIONS | Method::TRACE
+    )
+}
+
+/// Same-origin gate for state-changing requests, layered under the double-submit check: it is what
+/// stops a sibling subdomain from replaying a token Forseti minted for it. A present `Origin` must
+/// equal Forseti's own; otherwise an explicit non-same-origin `Sec-Fetch-Site` rejects. Neither
+/// header present passes — non-browser clients send neither, and the double-submit token still
+/// gates them. An unparseable `[self].url` leaves nothing to compare against and falls through to
+/// `Sec-Fetch-Site` rather than 403ing every POST.
+fn origin_allowed(headers: &HeaderMap, self_origin: Option<&str>) -> bool {
+    if let (Some(origin), Some(expected)) = (
+        headers.get(ORIGIN).and_then(|v| v.to_str().ok()),
+        self_origin,
+    ) {
+        return origin.eq_ignore_ascii_case(expected);
+    }
+    !matches!(
+        headers.get(SEC_FETCH_SITE).and_then(|v| v.to_str().ok()),
+        Some("cross-site" | "same-site")
+    )
+}
+
+/// Drop CSRF cookies this deployment didn't mint from the request's `Cookie` header, so downstream
+/// reads (equality in [`verify_csrf`], the [`crate::extractors::Csrf`] fallback) never see a
+/// tossed/forged value. Two rules: the name must be exactly [`csrf_cookie_name`] for the current
+/// scheme, since a sibling subdomain can plant a `Domain=`-scoped `forseti_csrf` but not a
+/// `__Host-` cookie; and the value must verify under this deployment's key. Non-CSRF cookies pass
+/// through untouched.
+fn strip_invalid_csrf_cookies(headers: &mut HeaderMap, secret: &[u8], secure: bool) {
+    let minted = csrf_cookie_name(secure);
     let lines: Vec<String> = headers
         .get_all(COOKIE)
         .iter()
@@ -182,7 +229,7 @@ fn strip_invalid_csrf_cookies(headers: &mut HeaderMap, secret: &[u8]) {
         .flat_map(|line| Cookie::split_parse(line.clone()).filter_map(Result::ok))
         .filter(|c| {
             let is_csrf = c.name() == CSRF_COOKIE_NAME || c.name() == CSRF_COOKIE_NAME_SECURE;
-            if is_csrf && !token_is_valid(secret, c.value()) {
+            if is_csrf && (c.name() != minted || !token_is_valid(secret, c.value())) {
                 changed = true;
                 return false;
             }
@@ -194,10 +241,10 @@ fn strip_invalid_csrf_cookies(headers: &mut HeaderMap, secret: &[u8]) {
         return;
     }
     headers.remove(COOKIE);
-    if !kept.is_empty() {
-        if let Ok(v) = HeaderValue::from_str(&kept.join("; ")) {
-            headers.insert(COOKIE, v);
-        }
+    if !kept.is_empty()
+        && let Ok(v) = HeaderValue::from_str(&kept.join("; "))
+    {
+        headers.insert(COOKIE, v);
     }
 }
 
@@ -285,7 +332,18 @@ where
 pub async fn middleware(State(state): State<AppState>, mut req: Request, next: Next) -> Response {
     let secure = state.cfg.self_.is_https();
 
-    strip_invalid_csrf_cookies(req.headers_mut(), &state.cookie_secret);
+    if !is_safe_method(req.method()) {
+        let self_origin = url_origin(&state.cfg.self_.url);
+        if !origin_allowed(req.headers(), self_origin.as_deref()) {
+            tracing::warn!(
+                path = %req.uri().path(),
+                "rejected cross-origin state-changing request"
+            );
+            return crate::extractors::forbid_response();
+        }
+    }
+
+    strip_invalid_csrf_cookies(req.headers_mut(), &state.cookie_secret, secure);
     let (token, set_cookie) = ensure_csrf_cookie(req.headers(), &state.cookie_secret, secure);
 
     req.extensions_mut().insert(CsrfToken(token));
@@ -298,8 +356,8 @@ pub async fn middleware(State(state): State<AppState>, mut req: Request, next: N
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::http::header::COOKIE;
     use axum::http::HeaderMap;
+    use axum::http::header::COOKIE;
 
     const SECRET: &[u8] = b"csrf-test-operator-secret";
 
@@ -438,7 +496,7 @@ mod tests {
                 .parse()
                 .unwrap(),
         );
-        strip_invalid_csrf_cookies(&mut headers, SECRET);
+        strip_invalid_csrf_cookies(&mut headers, SECRET, false);
         let raw = headers.get(COOKIE).unwrap().to_str().unwrap();
         assert!(!raw.contains("tossed"));
         assert!(raw.contains("other=1"));
@@ -450,15 +508,141 @@ mod tests {
     fn strip_invalid_csrf_cookies_keeps_signed_value() {
         let token = mint_token(SECRET);
         let mut headers = headers_with_csrf(&token);
-        strip_invalid_csrf_cookies(&mut headers, SECRET);
+        strip_invalid_csrf_cookies(&mut headers, SECRET, false);
         assert_eq!(read_csrf_cookie(&headers).as_deref(), Some(token.as_str()));
     }
 
     #[test]
     fn strip_invalid_csrf_cookies_removes_header_when_only_cookie_was_forged() {
         let mut headers = headers_with_csrf("tossed");
-        strip_invalid_csrf_cookies(&mut headers, SECRET);
+        strip_invalid_csrf_cookies(&mut headers, SECRET, false);
         assert!(headers.get(COOKIE).is_none());
+    }
+
+    #[test]
+    fn strip_invalid_csrf_cookies_drops_signed_unprefixed_cookie_on_https() {
+        // Cookie tossing: a sibling subdomain plants a validly signed, Domain-scoped `forseti_csrf`.
+        let tossed = mint_token(SECRET);
+        let mut headers = headers_with_csrf(&tossed);
+        strip_invalid_csrf_cookies(&mut headers, SECRET, true);
+        assert!(read_csrf_cookie(&headers).is_none());
+        assert!(!verify_csrf(&headers, &tossed));
+    }
+
+    #[test]
+    fn strip_invalid_csrf_cookies_prefers_host_prefixed_over_tossed_sibling_cookie() {
+        let ours = mint_token(SECRET);
+        let tossed = mint_token(SECRET);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            COOKIE,
+            format!("{CSRF_COOKIE_NAME}={tossed}; {CSRF_COOKIE_NAME_SECURE}={ours}")
+                .parse()
+                .unwrap(),
+        );
+        strip_invalid_csrf_cookies(&mut headers, SECRET, true);
+        assert_eq!(read_csrf_cookie(&headers).as_deref(), Some(ours.as_str()));
+    }
+
+    #[test]
+    fn strip_invalid_csrf_cookies_drops_host_prefixed_cookie_on_http() {
+        let token = mint_token(SECRET);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            COOKIE,
+            format!("{CSRF_COOKIE_NAME_SECURE}={token}")
+                .parse()
+                .unwrap(),
+        );
+        strip_invalid_csrf_cookies(&mut headers, SECRET, false);
+        assert!(read_csrf_cookie(&headers).is_none());
+    }
+
+    fn headers_with(name: &'static str, value: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(name, value.parse().unwrap());
+        h
+    }
+
+    #[test]
+    fn origin_allowed_matches_self_origin() {
+        let expected = Some("https://id.example.com");
+        assert!(origin_allowed(
+            &headers_with("origin", "https://id.example.com"),
+            expected
+        ));
+        assert!(!origin_allowed(
+            &headers_with("origin", "https://evil.example.com"),
+            expected
+        ));
+        assert!(!origin_allowed(&headers_with("origin", "null"), expected));
+    }
+
+    #[test]
+    fn origin_allowed_falls_back_to_sec_fetch_site() {
+        let expected = Some("https://id.example.com");
+        assert!(origin_allowed(
+            &headers_with("sec-fetch-site", "same-origin"),
+            expected
+        ));
+        assert!(origin_allowed(
+            &headers_with("sec-fetch-site", "none"),
+            expected
+        ));
+        assert!(!origin_allowed(
+            &headers_with("sec-fetch-site", "same-site"),
+            expected
+        ));
+        assert!(!origin_allowed(
+            &headers_with("sec-fetch-site", "cross-site"),
+            expected
+        ));
+    }
+
+    #[test]
+    fn origin_allowed_passes_when_neither_header_present() {
+        assert!(origin_allowed(
+            &HeaderMap::new(),
+            Some("https://id.example.com")
+        ));
+    }
+
+    #[test]
+    fn origin_allowed_without_self_origin_still_rejects_cross_site() {
+        assert!(origin_allowed(
+            &headers_with("origin", "https://evil.example.com"),
+            None
+        ));
+        assert!(!origin_allowed(
+            &headers_with("sec-fetch-site", "cross-site"),
+            None
+        ));
+    }
+
+    #[test]
+    fn url_origin_elides_default_ports_and_paths() {
+        assert_eq!(
+            url_origin("https://id.example.com/login?x=1").as_deref(),
+            Some("https://id.example.com")
+        );
+        assert_eq!(
+            url_origin("https://id.example.com:443/").as_deref(),
+            Some("https://id.example.com")
+        );
+        assert_eq!(
+            url_origin("http://127.0.0.1:4433").as_deref(),
+            Some("http://127.0.0.1:4433")
+        );
+        assert!(url_origin("/relative").is_none());
+        assert!(url_origin("not a url").is_none());
+    }
+
+    #[test]
+    fn safe_methods_skip_the_origin_gate() {
+        assert!(is_safe_method(&Method::GET));
+        assert!(is_safe_method(&Method::HEAD));
+        assert!(!is_safe_method(&Method::POST));
+        assert!(!is_safe_method(&Method::DELETE));
     }
 
     #[test]

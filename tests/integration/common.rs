@@ -614,19 +614,19 @@ pub async fn read_mailcrab_inbox(to_address: &str) -> Vec<MailItem> {
             .get(format!("{MAILCRAB}/api/message/{id}"))
             .send()
             .await;
-        if let Ok(r) = body_res {
-            if let Ok(v) = r.json::<Value>().await {
-                // Mailcrab returns plain + html separately. The portal-
-                // generated mail we care about (claim-email code, invite)
-                // is text/plain only; Kratos's verification email is
-                // multipart. Prefer `text` (plain), fall back to `html`.
-                let body = v["text"]
-                    .as_str()
-                    .or_else(|| v["html"].as_str())
-                    .unwrap_or_default()
-                    .to_string();
-                item.body = body;
-            }
+        if let Ok(r) = body_res
+            && let Ok(v) = r.json::<Value>().await
+        {
+            // Mailcrab returns plain + html separately. The portal-
+            // generated mail we care about (claim-email code, invite)
+            // is text/plain only; Kratos's verification email is
+            // multipart. Prefer `text` (plain), fall back to `html`.
+            let body = v["text"]
+                .as_str()
+                .or_else(|| v["html"].as_str())
+                .unwrap_or_default()
+                .to_string();
+            item.body = body;
         }
         out.push(item);
     }
@@ -1381,6 +1381,31 @@ pub fn delete_offline_secret(identity_id: &str) {
     .unwrap_or_else(|e| panic!("delete offline_secrets: {e}"));
 }
 
+/// Record that `identity_id` has completed an online auth on `host_id` —
+/// mirrors the `host_account_logins` row `posix::db::approve_device_session`
+/// writes when a device-flow approval wins. `/posix/v1/offline_verifiers`
+/// serves an account's verifier only to hosts that have such a row.
+pub fn seed_host_account_login(host_id: &str, identity_id: &str) {
+    let now = chrono::Utc::now().to_rfc3339();
+    let conn = forseti_db_conn();
+    conn.execute(
+        "INSERT OR REPLACE INTO host_account_logins (host_id, identity_id, last_login_at) \
+         VALUES (?1, ?2, ?3)",
+        params![host_id, identity_id, now],
+    )
+    .unwrap_or_else(|e| panic!("seed host_account_logins: {e}"));
+}
+
+/// Delete every `host_account_logins` row for a host (test cleanup).
+pub fn delete_host_account_logins(host_id: &str) {
+    let conn = forseti_db_conn();
+    conn.execute(
+        "DELETE FROM host_account_logins WHERE host_id = ?1",
+        params![host_id],
+    )
+    .unwrap_or_else(|e| panic!("delete host_account_logins: {e}"));
+}
+
 /// Count `audit_events` rows matching `action` whose metadata mentions `host_id`.
 /// Used by the offline-audit ingest test to assert a batch landed as rows.
 pub fn count_audit_events_for_host(action: &str, host_id: &str) -> i64 {
@@ -1734,10 +1759,10 @@ impl FakeMcpServer {
 ///
 /// Binds to `127.0.0.1:0` so concurrent test runs don't fight over a port.
 pub async fn spawn_fake_mcp_server(expected_audience: &str) -> FakeMcpServer {
+    use axum::Router;
     use axum::extract::State;
     use axum::http::{HeaderMap, StatusCode as AxStatus};
     use axum::routing::get;
-    use axum::Router;
 
     #[derive(Clone)]
     struct St {

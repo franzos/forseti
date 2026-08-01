@@ -15,10 +15,15 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Cmd {
+    /// Delete audit-log rows older than [audit].audit_retention_days
     AuditPrune,
+    /// Delete identities older than [identity].unverified_ttl_days that still have an unverified address
     UnverifiedPrune,
+    /// Drop POSIX accounts, offline secrets and device sessions whose Kratos identity is gone
     PosixReconcile,
+    /// Create the Hydra OAuth2 client the POSIX/PAM device flow logs in with
     PosixInitClient,
+    /// Inspect and edit the Kratos, Hydra and Forseti config files
     Config(ConfigArgs),
     #[command(name = "config-check", hide = true)]
     ConfigCheckAlias(CheckArgs),
@@ -36,6 +41,7 @@ pub struct ConfigArgs {
 
 #[derive(Args, Clone)]
 pub struct PathArgs {
+    /// Path to kratos.yml (defaults to infra/kratos/kratos.yml when it exists)
     #[arg(
         long = "kratos",
         alias = "kratos-config",
@@ -43,6 +49,7 @@ pub struct PathArgs {
         global = true
     )]
     pub kratos: Option<PathBuf>,
+    /// Path to hydra.yml (defaults to infra/hydra/hydra.yml when it exists)
     #[arg(
         long = "hydra",
         alias = "hydra-config",
@@ -50,40 +57,54 @@ pub struct PathArgs {
         global = true
     )]
     pub hydra: Option<PathBuf>,
+    /// Path to Forseti's config.toml (defaults to ./config.toml when it exists)
     #[arg(long = "forseti-config", env = "FORSETI_CONFIG_PATH", global = true)]
     pub forseti_config: Option<PathBuf>,
+    /// Show what would change without writing any file
     #[arg(long, global = true)]
     pub dry_run: bool,
+    /// Answer confirmation prompts with yes (never satisfies the pairwise-salt gate)
     #[arg(long, global = true)]
     pub yes: bool,
+    /// Write through a symlinked config file instead of refusing
     #[arg(long, global = true)]
     pub follow_symlink: bool,
 }
 
 #[derive(Subcommand)]
 pub enum ConfigCmd {
+    /// Report the current state of every tracked setting across the config files
     Status {
+        /// Emit the settings table as JSON instead of text
         #[arg(long)]
         json: bool,
     },
+    /// Lint the config files for misconfiguration, placeholders and weak secrets
     Check(CheckArgs),
+    /// Generate a fresh kratos.yml and hydra.yml with CSPRNG secrets
     Init(InitArgs),
+    /// Enable or disable a social sign-in provider
     Oidc {
         #[command(subcommand)]
         cmd: OidcCmd,
     },
+    /// Roll a secret, keeping the old one accepted where the format allows it
     Rotate {
         #[command(subcommand)]
         cmd: RotateCmd,
     },
+    /// Drop superseded secrets left behind by a rotation
     Prune {
         #[command(subcommand)]
         cmd: PruneCmd,
     },
+    /// Restore config files from the backups written by earlier edits
     Restore {
+        /// Restore the generation with this unix-seconds timestamp for every target
         #[arg(long)]
         from: Option<String>,
     },
+    /// Configure the SMTP server Kratos sends mail through
     Smtp {
         #[command(subcommand)]
         cmd: SmtpCmd,
@@ -95,36 +116,50 @@ pub struct CheckArgs {
     #[command(flatten)]
     pub paths: PathArgs,
     // Kept to preserve existing config-check behavior.
+    /// Exit non-zero on warnings, not just failures
     #[arg(long)]
     pub strict: bool,
 }
 
 #[derive(Args)]
 pub struct InitArgs {
+    /// Public base URL Forseti is served at; also the WebAuthn rp.id host
     #[arg(long)]
     pub forseti_url: Option<String>,
+    /// Kratos public API base URL
     #[arg(long)]
     pub kratos_public_url: Option<String>,
+    /// Kratos admin API base URL
     #[arg(long)]
     pub kratos_admin_url: Option<String>,
+    /// Hydra public API base URL
     #[arg(long)]
     pub hydra_public_url: Option<String>,
+    /// Hydra admin API base URL
     #[arg(long)]
     pub hydra_admin_url: Option<String>,
+    /// Kratos database DSN
     #[arg(long)]
     pub kratos_db_dsn: Option<String>,
+    /// Hydra database DSN
     #[arg(long)]
     pub hydra_db_dsn: Option<String>,
+    /// SMTP connection URI Kratos sends mail through
     #[arg(long)]
     pub smtp_uri: Option<String>,
+    /// From address on Kratos's outgoing mail
     #[arg(long)]
     pub smtp_from_address: Option<String>,
+    /// From name on Kratos's outgoing mail
     #[arg(long)]
     pub smtp_from_name: Option<String>,
+    /// Where to write the generated Kratos config
     #[arg(long, default_value = "kratos.yml")]
     pub kratos_out: String,
+    /// Where to write the generated Hydra config
     #[arg(long, default_value = "hydra.yml")]
     pub hydra_out: String,
+    /// Overwrite the output files if they already exist
     #[arg(long)]
     pub force: bool,
 }
@@ -132,10 +167,13 @@ pub struct InitArgs {
 #[derive(Clone, Args)]
 pub struct SecretSourceArgs {
     // at most one; none => interactive prompt fallback, enforced post-parse
+    /// Read the client secret from this environment variable
     #[arg(long, group = "secret_src")]
     pub client_secret_env: Option<String>,
+    /// Read the client secret from this file
     #[arg(long, group = "secret_src")]
     pub client_secret_file: Option<PathBuf>,
+    /// Read the client secret from stdin
     #[arg(long, group = "secret_src")]
     pub client_secret_stdin: bool,
 }
@@ -147,10 +185,13 @@ pub struct SecretSourceArgs {
 #[derive(Clone, Args)]
 pub struct AppleKeySourceArgs {
     // at most one; none => rejected post-parse for apple
+    /// Read Apple's .p8 signing key from this environment variable
     #[arg(long, group = "apple_key_src")]
     pub apple_private_key_env: Option<String>,
+    /// Read Apple's .p8 signing key from this file
     #[arg(long, group = "apple_key_src")]
     pub apple_private_key_file: Option<PathBuf>,
+    /// Read Apple's .p8 signing key from stdin
     #[arg(long, group = "apple_key_src")]
     pub apple_private_key_stdin: bool,
 }
@@ -158,39 +199,55 @@ pub struct AppleKeySourceArgs {
 #[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)] // parsed once at startup; boxing costs clap's derive
 pub enum OidcCmd {
+    /// Add a social sign-in provider to kratos.yml and write its Jsonnet mapper
     Enable {
+        /// Provider to enable: google, github, microsoft or apple
         provider: String, // validated post-parse: google|github|microsoft|apple
+        /// OAuth2 client id issued by the provider (prompted for when omitted interactively)
         #[arg(long)]
         client_id: Option<String>, // Option so the menu can prompt; non-interactive requires it post-parse
         #[command(flatten)]
         secret: SecretSourceArgs,
+        /// Specific Entra tenant id; required for microsoft (common/organizations are refused)
         #[arg(long)]
         microsoft_tenant: Option<String>, // required iff provider == microsoft, post-parse
+        /// Apple developer team id; required for apple
         #[arg(long)]
         apple_team_id: Option<String>, // required iff provider == apple, post-parse
+        /// Apple key id matching the .p8 signing key; required for apple
         #[arg(long)]
         apple_key_id: Option<String>, // required iff provider == apple, post-parse
         #[command(flatten)]
         apple_key: AppleKeySourceArgs,
+        /// Keep an existing customised mapper instead of regenerating the pinned one
         #[arg(long)]
         keep_mapper: bool,
     },
+    /// Remove a social sign-in provider from kratos.yml
     Disable {
+        /// Provider id as it appears in kratos.yml
         id: String,
     },
 }
 
 #[derive(Subcommand)]
 pub enum RotateCmd {
+    /// Issue a new audit webhook token, staging it alongside the current one
     WebhookToken,
+    /// Prepend a fresh Kratos cookie and/or cipher secret, keeping the old ones valid
     KratosSecrets {
+        /// Rotate only the cookie secrets
         #[arg(long)]
         cookie: bool,
+        /// Rotate only the cipher secrets
         #[arg(long)]
         cipher: bool,
     },
+    /// Prepend a fresh Hydra system secret (Hydra needs a restart to pick it up)
     HydraSystem,
+    /// Replace Hydra's pairwise salt; every pairwise sub ever issued changes
     PairwiseSalt {
+        /// Required non-interactively; interactive mode asks for a typed confirmation instead
         #[arg(long = "i-understand-subs-change")]
         confirmed: bool,
     },
@@ -198,27 +255,38 @@ pub enum RotateCmd {
 
 #[derive(Subcommand)]
 pub enum PruneCmd {
+    /// Drop every accepted audit webhook token except the one kratos.yml presents
     WebhookToken,
+    /// Drop all but the newest Kratos cookie and/or cipher secret
     KratosSecrets {
+        /// Prune only the cookie secrets
         #[arg(long)]
         cookie: bool,
+        /// Prune only the cipher secrets
         #[arg(long)]
         cipher: bool,
     },
+    /// Drop all but the newest Hydra system secret
     HydraSystem,
 }
 
 #[derive(Subcommand)]
 pub enum SmtpCmd {
+    /// Set the SMTP URI and/or from address and name in kratos.yml
     Set {
+        /// Read the SMTP URI from this environment variable
         #[arg(long, group = "uri_src")]
         uri_env: Option<String>,
+        /// Read the SMTP URI from this file
         #[arg(long, group = "uri_src")]
         uri_file: Option<PathBuf>,
+        /// Read the SMTP URI from stdin
         #[arg(long, group = "uri_src")]
         uri_stdin: bool,
+        /// From address on outgoing mail
         #[arg(long)]
         from_address: Option<String>,
+        /// From name on outgoing mail
         #[arg(long)]
         from_name: Option<String>,
     },

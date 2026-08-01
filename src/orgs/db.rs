@@ -318,6 +318,21 @@ struct NewOrg<'a> {
     created_by: Option<&'a str>,
 }
 
+/// The `organizations.slug` unique constraint rejected the insert. Carried as
+/// its own error so callers can offer a retry instead of a 500: `suggest_slug`
+/// samples existing slugs rather than proving uniqueness, and two concurrent
+/// creates can pick the same one regardless.
+#[derive(Debug)]
+pub struct SlugTaken;
+
+impl std::fmt::Display for SlugTaken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("organization slug already in use")
+    }
+}
+
+impl std::error::Error for SlugTaken {}
+
 pub async fn create_org(
     db: &DbPool,
     id: &str,
@@ -330,7 +345,7 @@ pub async fn create_org(
     let name = name.to_string();
     let created_by = created_by.map(str::to_string);
     let now = Utc::now().to_rfc3339();
-    db_interact!(db, |conn| {
+    let result = db_interact!(db, |conn| {
         diesel::insert_into(organizations::table)
             .values(NewOrg {
                 id: &id,
@@ -340,9 +355,15 @@ pub async fn create_org(
                 created_by: created_by.as_deref(),
             })
             .execute(conn)
-            .map(|_| ())
-    })?;
-    Ok(())
+    });
+    match result {
+        Ok(_) => Ok(()),
+        Err(diesel::result::Error::DatabaseError(
+            diesel::result::DatabaseErrorKind::UniqueViolation,
+            _,
+        )) => Err(SlugTaken.into()),
+        Err(e) => Err(e.into()),
+    }
 }
 
 pub async fn update_branding(
@@ -625,7 +646,7 @@ struct NewMember<'a> {
 /// upgrades reader->writer and returns SQLITE_BUSY immediately, bypassing
 /// busy_timeout); Postgres (MVCC) uses a plain transaction.
 macro_rules! serialized_txn {
-    ($db:expr, $c:ident, $body:block) => {{
+    ($db:expr_2021, $c:ident, $body:block) => {{
         match $db {
             DbPool::Sqlite(pool) => {
                 let conn = pool
@@ -1150,6 +1171,10 @@ pub fn slugify(name: &str) -> String {
 
 /// Suggest a unique slug from `name`, appending `-2`, `-3`, ... on collision.
 /// The `LIKE` prefix is safe: `base` comes from `slugify`, so `[a-z0-9-]+`.
+///
+/// Only the first `MAX_ROWS_PER_LIST` matching slugs are sampled, so this is a
+/// suggestion, not a guarantee: the `organizations.slug` unique constraint is
+/// the real guard, surfaced to the caller as [`SlugTaken`].
 pub async fn suggest_slug(db: &DbPool, name: &str) -> anyhow::Result<String> {
     let base = slugify(name);
     let prefix = format!("{base}%");
@@ -1181,7 +1206,7 @@ pub async fn suggest_slug(db: &DbPool, name: &str) -> anyhow::Result<String> {
 #[cfg(test)]
 pub(crate) async fn test_pool() -> DbPool {
     use deadpool_diesel::sqlite::{Manager, Pool, Runtime};
-    use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
+    use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
 
     const TEST_MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations/sqlite");
 
@@ -1203,7 +1228,7 @@ pub(crate) async fn test_pool() -> DbPool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::orgs::{Role, DEFAULT_ORG_ID};
+    use crate::orgs::{DEFAULT_ORG_ID, Role};
     use chrono::TimeZone;
 
     #[tokio::test]
@@ -1504,6 +1529,19 @@ mod tests {
             "suggested a reserved slug: {slug}"
         );
         assert_eq!(slug, "admin-2");
+    }
+
+    #[tokio::test]
+    async fn create_org_reports_slug_conflict() {
+        let db = test_pool().await;
+        create_org(&db, "o1", "acme", "Acme", None).await.unwrap();
+        let err = create_org(&db, "o2", "acme", "Acme Two", None)
+            .await
+            .expect_err("duplicate slug must fail");
+        assert!(
+            err.downcast_ref::<SlugTaken>().is_some(),
+            "expected SlugTaken, got: {err}"
+        );
     }
 
     // --- Default floor: single-query facts, atomic add, join+drop, leave ---

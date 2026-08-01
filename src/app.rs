@@ -5,10 +5,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::{
+    Router,
     extract::State,
     response::{IntoResponse, Response},
     routing::get,
-    Router,
 };
 use tokio_util::sync::CancellationToken;
 use tower_http::set_header::SetResponseHeaderLayer;
@@ -129,9 +129,9 @@ pub(crate) async fn run() -> anyhow::Result<()> {
     let cfg_public_bind = cfg.self_.bind.clone();
     let cfg_internal_bind = cfg.internal.bind.clone();
     let metrics_handle = crate::metrics::install_metrics_recorder();
+    let ip_salt: Arc<str> = crate::audit::ip_salt(&cfg, &cookie_secret).into();
 
     let state = AppState {
-        metrics_scrape_token: cfg.metrics.scrape_token.clone(),
         cfg: Arc::new(cfg),
         ory,
         db,
@@ -139,6 +139,7 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         signing_key,
         license,
         cookie_secret,
+        ip_salt,
         discovery: crate::state::DiscoveryCache::default(),
         logo_cache: Arc::new(tokio::sync::Mutex::new(
             crate::logo_cache::LogoCache::default(),
@@ -165,6 +166,13 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         .merge(accounts::router())
         .merge(handoff::router(&state.cfg.proxy, &state.cfg.handoff))
         .merge(admin::router())
+        // One-shot secret reveals (client secrets, recovery codes, DCR + registration access
+        // tokens, POSIX host secrets) render on these routes; none of them may reach a disk
+        // cache or an intermediary.
+        .route_layer(SetResponseHeaderLayer::overriding(
+            axum::http::header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static("no-store"),
+        ))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             crate::csrf::middleware,
@@ -205,15 +213,18 @@ pub(crate) async fn run() -> anyhow::Result<()> {
     if state.cfg.saml.is_some() {
         public_app = public_app.merge(crate::saml::router());
     }
-    let csp_value =
-        axum::http::HeaderValue::from_str(&build_csp(&state.cfg.security.frame_ancestors))
-            .unwrap_or_else(|e| {
-                eprintln!(
-                "config error: [security].frame_ancestors {:?} is not a valid header value: {e}",
-                state.cfg.security.frame_ancestors
-            );
-                std::process::exit(1);
-            });
+    let form_action = csp_form_action(&state.cfg.kratos.public_url);
+    let csp_value = axum::http::HeaderValue::from_str(&build_csp(
+        &state.cfg.security.frame_ancestors,
+        &form_action,
+    ))
+    .unwrap_or_else(|e| {
+        eprintln!(
+            "config error: [security].frame_ancestors {:?} is not a valid header value: {e}",
+            state.cfg.security.frame_ancestors
+        );
+        std::process::exit(1);
+    });
 
     let mut public_app = public_app
         .merge(static_assets::router())
@@ -245,8 +256,8 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         ));
     }
     // `/join/confirm` and `/oauth/consent` must always be unframable (CSRF POST), overriding global config.
-    let csp_strict = axum::http::HeaderValue::from_str(&build_csp("'none'"))
-        .expect("static strict csp is a valid header value");
+    let csp_strict = axum::http::HeaderValue::from_str(&build_csp("'none'", &form_action))
+        .expect("strict csp reuses the already-validated form-action sources");
     let public_app = public_app
         .layer(TraceLayer::new_for_http())
         .layer(axum::middleware::from_fn_with_state(
@@ -433,9 +444,23 @@ async fn shutdown_signal() {
     }
 }
 
-// omits default-src/script-src/style-src/img-src/form-action: those break WebAuthn/QR/Shape-2 forms
-fn build_csp(frame_ancestors: &str) -> String {
-    format!("object-src 'none'; base-uri 'self'; frame-ancestors {frame_ancestors}")
+// omits default-src/script-src/style-src/img-src: those break WebAuthn/QR/Shape-2 forms
+fn build_csp(frame_ancestors: &str, form_action: &str) -> String {
+    format!(
+        "object-src 'none'; base-uri 'self'; frame-ancestors {frame_ancestors}; \
+         form-action {form_action}"
+    )
+}
+
+/// `form-action` sources: `'self'` plus Kratos's public origin, because the login, registration,
+/// recovery, verification and settings forms take their `action` verbatim from the Kratos flow
+/// JSON, which points at Kratos's own origin. Origin only (scheme+host+port); CSP source
+/// expressions with a path would not match the flow's action URL anyway.
+fn csp_form_action(kratos_public_url: &str) -> String {
+    match crate::csrf::url_origin(kratos_public_url) {
+        Some(origin) => format!("'self' {origin}"),
+        None => "'self'".to_string(),
+    }
 }
 
 /// Forces `frame-ancestors 'none'` + `X-Frame-Options: DENY` on sensitive, state-changing pages, overriding global config.
@@ -459,7 +484,7 @@ async fn strict_frame_for_sensitive(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_csp, resolve_cookie_secret, worker_stale_threshold_secs};
+    use super::{build_csp, csp_form_action, resolve_cookie_secret, worker_stale_threshold_secs};
 
     #[test]
     fn worker_stale_threshold_scales_with_tick_and_floors_at_20() {
@@ -493,25 +518,50 @@ mod tests {
 
     #[test]
     fn csp_contains_safe_directives() {
-        let csp = build_csp("'self'");
+        let csp = build_csp("'self'", "'self'");
         assert!(csp.contains("object-src 'none'"));
         assert!(csp.contains("base-uri 'self'"));
         assert!(csp.contains("frame-ancestors 'self'"));
+        assert!(csp.contains("form-action 'self'"));
     }
 
     #[test]
     fn csp_omits_breaking_directives() {
-        let csp = build_csp("'self'");
+        let csp = build_csp("'self'", "'self'");
         assert!(!csp.contains("default-src"));
         assert!(!csp.contains("script-src"));
         assert!(!csp.contains("style-src"));
         assert!(!csp.contains("img-src"));
-        assert!(!csp.contains("form-action"));
     }
 
     #[test]
     fn csp_uses_configured_frame_ancestors() {
-        let csp = build_csp("https://example.com");
+        let csp = build_csp("https://example.com", "'self'");
         assert!(csp.contains("frame-ancestors https://example.com"));
+    }
+
+    #[test]
+    fn csp_form_action_allows_self_and_kratos_origin() {
+        // Kratos renders its flow forms' action; a bare 'self' would break every login POST.
+        assert_eq!(
+            csp_form_action("http://127.0.0.1:4433/"),
+            "'self' http://127.0.0.1:4433"
+        );
+        assert_eq!(
+            csp_form_action("https://auth.example.com/self-service/login"),
+            "'self' https://auth.example.com"
+        );
+    }
+
+    #[test]
+    fn csp_form_action_falls_back_to_self_on_unparseable_kratos_url() {
+        assert_eq!(csp_form_action("not a url"), "'self'");
+    }
+
+    #[test]
+    fn csp_form_action_lands_in_the_header() {
+        let csp = build_csp("'none'", &csp_form_action("https://auth.example.com"));
+        assert!(csp.contains("form-action 'self' https://auth.example.com"));
+        assert!(csp.contains("frame-ancestors 'none'"));
     }
 }

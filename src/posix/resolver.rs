@@ -20,7 +20,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 
-use crate::audit::{self, action, target_kind, AuditEvent, SafeMetadata};
+use crate::audit::{self, AuditEvent, SafeMetadata, action, target_kind};
 use crate::posix::db;
 use crate::posix::host_auth::RequirePosixHost;
 use crate::posix::offline::{OfflineVerifier, OfflineVerifiersResponse};
@@ -396,20 +396,59 @@ fn text_plain(body: String) -> Response {
 
 // --- offline auth (M3a) --------------------------------------------------
 
+/// Whether this host gets an empty offline-verifier set no matter what.
+/// force_mfa closes the AAL2-downgrade where going offline would skip the
+/// second factor; the config switch is the deployment-wide master off.
+fn offline_pull_suppressed(offline_auth_enabled: bool, force_mfa: bool) -> bool {
+    !offline_auth_enabled || force_mfa
+}
+
+/// Build the verifier rows for a host: an account is served only if it has an
+/// offline verifier AND has already authenticated online on THIS host.
+///
+/// Restricting the pull to accounts the host has actually seen keeps a
+/// compromised or decommissioned-but-unrevoked host from walking off with an
+/// offline-crackable corpus for the whole org. The cost is that a user's FIRST
+/// login on a given host must happen online; every later one can be offline.
+/// Login records never age out by themselves: expiring one would lock a
+/// returning user out of a partitioned host, and revoking the host (or the
+/// account, or the scope) is the intended withdrawal.
+fn project_verifiers(
+    candidates: Vec<db::PosixAccount>,
+    secrets: &std::collections::HashMap<String, (String, i32)>,
+    logged_in_here: &std::collections::HashSet<String>,
+    ttl_secs: i64,
+) -> Vec<OfflineVerifier> {
+    candidates
+        .into_iter()
+        .filter(|a| logged_in_here.contains(&a.identity_id))
+        .filter_map(|a| {
+            let (verifier, algo_version) = secrets.get(&a.identity_id).cloned()?;
+            Some(OfflineVerifier {
+                username: a.username,
+                verifier,
+                ttl_secs,
+                algo_version,
+            })
+        })
+        .collect()
+}
+
 /// The complete current set of offline verifiers this host may verify against
 /// while partitioned. The host wholesale-replaces its keystore, so withdrawal
 /// (disable / de-scope / clear / force_mfa-flip) is just absence from the next pull.
 ///
-/// force_mfa hosts get an empty set unconditionally: closes the AAL2-downgrade
-/// where going offline would skip the second factor. Checked before any DB work.
+/// force_mfa hosts get an empty set unconditionally, checked before any DB work.
 async fn offline_verifiers(State(state): State<AppState>, host: RequirePosixHost) -> Response {
-    if !state.cfg.posix.offline_auth_enabled || host.force_mfa {
+    if offline_pull_suppressed(state.cfg.posix.offline_auth_enabled, host.force_mfa) {
         return Json(OfflineVerifiersResponse { verifiers: vec![] }).into_response();
     }
 
     // Candidates: accounts visible under the host's scope (both queries filter
-    // enabled=1). Uncapped: this is an auth-decision surface, so it must be
-    // complete (the NSS enumeration queries stay capped).
+    // enabled=1), later narrowed to those seen on this host by
+    // `project_verifiers`. Uncapped: this is an auth-decision surface, so it
+    // must be complete for the accounts it covers (the NSS enumeration queries
+    // stay capped).
     let candidates = match resolve_scope(&state, &host).await {
         Ok(HostScope::WholeOrg(org)) => match db::all_accounts_in_org(&state.db, &org).await {
             Ok(rows) => rows,
@@ -424,6 +463,12 @@ async fn offline_verifiers(State(state): State<AppState>, host: RequirePosixHost
         Err(r) => return r,
     };
 
+    let logged_in_here: std::collections::HashSet<String> =
+        match db::host_login_identity_ids(&state.db, &host.host_id).await {
+            Ok(ids) => ids.into_iter().collect(),
+            Err(e) => return db_error(e, "offline_verifiers host login lookup failed"),
+        };
+
     let ids: Vec<String> = candidates.iter().map(|a| a.identity_id.clone()).collect();
     let secrets = match db::offline_secrets_for_identities(&state.db, ids).await {
         Ok(rows) => rows,
@@ -435,18 +480,7 @@ async fn offline_verifiers(State(state): State<AppState>, host: RequirePosixHost
         .collect();
 
     let ttl_secs = state.cfg.posix.offline_ttl_hours.saturating_mul(3600) as i64;
-    let verifiers: Vec<OfflineVerifier> = candidates
-        .into_iter()
-        .filter_map(|a| {
-            let (verifier, algo_version) = by_id.get(&a.identity_id).cloned()?;
-            Some(OfflineVerifier {
-                username: a.username,
-                verifier,
-                ttl_secs,
-                algo_version,
-            })
-        })
-        .collect();
+    let verifiers = project_verifiers(candidates, &by_id, &logged_in_here, ttl_secs);
 
     Json(OfflineVerifiersResponse { verifiers }).into_response()
 }
@@ -519,4 +553,98 @@ async fn offline_audit(
     let written = audit::log_batch(&state.db, events).await.unwrap_or(0);
 
     Json(serde_json::json!({ "accepted": written })).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::{HashMap, HashSet};
+
+    const PHC: &str = "$argon2id$v=19$m=65536,t=3,p=1$c2FsdHNhbHQ$aGFzaGhhc2g";
+
+    fn account(identity_id: &str, username: &str) -> db::PosixAccount {
+        db::PosixAccount {
+            identity_id: identity_id.into(),
+            username: username.into(),
+            uid: 10_000,
+            gid: 20_000,
+            gecos: String::new(),
+            shell: "/bin/bash".into(),
+            home_dir: "/home".into(),
+            enabled: 1,
+            created_at: "2026-08-01T00:00:00+00:00".into(),
+            updated_at: "2026-08-01T00:00:00+00:00".into(),
+        }
+    }
+
+    fn secrets(ids: &[&str]) -> HashMap<String, (String, i32)> {
+        ids.iter()
+            .map(|id| ((*id).to_string(), (PHC.to_string(), 1)))
+            .collect()
+    }
+
+    fn logins(ids: &[&str]) -> HashSet<String> {
+        ids.iter().map(|id| (*id).to_string()).collect()
+    }
+
+    #[test]
+    fn account_never_seen_on_this_host_is_excluded() {
+        // In scope and has an offline secret, but has never authenticated
+        // online here: the host must not receive a crackable verifier for it.
+        let out = project_verifiers(
+            vec![account("alice", "alice")],
+            &secrets(&["alice"]),
+            &logins(&[]),
+            3600,
+        );
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn account_seen_on_this_host_is_included() {
+        let out = project_verifiers(
+            vec![account("alice", "alice")],
+            &secrets(&["alice"]),
+            &logins(&["alice"]),
+            3600,
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].username, "alice");
+        assert_eq!(out[0].verifier, PHC);
+        assert_eq!(out[0].ttl_secs, 3600);
+        assert_eq!(out[0].algo_version, 1);
+    }
+
+    #[test]
+    fn a_login_on_another_host_does_not_carry_over() {
+        // bob logged in here, alice only elsewhere (so she's absent from this
+        // host's login set).
+        let out = project_verifiers(
+            vec![account("alice", "alice"), account("bob", "bob")],
+            &secrets(&["alice", "bob"]),
+            &logins(&["bob"]),
+            3600,
+        );
+        let names: Vec<&str> = out.iter().map(|v| v.username.as_str()).collect();
+        assert_eq!(names, vec!["bob"]);
+    }
+
+    #[test]
+    fn seen_account_without_a_secret_is_still_excluded() {
+        let out = project_verifiers(
+            vec![account("alice", "alice")],
+            &secrets(&[]),
+            &logins(&["alice"]),
+            3600,
+        );
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn force_mfa_host_is_suppressed_even_when_enabled() {
+        assert!(offline_pull_suppressed(true, true));
+        assert!(offline_pull_suppressed(false, false));
+        assert!(offline_pull_suppressed(false, true));
+        assert!(!offline_pull_suppressed(true, false));
+    }
 }

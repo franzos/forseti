@@ -1,5 +1,5 @@
 use axum::extract::{MatchedPath, Request, State};
-use axum::http::{header, HeaderMap, Method, StatusCode};
+use axum::http::{HeaderMap, Method, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
@@ -63,7 +63,7 @@ pub async fn metrics_handler(State(state): State<AppState>, headers: HeaderMap) 
     if !scrape_allowed(state.license.feature(Feature::Observability)) {
         return StatusCode::NOT_FOUND.into_response();
     }
-    let Some(expected) = state.metrics_scrape_token.as_deref() else {
+    let Some(expected) = state.cfg.metrics.scrape_token.as_deref() else {
         return StatusCode::NOT_FOUND.into_response();
     };
     if !bearer_matches(&headers, expected) {
@@ -149,7 +149,7 @@ mod tests {
 
     #[tokio::test]
     async fn http_metrics_recorded() {
-        use axum::{routing::get, Router};
+        use axum::{Router, routing::get};
         use tower::ServiceExt;
 
         let recorder = PrometheusBuilder::new().build_recorder();
@@ -180,7 +180,7 @@ mod tests {
 
     #[test]
     fn bearer_matches_matrix() {
-        use axum::http::{header, HeaderMap, HeaderValue};
+        use axum::http::{HeaderMap, HeaderValue, header};
         let mut h = HeaderMap::new();
         h.insert(
             header::AUTHORIZATION,

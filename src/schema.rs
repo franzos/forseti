@@ -292,6 +292,14 @@ diesel::table! {
 }
 
 diesel::table! {
+    host_account_logins (host_id, identity_id) {
+        host_id -> Text,
+        identity_id -> Text,
+        last_login_at -> Text,
+    }
+}
+
+diesel::table! {
     device_sessions (device_code) {
         device_code -> Text,
         user_code -> Text,

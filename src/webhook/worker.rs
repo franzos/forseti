@@ -6,8 +6,8 @@
 //! 72h max age — whichever fires first transitions the row to `DEAD`.
 //! Defaults match Stripe-shape conventions.
 
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -20,7 +20,7 @@ use crate::db_interact;
 use crate::ory::OryClients;
 use crate::schema::webhook_outbox;
 
-use super::outbox::{reconcile_pending, state, OutboxRow};
+use super::outbox::{OutboxRow, reconcile_pending, state};
 
 /// Heartbeat handle for the webhook worker. Exposes the unix-seconds
 /// timestamp of the worker's last completed tick; `/readyz` reads this to
@@ -234,23 +234,38 @@ async fn deliver(
     row: OutboxRow,
     cfg: &crate::config::WebhookConfig,
 ) {
-    // The payload column already holds the compact JWS minted at
-    // enqueue time. `iat` inside the SET is bound to *that* moment, not
-    // delivery time — RFC 8417 doesn't require recomputation on retry,
-    // and re-signing per retry would invalidate any receiver-side
-    // dedupe that hashed the body.
-    let req = http
-        .post(&row.url)
-        .header("Content-Type", "application/secevent+jwt")
-        .header("X-Forseti-Event", &row.event_id)
-        .body(row.payload.clone());
+    // Re-check the stored target: a URL written straight to the Hydra client's
+    // metadata never passed the admin form's guard. The reasons
+    // `validate_webhook_url` returns never echo the URL, so a rejected target
+    // can't carry userinfo into `last_error` (rendered on /admin/webhooks).
+    let outcome = match super::validate::validate_webhook_url(&row.url) {
+        Err(reason) => {
+            tracing::warn!(
+                row_id = %row.id,
+                client_id = %row.client_id,
+                reason = %reason,
+                "webhook target rejected before send"
+            );
+            DeliveryOutcome::Failure(format!("rejected target URL: {reason}"))
+        }
+        Ok(()) => {
+            // The payload column already holds the compact JWS minted at
+            // enqueue time. `iat` inside the SET is bound to *that* moment, not
+            // delivery time — RFC 8417 doesn't require recomputation on retry,
+            // and re-signing per retry would invalidate any receiver-side
+            // dedupe that hashed the body.
+            let req = http
+                .post(&row.url)
+                .header("Content-Type", "application/secevent+jwt")
+                .header("X-Forseti-Event", &row.event_id)
+                .body(row.payload.clone());
 
-    let response = req.send().await;
-
-    let outcome = match response {
-        Ok(resp) if resp.status().is_success() => DeliveryOutcome::Success,
-        Ok(resp) => DeliveryOutcome::Failure(format!("HTTP {}", resp.status())),
-        Err(e) => DeliveryOutcome::Failure(format!("transport: {e}")),
+            match req.send().await {
+                Ok(resp) if resp.status().is_success() => DeliveryOutcome::Success,
+                Ok(resp) => DeliveryOutcome::Failure(format!("HTTP {}", resp.status())),
+                Err(e) => DeliveryOutcome::Failure(format!("transport: {e}")),
+            }
+        }
     };
 
     if let Err(e) = record_outcome(db, &row, outcome, cfg).await {

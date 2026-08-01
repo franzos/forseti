@@ -4,9 +4,10 @@
 //! with environment-variable overrides under the `FORSETI_` prefix using a
 //! double-underscore separator (e.g. `FORSETI_KRATOS__PUBLIC_URL`).
 
+use anyhow::Context;
 use figment::{
-    providers::{Env, Format, Toml},
     Figment,
+    providers::{Env, Format, Toml},
 };
 use serde::Deserialize;
 
@@ -171,7 +172,6 @@ pub struct PosixConfig {
     pub gid_base: u32,
     /// Size of the user uid band starting at `uid_base`.
     #[serde(default = "default_user_uid_size")]
-    #[allow(dead_code)] // uid-band ceiling not yet enforced
     pub user_uid_size: u32,
     /// Size of the user-private gid band starting at `gid_base`.
     #[serde(default = "default_user_gid_size")]
@@ -252,10 +252,40 @@ fn default_group_gid_size() -> u32 {
 }
 
 impl PosixConfig {
-    /// Hard invariant: the user-private gid band and the team-gid band must be
-    /// disjoint intervals, else a team gid could numerically collide with a user
-    /// gid on a host (cross-group ownership collision).
+    /// Hard invariants: every band must fit below `i32::MAX` (the
+    /// `posix_sequences.next` column is an i32, and a band top above it would
+    /// wrap to a negative id), and the user-private gid band and the team-gid
+    /// band must be disjoint intervals, else a team gid could numerically
+    /// collide with a user gid on a host (cross-group ownership collision).
     pub fn validate_bands(&self) -> anyhow::Result<()> {
+        for (base_knob, size_knob, base, size) in [
+            (
+                "uid_base",
+                "user_uid_size",
+                self.uid_base,
+                self.user_uid_size,
+            ),
+            (
+                "gid_base",
+                "user_gid_size",
+                self.gid_base,
+                self.user_gid_size,
+            ),
+            (
+                "group_gid_base",
+                "group_gid_size",
+                self.group_gid_base,
+                self.group_gid_size,
+            ),
+        ] {
+            let end = base.saturating_add(size);
+            anyhow::ensure!(
+                end <= i32::MAX as u32,
+                "[posix].{base_knob} + {size_knob} = {end} exceeds the {} id ceiling; ids would wrap negative",
+                i32::MAX
+            );
+        }
+
         let user_gid_end = self.gid_base.saturating_add(self.user_gid_size);
         let team_gid_end = self.group_gid_base.saturating_add(self.group_gid_size);
         let disjoint = user_gid_end <= self.group_gid_base || team_gid_end <= self.gid_base;
@@ -383,6 +413,10 @@ pub struct OAuthConfig {
     /// `crate::oauth::register::RESERVED_NAMES_DEFAULT` are used.
     #[serde(default)]
     pub dcr_reserved_names: Option<Vec<String>>,
+    /// Require a valid Initial Access Token on `POST /oauth2/register`. Off by
+    /// default: anonymous DCR stays open unless the operator closes it.
+    #[serde(default)]
+    pub dcr_require_iat: bool,
     /// Per-IP rate limit on `POST /oauth2/register`, max requests per minute. In-memory, per-process.
     /// `None` falls back to the code-side default (10). Set to `0` to disable the per-minute bucket.
     #[serde(default)]
@@ -434,22 +468,22 @@ pub struct OAuthConfig {
 /// in version-controllable declarative config; adding an admin needs a config reload, not a DB write.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct AdminConfig {
-    /// Lowercased on read; matched case-insensitively against the session's
-    /// `traits.email`. Empty list = nobody is an admin.
+    /// Matched ASCII-case-insensitively against the session's `traits.email`.
+    /// Empty list = nobody is an admin.
     #[serde(default)]
     pub allowed_emails: Vec<String>,
 }
 
 impl AdminConfig {
     /// Case-insensitive membership test. Empty list → always false.
+    /// Runs per authenticated request, so it compares in place rather than allocating.
     pub fn is_admin(&self, email: &str) -> bool {
         if email.is_empty() {
             return false;
         }
-        let needle = email.to_lowercase();
         self.allowed_emails
             .iter()
-            .any(|e| e.to_lowercase() == needle)
+            .any(|e| e.eq_ignore_ascii_case(email))
     }
 }
 
@@ -994,21 +1028,21 @@ fn default_known_accounts_cookie_ttl_seconds() -> u64 {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct AuthConfig {
     /// Per-IP rate limit on `GET /registration`, max requests per minute. `None`
-    /// falls back to the code-side default. Set to `0` to disable the bucket.
+    /// falls back to 30. Set to `0` to disable the bucket.
     #[serde(default)]
     pub registration_ip_rate_per_minute: Option<u32>,
     /// Per-IP rate limit on `GET /registration`, max requests per hour, in parallel
-    /// with the per-minute bucket. `None` falls back to the code-side default.
+    /// with the per-minute bucket. `None` falls back to 300. Set to `0` to disable the bucket.
     #[serde(default)]
     pub registration_ip_rate_per_hour: Option<u32>,
     /// Global (all-callers-share-one-bucket) rate limit on `GET /registration`,
     /// max requests per minute. Bounds total traffic even when `trust_xff` trusts
-    /// a spoofable header. `None` falls back to the code-side default.
+    /// a spoofable header. `None` falls back to 120. Set to `0` to disable the bucket.
     #[serde(default)]
     pub registration_global_rate_per_minute: Option<u32>,
     /// Global rate limit on `GET /registration`, max requests per hour, in
-    /// parallel with the per-minute global bucket. `None` falls back to the
-    /// code-side default.
+    /// parallel with the per-minute global bucket. `None` falls back to 1200.
+    /// Set to `0` to disable the bucket.
     #[serde(default)]
     pub registration_global_rate_per_hour: Option<u32>,
 }
@@ -1035,19 +1069,20 @@ pub struct OrgsConfig {
     #[serde(default)]
     pub reserved_names: Option<Vec<String>>,
     /// Per-IP rate limit on `GET /o/{slug}`, max requests per minute. `None`
-    /// falls back to the code-side default. Set to `0` to disable the bucket.
+    /// falls back to 60. Set to `0` to disable the bucket.
     #[serde(default)]
     pub landing_ip_rate_per_minute: Option<u32>,
     /// Per-IP rate limit on `GET /o/{slug}`, max requests per hour, in parallel
-    /// with the per-minute bucket. `None` falls back to the code-side default.
+    /// with the per-minute bucket. `None` falls back to 600. Set to `0` to disable the bucket.
     #[serde(default)]
     pub landing_ip_rate_per_hour: Option<u32>,
     /// Global rate limit on `GET /o/{slug}`, max requests per minute, shared
-    /// across every slug and caller. `None` falls back to the code-side default.
+    /// across every slug and caller. `None` falls back to 300. Set to `0` to disable the bucket.
     #[serde(default)]
     pub landing_global_rate_per_minute: Option<u32>,
     /// Global rate limit on `GET /o/{slug}`, max requests per hour, in parallel
-    /// with the per-minute global bucket. `None` falls back to the code-side default.
+    /// with the per-minute global bucket. `None` falls back to 3000.
+    /// Set to `0` to disable the bucket.
     #[serde(default)]
     pub landing_global_rate_per_hour: Option<u32>,
     /// Individually operator-disableable domain-ownership proof methods for
@@ -1123,12 +1158,22 @@ fn clamp_rate(field: &str, value: u32, ceiling: u32) -> u32 {
 
 impl AppConfig {
     /// Load config from `config.toml` (or `$FORSETI_CONFIG_PATH`) plus `FORSETI_*` env overrides.
+    /// An explicitly set `FORSETI_CONFIG_PATH` that doesn't exist is a hard error; the default
+    /// path staying absent is tolerated (env-only deployments).
     pub fn load() -> anyhow::Result<Self> {
-        let path = std::env::var("FORSETI_CONFIG_PATH").unwrap_or_else(|_| "config.toml".into());
+        let explicit = std::env::var("FORSETI_CONFIG_PATH")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let path = explicit.clone().unwrap_or_else(|| "config.toml".into());
+        if explicit.is_some() && !std::path::Path::new(&path).is_file() {
+            anyhow::bail!("FORSETI_CONFIG_PATH is set to {path:?}, which is not a readable file");
+        }
         let mut cfg: AppConfig = Figment::new()
             .merge(Toml::file(&path))
             .merge(Env::prefixed("FORSETI_").split("__"))
-            .extract()?;
+            .extract()
+            .with_context(|| format!("loading config from {path}"))?;
         cfg.clamp_rate_limits();
         cfg.brand.validate_logo_url()?;
         cfg.validate_email()?;
@@ -1176,144 +1221,123 @@ impl AppConfig {
     /// Clamp every rate-limit-bearing knob to its sanity ceiling.
     /// `0` is preserved (it's the documented "disable bucket" sentinel).
     fn clamp_rate_limits(&mut self) {
-        self.claim_email.rate_limit_per_minute = clamp_rate(
-            "claim_email.rate_limit_per_minute",
-            self.claim_email.rate_limit_per_minute,
-            RATE_LIMIT_PER_MINUTE_CEILING,
-        );
-        self.claim_email.rate_limit_per_hour = clamp_rate(
-            "claim_email.rate_limit_per_hour",
-            self.claim_email.rate_limit_per_hour,
-            RATE_LIMIT_PER_HOUR_CEILING,
-        );
-        self.handoff.rate_limit_per_minute = clamp_rate(
-            "handoff.rate_limit_per_minute",
-            self.handoff.rate_limit_per_minute,
-            RATE_LIMIT_PER_MINUTE_CEILING,
-        );
-        self.handoff.rate_limit_per_hour = clamp_rate(
-            "handoff.rate_limit_per_hour",
-            self.handoff.rate_limit_per_hour,
-            RATE_LIMIT_PER_HOUR_CEILING,
-        );
-        if let Some(v) = self.oauth.dcr_ip_rate_per_minute {
-            self.oauth.dcr_ip_rate_per_minute = Some(clamp_rate(
+        let required: [(&str, &mut u32, u32); 4] = [
+            (
+                "claim_email.rate_limit_per_minute",
+                &mut self.claim_email.rate_limit_per_minute,
+                RATE_LIMIT_PER_MINUTE_CEILING,
+            ),
+            (
+                "claim_email.rate_limit_per_hour",
+                &mut self.claim_email.rate_limit_per_hour,
+                RATE_LIMIT_PER_HOUR_CEILING,
+            ),
+            (
+                "handoff.rate_limit_per_minute",
+                &mut self.handoff.rate_limit_per_minute,
+                RATE_LIMIT_PER_MINUTE_CEILING,
+            ),
+            (
+                "handoff.rate_limit_per_hour",
+                &mut self.handoff.rate_limit_per_hour,
+                RATE_LIMIT_PER_HOUR_CEILING,
+            ),
+        ];
+        for (field, value, ceiling) in required {
+            *value = clamp_rate(field, *value, ceiling);
+        }
+
+        let optional: [(&str, &mut Option<u32>, u32); 17] = [
+            (
                 "oauth.dcr_ip_rate_per_minute",
-                v,
+                &mut self.oauth.dcr_ip_rate_per_minute,
                 RATE_LIMIT_PER_MINUTE_CEILING,
-            ));
-        }
-        if let Some(v) = self.oauth.dcr_ip_rate_per_hour {
-            self.oauth.dcr_ip_rate_per_hour = Some(clamp_rate(
+            ),
+            (
                 "oauth.dcr_ip_rate_per_hour",
-                v,
+                &mut self.oauth.dcr_ip_rate_per_hour,
                 RATE_LIMIT_PER_HOUR_CEILING,
-            ));
-        }
-        if let Some(v) = self.oauth.dcr_global_rate_per_minute {
-            self.oauth.dcr_global_rate_per_minute = Some(clamp_rate(
+            ),
+            (
                 "oauth.dcr_global_rate_per_minute",
-                v,
+                &mut self.oauth.dcr_global_rate_per_minute,
                 RATE_LIMIT_PER_MINUTE_CEILING,
-            ));
-        }
-        if let Some(v) = self.oauth.dcr_global_rate_per_hour {
-            self.oauth.dcr_global_rate_per_hour = Some(clamp_rate(
+            ),
+            (
                 "oauth.dcr_global_rate_per_hour",
-                v,
+                &mut self.oauth.dcr_global_rate_per_hour,
                 RATE_LIMIT_PER_HOUR_CEILING,
-            ));
-        }
-        if let Some(v) = self.oauth.dcr_iat_daily_limit {
-            self.oauth.dcr_iat_daily_limit = Some(clamp_rate(
+            ),
+            (
                 "oauth.dcr_iat_daily_limit",
-                v,
+                &mut self.oauth.dcr_iat_daily_limit,
                 RATE_LIMIT_PER_DAY_CEILING,
-            ));
-        }
-        if let Some(v) = self.oauth.device_verify_ip_rate_per_minute {
-            self.oauth.device_verify_ip_rate_per_minute = Some(clamp_rate(
+            ),
+            (
                 "oauth.device_verify_ip_rate_per_minute",
-                v,
+                &mut self.oauth.device_verify_ip_rate_per_minute,
                 RATE_LIMIT_PER_MINUTE_CEILING,
-            ));
-        }
-        if let Some(v) = self.oauth.device_verify_ip_rate_per_hour {
-            self.oauth.device_verify_ip_rate_per_hour = Some(clamp_rate(
+            ),
+            (
                 "oauth.device_verify_ip_rate_per_hour",
-                v,
+                &mut self.oauth.device_verify_ip_rate_per_hour,
                 RATE_LIMIT_PER_HOUR_CEILING,
-            ));
-        }
-        if let Some(v) = self.orgs.logo_ip_rate_per_minute {
-            self.orgs.logo_ip_rate_per_minute = Some(clamp_rate(
+            ),
+            (
                 "orgs.logo_ip_rate_per_minute",
-                v,
+                &mut self.orgs.logo_ip_rate_per_minute,
                 RATE_LIMIT_PER_MINUTE_CEILING,
-            ));
-        }
-        if let Some(v) = self.orgs.logo_ip_rate_per_hour {
-            self.orgs.logo_ip_rate_per_hour = Some(clamp_rate(
+            ),
+            (
                 "orgs.logo_ip_rate_per_hour",
-                v,
+                &mut self.orgs.logo_ip_rate_per_hour,
                 RATE_LIMIT_PER_HOUR_CEILING,
-            ));
-        }
-        if let Some(v) = self.orgs.landing_ip_rate_per_minute {
-            self.orgs.landing_ip_rate_per_minute = Some(clamp_rate(
+            ),
+            (
                 "orgs.landing_ip_rate_per_minute",
-                v,
+                &mut self.orgs.landing_ip_rate_per_minute,
                 RATE_LIMIT_PER_MINUTE_CEILING,
-            ));
-        }
-        if let Some(v) = self.orgs.landing_ip_rate_per_hour {
-            self.orgs.landing_ip_rate_per_hour = Some(clamp_rate(
+            ),
+            (
                 "orgs.landing_ip_rate_per_hour",
-                v,
+                &mut self.orgs.landing_ip_rate_per_hour,
                 RATE_LIMIT_PER_HOUR_CEILING,
-            ));
-        }
-        if let Some(v) = self.orgs.landing_global_rate_per_minute {
-            self.orgs.landing_global_rate_per_minute = Some(clamp_rate(
+            ),
+            (
                 "orgs.landing_global_rate_per_minute",
-                v,
+                &mut self.orgs.landing_global_rate_per_minute,
                 RATE_LIMIT_PER_MINUTE_CEILING,
-            ));
-        }
-        if let Some(v) = self.orgs.landing_global_rate_per_hour {
-            self.orgs.landing_global_rate_per_hour = Some(clamp_rate(
+            ),
+            (
                 "orgs.landing_global_rate_per_hour",
-                v,
+                &mut self.orgs.landing_global_rate_per_hour,
                 RATE_LIMIT_PER_HOUR_CEILING,
-            ));
-        }
-        if let Some(v) = self.auth.registration_ip_rate_per_minute {
-            self.auth.registration_ip_rate_per_minute = Some(clamp_rate(
+            ),
+            (
                 "auth.registration_ip_rate_per_minute",
-                v,
+                &mut self.auth.registration_ip_rate_per_minute,
                 RATE_LIMIT_PER_MINUTE_CEILING,
-            ));
-        }
-        if let Some(v) = self.auth.registration_ip_rate_per_hour {
-            self.auth.registration_ip_rate_per_hour = Some(clamp_rate(
+            ),
+            (
                 "auth.registration_ip_rate_per_hour",
-                v,
+                &mut self.auth.registration_ip_rate_per_hour,
                 RATE_LIMIT_PER_HOUR_CEILING,
-            ));
-        }
-        if let Some(v) = self.auth.registration_global_rate_per_minute {
-            self.auth.registration_global_rate_per_minute = Some(clamp_rate(
+            ),
+            (
                 "auth.registration_global_rate_per_minute",
-                v,
+                &mut self.auth.registration_global_rate_per_minute,
                 RATE_LIMIT_PER_MINUTE_CEILING,
-            ));
-        }
-        if let Some(v) = self.auth.registration_global_rate_per_hour {
-            self.auth.registration_global_rate_per_hour = Some(clamp_rate(
+            ),
+            (
                 "auth.registration_global_rate_per_hour",
-                v,
+                &mut self.auth.registration_global_rate_per_hour,
                 RATE_LIMIT_PER_HOUR_CEILING,
-            ));
+            ),
+        ];
+        for (field, value, ceiling) in optional {
+            if let Some(v) = *value {
+                *value = Some(clamp_rate(field, v, ceiling));
+            }
         }
     }
 }
@@ -1555,28 +1579,40 @@ mod tests {
 
     #[test]
     fn logo_url_http_and_https_are_valid() {
-        assert!(brand_with_logo(Some("https://example.com/logo.svg"))
-            .validate_logo_url()
-            .is_ok());
-        assert!(brand_with_logo(Some("http://example.com/logo.png"))
-            .validate_logo_url()
-            .is_ok());
+        assert!(
+            brand_with_logo(Some("https://example.com/logo.svg"))
+                .validate_logo_url()
+                .is_ok()
+        );
+        assert!(
+            brand_with_logo(Some("http://example.com/logo.png"))
+                .validate_logo_url()
+                .is_ok()
+        );
     }
 
     #[test]
     fn logo_url_rejects_non_http_schemes_and_garbage() {
-        assert!(brand_with_logo(Some("javascript:alert(1)"))
-            .validate_logo_url()
-            .is_err());
-        assert!(brand_with_logo(Some("data:image/svg+xml,<svg/>"))
-            .validate_logo_url()
-            .is_err());
-        assert!(brand_with_logo(Some("/static/logo.svg"))
-            .validate_logo_url()
-            .is_err());
-        assert!(brand_with_logo(Some("not a url"))
-            .validate_logo_url()
-            .is_err());
+        assert!(
+            brand_with_logo(Some("javascript:alert(1)"))
+                .validate_logo_url()
+                .is_err()
+        );
+        assert!(
+            brand_with_logo(Some("data:image/svg+xml,<svg/>"))
+                .validate_logo_url()
+                .is_err()
+        );
+        assert!(
+            brand_with_logo(Some("/static/logo.svg"))
+                .validate_logo_url()
+                .is_err()
+        );
+        assert!(
+            brand_with_logo(Some("not a url"))
+                .validate_logo_url()
+                .is_err()
+        );
     }
 
     // --- PosixConfig -------------------------------------------------------
@@ -1608,6 +1644,22 @@ mod tests {
     fn posix_overlapping_bands_rejected() {
         let mut p = PosixConfig::default();
         p.group_gid_base = p.gid_base; // overlap the user gid band
+        assert!(p.validate_bands().is_err());
+    }
+
+    #[test]
+    fn posix_bands_above_i32_ceiling_rejected() {
+        let p = PosixConfig {
+            uid_base: i32::MAX as u32,
+            ..Default::default()
+        };
+        assert!(p.validate_bands().is_err());
+
+        let p = PosixConfig {
+            gid_base: 3_000_000_000,
+            group_gid_base: 4_000_000_000,
+            ..Default::default()
+        };
         assert!(p.validate_bands().is_err());
     }
 

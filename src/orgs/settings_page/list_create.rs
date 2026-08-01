@@ -7,11 +7,11 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use serde::Deserialize;
 
-use crate::audit::{self, action, target_kind, AuditCtx, AuditEvent};
+use crate::audit::{self, AuditCtx, AuditEvent, action, target_kind};
 use crate::audit_metadata;
 use crate::commercial::license::Feature;
 use crate::commercial::upsell::render_upsell;
-use crate::extractors::{gate_orgs_feature_or_upsell, Csrf, RequireSession};
+use crate::extractors::{Csrf, RequireSession, gate_orgs_feature_or_upsell};
 use crate::orgs::{self, Membership, Role};
 use crate::page_chrome::{PageChrome, ThemedChrome};
 use crate::render::render;
@@ -162,6 +162,10 @@ pub(super) async fn orgs_create(
     }
     let id = uuid::Uuid::new_v4().to_string();
     if let Err(e) = orgs::create_org(&state.db, &id, &slug, name, Some(&identity_id)).await {
+        // The pre-check above loses to a concurrent create; the unique index is the real guard.
+        if e.downcast_ref::<orgs::SlugTaken>().is_some() {
+            return (StatusCode::CONFLICT, "slug already in use").into_response();
+        }
         tracing::error!(error = ?e, "create_org failed");
         return (StatusCode::INTERNAL_SERVER_ERROR, "create failed").into_response();
     }

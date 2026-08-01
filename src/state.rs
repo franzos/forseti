@@ -9,11 +9,11 @@ use axum::response::Response;
 use tokio::sync::Mutex;
 
 use crate::commercial::LicenseHandle;
-use crate::config::{AppConfig, Redacted};
+use crate::config::AppConfig;
 use crate::db::DbPool;
 use crate::logo_cache::LogoCache;
-use crate::ory::discovery::OidcDiscovery;
 use crate::ory::OryClients;
+use crate::ory::discovery::OidcDiscovery;
 use crate::webhook::{SigningKey, WorkerHandle};
 
 /// TTL for the cached Hydra discovery doc.
@@ -46,14 +46,14 @@ pub struct AppState {
     pub license: LicenseHandle,
     /// Master secret for the signed-cookie codec ([`crate::signed_cookie`]); ephemeral per-boot key when unset.
     pub cookie_secret: Arc<[u8]>,
+    /// Salt for audit IP pseudonymization, derived once at boot from `[audit].ip_salt` or the cookie secret.
+    pub ip_salt: Arc<str>,
     /// Cached Hydra OIDC discovery doc; lazily fetched, falls back to config-derived paths on error.
     pub discovery: DiscoveryCache,
     /// Bounded in-process cache of served org logo blobs; see [`crate::logo_cache`].
     pub logo_cache: Arc<Mutex<LogoCache>>,
     /// Prometheus render handle backing `/metrics`; see [`crate::metrics`].
     pub metrics_handle: metrics_exporter_prometheus::PrometheusHandle,
-    /// Bearer token a scraper must present at `/metrics`. `None` = endpoint disabled (404).
-    pub metrics_scrape_token: Option<Redacted>,
 }
 
 impl AppState {
@@ -63,10 +63,10 @@ impl AppState {
     pub async fn openid_configuration(&self) -> (OidcDiscovery, bool) {
         {
             let guard = self.discovery.0.lock().await;
-            if let Some(c) = guard.as_ref() {
-                if Instant::now() < c.next_refresh_at {
-                    return (c.doc.clone(), true);
-                }
+            if let Some(c) = guard.as_ref()
+                && Instant::now() < c.next_refresh_at
+            {
+                return (c.doc.clone(), true);
             }
         }
         match crate::ory::discovery::fetch(&self.ory, &self.cfg.hydra.public_url).await {

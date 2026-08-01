@@ -61,7 +61,7 @@ use axum::{
     middleware::Next,
     response::Response,
 };
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, Utc};
 use diesel::prelude::*;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -307,7 +307,7 @@ impl SafeMetadata {
 /// ```
 #[macro_export]
 macro_rules! audit_metadata {
-    ($($k:literal => $v:expr),* $(,)?) => {{
+    ($($k:literal => $v:expr_2021),* $(,)?) => {{
         $crate::audit::SafeMetadata::from_pairs(&[
             $(($k, ::serde_json::json!($v))),*
         ])
@@ -422,13 +422,13 @@ pub async fn middleware(
     mut req: Request,
     next: Next,
 ) -> Response {
-    let salt = ip_salt(&state.cfg, &state.cookie_secret);
+    let salt = &state.ip_salt;
     let peer_ip = req
         .extensions()
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
         .map(|ci| ci.0.ip().to_string());
     let ip = extract_client_ip(&headers, state.cfg.proxy.trust_forwarded_for, peer_ip);
-    let ip_hash = ip.map(|ip| hash_ip(&ip, &salt));
+    let ip_hash = ip.map(|ip| hash_ip(&ip, salt));
     let user_agent = headers
         .get("user-agent")
         .and_then(|v| v.to_str().ok())
@@ -455,10 +455,10 @@ pub async fn middleware(
 /// v1 derived from `self.url` — public information, so anyone holding an
 /// audit dump could recompute the salt and brute-force the IPv4 space.
 pub fn ip_salt(cfg: &AppConfig, cookie_secret: &[u8]) -> String {
-    if let Some(s) = cfg.audit.ip_salt.as_ref() {
-        if !s.is_empty() {
-            return s.clone();
-        }
+    if let Some(s) = cfg.audit.ip_salt.as_ref()
+        && !s.is_empty()
+    {
+        return s.clone();
     }
     const DOMAIN: &[u8] = b"forseti::audit::ip-salt::v2";
     let mut h = Sha256::new();
@@ -487,12 +487,12 @@ fn extract_client_ip(
     peer_ip: Option<String>,
 ) -> Option<String> {
     if trust_forwarded {
-        if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-            if let Some(first) = xff.split(',').next() {
-                let s = first.trim();
-                if !s.is_empty() {
-                    return Some(s.to_string());
-                }
+        if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok())
+            && let Some(first) = xff.split(',').next()
+        {
+            let s = first.trim();
+            if !s.is_empty() {
+                return Some(s.to_string());
             }
         }
         if let Some(xri) = headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
@@ -822,11 +822,7 @@ pub fn record_kratos_webhook_received() {
 /// `None` if no payload has landed since boot.
 pub fn last_kratos_webhook_epoch() -> Option<u64> {
     let n = LAST_KRATOS_WEBHOOK_EPOCH.load(Ordering::Relaxed);
-    if n == 0 {
-        None
-    } else {
-        Some(n)
-    }
+    if n == 0 { None } else { Some(n) }
 }
 
 /// In-process count of Kratos-webhook payloads rejected for a malformed
@@ -918,16 +914,25 @@ fn emit_audit_fallback(row: &NewAuditEvent) {
     );
 }
 
+/// Canonical spelling for `audit_events.created_at`. Writes, filter bounds
+/// and the prune cutoff must all go through here: the column is TEXT and
+/// compared lexicographically, so a bound in a different RFC3339 spelling
+/// (trailing `Z`, or seconds-only) mis-sorts against the stored `+00:00`
+/// values and drops or admits rows inside the boundary second.
+fn created_at_text(ts: DateTime<Utc>) -> String {
+    ts.to_rfc3339()
+}
+
 fn build_row(event: AuditEvent) -> anyhow::Result<NewAuditEvent> {
     let mut meta = event.metadata.into_value();
-    if let Some(err) = event.err_msg {
-        if let serde_json::Value::Object(ref mut map) = meta {
-            map.insert("error".to_string(), serde_json::Value::String(err));
-        }
+    if let Some(err) = event.err_msg
+        && let serde_json::Value::Object(ref mut map) = meta
+    {
+        map.insert("error".to_string(), serde_json::Value::String(err));
     }
     Ok(NewAuditEvent {
         id: Uuid::new_v4().to_string(),
-        created_at: Utc::now().to_rfc3339(),
+        created_at: created_at_text(Utc::now()),
         actor_kind: event.actor_kind.to_string(),
         actor_id: event.actor_id,
         actor_email: event.actor_email,
@@ -950,8 +955,8 @@ fn build_row(event: AuditEvent) -> anyhow::Result<NewAuditEvent> {
 /// usable but `action_exact` wins if both are set (callers shouldn't pass
 /// both anyway). `since` / `until` are typed `DateTime<Utc>` so an invalid
 /// timestamp can't reach the SQL `>=`/`<` comparison and silently return
-/// the wrong row set — each is re-serialised to canonical RFC3339 before
-/// the comparison so lexicographic order matches chronological order
+/// the wrong row set — each is re-serialised through [`created_at_text`]
+/// before the comparison so lexicographic order matches chronological order
 /// against the `created_at` TEXT column.
 #[derive(Debug, Clone, Default)]
 pub struct AuditFilter {
@@ -1024,7 +1029,7 @@ pub async fn query(db: &DbPool, filter: AuditFilter) -> anyhow::Result<(Vec<Audi
         use crate::schema::audit_events::dsl as a;
 
         macro_rules! apply_filters {
-            ($q:expr, $f:expr) => {{
+            ($q:expr_2021, $f:expr_2021) => {{
                 let mut q = $q;
                 let f = $f;
                 if let Some(v) = f.actor_id.as_deref() {
@@ -1064,10 +1069,10 @@ pub async fn query(db: &DbPool, filter: AuditFilter) -> anyhow::Result<(Vec<Audi
                     }
                 }
                 if let Some(v) = f.since.as_ref() {
-                    q = q.filter(a::created_at.ge(v.to_rfc3339_opts(SecondsFormat::Secs, true)));
+                    q = q.filter(a::created_at.ge(created_at_text(*v)));
                 }
                 if let Some(v) = f.until.as_ref() {
-                    q = q.filter(a::created_at.lt(v.to_rfc3339_opts(SecondsFormat::Secs, true)));
+                    q = q.filter(a::created_at.lt(created_at_text(*v)));
                 }
                 if let Some(v) = f.severity.as_deref() {
                     q = q.filter(a::severity.eq(v.to_string()));
@@ -1106,7 +1111,7 @@ pub async fn query(db: &DbPool, filter: AuditFilter) -> anyhow::Result<(Vec<Audi
 /// CLI subcommand or an operator-driven cron; this is **not** wired into
 /// the HTTP server.
 pub async fn prune_older_than(db: &DbPool, days: i64) -> anyhow::Result<usize> {
-    let cutoff = (Utc::now() - chrono::Duration::days(days)).to_rfc3339();
+    let cutoff = created_at_text(Utc::now() - chrono::Duration::days(days));
     match db {
         DbPool::Sqlite(_) => prune_sqlite(db, cutoff).await,
         DbPool::Postgres(_) => prune_postgres(db, cutoff).await,
@@ -1418,6 +1423,100 @@ mod escape_like_tests {
         assert!(
             escaped.contains("\\_"),
             "underscore must be backslash-escaped"
+        );
+    }
+}
+
+#[cfg(test)]
+mod created_at_boundary_tests {
+    //! `created_at` is TEXT, so `since`/`until` are lexicographic string
+    //! comparisons. These pin the boundary second: `since` is inclusive
+    //! (`>=`), `until` is exclusive (`<`), and both must agree with the
+    //! spelling the write path stores.
+    use super::*;
+    use crate::orgs::db::test_pool;
+    use chrono::{TimeZone, Timelike};
+
+    async fn insert_at(db: &DbPool, id: &str, ts: DateTime<Utc>) {
+        let row = NewAuditEvent {
+            id: id.to_string(),
+            created_at: created_at_text(ts),
+            actor_kind: actor_kind::SYSTEM.to_string(),
+            actor_id: None,
+            actor_email: None,
+            action: "test.boundary".to_string(),
+            target_kind: None,
+            target_id: None,
+            org_id: None,
+            ip_hash: None,
+            user_agent: None,
+            request_id: None,
+            severity: severity::INFO.to_string(),
+            success: 1,
+            metadata: "{}".to_string(),
+        };
+        let res: anyhow::Result<()> = async {
+            db_interact!(db, |conn| {
+                diesel::insert_into(audit_events::table)
+                    .values(&row)
+                    .execute(conn)
+                    .map(|_| ())
+            })?;
+            Ok(())
+        }
+        .await;
+        res.expect("insert test audit row");
+    }
+
+    fn at(h: u32, m: u32, s: u32, nanos: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2025, 1, 1, h, m, s)
+            .unwrap()
+            .with_nanosecond(nanos)
+            .unwrap()
+    }
+
+    async fn ids(db: &DbPool, filter: AuditFilter) -> Vec<String> {
+        let (rows, _) = query(db, filter).await.expect("query");
+        let mut out: Vec<String> = rows.into_iter().map(|r| r.id).collect();
+        out.sort();
+        out
+    }
+
+    #[tokio::test]
+    async fn boundary_second_is_inclusive_for_since_and_exclusive_for_until() {
+        let db = test_pool().await;
+        let boundary = at(12, 0, 0, 0);
+        insert_at(&db, "before", at(11, 59, 59, 999_000_000)).await;
+        insert_at(&db, "exact", boundary).await;
+        insert_at(&db, "within", at(12, 0, 0, 500_000_000)).await;
+
+        let base = AuditFilter {
+            limit: 50,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            ids(
+                &db,
+                AuditFilter {
+                    since: Some(boundary),
+                    ..base.clone()
+                }
+            )
+            .await,
+            vec!["exact".to_string(), "within".to_string()]
+        );
+
+        assert_eq!(
+            ids(
+                &db,
+                AuditFilter {
+                    until: Some(boundary),
+                    ..base
+                }
+            )
+            .await,
+            vec!["before".to_string()]
         );
     }
 }

@@ -8,15 +8,15 @@ use axum::response::{IntoResponse, Response};
 use chrono::Utc;
 use serde_json::json;
 
-use crate::audit::{self, action, AuditCtx, AuditEvent};
+use crate::audit::{self, AuditCtx, AuditEvent, action};
 use crate::audit_metadata;
 use crate::oauth_client_metadata;
 use crate::state::AppState;
 
 use super::iat::hash_token;
 use super::iat::{
-    consume_iat, lookup_iat, parse_authorization, AuthOutcome, IatCheck, IatConsume, IatRow,
-    DEFAULT_IAT_DAILY_LIMIT,
+    AuthOutcome, DEFAULT_IAT_DAILY_LIMIT, IatCheck, IatConsume, IatRow, consume_iat, lookup_iat,
+    parse_authorization,
 };
 use super::reserved_names::{reserved_name_hit, truncate_for_audit};
 
@@ -27,10 +27,23 @@ pub(crate) async fn register(
     actx: AuditCtx,
     body: Bytes,
 ) -> Response {
-    // Anonymous DCR is the default; a present `Authorization` header must
-    // parse to a valid IAT or get rejected with 401 (no silent fall-through,
-    // so attackers can't probe IATs without an audit trail).
+    // Anonymous DCR is the default unless `dcr_require_iat` closes it; a present
+    // `Authorization` header must parse to a valid IAT or get rejected with 401
+    // (no silent fall-through, so attackers can't probe IATs without an audit trail).
     let iat_row: Option<IatRow> = match parse_authorization(&headers) {
+        AuthOutcome::None if state.cfg.oauth.dcr_require_iat => {
+            tracing::info!("dcr: rejected anonymous request; dcr_require_iat is enabled");
+            let ev = AuditEvent::new(action::OAUTH_CLIENT_DCR_REJECTED)
+                .with_ctx(&actx)
+                .severity(audit::severity::WARNING)
+                .metadata(audit_metadata!("reason" => "iat_required"));
+            let _ = audit::log(&state.db, ev).await;
+            return error_response(
+                StatusCode::UNAUTHORIZED,
+                "invalid_token",
+                "This deployment requires an initial access token. Send `Authorization: Bearer <initial_access_token>`.",
+            );
+        }
         AuthOutcome::None => None,
         AuthOutcome::Malformed => {
             tracing::info!("dcr: rejected request with malformed Authorization header");
@@ -107,14 +120,14 @@ pub(crate) async fn register(
                 StatusCode::BAD_REQUEST,
                 "invalid_client_metadata",
                 "Request body must be a JSON object.",
-            )
+            );
         }
         Err(e) => {
             return error_response(
                 StatusCode::BAD_REQUEST,
                 "invalid_client_metadata",
                 &format!("Request body is not valid JSON: {e}"),
-            )
+            );
         }
     };
 

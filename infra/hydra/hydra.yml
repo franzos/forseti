@@ -45,9 +45,11 @@ oidc:
   # `enabled: true` opens Hydra's own `/oauth2/register` on the public
   # port. We don't expose that publicly — the portal advertises
   # *itself* as the registration_endpoint (see `client_registration_url`
-  # below) and gates inbound requests with an Initial Access Token
-  # before forwarding to Hydra. See `src/oauth/register.rs` and
-  # `src/admin/dcr_tokens.rs`.
+  # below) and forwards to Hydra after its own validation, rate limits,
+  # and name denylist. Registration is ANONYMOUS by default (RFC 7591
+  # §3 leaves the Initial Access Token optional); set
+  # `[oauth].dcr_require_iat = true` to require one. See
+  # `src/oauth/register.rs` and `src/admin/dcr_tokens.rs`.
   #
   # `default_scope` is the scope list applied to self-registered clients
   # that don't post their own `scope` field. We include MCP-style
@@ -68,8 +70,9 @@ webfinger:
     # field and Claude refuses to proceed.
     #
     # Points at the portal, not Hydra. The portal's `POST /oauth2/register`
-    # validates an Initial Access Token before forwarding to Hydra —
-    # without that gate the endpoint is anonymous.
+    # accepts anonymous registrations by default, applying its own rate
+    # limits and validation; an Initial Access Token is only required when
+    # the operator sets `[oauth].dcr_require_iat = true`.
     client_registration_url: http://localhost:3000/oauth2/register
 
 oauth2:

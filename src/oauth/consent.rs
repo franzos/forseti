@@ -8,7 +8,7 @@ use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Redirect, Response};
 use serde::Deserialize;
 
-use crate::audit::{self, action, severity, target_kind, AuditCtx, AuditEvent};
+use crate::audit::{self, AuditCtx, AuditEvent, action, severity, target_kind};
 use crate::audit_metadata;
 use crate::csrf::CsrfForm;
 use crate::extractors::{Csrf, OptionalSession};
@@ -153,35 +153,13 @@ pub(crate) async fn oauth_consent(
     let is_pam_client =
         !client_id_lookup.is_empty() && client_id_lookup == state.cfg.posix.pam_client_id;
 
-    // Auto-grant path (remembered consent or trusted client). Verify the
-    // active Kratos session matches Hydra's claimed subject first: a crafted
-    // consent link tied to one identity could otherwise auto-grant tokens
-    // while a different identity is signed in. Mismatch rejects with
-    // `access_denied`. Unverified clients never auto-grant.
+    // Auto-grant path (remembered consent or trusted client). Unverified
+    // clients never auto-grant.
     if !is_pam_client && verified && (hydra_skip || client_skip_consent) {
-        // InsufficientAal means a session exists we couldn't read here;
-        // treating it as "no subject" keeps the mismatch check conservative.
-        let session_subject = session.identity_id().unwrap_or_default();
-        if session_subject != subject || subject.is_empty() {
-            tracing::warn!(
-                consent_subject = %subject,
-                session_subject = %session_subject,
-                "rejecting auto-grant: session subject mismatch"
-            );
-            match ory::hydra::reject_consent_request(
-                &state.ory,
-                &challenge,
-                "access_denied",
-                "Consent subject does not match the signed-in identity.",
-            )
-            .await
-            {
-                Ok(redirect) => return Redirect::to(&redirect.redirect_to).into_response(),
-                Err(e) => {
-                    tracing::error!(error = ?e, "hydra reject_consent_request (mismatch) failed");
-                    return Redirect::to("/error").into_response();
-                }
-            }
+        if let Some(rejected) =
+            reject_unless_session_subject(&state, &challenge, &subject, &session).await
+        {
+            return rejected;
         }
         let requested_org_id = crate::oauth::login::parse_organization_id_param(
             req.request_url.as_deref().unwrap_or_default(),
@@ -420,6 +398,12 @@ pub(crate) async fn oauth_consent_submit(
     };
 
     let subject = req.subject.clone().unwrap_or_default();
+    if let Some(rejected) =
+        reject_unless_session_subject(&state, &form.consent_challenge, &subject, &session).await
+    {
+        return rejected;
+    }
+
     let client_id = req
         .client
         .as_ref()
@@ -435,7 +419,11 @@ pub(crate) async fn oauth_consent_submit(
     // that used Hydra's non-standard `audience=` param instead.
     let request_url = req.request_url.clone().unwrap_or_default();
     let captured_audience = requested_audience.clone();
-    let grant_scope_for_audit = form.grant_scope.clone();
+    let grant_scope = intersect_requested_scope(
+        form.grant_scope,
+        &req.requested_scope.clone().unwrap_or_default(),
+    );
+    let grant_scope_for_audit = grant_scope.clone();
 
     // Re-compute the consent locale from the same inputs the GET handler used
     // so the locale claim fallback is consistent between both code paths.
@@ -456,7 +444,7 @@ pub(crate) async fn oauth_consent_submit(
         &state,
         &form.consent_challenge,
         &subject,
-        form.grant_scope,
+        grant_scope,
         requested_audience,
         remember,
         &headers,
@@ -510,22 +498,73 @@ pub(crate) async fn oauth_consent_submit(
     // Lazy provenance: record the resource URL being granted, if any, when
     // the row doesn't already carry one. First-writer-wins (see
     // `upsert_resource_url_if_missing`). Fires for every client.
-    if !client_id.is_empty() {
-        if let Some(url) = extract_resource_url(request_url.as_str(), captured_audience.as_slice())
-        {
-            if let Err(e) =
-                oauth_client_metadata::upsert_resource_url_if_missing(&state.db, &client_id, &url)
-                    .await
-            {
-                tracing::error!(
-                    error = ?e,
-                    client_id = %client_id,
-                    "consent: failed to capture resource_url provenance",
-                );
-            }
-        }
+    if !client_id.is_empty()
+        && let Some(url) = extract_resource_url(request_url.as_str(), captured_audience.as_slice())
+        && let Err(e) =
+            oauth_client_metadata::upsert_resource_url_if_missing(&state.db, &client_id, &url).await
+    {
+        tracing::error!(
+            error = ?e,
+            client_id = %client_id,
+            "consent: failed to capture resource_url provenance",
+        );
     }
     redirect
+}
+
+/// Gate every grant path on "the consent subject IS the signed-in identity":
+/// a consent link bound to one subject and opened by another would otherwise
+/// mint tokens for the link's owner while the clicking user believes they
+/// authorised their own account (CWE-384 at the relying party). Returns the
+/// `access_denied` rejection response on mismatch, `None` when the grant may
+/// proceed. An empty subject never passes.
+async fn reject_unless_session_subject(
+    state: &AppState,
+    challenge: &str,
+    subject: &str,
+    session: &OptionalSession,
+) -> Option<Response> {
+    // InsufficientAal means a session exists we couldn't read here; treating
+    // it as "no subject" keeps the mismatch check conservative.
+    let session_subject = session.identity_id().unwrap_or_default();
+    if subject_is_signed_in(session_subject, subject) {
+        return None;
+    }
+    tracing::warn!(
+        consent_subject = %subject,
+        session_subject = %session_subject,
+        "rejecting consent: session subject mismatch"
+    );
+    match ory::hydra::reject_consent_request(
+        &state.ory,
+        challenge,
+        "access_denied",
+        "Consent subject does not match the signed-in identity.",
+    )
+    .await
+    {
+        Ok(redirect) => Some(Redirect::to(&redirect.redirect_to).into_response()),
+        Err(e) => {
+            tracing::error!(error = ?e, "hydra reject_consent_request (mismatch) failed");
+            Some(Redirect::to("/error").into_response())
+        }
+    }
+}
+
+/// The grant predicate behind [`reject_unless_session_subject`]: an empty
+/// consent subject, or one that isn't the session's identity, never grants.
+fn subject_is_signed_in(session_subject: &str, consent_subject: &str) -> bool {
+    !consent_subject.is_empty() && session_subject == consent_subject
+}
+
+/// Drop granted scopes the client never asked for. The consent checkboxes are
+/// only a UI affordance, so a tampered POST must not widen the grant past the
+/// challenge's `requested_scope` (RFC 6749 §3.3).
+fn intersect_requested_scope(granted: Vec<String>, requested: &[String]) -> Vec<String> {
+    granted
+        .into_iter()
+        .filter(|s| requested.iter().any(|r| r == s))
+        .collect()
 }
 
 /// Tear down the Kratos session and restart the OAuth flow with
@@ -580,18 +619,16 @@ async fn switch_account(
 /// value. Not normalised or validated: this is "what we observed".
 fn extract_resource_url(request_url: &str, requested_audience: &[String]) -> Option<String> {
     // RFC 8707 §2 allows multiple `resource=` values; take the first.
-    if !request_url.is_empty() {
-        if let Ok(url) = url::Url::parse(request_url) {
-            if let Some(resource) = url
-                .query_pairs()
-                .find(|(k, _)| k == "resource")
-                .map(|(_, v)| v.into_owned())
-            {
-                let trimmed = resource.trim();
-                if !trimmed.is_empty() {
-                    return Some(trimmed.to_string());
-                }
-            }
+    if !request_url.is_empty()
+        && let Ok(url) = url::Url::parse(request_url)
+        && let Some(resource) = url
+            .query_pairs()
+            .find(|(k, _)| k == "resource")
+            .map(|(_, v)| v.into_owned())
+    {
+        let trimmed = resource.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
         }
     }
     requested_audience
@@ -767,14 +804,14 @@ async fn finalize_consent(
         &memberships,
         cookie_choice.as_ref(),
     );
-    if let Some(req_org) = requested_org_id.filter(|s| !s.is_empty()) {
-        if active.is_none() {
-            tracing::info!(
-                subject,
-                organization_id = %req_org,
-                "consent: requested organization_id is not a membership; suppressing org claim",
-            );
-        }
+    if let Some(req_org) = requested_org_id.filter(|s| !s.is_empty())
+        && active.is_none()
+    {
+        tracing::info!(
+            subject,
+            organization_id = %req_org,
+            "consent: requested organization_id is not a membership; suppressing org claim",
+        );
     }
 
     // Pre-fetch the Forseti-owned profile only when the feature is on and a
@@ -890,25 +927,25 @@ fn build_id_token_claims(
     let scopes: std::collections::HashSet<&str> = grant_scope.iter().map(String::as_str).collect();
     let mut claims = serde_json::Map::new();
 
-    if scopes.contains("org") {
-        if let Some(m) = active_org {
-            if let Ok(role) = m.role.parse::<crate::orgs::Role>() {
-                claims.insert(
-                    "org".to_string(),
-                    serde_json::json!({
-                        "id": m.org_id,
-                        "slug": m.slug,
-                        "role": role.as_str(),
-                        "name": m.name,
-                    }),
-                );
-            } else {
-                tracing::warn!(
-                    org_id = %m.org_id,
-                    role = %m.role,
-                    "consent: skipping `org` claim for membership with unknown role",
-                );
-            }
+    if scopes.contains("org")
+        && let Some(m) = active_org
+    {
+        if let Ok(role) = m.role.parse::<crate::orgs::Role>() {
+            claims.insert(
+                "org".to_string(),
+                serde_json::json!({
+                    "id": m.org_id,
+                    "slug": m.slug,
+                    "role": role.as_str(),
+                    "name": m.name,
+                }),
+            );
+        } else {
+            tracing::warn!(
+                org_id = %m.org_id,
+                role = %m.role,
+                "consent: skipping `org` claim for membership with unknown role",
+            );
         }
     }
     if scopes.contains("orgs") {
@@ -1060,28 +1097,28 @@ fn build_id_token_claims(
         claims.insert("locale".to_string(), serde_json::Value::String(locale_val));
     }
 
-    if scopes.contains("extended_profile") {
-        if let Some(p) = profile {
-            if let Some(bio) = p.bio.as_deref().filter(|s| !s.is_empty()) {
-                claims.insert(
-                    "bio".to_string(),
-                    serde_json::Value::String(bio.to_string()),
-                );
-            }
-            if let Some(pronouns) = p.pronouns.as_deref().filter(|s| !s.is_empty()) {
-                claims.insert(
-                    "pronouns".to_string(),
-                    serde_json::Value::String(pronouns.to_string()),
-                );
-            }
-            if !p.links.is_empty() {
-                let arr: Vec<serde_json::Value> = p
-                    .links
-                    .iter()
-                    .map(|l| serde_json::json!({"label": l.label, "url": l.url}))
-                    .collect();
-                claims.insert("links".to_string(), serde_json::Value::Array(arr));
-            }
+    if scopes.contains("extended_profile")
+        && let Some(p) = profile
+    {
+        if let Some(bio) = p.bio.as_deref().filter(|s| !s.is_empty()) {
+            claims.insert(
+                "bio".to_string(),
+                serde_json::Value::String(bio.to_string()),
+            );
+        }
+        if let Some(pronouns) = p.pronouns.as_deref().filter(|s| !s.is_empty()) {
+            claims.insert(
+                "pronouns".to_string(),
+                serde_json::Value::String(pronouns.to_string()),
+            );
+        }
+        if !p.links.is_empty() {
+            let arr: Vec<serde_json::Value> = p
+                .links
+                .iter()
+                .map(|l| serde_json::json!({"label": l.label, "url": l.url}))
+                .collect();
+            claims.insert("links".to_string(), serde_json::Value::Array(arr));
         }
     }
 
@@ -1091,8 +1128,8 @@ fn build_id_token_claims(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_id_token_claims, extract_resource_url, project_group_slugs, resolve_claim_active_org,
-        with_prompt_login,
+        build_id_token_claims, extract_resource_url, intersect_requested_scope,
+        project_group_slugs, resolve_claim_active_org, subject_is_signed_in, with_prompt_login,
     };
     use crate::ory;
 
@@ -1120,6 +1157,58 @@ mod tests {
             .query_pairs()
             .find(|(k, _)| k == key)
             .map(|(_, v)| v.into_owned())
+    }
+
+    #[test]
+    fn subject_matches_signed_in_identity() {
+        assert!(subject_is_signed_in("id-1", "id-1"));
+    }
+
+    #[test]
+    fn foreign_consent_subject_is_rejected() {
+        // Victim signed in as id-2 clicking Allow on a challenge bound to id-1.
+        assert!(!subject_is_signed_in("id-2", "id-1"));
+    }
+
+    #[test]
+    fn anonymous_caller_never_grants() {
+        assert!(!subject_is_signed_in("", "id-1"));
+    }
+
+    #[test]
+    fn empty_consent_subject_never_grants() {
+        assert!(!subject_is_signed_in("", ""));
+        assert!(!subject_is_signed_in("id-1", ""));
+    }
+
+    #[test]
+    fn grant_scope_drops_unrequested_scopes() {
+        let requested = vec!["openid".to_string(), "email".to_string()];
+        let granted = vec![
+            "openid".to_string(),
+            "email".to_string(),
+            "offline_access".to_string(),
+        ];
+        assert_eq!(
+            intersect_requested_scope(granted, &requested),
+            vec!["openid".to_string(), "email".to_string()]
+        );
+    }
+
+    #[test]
+    fn grant_scope_keeps_a_subset() {
+        let requested = vec!["openid".to_string(), "email".to_string()];
+        assert_eq!(
+            intersect_requested_scope(vec!["openid".to_string()], &requested),
+            vec!["openid".to_string()]
+        );
+    }
+
+    #[test]
+    fn grant_scope_empty_stays_empty() {
+        let requested = vec!["openid".to_string()];
+        assert!(intersect_requested_scope(Vec::new(), &requested).is_empty());
+        assert!(intersect_requested_scope(vec!["openid".to_string()], &[]).is_empty());
     }
 
     #[test]
@@ -1162,8 +1251,7 @@ mod tests {
 
     #[test]
     fn extract_resource_url_picks_rfc8707_resource_param() {
-        let request_url =
-            "https://hydra.example.com/oauth2/auth?client_id=x&resource=https%3A%2F%2Fapi.example.com";
+        let request_url = "https://hydra.example.com/oauth2/auth?client_id=x&resource=https%3A%2F%2Fapi.example.com";
         let audience = vec![];
         assert_eq!(
             extract_resource_url(request_url, &audience),

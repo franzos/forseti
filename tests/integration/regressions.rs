@@ -284,9 +284,10 @@ async fn public_response_carries_safe_security_headers() {
     assert!(csp.contains("object-src 'none'"));
     assert!(csp.contains("base-uri 'self'"));
     assert!(csp.contains("frame-ancestors 'self'"));
+    // Kratos's origin has to stay listed, or every flow form POST is blocked.
+    assert!(csp.contains("form-action 'self' http://"));
     // WebAuthn/QR-safety guard: these directives must stay absent
     assert!(!csp.contains("default-src"));
     assert!(!csp.contains("script-src"));
     assert!(!csp.contains("img-src"));
-    assert!(!csp.contains("form-action"));
 }

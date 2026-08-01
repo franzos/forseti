@@ -12,8 +12,8 @@ use uuid::Uuid;
 use crate::db::DbPool;
 use crate::db_interact;
 use crate::schema::{
-    device_sessions, host_allowed_groups, host_enrollments, offline_secrets, posix_accounts,
-    posix_group_members, posix_groups, ssh_authorized_keys,
+    device_sessions, host_account_logins, host_allowed_groups, host_enrollments, offline_secrets,
+    posix_accounts, posix_group_members, posix_groups, ssh_authorized_keys,
 };
 
 /// Hard cap on every unbounded list query here (see `orgs::db::MAX_ROWS_PER_LIST`).
@@ -232,6 +232,19 @@ pub async fn host_allowed_team_ids(db: &DbPool, host_id: &str) -> anyhow::Result
         host_allowed_groups::table
             .filter(host_allowed_groups::host_id.eq(&id))
             .select(host_allowed_groups::team_id)
+            .load(conn)
+    })?)
+}
+
+/// The identities that have completed an online auth on `host_id`. UNCAPPED:
+/// it gates the offline-verifier projection, and a capped read would silently
+/// strip offline credentials from members past the cap.
+pub async fn host_login_identity_ids(db: &DbPool, host_id: &str) -> anyhow::Result<Vec<String>> {
+    let id = host_id.to_string();
+    Ok(db_interact!(db, |conn| {
+        host_account_logins::table
+            .filter(host_account_logins::host_id.eq(&id))
+            .select(host_account_logins::identity_id)
             .load(conn)
     })?)
 }
@@ -790,6 +803,14 @@ struct NewHostAllowedGroup<'a> {
 }
 
 #[derive(Insertable)]
+#[diesel(table_name = host_account_logins)]
+struct NewHostAccountLogin<'a> {
+    host_id: &'a str,
+    identity_id: &'a str,
+    last_login_at: String,
+}
+
+#[derive(Insertable)]
 #[diesel(table_name = ssh_authorized_keys)]
 struct NewSshKey<'a> {
     id: &'a str,
@@ -890,8 +911,9 @@ pub async fn set_account_enabled(
     Ok(())
 }
 
-/// Cascade-delete every POSIX row tied to `identity_id`: keys, memberships, the
-/// account's primary (user-kind) group, and the account itself. Idempotent.
+/// Cascade-delete every POSIX row tied to `identity_id`: keys, memberships,
+/// per-host login records, the account's primary (user-kind) group, and the
+/// account itself. Idempotent.
 pub async fn delete_account_rows(db: &DbPool, identity_id: &str) -> anyhow::Result<()> {
     let id = identity_id.to_string();
     db_interact!(db, |conn| {
@@ -902,6 +924,10 @@ pub async fn delete_account_rows(db: &DbPool, identity_id: &str) -> anyhow::Resu
             .execute(c)?;
             diesel::delete(
                 posix_group_members::table.filter(posix_group_members::identity_id.eq(&id)),
+            )
+            .execute(c)?;
+            diesel::delete(
+                host_account_logins::table.filter(host_account_logins::identity_id.eq(&id)),
             )
             .execute(c)?;
             // Delete ONLY this account's primary (user-kind) group, never an
@@ -984,6 +1010,8 @@ pub async fn delete_host(db: &DbPool, id: &str) -> anyhow::Result<()> {
     db_interact!(db, |conn| {
         conn.transaction::<_, diesel::result::Error, _>(|c| {
             diesel::delete(device_sessions::table.filter(device_sessions::host_id.eq(&id)))
+                .execute(c)?;
+            diesel::delete(host_account_logins::table.filter(host_account_logins::host_id.eq(&id)))
                 .execute(c)?;
             diesel::delete(host_allowed_groups::table.filter(host_allowed_groups::host_id.eq(&id)))
                 .execute(c)?;
@@ -1183,6 +1211,10 @@ pub async fn device_session_by_user_code(
 /// approving identity, ONLY if still `pending`. Returns `true` iff exactly one
 /// row transitioned, so a replay that finds it terminal gets `false` and must
 /// not re-approve.
+///
+/// The winning transition also records the online login in `host_account_logins`,
+/// in the SAME transaction: that row is what unlocks the account's offline
+/// verifier for this host, so it must never exist without a real approval.
 pub async fn approve_device_session(
     db: &DbPool,
     device_code: &str,
@@ -1190,19 +1222,43 @@ pub async fn approve_device_session(
 ) -> anyhow::Result<bool> {
     let dc = device_code.to_string();
     let id = identity_id.to_string();
-    let n: usize = db_interact!(db, |conn| {
-        diesel::update(
-            device_sessions::table
+    let now = Utc::now().to_rfc3339();
+    let approved: bool = db_interact!(db, |conn| {
+        conn.transaction::<bool, diesel::result::Error, _>(|c| {
+            let n = diesel::update(
+                device_sessions::table
+                    .filter(device_sessions::device_code.eq(&dc))
+                    .filter(device_sessions::status.eq(device_status::PENDING)),
+            )
+            .set((
+                device_sessions::status.eq(device_status::APPROVED),
+                device_sessions::identity_id.eq(&id),
+            ))
+            .execute(c)?;
+            if n != 1 {
+                return Ok(false);
+            }
+            let host_id: String = device_sessions::table
                 .filter(device_sessions::device_code.eq(&dc))
-                .filter(device_sessions::status.eq(device_status::PENDING)),
-        )
-        .set((
-            device_sessions::status.eq(device_status::APPROVED),
-            device_sessions::identity_id.eq(&id),
-        ))
-        .execute(conn)
+                .select(device_sessions::host_id)
+                .first(c)?;
+            diesel::insert_into(host_account_logins::table)
+                .values(NewHostAccountLogin {
+                    host_id: &host_id,
+                    identity_id: &id,
+                    last_login_at: now.clone(),
+                })
+                .on_conflict((
+                    host_account_logins::host_id,
+                    host_account_logins::identity_id,
+                ))
+                .do_update()
+                .set(host_account_logins::last_login_at.eq(&now))
+                .execute(c)?;
+            Ok(true)
+        })
     })?;
-    Ok(n == 1)
+    Ok(approved)
 }
 
 /// Atomic single-use deny: flip `pending` to `denied`, ONLY if still `pending`.
@@ -1439,6 +1495,98 @@ mod tests {
         assert!(hosts_reachable_by(&db, "alice").await.unwrap().is_empty());
     }
 
+    /// A pending session for `username` on `host`, expiring far in the future.
+    async fn pending_session(db: &DbPool, code: &str, host: &str, username: &str) {
+        assert!(
+            insert_device_session(db, code, code, host, username, "2099-01-01T00:00:00+00:00")
+                .await
+                .expect("insert session")
+        );
+    }
+
+    #[tokio::test]
+    async fn approving_a_device_session_records_the_host_login() {
+        let db = temp_pool().await;
+        provision(&db, "alice", "alice").await;
+        insert_host(&db, "h-1", "one.example", "x", "orgA", false, None)
+            .await
+            .unwrap();
+        insert_host(&db, "h-2", "two.example", "x", "orgA", false, None)
+            .await
+            .unwrap();
+
+        // No online auth yet → the host has seen nobody.
+        assert!(
+            host_login_identity_ids(&db, "h-1")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        pending_session(&db, "dc-1", "h-1", "alice").await;
+        assert!(approve_device_session(&db, "dc-1", "alice").await.unwrap());
+        assert_eq!(
+            host_login_identity_ids(&db, "h-1").await.unwrap(),
+            vec!["alice".to_string()]
+        );
+        // The login does NOT carry over to another host.
+        assert!(
+            host_login_identity_ids(&db, "h-2")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        // Re-approving is a no-op transition, so no duplicate row.
+        pending_session(&db, "dc-2", "h-1", "alice").await;
+        assert!(approve_device_session(&db, "dc-2", "alice").await.unwrap());
+        assert_eq!(host_login_identity_ids(&db, "h-1").await.unwrap().len(), 1);
+
+        // A denied session must not leave a login behind.
+        pending_session(&db, "dc-3", "h-2", "alice").await;
+        assert!(deny_device_session(&db, "dc-3").await.unwrap());
+        assert!(!approve_device_session(&db, "dc-3", "alice").await.unwrap());
+        assert!(
+            host_login_identity_ids(&db, "h-2")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn host_logins_are_cleaned_up_with_the_host_and_the_account() {
+        let db = temp_pool().await;
+        provision(&db, "alice", "alice").await;
+        insert_host(&db, "h-1", "one.example", "x", "orgA", false, None)
+            .await
+            .unwrap();
+        insert_host(&db, "h-2", "two.example", "x", "orgA", false, None)
+            .await
+            .unwrap();
+        pending_session(&db, "dc-1", "h-1", "alice").await;
+        assert!(approve_device_session(&db, "dc-1", "alice").await.unwrap());
+        pending_session(&db, "dc-2", "h-2", "alice").await;
+        assert!(approve_device_session(&db, "dc-2", "alice").await.unwrap());
+
+        delete_host(&db, "h-1").await.unwrap();
+        assert!(
+            host_login_identity_ids(&db, "h-1")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(host_login_identity_ids(&db, "h-2").await.unwrap().len(), 1);
+
+        delete_account_rows(&db, "alice").await.unwrap();
+        assert!(
+            host_login_identity_ids(&db, "h-2")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
     #[tokio::test]
     async fn team_gid_is_allocated_once_and_never_flips() {
         let db = temp_pool().await;
@@ -1456,8 +1604,10 @@ mod tests {
         assert_eq!(first, second);
 
         // Unknown team must error, never hand out an unstored gid.
-        assert!(find_or_create_team_gid(&db, "no-such-team", 3_000_000)
-            .await
-            .is_err());
+        assert!(
+            find_or_create_team_gid(&db, "no-such-team", 3_000_000)
+                .await
+                .is_err()
+        );
     }
 }

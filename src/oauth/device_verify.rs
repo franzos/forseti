@@ -63,10 +63,12 @@ struct DeviceDoneTemplate {
 /// target account looked up by `user_code`. Gated behind a Kratos session
 /// (RFC 8628 §3.3: the user authenticates at the verification URI) so the
 /// host-bound `(username, hostname)` target is never disclosed to an
-/// unauthenticated caller guessing user codes.
+/// unauthenticated caller guessing user codes. A signed-in caller who isn't
+/// the named account is treated as "no match": the panel is suppressed rather
+/// than disclosing someone else's `(username, hostname)`.
 pub(crate) async fn device_verify(
     State(state): State<AppState>,
-    _session: RequireSession,
+    session: RequireSession,
     Query(query): Query<DeviceVerifyQuery>,
     Chrome(chrome): Chrome,
 ) -> Response {
@@ -76,7 +78,20 @@ pub(crate) async fn device_verify(
     let target = if user_code.is_empty() {
         None
     } else {
-        load_target(&state, &user_code).await
+        match load_target(&state, &user_code).await {
+            Some(t) => {
+                if approver_is_target(&state, &session.identity_id, &t).await {
+                    Some(t)
+                } else {
+                    tracing::warn!(
+                        identity_id = %session.identity_id,
+                        "device_verify: signed-in identity is not the named target; hiding it"
+                    );
+                    None
+                }
+            }
+            None => None,
+        }
     };
 
     render(&DeviceVerifyTemplate {
@@ -97,13 +112,24 @@ pub(crate) struct DeviceVerifyForm {
 /// login + consent. On success we follow Hydra's `redirect_to`.
 pub(crate) async fn device_verify_submit(
     State(state): State<AppState>,
-    _session: RequireSession,
+    session: RequireSession,
     ReqLocale(locale): ReqLocale,
     CsrfForm(form): CsrfForm<DeviceVerifyForm>,
 ) -> Response {
     // Re-load by user_code so a tampered POST can't accept a code with no
     // backing session.
-    if load_target(&state, &form.user_code).await.is_none() {
+    let Some(target) = load_target(&state, &form.user_code).await else {
+        return render(&DeviceDoneTemplate {
+            chrome: anon_chrome(&state, locale),
+            error: true,
+        });
+    };
+
+    if !approver_is_target(&state, &session.identity_id, &target).await {
+        tracing::warn!(
+            identity_id = %session.identity_id,
+            "device_verify: refusing approval by an identity that is not the named target"
+        );
         return render(&DeviceDoneTemplate {
             chrome: anon_chrome(&state, locale),
             error: true,
@@ -173,4 +199,55 @@ async fn load_target(state: &AppState, user_code: &str) -> Option<VerifyTarget> 
 /// available once the request body is consumed).
 fn anon_chrome(state: &AppState, locale: crate::locale::LanguageIdentifier) -> PageChrome {
     PageChrome::from_parts(state, String::new(), String::new(), locale)
+}
+
+/// Resolve the approver's POSIX account and require it to BE the account the
+/// device flow named. Mirrors the named-target rule of `evaluate_binding` in
+/// `src/posix/device.rs`, which still re-runs the full binding (enabled, host
+/// scope, force_mfa) at poll time; this only moves the username check forward
+/// to approval so a wrong signed-in user can't approve, or read, a flow that
+/// isn't theirs. A lookup error fails closed.
+async fn approver_is_target(state: &AppState, identity_id: &str, target: &VerifyTarget) -> bool {
+    let account = match db::account_by_identity(&state.db, identity_id).await {
+        Ok(a) => a,
+        Err(e) => {
+            tracing::error!(error = ?e, "device_verify: account lookup failed");
+            return false;
+        }
+    };
+    approver_matches(
+        account.as_ref().map(|a| a.username.as_str()),
+        &target.username,
+    )
+}
+
+/// Pure half of [`approver_is_target`]: no account, or a different username,
+/// never approves. Byte-exact comparison, like `evaluate_binding`.
+fn approver_matches(account_username: Option<&str>, requested_username: &str) -> bool {
+    account_username == Some(requested_username)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::approver_matches;
+
+    #[test]
+    fn named_target_approves_own_flow() {
+        assert!(approver_matches(Some("alice"), "alice"));
+    }
+
+    #[test]
+    fn other_account_cannot_approve() {
+        assert!(!approver_matches(Some("bob"), "alice"));
+    }
+
+    #[test]
+    fn identity_without_posix_account_cannot_approve() {
+        assert!(!approver_matches(None, "alice"));
+    }
+
+    #[test]
+    fn username_match_is_case_sensitive() {
+        assert!(!approver_matches(Some("Alice"), "alice"));
+    }
 }

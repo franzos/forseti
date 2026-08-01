@@ -8,8 +8,8 @@ use deadpool_diesel::{
         Hook, HookError, Manager as SqliteManager, Pool as SqlitePool, Runtime as SqliteRuntime,
     },
 };
-use diesel::{pg::PgConnection, sql_types::BigInt, sqlite::SqliteConnection, RunQueryDsl};
-use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
+use diesel::{RunQueryDsl, pg::PgConnection, sql_types::BigInt, sqlite::SqliteConnection};
+use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
 
 /// Stable int8 key for `pg_advisory_lock` so concurrent replicas booting
 /// simultaneously serialise their migration runs instead of deadlocking or
@@ -49,10 +49,25 @@ pub enum DbPool {
 impl DbPool {
     /// Initialise a pool from `[database]` config. Picks the backend from the
     /// URL scheme. Sqlite URLs may use a `sqlite://` prefix or a raw path; both work.
+    /// A missing sqlite file is created (server boot on a fresh deployment).
     pub fn init(cfg: &DatabaseConfig) -> anyhow::Result<Self> {
+        Self::init_inner(cfg, true)
+    }
+
+    /// Like [`DbPool::init`], but a missing sqlite file is an error. Used by the
+    /// maintenance subcommands, where a mis-resolved path would otherwise mean
+    /// pruning a brand-new empty database and reporting success.
+    pub fn init_existing(cfg: &DatabaseConfig) -> anyhow::Result<Self> {
+        Self::init_inner(cfg, false)
+    }
+
+    fn init_inner(cfg: &DatabaseConfig, create_missing: bool) -> anyhow::Result<Self> {
         match cfg.backend() {
             DatabaseBackend::Sqlite => {
                 let path = sqlite_path(&cfg.url);
+                if !create_missing {
+                    require_existing_sqlite(&path)?;
+                }
                 #[cfg(unix)]
                 restrict_sqlite_permissions(&path)?;
                 let manager = SqliteManager::new(path, SqliteRuntime::Tokio1);
@@ -177,7 +192,7 @@ impl DbPool {
 /// ```
 #[macro_export]
 macro_rules! db_interact {
-    ($db:expr, |$conn:ident| $body:block) => {{
+    ($db:expr_2021, |$conn:ident| $body:block) => {{
         match &$db {
             $crate::db::DbPool::Sqlite(pool) => {
                 let conn = pool
@@ -231,6 +246,17 @@ fn restrict_sqlite_permissions(path: &str) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+fn require_existing_sqlite(path: &str) -> anyhow::Result<()> {
+    if path == ":memory:" || std::path::Path::new(path).exists() {
+        return Ok(());
+    }
+    let resolved = std::path::absolute(path).unwrap_or_else(|_| std::path::PathBuf::from(path));
+    anyhow::bail!(
+        "database not found at {}; run from the deployment directory or set [database].url",
+        resolved.display()
+    )
 }
 
 /// Diesel's sqlite manager wants a filesystem path, not a URL. Accept both

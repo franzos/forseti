@@ -26,11 +26,11 @@ use std::str::FromStr;
 use axum::http::HeaderMap;
 
 pub use db::{
-    count_orgs, create_org, delete_org, fetch_invite, find_member, insert_invite, is_reserved_slug,
-    list_member_profiles, list_members, list_members_paged, list_memberships,
-    list_memberships_limited, list_org_invites, org_by_id, org_by_slug, remove_member,
-    set_member_hidden, set_member_visibility, slugify, suggest_slug, update_branding, update_role,
-    Membership, Org, OrgInvite,
+    Membership, Org, OrgInvite, SlugTaken, count_orgs, create_org, delete_org, fetch_invite,
+    find_member, insert_invite, is_reserved_slug, list_member_profiles, list_members,
+    list_members_paged, list_memberships, list_memberships_limited, list_org_invites, org_by_id,
+    org_by_slug, remove_member, set_member_hidden, set_member_visibility, slugify, suggest_slug,
+    update_branding, update_role,
 };
 
 /// Stable PK of the seeded "Default" org. Matches the migration's INSERT.
@@ -195,10 +195,9 @@ pub fn active_org(
         return None;
     }
     if let Some(cookie_id) = cookie::read_active_org_cookie(headers, cookie_secret, cookie_ttl_secs)
+        && let Some(m) = memberships.iter().find(|m| m.org_id == cookie_id)
     {
-        if let Some(m) = memberships.iter().find(|m| m.org_id == cookie_id) {
-            return Some(m.clone());
-        }
+        return Some(m.clone());
     }
     memberships.first().cloned()
 }
@@ -307,31 +306,29 @@ pub async fn ensure_default_floor(
             }
         };
     if admin_cfg.is_admin(email) {
-        if !default_present {
-            if let Err(e) =
+        if !default_present
+            && let Err(e) =
                 db::add_member_race_safe(db, identity_id, DEFAULT_ORG_ID, Role::Owner).await
-            {
-                tracing::warn!(
-                    error = ?e,
-                    identity_id,
-                    "ensure_default_floor: operator Default owner insert failed (will retry on next request)"
-                );
-            }
+        {
+            tracing::warn!(
+                error = ?e,
+                identity_id,
+                "ensure_default_floor: operator Default owner insert failed (will retry on next request)"
+            );
         }
         return;
     }
     if decide_membership_action(default_present, non_default_count)
         == MembershipAction::AddDefaultFloor
+        && let Err(e) = db::add_default_floor_member_txn(db, identity_id).await
     {
-        if let Err(e) = db::add_default_floor_member_txn(db, identity_id).await {
-            // Diesel collapses unique-constraint violations into a generic
-            // error string; "already a member" is the expected loser-of-race.
-            tracing::warn!(
-                error = ?e,
-                identity_id,
-                "ensure_default_floor: Default floor insert failed (will retry on next request)"
-            );
-        }
+        // Diesel collapses unique-constraint violations into a generic
+        // error string; "already a member" is the expected loser-of-race.
+        tracing::warn!(
+            error = ?e,
+            identity_id,
+            "ensure_default_floor: Default floor insert failed (will retry on next request)"
+        );
     }
 }
 
@@ -531,10 +528,12 @@ mod tests {
         domains::mark_domain_verified(&db, "acme-id", "acme.com")
             .await
             .unwrap();
-        assert!(lookup_proven_org_for_email(&db, "owner@acme.com")
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            lookup_proven_org_for_email(&db, "owner@acme.com")
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -553,10 +552,12 @@ mod tests {
         db::set_domain_join_policy_raw(&db, "acme-id", "bogus")
             .await
             .unwrap();
-        assert!(lookup_proven_org_for_email(&db, "owner@acme.com")
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            lookup_proven_org_for_email(&db, "owner@acme.com")
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -571,10 +572,12 @@ mod tests {
         domains::mark_domain_verified(&db, DEFAULT_ORG_ID, "acme.com")
             .await
             .unwrap();
-        assert!(lookup_proven_org_for_email(&db, "owner@acme.com")
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            lookup_proven_org_for_email(&db, "owner@acme.com")
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -592,10 +595,12 @@ mod tests {
         domains::mark_domain_verified(&db, "acme-id", "acme.com")
             .await
             .unwrap();
-        assert!(lookup_proven_org_for_email(&db, "owner@acme.com")
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            lookup_proven_org_for_email(&db, "owner@acme.com")
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -612,10 +617,12 @@ mod tests {
         domains::mark_domain_verified(&db, "acme-id", "gmail.com")
             .await
             .unwrap();
-        assert!(lookup_proven_org_for_email(&db, "someone@gmail.com")
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            lookup_proven_org_for_email(&db, "someone@gmail.com")
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -624,10 +631,12 @@ mod tests {
         db::create_org(&db, "acme-id", "acme", "Acme", None)
             .await
             .unwrap();
-        assert!(lookup_proven_org_for_email(&db, "owner@acme.com")
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            lookup_proven_org_for_email(&db, "owner@acme.com")
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]

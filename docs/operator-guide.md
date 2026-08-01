@@ -234,6 +234,7 @@ Per-IP / per-IAT rate limiting on `POST /oauth2/register`, plus the reserved-nam
 
 | Key                        | Type     | Default          | Description                                                                                                                                                |
 |----------------------------|----------|------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `dcr_require_iat`          | bool     | `false`          | Require a valid initial access token on `POST /oauth2/register`. Left off, anonymous dynamic client registration stays open; turned on, an anonymous request is rejected with `401 invalid_token`. |
 | `dcr_ip_rate_per_minute`   | u32      | `10`             | Per-IP rate limit on `POST /oauth2/register` — max requests per minute. In-memory, per-process. `0` disables this bucket.                                  |
 | `dcr_ip_rate_per_hour`     | u32      | `100`            | Per-IP rate limit — max requests per hour. Enforced in parallel with the per-minute bucket. `0` disables.                                                  |
 | `dcr_global_rate_per_minute` | u32    | `40`             | Global (all-callers-share-one-bucket) rate limit, requests per minute. Bounds total traffic even when a spoofed `X-Forwarded-For` defeats the per-IP bucket. `0` disables. |
@@ -251,8 +252,8 @@ Per-IP + global rate limiting on `GET /registration`. These knobs apply to **eve
 
 | Key                                    | Type | Default | Description                                                                                                    |
 |-----------------------------------------|------|---------|------------------------------------------------------------------------------------------------------------------|
-| `registration_ip_rate_per_minute`      | u32  | `10`    | Per-IP rate limit on `GET /registration`, requests per minute. `0` disables the bucket.                        |
-| `registration_ip_rate_per_hour`        | u32  | `60`    | Per-IP rate limit on `GET /registration`, requests per hour, in parallel with the per-minute bucket. `0` disables. |
+| `registration_ip_rate_per_minute`      | u32  | `30`    | Per-IP rate limit on `GET /registration`, requests per minute. `0` disables the bucket.                        |
+| `registration_ip_rate_per_hour`        | u32  | `300`   | Per-IP rate limit on `GET /registration`, requests per hour, in parallel with the per-minute bucket. `0` disables. |
 | `registration_global_rate_per_minute`  | u32  | `120`   | Global (all-callers-share-one-bucket) rate limit, requests per minute. Bounds total traffic even when a spoofed `X-Forwarded-For` defeats the per-IP bucket. `0` disables. |
 | `registration_global_rate_per_hour`    | u32  | `1200`  | Global rate limit, requests per hour, in parallel with the per-minute global bucket. `0` disables.             |
 
@@ -263,6 +264,8 @@ These are clamped at load time under the same ceilings as `[oauth]`/`[orgs]`/`[c
 | Key                    | Type | Default | Description                                                                                                                                                                                                                              |
 |------------------------|------|---------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `trust_forwarded_for`  | bool | `false` | Honour `X-Forwarded-For` / `X-Real-IP` / `Forwarded` when deriving the audited client IP and keying per-IP rate limiters. Set `true` ONLY when the upstream reverse proxy strips client-sent forwarded-for headers before re-adding its own — otherwise a direct caller can forge the header and spoof their IP. See [proxy guide](./operator-guide-proxy.md). |
+
+**Safety precondition: the listener must be unreachable except through the trusted proxy.** There is no trusted-proxy allowlist — when `trust_forwarded_for = true`, Forseti takes the first `X-Forwarded-For` hop from *whoever* opened the connection, with no check that the peer is your proxy. Two things must both hold before you enable it: (1) the proxy strips client-sent `X-Forwarded-*` before re-adding its own, and (2) Forseti's listener accepts connections only from the proxy — bind it to loopback or a private interface, or firewall the port. If either fails, anyone who can reach the listener directly sets their own `X-Forwarded-For` and thereby controls both the client IP recorded in the audit log (making audit rows attributable to an IP of their choosing) and the key for every per-IP rate-limit bucket (a fresh header value per request means an unlimited number of fresh buckets, so the per-IP limits stop limiting anything). The global rate-limit buckets are the only backstop in that case. With `trust_forwarded_for = false` (the default) Forseti keys on the TCP peer address, which cannot be forged.
 
 ### Environment overrides
 
@@ -711,6 +714,8 @@ The [device-auth login](#enabling-pam-login-device-auth) above needs the network
 This is **not** the same as the daemon being down. A `forseti-unixd` outage stays fail-closed (above) — offline auth needs the daemon running to verify the passphrase. It only kicks in on *server-unreachable, daemon-up*.
 
 **How a user enables it.** While online, the user sets a passphrase at `/settings/offline-access` in their dashboard. It must be **at least 8 characters** and is **separate from their Forseti account password** — it's a dedicated offline credential, never the primary one. Forseti stores only an Argon2id verifier (m=64 MiB, t=3, p=1); enrolled hosts pull it on an interval and re-pepper it locally. Clearing the passphrase there withdraws it from every host on their next sync.
+
+**Each user's first login on a host must be online.** A host is provisioned offline verifiers only for the accounts it has already seen: a user's verifier is served to a given host only after that user has completed an online device-auth login *on that host*. On a freshly enrolled host every user therefore has to log in once while the host can reach Forseti; every later login on that host can fall back to offline. The point is to bound what a compromised or decommissioned-but-unrevoked host can walk away with: an offline-crackable corpus for the people who actually use that host, not for the whole org. The record is per host and does not expire on its own (expiring it would lock a returning user out of a partitioned host), so withdrawal is deleting the host, disabling the account, or de-scoping it, exactly as with any other verifier.
 
 **`force_mfa` hosts refuse offline auth.** A host enrolled with `force_mfa` is provisioned **zero** offline verifiers — it always requires the network to log a user in. This is deliberate: it closes the AAL2-downgrade where a user could skip their second factor simply by going offline. If you depend on MFA at a host, leave `force_mfa` on and accept that a partition means no terminal login there.
 

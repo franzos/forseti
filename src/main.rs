@@ -47,14 +47,18 @@ mod theming;
 mod web;
 mod webhook;
 
-pub(crate) use web::{render_error_boundary, safe_return_to, FlowQuery};
+pub(crate) use web::{FlowQuery, render_error_boundary, safe_return_to};
 
 use clap::Parser as _;
 use cli::{Cli, Cmd, ConfigCmd, PruneCmd, RotateCmd};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    match Cli::parse().cmd {
+    let cmd = Cli::parse().cmd;
+    if cmd.is_some() {
+        init_cli_tracing();
+    }
+    match cmd {
         None => app::run().await,
         Some(Cmd::AuditPrune) => {
             let cfg = config::AppConfig::load()?;
@@ -127,6 +131,18 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
+/// Subcommands don't go through `app::run`'s JSON subscriber, so warnings from
+/// `AppConfig::load` would otherwise be dropped. Stderr keeps stdout parseable.
+fn init_cli_tracing() {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
+    let _ = tracing_subscriber::fmt()
+        .compact()
+        .with_writer(std::io::stderr)
+        .with_env_filter(filter)
+        .try_init();
+}
+
 /// `config` subcommand dispatch. Bare `forseti config` (`cmd: None`) drops
 /// into the interactive menu when stdin is a TTY; otherwise it prints the
 /// same clap help it always did and exits 2.
@@ -188,7 +204,7 @@ async fn dispatch_config(args: cli::ConfigArgs) -> i32 {
 /// Shared DB prologue for the DB-touching subcommands: pool init + ping, then migrations unless skipped.
 /// Migrations land tables a fresh DB lacks (e.g. audit_events + the sqlite trigger's `_forseti_meta` sentinel).
 async fn bootstrap_db(cfg: &config::AppConfig) -> anyhow::Result<db::DbPool> {
-    let db = db::DbPool::init(&cfg.database)?;
+    let db = db::DbPool::init_existing(&cfg.database)?;
     db.ping().await?;
     if !cfg.database.skip_migrations {
         db.run_migrations().await?;

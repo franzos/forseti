@@ -16,7 +16,8 @@ use chrono::Utc;
 use serde::Deserialize;
 use uuid::Uuid;
 
-use crate::audit::{self, action, target_kind, AuditCtx, AuditEvent};
+use crate::FlowQuery;
+use crate::audit::{self, AuditCtx, AuditEvent, action, target_kind};
 use crate::audit_metadata;
 use crate::csrf;
 use crate::flow_view::session_email;
@@ -26,9 +27,8 @@ use crate::page_chrome::{PageChrome, ThemedChrome};
 use crate::render::render;
 use crate::state::AppState;
 use crate::webhook;
-use crate::FlowQuery;
 
-use super::{fetch_settings_subpage, SettingsSection};
+use super::{SettingsSection, fetch_settings_subpage};
 
 /// One app shown on the delete-confirm card as a notification target.
 #[derive(Debug, Clone)]
@@ -402,6 +402,17 @@ async fn collect_webhook_targets(
         let Some(url) = deletion_url_from_metadata(client.metadata.as_ref()) else {
             continue;
         };
+        // Hydra's RFC 7592 client-configuration endpoint writes this metadata
+        // without going through the admin form, so the save-time guard has to
+        // be re-applied here.
+        if let Err(reason) = webhook::validate_webhook_url(&url) {
+            tracing::warn!(
+                client_id = %client_id,
+                reason = %reason,
+                "skipping account-deletion webhook target: unsafe URL"
+            );
+            continue;
+        }
         targets.push(webhook::WebhookTarget { client_id, url });
     }
     Ok(targets)
@@ -429,7 +440,12 @@ async fn list_apps_to_notify(state: &AppState, user_id: &str) -> Vec<NotifiedApp
         if !seen.insert(client_id.clone()) {
             continue;
         }
-        if deletion_url_from_metadata(client.metadata.as_ref()).is_none() {
+        // Same guard as `collect_webhook_targets`, so the card doesn't promise
+        // a notification the saga will drop.
+        let Some(url) = deletion_url_from_metadata(client.metadata.as_ref()) else {
+            continue;
+        };
+        if webhook::validate_webhook_url(&url).is_err() {
             continue;
         }
         apps.push(NotifiedApp {
