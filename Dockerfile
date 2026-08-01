@@ -39,6 +39,11 @@ COPY assets ./assets
 # must be in place before `cargo build`.
 COPY static ./static
 COPY --from=css /styles.css ./static/styles.css
+# `forseti-unix/proto` is a path dev-dependency (the Linux client's wire types,
+# used by the integration tests). Cargo resolves the whole dependency graph
+# before it builds, so the manifest has to be present even for a release build
+# that never compiles it.
+COPY forseti-unix/proto ./forseti-unix/proto
 RUN cargo build --release --locked
 
 # --- Runtime image.

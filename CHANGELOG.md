@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.20] - 2026-08-01
+
+### Fixed
+- No container image was published for 0.1.18 or 0.1.19
+
 ## [0.1.19] - 2026-08-01
 
 ### Fixed
