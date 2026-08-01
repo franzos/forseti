@@ -236,6 +236,22 @@ pub async fn list_members(db: &DbPool, org_id: &str) -> anyhow::Result<Vec<OrgMe
     list_members_paged(db, org_id, MAX_ROWS_PER_LIST, 0).await
 }
 
+/// The org's owners, whatever the member count. Counted in SQL rather than
+/// filtered out of [`list_members`], which stops at `MAX_ROWS_PER_LIST` — past
+/// that the owners can sit outside the page entirely, and a caller counting
+/// them there reads zero owners in a perfectly healthy org.
+pub async fn list_owners(db: &DbPool, org_id: &str) -> anyhow::Result<Vec<OrgMember>> {
+    let o = org_id.to_string();
+    let rows: Vec<OrgMember> = db_interact!(db, |conn| {
+        organization_members::table
+            .filter(organization_members::org_id.eq(&o))
+            .filter(organization_members::role.eq(super::Role::Owner.as_str()))
+            .select(OrgMember::as_select())
+            .load(conn)
+    })?;
+    Ok(rows)
+}
+
 /// Paginated `list_members`. Orders by `added_at` then `identity_id` so the
 /// page boundary is stable when `added_at` ties.
 pub async fn list_members_paged(

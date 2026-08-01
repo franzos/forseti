@@ -268,13 +268,9 @@ pub(super) async fn members_role(
     // operation (rename, invite, manage roles) and become unrecoverable
     // through the UI.
     if role == Role::Member {
-        let members = orgs::list_members(&state.db, org_id)
+        let owners = orgs::list_owners(&state.db, org_id)
             .await
             .unwrap_or_default();
-        let owners: Vec<_> = members
-            .iter()
-            .filter(|m| crate::orgs::is_owner_role(&m.role))
-            .collect();
         if owners.len() == 1 && owners[0].identity_id == target_identity {
             return (StatusCode::CONFLICT, "cannot demote the last owner").into_response();
         }
@@ -459,13 +455,9 @@ pub(super) async fn members_remove(
         return r;
     }
     // Refuse to remove the last owner: the org would become ungovernable.
-    let members = orgs::list_members(&state.db, org_id)
+    let owners = orgs::list_owners(&state.db, org_id)
         .await
         .unwrap_or_default();
-    let owners: Vec<_> = members
-        .iter()
-        .filter(|m| crate::orgs::is_owner_role(&m.role))
-        .collect();
     if owners.len() == 1 && owners[0].identity_id == target_identity {
         return (StatusCode::CONFLICT, "cannot remove the last owner").into_response();
     }

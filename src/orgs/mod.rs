@@ -28,9 +28,9 @@ use axum::http::HeaderMap;
 pub use db::{
     Membership, Org, OrgInvite, SlugTaken, count_orgs, create_org, delete_org, fetch_invite,
     find_member, insert_invite, is_reserved_slug, list_member_profiles, list_members,
-    list_members_paged, list_memberships, list_memberships_limited, list_org_invites, org_by_id,
-    org_by_slug, remove_member, set_member_hidden, set_member_visibility, slugify, suggest_slug,
-    update_branding, update_role,
+    list_members_paged, list_memberships, list_memberships_limited, list_org_invites, list_owners,
+    org_by_id, org_by_slug, remove_member, set_member_hidden, set_member_visibility, slugify,
+    suggest_slug, update_branding, update_role,
 };
 
 /// Stable PK of the seeded "Default" org. Matches the migration's INSERT.
