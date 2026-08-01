@@ -243,90 +243,90 @@ pub async fn upsert(db: &DbPool, input: ProfileInput<'_>) -> Result<(), SaveErro
         username_lc: username.as_deref().map(username::fold),
         username,
     };
-    let outcome: Result<(), TxError> = db_interact!(db, |conn| {
+    // The username checks (current holder, history tombstone, cooldown) all read
+    // before the upsert writes, so this has to claim the write lock up front.
+    let outcome: Result<(), TxError> = crate::serialized_txn!(db, (), TxError, |conn| {
         use diesel::upsert::excluded;
-        conn.transaction::<(), TxError, _>(|conn| {
-            let old_lc: Option<String> = member_profiles::table
-                .filter(member_profiles::identity_id.eq(&row.identity_id))
-                .select(member_profiles::username_lc)
-                .first::<Option<String>>(conn)
-                .optional()?
-                .flatten();
+        let old_lc: Option<String> = member_profiles::table
+            .filter(member_profiles::identity_id.eq(&row.identity_id))
+            .select(member_profiles::username_lc)
+            .first::<Option<String>>(conn)
+            .optional()?
+            .flatten();
 
-            if old_lc != row.username_lc {
-                if let Some(new_lc) = row.username_lc.as_deref() {
-                    let holder: Option<String> = member_profiles::table
-                        .filter(member_profiles::username_lc.eq(new_lc))
-                        .select(member_profiles::identity_id)
-                        .first::<String>(conn)
-                        .optional()?;
-                    if holder.is_some_and(|h| h != row.identity_id) {
-                        return Err(TxError::Taken);
-                    }
-                    let past: Option<String> = member_username_history::table
-                        .filter(member_username_history::username_lc.eq(new_lc))
-                        .select(member_username_history::identity_id)
-                        .first::<String>(conn)
-                        .optional()?;
-                    if past.is_some_and(|h| h != row.identity_id) {
-                        return Err(TxError::Taken);
-                    }
+        if old_lc != row.username_lc {
+            if let Some(new_lc) = row.username_lc.as_deref() {
+                let holder: Option<String> = member_profiles::table
+                    .filter(member_profiles::username_lc.eq(new_lc))
+                    .select(member_profiles::identity_id)
+                    .first::<String>(conn)
+                    .optional()?;
+                if holder.is_some_and(|h| h != row.identity_id) {
+                    return Err(TxError::Taken);
                 }
-                if let Some(released) = old_lc {
-                    let last: Option<String> = member_username_history::table
-                        .filter(member_username_history::identity_id.eq(&row.identity_id))
-                        .select(member_username_history::released_at)
-                        .order(member_username_history::released_at.desc())
-                        .first::<String>(conn)
-                        .optional()?;
-                    let too_soon = last
-                        .as_deref()
-                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-                        .is_some_and(|t| {
-                            Utc::now().signed_duration_since(t)
-                                < chrono::Duration::days(USERNAME_CHANGE_COOLDOWN_DAYS)
-                        });
-                    if too_soon {
-                        return Err(TxError::Cooldown);
-                    }
-                    // Re-releasing a handle this identity previously held just
-                    // refreshes the tombstone; it's still theirs to reclaim.
-                    diesel::insert_into(member_username_history::table)
-                        .values(&UsernameTombstone {
-                            username_lc: released,
-                            identity_id: row.identity_id.clone(),
-                            released_at: row.updated_at.clone(),
-                        })
-                        .on_conflict(member_username_history::username_lc)
-                        .do_update()
-                        .set(
-                            member_username_history::released_at
-                                .eq(excluded(member_username_history::released_at)),
-                        )
-                        .execute(conn)?;
+                let past: Option<String> = member_username_history::table
+                    .filter(member_username_history::username_lc.eq(new_lc))
+                    .select(member_username_history::identity_id)
+                    .first::<String>(conn)
+                    .optional()?;
+                if past.is_some_and(|h| h != row.identity_id) {
+                    return Err(TxError::Taken);
                 }
             }
+            if let Some(released) = old_lc {
+                let last: Option<String> = member_username_history::table
+                    .filter(member_username_history::identity_id.eq(&row.identity_id))
+                    .select(member_username_history::released_at)
+                    .order(member_username_history::released_at.desc())
+                    .first::<String>(conn)
+                    .optional()?;
+                let too_soon = last
+                    .as_deref()
+                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                    .is_some_and(|t| {
+                        Utc::now().signed_duration_since(t)
+                            < chrono::Duration::days(USERNAME_CHANGE_COOLDOWN_DAYS)
+                    });
+                if too_soon {
+                    return Err(TxError::Cooldown);
+                }
+                // Re-releasing a handle this identity previously held just
+                // refreshes the tombstone; it's still theirs to reclaim.
+                diesel::insert_into(member_username_history::table)
+                    .values(&UsernameTombstone {
+                        username_lc: released,
+                        identity_id: row.identity_id.clone(),
+                        released_at: row.updated_at.clone(),
+                    })
+                    .on_conflict(member_username_history::username_lc)
+                    .do_update()
+                    .set(
+                        member_username_history::released_at
+                            .eq(excluded(member_username_history::released_at)),
+                    )
+                    .execute(conn)?;
+            }
+        }
 
-            // ON CONFLICT DO UPDATE so two concurrent first-saves don't trip
-            // the PK constraint. Supported by both backends (sqlite >= 3.24).
-            diesel::insert_into(member_profiles::table)
-                .values(&row)
-                .on_conflict(member_profiles::identity_id)
-                .do_update()
-                .set((
-                    member_profiles::bio.eq(excluded(member_profiles::bio)),
-                    member_profiles::location.eq(excluded(member_profiles::location)),
-                    member_profiles::pronouns.eq(excluded(member_profiles::pronouns)),
-                    member_profiles::website.eq(excluded(member_profiles::website)),
-                    member_profiles::avatar_url.eq(excluded(member_profiles::avatar_url)),
-                    member_profiles::links_json.eq(excluded(member_profiles::links_json)),
-                    member_profiles::updated_at.eq(excluded(member_profiles::updated_at)),
-                    member_profiles::username.eq(excluded(member_profiles::username)),
-                    member_profiles::username_lc.eq(excluded(member_profiles::username_lc)),
-                ))
-                .execute(conn)?;
-            Ok(())
-        })
+        // ON CONFLICT DO UPDATE so two concurrent first-saves don't trip
+        // the PK constraint. Supported by both backends (sqlite >= 3.24).
+        diesel::insert_into(member_profiles::table)
+            .values(&row)
+            .on_conflict(member_profiles::identity_id)
+            .do_update()
+            .set((
+                member_profiles::bio.eq(excluded(member_profiles::bio)),
+                member_profiles::location.eq(excluded(member_profiles::location)),
+                member_profiles::pronouns.eq(excluded(member_profiles::pronouns)),
+                member_profiles::website.eq(excluded(member_profiles::website)),
+                member_profiles::avatar_url.eq(excluded(member_profiles::avatar_url)),
+                member_profiles::links_json.eq(excluded(member_profiles::links_json)),
+                member_profiles::updated_at.eq(excluded(member_profiles::updated_at)),
+                member_profiles::username.eq(excluded(member_profiles::username)),
+                member_profiles::username_lc.eq(excluded(member_profiles::username_lc)),
+            ))
+            .execute(conn)?;
+        Ok(())
     });
     match outcome {
         Ok(()) => Ok(()),

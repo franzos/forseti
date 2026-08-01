@@ -206,112 +206,98 @@ async fn consume_iat_once(
     let now_str = now.to_rfc3339();
     let window_cutoff = (now - ChronoDuration::hours(24)).to_rfc3339();
 
-    let r: IatConsume = db_interact!(db, |conn| {
-        conn.transaction::<IatConsume, diesel::result::Error, _>(|c| {
-            // Claim the write lock before reading anything. A transaction
-            // that reads first has to upgrade its lock to write later, and
-            // sqlite fails that outright rather than waiting out
-            // `busy_timeout` — it can't block mid-upgrade without risking a
-            // deadlock. Acquiring the lock up front is what `BEGIN
-            // IMMEDIATE` would do; diesel only exposes that on sqlite, so a
-            // no-op write gets us there on both backends. On postgres it
-            // takes the row lock, which this transaction wants anyway.
-            diesel::update(iat::table.filter(iat::id.eq(&id)))
-                .set(iat::daily_use_count.eq(iat::daily_use_count))
-                .execute(c)?;
+    let r: IatConsume = crate::serialized_txn!(db, IatConsume, diesel::result::Error, |c| {
+        // Re-read inside the transaction for committed state, not the
+        // `lookup_iat` snapshot.
+        let current: Option<IatRow> = iat::table
+            .filter(iat::id.eq(&id))
+            .select(IatRow::as_select())
+            .first(c)
+            .optional()?;
+        let Some(current) = current else {
+            return Ok(IatConsume::Exhausted);
+        };
+        if current.revoked_at.is_some() {
+            return Ok(IatConsume::Exhausted);
+        }
+        if let Some(exp) = current.expires_at.as_deref()
+            && exp <= now_str.as_str()
+        {
+            return Ok(IatConsume::Exhausted);
+        }
+        if let Some(rem) = current.uses_remaining
+            && rem <= 0
+        {
+            return Ok(IatConsume::Exhausted);
+        }
 
-            // Re-read inside the transaction for committed state, not the
-            // `lookup_iat` snapshot.
-            let current: Option<IatRow> = iat::table
-                .filter(iat::id.eq(&id))
-                .select(IatRow::as_select())
-                .first(c)
-                .optional()?;
-            let Some(current) = current else {
-                return Ok(IatConsume::Exhausted);
-            };
-            if current.revoked_at.is_some() {
-                return Ok(IatConsume::Exhausted);
+        // Live only if `started_at` is set and within 24h; else reset.
+        let in_window = current
+            .daily_window_started_at
+            .as_deref()
+            .map(|started| started > window_cutoff.as_str())
+            .unwrap_or(false);
+        let observed_window = current.daily_window_started_at.clone();
+
+        let capped = daily_limit > 0;
+        let limit = daily_limit as i32;
+        let new_window = Some(now_str.clone());
+
+        // One predicate covers both: NULL (unlimited) stays NULL under
+        // `- 1` and passes; bounded rows must still have a use left.
+        let not_exhausted = iat::uses_remaining.is_null().or(iat::uses_remaining.gt(0));
+        let dec_uses = iat::uses_remaining.eq(iat::uses_remaining - 1);
+        let base = iat::table.filter(iat::id.eq(&id)).filter(not_exhausted);
+
+        let updated = if in_window {
+            // Skip the UPDATE when already at the cap so the caller
+            // keeps the actual count for the audit row (the predicate
+            // below would match zero rows but lose the count).
+            if capped && current.daily_use_count >= limit {
+                return Ok(IatConsume::DailyLimit {
+                    count: current.daily_use_count,
+                });
             }
-            if let Some(exp) = current.expires_at.as_deref()
-                && exp <= now_str.as_str()
-            {
-                return Ok(IatConsume::Exhausted);
-            }
-            if let Some(rem) = current.uses_remaining
-                && rem <= 0
-            {
-                return Ok(IatConsume::Exhausted);
-            }
-
-            // Live only if `started_at` is set and within 24h; else reset.
-            let in_window = current
-                .daily_window_started_at
-                .as_deref()
-                .map(|started| started > window_cutoff.as_str())
-                .unwrap_or(false);
-            let observed_window = current.daily_window_started_at.clone();
-
-            let capped = daily_limit > 0;
-            let limit = daily_limit as i32;
-            let new_window = Some(now_str.clone());
-
-            // One predicate covers both: NULL (unlimited) stays NULL under
-            // `- 1` and passes; bounded rows must still have a use left.
-            let not_exhausted = iat::uses_remaining.is_null().or(iat::uses_remaining.gt(0));
-            let dec_uses = iat::uses_remaining.eq(iat::uses_remaining - 1);
-            let base = iat::table.filter(iat::id.eq(&id)).filter(not_exhausted);
-
-            let updated = if in_window {
-                // Skip the UPDATE when already at the cap so the caller
-                // keeps the actual count for the audit row (the predicate
-                // below would match zero rows but lose the count).
-                if capped && current.daily_use_count >= limit {
-                    return Ok(IatConsume::DailyLimit {
-                        count: current.daily_use_count,
-                    });
-                }
-                let next_count = current.daily_use_count + 1;
-                let set = (dec_uses, iat::daily_use_count.eq(next_count));
-                if capped {
-                    // `daily_use_count < limit` is the atomicity backstop
-                    // for the READ COMMITTED boundary race.
-                    diesel::update(base.filter(iat::daily_use_count.lt(limit)))
-                        .set(set)
-                        .execute(c)?
-                } else {
-                    diesel::update(base).set(set).execute(c)?
-                }
+            let next_count = current.daily_use_count + 1;
+            let set = (dec_uses, iat::daily_use_count.eq(next_count));
+            if capped {
+                // `daily_use_count < limit` is the atomicity backstop
+                // for the READ COMMITTED boundary race.
+                diesel::update(base.filter(iat::daily_use_count.lt(limit)))
+                    .set(set)
+                    .execute(c)?
             } else {
-                // Gate the reset on the observed prior window so a racer
-                // that already reset isn't clobbered back to `count = 1`.
-                let set = (
-                    dec_uses,
-                    iat::daily_use_count.eq(1),
-                    iat::daily_window_started_at.eq(&new_window),
-                );
-                match observed_window.clone() {
-                    Some(obs) => diesel::update(base.filter(iat::daily_window_started_at.eq(obs)))
-                        .set(set)
-                        .execute(c)?,
-                    None => diesel::update(base.filter(iat::daily_window_started_at.is_null()))
-                        .set(set)
-                        .execute(c)?,
-                }
-            };
-            if updated == 0 {
-                // Either `uses_remaining` hit zero or the daily predicate
-                // rejected us at the boundary. `DailyLimit` only when we
-                // were inside the window at the limit; else `Exhausted`.
-                if in_window && capped && current.daily_use_count + 1 > limit {
-                    return Ok(IatConsume::DailyLimit {
-                        count: current.daily_use_count,
-                    });
-                }
-                return Ok(IatConsume::Exhausted);
+                diesel::update(base).set(set).execute(c)?
             }
-            Ok(IatConsume::Ok)
-        })
+        } else {
+            // Gate the reset on the observed prior window so a racer
+            // that already reset isn't clobbered back to `count = 1`.
+            let set = (
+                dec_uses,
+                iat::daily_use_count.eq(1),
+                iat::daily_window_started_at.eq(&new_window),
+            );
+            match observed_window.clone() {
+                Some(obs) => diesel::update(base.filter(iat::daily_window_started_at.eq(obs)))
+                    .set(set)
+                    .execute(c)?,
+                None => diesel::update(base.filter(iat::daily_window_started_at.is_null()))
+                    .set(set)
+                    .execute(c)?,
+            }
+        };
+        if updated == 0 {
+            // Either `uses_remaining` hit zero or the daily predicate
+            // rejected us at the boundary. `DailyLimit` only when we
+            // were inside the window at the limit; else `Exhausted`.
+            if in_window && capped && current.daily_use_count + 1 > limit {
+                return Ok(IatConsume::DailyLimit {
+                    count: current.daily_use_count,
+                });
+            }
+            return Ok(IatConsume::Exhausted);
+        }
+        Ok(IatConsume::Ok)
     })?;
     Ok(r)
 }

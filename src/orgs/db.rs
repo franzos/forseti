@@ -656,40 +656,6 @@ struct NewMember<'a> {
     added_by: Option<&'a str>,
 }
 
-/// Run `$body` (a `Result<_, diesel::result::Error>` block naming the
-/// connection `$c`) in one serialized transaction. SQLite uses BEGIN IMMEDIATE
-/// so a read-then-write txn grabs the write lock up front (a deferred BEGIN
-/// upgrades reader->writer and returns SQLITE_BUSY immediately, bypassing
-/// busy_timeout); Postgres (MVCC) uses a plain transaction.
-macro_rules! serialized_txn {
-    ($db:expr_2021, $c:ident, $body:block) => {{
-        match $db {
-            DbPool::Sqlite(pool) => {
-                let conn = pool
-                    .get()
-                    .await
-                    .map_err(|e| anyhow::anyhow!("sqlite pool: {e}"))?;
-                conn.interact(move |$c: &mut diesel::sqlite::SqliteConnection| {
-                    $c.immediate_transaction::<_, diesel::result::Error, _>(|$c| $body)
-                })
-                .await
-                .map_err(|e| anyhow::anyhow!("sqlite interact: {e}"))??;
-            }
-            DbPool::Postgres(pool) => {
-                let conn = pool
-                    .get()
-                    .await
-                    .map_err(|e| anyhow::anyhow!("postgres pool: {e}"))?;
-                conn.interact(move |$c: &mut diesel::pg::PgConnection| {
-                    $c.transaction::<_, diesel::result::Error, _>(|$c| $body)
-                })
-                .await
-                .map_err(|e| anyhow::anyhow!("postgres interact: {e}"))??;
-            }
-        }
-    }};
-}
-
 /// Atomically add the non-allowlisted Default floor row: insert Default as
 /// `Member` iff the identity holds zero non-default memberships, checked inside
 /// the same serialized txn (H4 — the count and the insert must not interleave
@@ -700,7 +666,7 @@ macro_rules! serialized_txn {
 pub async fn add_default_floor_member_txn(db: &DbPool, identity_id: &str) -> anyhow::Result<()> {
     let ident = identity_id.to_string();
     let now = Utc::now().to_rfc3339();
-    serialized_txn!(db, c, {
+    crate::serialized_txn!(db, (), diesel::result::Error, |c| {
         let non_default: i64 = organization_members::table
             .filter(organization_members::identity_id.eq(&ident))
             .filter(organization_members::org_id.ne(super::DEFAULT_ORG_ID))
@@ -726,7 +692,7 @@ pub async fn add_default_floor_member_txn(db: &DbPool, identity_id: &str) -> any
             }
         }
         Ok(())
-    });
+    })?;
     Ok(())
 }
 
@@ -747,7 +713,7 @@ pub async fn join_org_race_safe(
     let org = org_id.to_string();
     let role_s = role.as_str();
     let now = Utc::now().to_rfc3339();
-    serialized_txn!(db, c, {
+    crate::serialized_txn!(db, (), diesel::result::Error, |c| {
         match diesel::insert_into(organization_members::table)
             .values(NewMember {
                 org_id: &org,
@@ -774,7 +740,7 @@ pub async fn join_org_race_safe(
             .execute(c)?;
         }
         Ok(())
-    });
+    })?;
     Ok(())
 }
 

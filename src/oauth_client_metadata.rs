@@ -213,15 +213,6 @@ pub async fn insert_admin_verified(
 /// connection types, and a shared helper would need full dual-backend bounds.
 macro_rules! ensure_row_and_prior {
     ($c:expr_2021, $id:expr_2021, $now:expr_2021) => {{
-        // Claim the write lock before reading. Both callers read this row and
-        // then write it, and sqlite refuses to upgrade a read lock to a write
-        // lock mid-transaction rather than waiting out `busy_timeout` — see
-        // `crate::db::is_retryable_tx_error`. Without this a concurrent write
-        // makes the whole transaction fail, and the verify/unverify handlers
-        // log the error and still report success to the admin.
-        diesel::update(ocm::table.filter(ocm::client_id.eq($id)))
-            .set(ocm::verification.eq(ocm::verification))
-            .execute($c)?;
         let existing: Option<Row> = ocm::table
             .filter(ocm::client_id.eq($id))
             .select(Row::as_select())
@@ -267,20 +258,19 @@ pub async fn mark_verified(
     let now = Utc::now().to_rfc3339();
     let id = client_id.to_string();
     let admin = admin_email.to_string();
-    let prior: String = db_interact!(db, |conn| {
-        conn.transaction::<String, diesel::result::Error, _>(|c| {
-            let prior = ensure_row_and_prior!(c, &id, now);
-            diesel::update(ocm::table.filter(ocm::client_id.eq(&id)))
-                .set((
-                    ocm::verification.eq(verification::VERIFIED),
-                    ocm::verified_by.eq(Some(admin.clone())),
-                    ocm::verified_at.eq(Some(now.clone())),
-                    ocm::verification_revoked_by.eq::<Option<String>>(None),
-                    ocm::verification_revoked_at.eq::<Option<String>>(None),
-                ))
-                .execute(c)?;
-            Ok(prior)
-        })
+    // Reads the prior state before writing, so it needs the write lock up front.
+    let prior: String = crate::serialized_txn!(db, String, diesel::result::Error, |c| {
+        let prior = ensure_row_and_prior!(c, &id, now);
+        diesel::update(ocm::table.filter(ocm::client_id.eq(&id)))
+            .set((
+                ocm::verification.eq(verification::VERIFIED),
+                ocm::verified_by.eq(Some(admin.clone())),
+                ocm::verified_at.eq(Some(now.clone())),
+                ocm::verification_revoked_by.eq::<Option<String>>(None),
+                ocm::verification_revoked_at.eq::<Option<String>>(None),
+            ))
+            .execute(c)?;
+        Ok(prior)
     })?;
     Ok(prior)
 }
@@ -301,18 +291,16 @@ pub async fn mark_unverified(
     let now = Utc::now().to_rfc3339();
     let id = client_id.to_string();
     let admin = admin_email.to_string();
-    let prior: String = db_interact!(db, |conn| {
-        conn.transaction::<String, diesel::result::Error, _>(|c| {
-            let prior = ensure_row_and_prior!(c, &id, now);
-            diesel::update(ocm::table.filter(ocm::client_id.eq(&id)))
-                .set((
-                    ocm::verification.eq(verification::UNVERIFIED),
-                    ocm::verification_revoked_by.eq(Some(admin.clone())),
-                    ocm::verification_revoked_at.eq(Some(now.clone())),
-                ))
-                .execute(c)?;
-            Ok(prior)
-        })
+    let prior: String = crate::serialized_txn!(db, String, diesel::result::Error, |c| {
+        let prior = ensure_row_and_prior!(c, &id, now);
+        diesel::update(ocm::table.filter(ocm::client_id.eq(&id)))
+            .set((
+                ocm::verification.eq(verification::UNVERIFIED),
+                ocm::verification_revoked_by.eq(Some(admin.clone())),
+                ocm::verification_revoked_at.eq(Some(now.clone())),
+            ))
+            .execute(c)?;
+        Ok(prior)
     })?;
     Ok(prior)
 }

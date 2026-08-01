@@ -238,6 +238,58 @@ macro_rules! db_interact {
     }};
 }
 
+/// [`db_interact`] for a transaction that reads before it writes.
+///
+/// sqlite's default `BEGIN` is deferred, so such a transaction takes a read
+/// lock and only later tries to upgrade to a write lock. sqlite refuses that
+/// upgrade outright — returning `SQLITE_BUSY` and deliberately ignoring
+/// `busy_timeout`, since blocking mid-upgrade could deadlock two transactions
+/// against each other. `BEGIN IMMEDIATE` claims the write lock up front
+/// instead, which is what `immediate_transaction` issues. Postgres is MVCC and
+/// needs no equivalent, so it gets a plain transaction.
+///
+/// Write-first transactions don't need this and can use [`db_interact`] with a
+/// plain `conn.transaction`. The failure it prevents is easy to miss: the
+/// transaction returns an error that has nothing to do with the data, and any
+/// caller folding errors into a business outcome reports it as one.
+///
+/// ```ignore
+/// let prior: String = serialized_txn!(db, String, diesel::result::Error, |c| {
+///     let prior = read_something(c)?;
+///     diesel::update(t::table).set(...).execute(c)?;
+///     Ok(prior)
+/// })?;
+/// ```
+#[macro_export]
+macro_rules! serialized_txn {
+    ($db:expr_2021, $ok:ty, $err:ty, |$c:ident| $body:block) => {{
+        match &$db {
+            $crate::db::DbPool::Sqlite(pool) => {
+                let conn = pool
+                    .get()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("sqlite pool: {e}"))?;
+                conn.interact(move |$c: &mut diesel::sqlite::SqliteConnection| {
+                    $c.immediate_transaction::<$ok, $err, _>(|$c| $body)
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("sqlite interact: {e}"))?
+            }
+            $crate::db::DbPool::Postgres(pool) => {
+                let conn = pool
+                    .get()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("postgres pool: {e}"))?;
+                conn.interact(move |$c: &mut diesel::pg::PgConnection| {
+                    $c.transaction::<$ok, $err, _>(|$c| $body)
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("postgres interact: {e}"))?
+            }
+        }
+    }};
+}
+
 /// The sqlite file holds secrets (transient secret_reveals payloads, invite
 /// tokens, audit log), so it must not be world-readable. Pre-create the db
 /// file `0600` when missing — sqlite gives `-wal`/`-shm` the same mode as the

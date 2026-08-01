@@ -105,28 +105,28 @@ pub async fn rename_team(db: &DbPool, team_id: &str, name: &str) -> anyhow::Resu
         !sl.is_empty(),
         "team name must contain at least one alphanumeric"
     );
-    // slug is immutable; DB UNIQUE no longer fires on rename, so guard the collision here
-    db_interact!(db, |conn| {
-        conn.transaction::<_, anyhow::Error, _>(|c| {
-            let org_id: String = org_teams::table
-                .filter(org_teams::id.eq(&id))
-                .select(org_teams::org_id)
-                .first(c)?;
-            let clash: i64 = org_teams::table
-                .filter(org_teams::org_id.eq(&org_id))
-                .filter(org_teams::slug.eq(&sl))
-                .filter(org_teams::id.ne(&id))
-                .count()
-                .get_result(c)?;
-            anyhow::ensure!(
-                clash == 0,
-                "another team in this org already uses slug `{sl}`"
-            );
-            diesel::update(org_teams::table.filter(org_teams::id.eq(&id)))
-                .set(org_teams::name.eq(&nm))
-                .execute(c)?;
-            Ok(())
-        })
+    // slug is immutable; DB UNIQUE no longer fires on rename, so guard the
+    // collision here. The guard reads before it writes, so the write lock has
+    // to be claimed up front or a concurrent write fails the whole rename.
+    crate::serialized_txn!(db, (), anyhow::Error, |c| {
+        let org_id: String = org_teams::table
+            .filter(org_teams::id.eq(&id))
+            .select(org_teams::org_id)
+            .first(c)?;
+        let clash: i64 = org_teams::table
+            .filter(org_teams::org_id.eq(&org_id))
+            .filter(org_teams::slug.eq(&sl))
+            .filter(org_teams::id.ne(&id))
+            .count()
+            .get_result(c)?;
+        anyhow::ensure!(
+            clash == 0,
+            "another team in this org already uses slug `{sl}`"
+        );
+        diesel::update(org_teams::table.filter(org_teams::id.eq(&id)))
+            .set(org_teams::name.eq(&nm))
+            .execute(c)?;
+        Ok(())
     })?;
     Ok(())
 }
