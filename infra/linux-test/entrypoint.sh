@@ -26,6 +26,7 @@ fail()  { printf 'FAIL: %s\n' "$*"; exit 1; }
 step "Preparing runtime dirs"
 install -d -o forseti -g forseti -m 0755 /run/forseti
 install -d -o forseti -g forseti -m 0700 /var/cache/forseti
+install -d -o forseti -g forseti -m 0700 /var/lib/forseti
 install -d -o root    -g root    -m 0755 /etc/forseti
 
 # --- render the daemon config from env

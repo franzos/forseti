@@ -12,6 +12,7 @@ KEY_DIR="${SEED_KEY_DIR:-$HERE/.seed-keys}"
 HOST_ID="${HOST_ID:-linux-test-host}"
 IDENTITY_ID="${IDENTITY_ID:-00000000-0000-0000-0000-0000linuxtest}"
 TEST_USER="${TEST_USER:-linuxtester}"
+ORG_ID="${ORG_ID:-00000000-0000-0000-0000-00000linuxorg}"
 KEY_ID="linux-test-key"
 
 if command -v guix >/dev/null 2>&1; then
@@ -27,7 +28,11 @@ DELETE FROM ssh_authorized_keys  WHERE id = '${KEY_ID}' OR identity_id = '${IDEN
 DELETE FROM posix_group_members  WHERE identity_id = '${IDENTITY_ID}';
 DELETE FROM posix_accounts       WHERE identity_id = '${IDENTITY_ID}';
 DELETE FROM posix_groups         WHERE name = '${TEST_USER}' AND kind = 'user';
+DELETE FROM host_allowed_groups  WHERE host_id = '${HOST_ID}';
 DELETE FROM host_enrollments     WHERE id = '${HOST_ID}';
+DELETE FROM host_account_logins  WHERE host_id = '${HOST_ID}' OR identity_id = '${IDENTITY_ID}';
+DELETE FROM organization_members WHERE org_id = '${ORG_ID}';
+DELETE FROM organizations        WHERE id = '${ORG_ID}';
 SQL
   echo "unseed: removed seeded rows from $DB"
 else

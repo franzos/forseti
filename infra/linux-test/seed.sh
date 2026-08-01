@@ -32,6 +32,8 @@ TEST_GID="${TEST_GID:-60002}"
 TEST_HOME="${TEST_HOME:-/home/${TEST_USER}}"
 TEST_SHELL="${TEST_SHELL:-/bin/sh}"
 IDENTITY_ID="${IDENTITY_ID:-00000000-0000-0000-0000-0000linuxtest}"
+ORG_ID="${ORG_ID:-00000000-0000-0000-0000-00000linuxorg}"
+ORG_SLUG="${ORG_SLUG:-linux-test-org}"
 
 [ -f "$DB" ] || { echo "seed: forseti.db not found at $DB" >&2; exit 1; }
 
@@ -59,13 +61,26 @@ SECRET_HASH="$(printf '%s' "$HOST_SECRET" | sha256sum | cut -d' ' -f1)"
 NOW="$(date -u +%Y-%m-%dT%H:%M:%S+00:00)"
 KEY_ID="linux-test-key"
 
-# --- insert the three rows (unscoped host: allowed_gid NULL → resolves by name)
+# --- insert the rows. Whole-org host: no host_allowed_groups rows, so every
+# provisioned member of the host's org resolves.
 SQLITE "$DB" <<SQL
 .timeout 5000
-INSERT OR REPLACE INTO host_enrollments
-  (id, hostname, secret_hash, allowed_gid, force_mfa, created_by, created_at, last_seen_at)
+INSERT OR REPLACE INTO organizations
+  (id, slug, name, created_at, created_by)
 VALUES
-  ('${HOST_ID}', '${HOSTNAME_LABEL}', '${SECRET_HASH}', NULL, 0, 'linux-test-seed', '${NOW}', NULL);
+  ('${ORG_ID}', '${ORG_SLUG}', 'Linux Test Org', '${NOW}', 'linux-test-seed');
+
+INSERT OR REPLACE INTO organization_members
+  (org_id, identity_id, role, added_at, added_by)
+VALUES
+  ('${ORG_ID}', '${IDENTITY_ID}', 'member', '${NOW}', 'linux-test-seed');
+
+INSERT OR REPLACE INTO host_enrollments
+  (id, hostname, secret_hash, org_id, force_mfa, created_by, created_at, last_seen_at)
+VALUES
+  ('${HOST_ID}', '${HOSTNAME_LABEL}', '${SECRET_HASH}', '${ORG_ID}', 0, 'linux-test-seed', '${NOW}', NULL);
+
+DELETE FROM host_allowed_groups WHERE host_id = '${HOST_ID}';
 
 INSERT OR REPLACE INTO posix_accounts
   (identity_id, username, uid, gid, gecos, shell, home_dir, enabled, created_at, updated_at)
@@ -76,9 +91,9 @@ VALUES
 -- Without the group row, glibc's initgroups()/getgrgid for the primary gid
 -- resolves to nothing and sshd's temporarily_use_uid fails with EINVAL.
 INSERT OR REPLACE INTO posix_groups
-  (gid, name, org_id, kind, created_at)
+  (gid, name, kind, created_at)
 VALUES
-  (${TEST_GID}, '${TEST_USER}', NULL, 'user', '${NOW}');
+  (${TEST_GID}, '${TEST_USER}', 'user', '${NOW}');
 
 INSERT OR REPLACE INTO posix_group_members
   (gid, identity_id, added_at)
