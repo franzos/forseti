@@ -100,6 +100,7 @@ async fn provision_accepts_email() {
     let Some(client) = admin_client_or_skip().await else {
         return;
     };
+    require_free_seat();
     let email = unique_email("byemail");
     let id = kratos_admin_create_identity(&email).await;
     let username = format!("byemail{}", chrono::Utc::now().timestamp_millis() % 50_000);
@@ -743,6 +744,26 @@ async fn org_member_removal_revokes_scoped_host_access() {
 /// default (`src/config.rs`).
 const FREE_SEATS: i64 = 25;
 
+/// Fail early, and say why, when the playground has no free seats left.
+///
+/// Every provisioning test needs to be able to create an account, and the seat
+/// cap counts accumulated fixtures from previous runs alongside real ones. Once
+/// the playground drifts over the cap these tests fail somewhere far from the
+/// cause — a re-rendered form, or an empty filler list several steps later —
+/// and read like product bugs. `cleanup()` doesn't run when a test panics, so
+/// the drift is normal, not exceptional.
+fn require_free_seat() {
+    let enabled = count_enabled_posix_accounts();
+    assert!(
+        enabled < FREE_SEATS,
+        "playground has {enabled} enabled posix accounts against a {FREE_SEATS}-seat free \
+         tier, so no provision can succeed and this test cannot set up. Run \
+         `forseti posix-reconcile` to drop accounts whose Kratos identity is already gone. \
+         Leftovers that survive it still have live identities: delete those identities, \
+         then reconcile again."
+    );
+}
+
 /// Drive the POSIX-provisioning admin surface: fill the free-tier seat cap
 /// with bare seeded accounts, assert the NEXT provision over HTTP is
 /// REJECTED with the cap message (no license needed — unlicensed falls back
@@ -764,6 +785,11 @@ async fn admin_posix_seat_cap_enforced_then_happy_path() {
         );
         return;
     };
+
+    // This test seeds the cap full and then frees one of its OWN fillers, so it
+    // has to start under the cap; over it, `seeded` comes out empty and the
+    // failure surfaces as a confusing `pop()` on an empty list.
+    require_free_seat();
 
     // A real Kratos identity for the over-cap and happy-path provisions —
     // the handler verifies the identity exists before touching the seat cap.
