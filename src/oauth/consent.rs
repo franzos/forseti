@@ -275,7 +275,7 @@ pub(crate) async fn oauth_consent(
     )
     .await;
 
-    render(&ConsentTemplate {
+    let mut resp = render(&ConsentTemplate {
         chrome,
         consent_intro: state.cfg.brand.consent_intro.clone(),
         client_name,
@@ -286,7 +286,15 @@ pub(crate) async fn oauth_consent(
         client_id: client_id_lookup.to_string(),
         has_logo,
         known_accounts,
-    })
+    });
+    // Granting consent navigates portal -> Hydra -> this client's redirect_uri,
+    // and `form-action` is enforced across that whole chain. Hydra registered
+    // and validated these URIs; without them the browser blocks the last hop
+    // and the user is left on an apparently inert page.
+    if let Some(uris) = req.client.as_ref().and_then(|c| c.redirect_uris.as_ref()) {
+        crate::app::allow_form_action_to(&mut resp, uris);
+    }
+    resp
 }
 
 #[derive(Debug, Deserialize)]

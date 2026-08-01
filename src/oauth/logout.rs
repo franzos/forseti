@@ -40,15 +40,28 @@ pub(crate) async fn oauth_logout(
 
     // Validate the challenge before rendering: there's no recovery from a
     // confirm-then-submit on a stale challenge.
-    if let Err(e) = ory::hydra::get_logout_request(&state.ory, &challenge).await {
-        tracing::error!(error = ?e, "hydra get_logout_request failed");
-        return Redirect::to("/error").into_response();
-    }
+    let logout_req = match ory::hydra::get_logout_request(&state.ory, &challenge).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!(error = ?e, "hydra get_logout_request failed");
+            return Redirect::to("/error").into_response();
+        }
+    };
 
-    render(&OAuthLogoutConfirmTemplate {
+    let mut resp = render(&OAuthLogoutConfirmTemplate {
         chrome,
         logout_challenge: challenge,
-    })
+    });
+    // Same redirect-chain rule as consent: confirming logout ends at the RP's
+    // registered `post_logout_redirect_uri`, so `form-action` has to allow it.
+    if let Some(uris) = logout_req
+        .client
+        .as_ref()
+        .and_then(|c| c.post_logout_redirect_uris.as_ref())
+    {
+        crate::app::allow_form_action_to(&mut resp, uris);
+    }
+    resp
 }
 
 #[derive(Debug, Deserialize)]

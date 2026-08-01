@@ -229,7 +229,19 @@ pub(crate) async fn run() -> anyhow::Result<()> {
     if state.cfg.saml.is_some() {
         public_app = public_app.merge(crate::saml::router());
     }
-    let form_action = csp_form_action(&state.cfg.kratos.public_url);
+    // Falls back to `[hydra].public_url` the same way the device id_token's
+    // issuer check does, so a deployment where the two match needs no extra config.
+    let hydra_issuer = state
+        .cfg
+        .posix
+        .hydra_issuer
+        .clone()
+        .unwrap_or_else(|| state.cfg.hydra.public_url.clone());
+    let form_action = csp_form_action(
+        &state.cfg.kratos.public_url,
+        &state.cfg.hydra.public_url,
+        &hydra_issuer,
+    );
     let csp_value = axum::http::HeaderValue::from_str(&build_csp(
         &state.cfg.security.frame_ancestors,
         &form_action,
@@ -272,12 +284,14 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         ));
     }
     // `/join/confirm` and `/oauth/consent` must always be unframable (CSRF POST), overriding global config.
-    let csp_strict = axum::http::HeaderValue::from_str(&build_csp("'none'", &form_action))
-        .expect("strict csp reuses the already-validated form-action sources");
+    let csp_sources = CspSources {
+        frame_ancestors: state.cfg.security.frame_ancestors.clone(),
+        form_action,
+    };
     let public_app = public_app
         .layer(TraceLayer::new_for_http())
         .layer(axum::middleware::from_fn_with_state(
-            csp_strict,
+            csp_sources,
             strict_frame_for_sensitive,
         ))
         .with_state(state.clone());
@@ -468,28 +482,101 @@ fn build_csp(frame_ancestors: &str, form_action: &str) -> String {
     )
 }
 
-/// `form-action` sources: `'self'` plus Kratos's public origin, because the login, registration,
-/// recovery, verification and settings forms take their `action` verbatim from the Kratos flow
-/// JSON, which points at Kratos's own origin. Origin only (scheme+host+port); CSP source
-/// expressions with a path would not match the flow's action URL anyway.
-fn csp_form_action(kratos_public_url: &str) -> String {
-    match crate::csrf::url_origin(kratos_public_url) {
-        Some(origin) => format!("'self' {origin}"),
-        None => "'self'".to_string(),
+/// `form-action` sources: `'self'` plus every origin a form POST is legitimately allowed to end
+/// up at.
+///
+/// Kratos, because the login, registration, recovery, verification and settings forms take their
+/// `action` verbatim from the Kratos flow JSON, which points at Kratos's own origin.
+///
+/// Hydra, because `form-action` is enforced across redirects, not just on the form's `action`:
+/// consent, logout and device approval all POST to the portal and answer with a 303 into Hydra.
+/// Leave Hydra out and the browser silently blocks that navigation — the server logs a clean 303
+/// and the user sits on an unchanged page.
+///
+/// Hydra's browser-facing origin is its `urls.self.issuer`, which can differ from
+/// `[hydra].public_url` (a container-reachable hostname vs `localhost`), so both are listed when
+/// they differ. Origin only (scheme+host+port); CSP source expressions with a path would not match
+/// the flow's action URL anyway.
+fn csp_form_action(kratos_public_url: &str, hydra_public_url: &str, hydra_issuer: &str) -> String {
+    let mut sources = vec!["'self'".to_string()];
+    for url in [kratos_public_url, hydra_public_url, hydra_issuer] {
+        if let Some(origin) = crate::csrf::url_origin(url)
+            && !sources.contains(&origin)
+        {
+            sources.push(origin);
+        }
+    }
+    sources.join(" ")
+}
+
+/// Base CSP inputs the response-time middleware needs to rebuild the header for
+/// a single response.
+#[derive(Clone)]
+struct CspSources {
+    frame_ancestors: String,
+    form_action: String,
+}
+
+/// Extra `form-action` origins for one response, attached by a handler that
+/// knows where its form is allowed to end up.
+///
+/// An authorization server can't express this statically: after consent the
+/// browser has to reach the client's registered `redirect_uri`, which differs
+/// per client. Handlers that render such a form attach the origins Hydra
+/// already validated for that client, so the allowlist stays exact instead of
+/// being widened for everyone.
+#[derive(Clone)]
+pub(crate) struct ExtraFormAction(pub(crate) Vec<String>);
+
+/// Attach the distinct origins of `uris` to `resp` as extra `form-action`
+/// sources. Non-absolute or opaque entries are skipped; a client with none
+/// usable simply adds nothing.
+pub(crate) fn allow_form_action_to(resp: &mut Response, uris: &[String]) {
+    let mut origins: Vec<String> = Vec::new();
+    for uri in uris {
+        if let Some(origin) = crate::csrf::url_origin(uri)
+            && !origins.contains(&origin)
+        {
+            origins.push(origin);
+        }
+    }
+    if !origins.is_empty() {
+        resp.extensions_mut().insert(ExtraFormAction(origins));
     }
 }
 
-/// Forces `frame-ancestors 'none'` + `X-Frame-Options: DENY` on sensitive, state-changing pages, overriding global config.
+/// Forces `frame-ancestors 'none'` + `X-Frame-Options: DENY` on sensitive, state-changing pages,
+/// overriding global config, and folds in any per-response [`ExtraFormAction`].
 async fn strict_frame_for_sensitive(
-    State(csp_strict): State<axum::http::HeaderValue>,
+    State(sources): State<CspSources>,
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
     let sensitive = matches!(req.uri().path(), "/join/confirm" | "/oauth/consent");
     let mut resp = next.run(req).await;
+    let extra = resp.extensions().get::<ExtraFormAction>().cloned();
+
+    if sensitive || extra.is_some() {
+        let frame_ancestors = if sensitive {
+            "'none'"
+        } else {
+            sources.frame_ancestors.as_str()
+        };
+        let form_action = match extra {
+            Some(ExtraFormAction(origins)) if !origins.is_empty() => {
+                format!("{} {}", sources.form_action, origins.join(" "))
+            }
+            _ => sources.form_action.clone(),
+        };
+        // A bad origin can only come from client metadata, so drop the addition
+        // rather than the whole header if it won't serialise.
+        if let Ok(v) = axum::http::HeaderValue::from_str(&build_csp(frame_ancestors, &form_action))
+        {
+            resp.headers_mut()
+                .insert(axum::http::header::CONTENT_SECURITY_POLICY, v);
+        }
+    }
     if sensitive {
-        resp.headers_mut()
-            .insert(axum::http::header::CONTENT_SECURITY_POLICY, csp_strict);
         resp.headers_mut().insert(
             axum::http::header::X_FRAME_OPTIONS,
             axum::http::HeaderValue::from_static("DENY"),
@@ -500,7 +587,10 @@ async fn strict_frame_for_sensitive(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_csp, csp_form_action, resolve_cookie_secret, worker_stale_threshold_secs};
+    use super::{
+        ExtraFormAction, allow_form_action_to, build_csp, csp_form_action, resolve_cookie_secret,
+        worker_stale_threshold_secs,
+    };
 
     #[test]
     fn worker_stale_threshold_scales_with_tick_and_floors_at_20() {
@@ -541,6 +631,44 @@ mod tests {
         assert!(csp.contains("form-action 'self'"));
     }
 
+    /// `form-action` is enforced across redirects, so leaving Hydra out silently
+    /// breaks consent, logout and device approval: the POST lands, the server
+    /// answers 303, and the browser refuses to follow it.
+    #[test]
+    fn form_action_allows_hydra_as_well_as_kratos() {
+        let csp = csp_form_action(
+            "http://localhost:4433",
+            "http://localhost:4444",
+            "http://localhost:4444",
+        );
+        assert!(csp.contains("http://localhost:4433"), "kratos: {csp}");
+        assert!(csp.contains("http://localhost:4444"), "hydra: {csp}");
+        // public_url == issuer must not be listed twice.
+        assert_eq!(csp.matches("http://localhost:4444").count(), 1, "{csp}");
+    }
+
+    /// Hydra's browser-facing origin is its issuer, which in the playground is a
+    /// container-reachable hostname while `[hydra].public_url` stays localhost.
+    /// Both have to be allowed.
+    #[test]
+    fn form_action_covers_an_issuer_that_differs_from_public_url() {
+        let csp = csp_form_action(
+            "http://localhost:4433",
+            "http://localhost:4444",
+            "http://host.containers.internal:4444",
+        );
+        assert!(csp.contains("http://localhost:4444"), "{csp}");
+        assert!(
+            csp.contains("http://host.containers.internal:4444"),
+            "{csp}"
+        );
+    }
+
+    #[test]
+    fn form_action_falls_back_to_self_on_unparseable_urls() {
+        assert_eq!(csp_form_action("", "", ""), "'self'");
+    }
+
     #[test]
     fn csp_omits_breaking_directives() {
         let csp = build_csp("'self'", "'self'");
@@ -560,24 +688,59 @@ mod tests {
     fn csp_form_action_allows_self_and_kratos_origin() {
         // Kratos renders its flow forms' action; a bare 'self' would break every login POST.
         assert_eq!(
-            csp_form_action("http://127.0.0.1:4433/"),
+            csp_form_action("http://127.0.0.1:4433/", "", ""),
             "'self' http://127.0.0.1:4433"
         );
         assert_eq!(
-            csp_form_action("https://auth.example.com/self-service/login"),
+            csp_form_action("https://auth.example.com/self-service/login", "", ""),
             "'self' https://auth.example.com"
         );
     }
 
     #[test]
     fn csp_form_action_falls_back_to_self_on_unparseable_kratos_url() {
-        assert_eq!(csp_form_action("not a url"), "'self'");
+        assert_eq!(csp_form_action("not a url", "", ""), "'self'");
     }
 
     #[test]
     fn csp_form_action_lands_in_the_header() {
-        let csp = build_csp("'none'", &csp_form_action("https://auth.example.com"));
+        let csp = build_csp(
+            "'none'",
+            &csp_form_action("https://auth.example.com", "", ""),
+        );
         assert!(csp.contains("form-action 'self' https://auth.example.com"));
         assert!(csp.contains("frame-ancestors 'none'"));
+    }
+
+    /// The per-response hook is what makes an allowlisted `form-action` workable
+    /// for an authorization server: the client's registered redirect URIs are
+    /// only knowable per request.
+    #[test]
+    fn extra_form_action_carries_distinct_client_origins() {
+        let mut resp = axum::response::IntoResponse::into_response("ok");
+        allow_form_action_to(
+            &mut resp,
+            &[
+                "https://app.example.com/cb".to_string(),
+                "https://app.example.com/other".to_string(),
+                "https://other.example.com/cb".to_string(),
+                "not a url".to_string(),
+            ],
+        );
+        let extra = resp
+            .extensions()
+            .get::<ExtraFormAction>()
+            .expect("origins attached");
+        assert_eq!(
+            extra.0,
+            vec!["https://app.example.com", "https://other.example.com"]
+        );
+    }
+
+    #[test]
+    fn extra_form_action_absent_when_no_origin_is_usable() {
+        let mut resp = axum::response::IntoResponse::into_response("ok");
+        allow_form_action_to(&mut resp, &["not a url".to_string()]);
+        assert!(resp.extensions().get::<ExtraFormAction>().is_none());
     }
 }
