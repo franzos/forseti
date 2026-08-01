@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.1.18] - 2026-08-01
+
+### Added
+- Cancel a Linux login that was started for another account
+
+### Security
+- Consent and device approval are bound to the signed-in session
+- Enrolled Linux hosts no longer receive Hydra's device code
+- The Linux PAM OAuth client can no longer be made public
+
+### Fixed
+- Concurrent client registration reported a valid token as spent
+- Last-owner protection failed in organizations above 500 members
+
 ## [0.1.17] - 2026-07-31
 
 ### Added
