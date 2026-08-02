@@ -241,7 +241,7 @@ async fn take_secret_reveal_inner(
 }
 
 fn random_token() -> String {
-    use rand::Rng;
+    use rand::RngExt;
     let bytes: [u8; 16] = rand::rng().random();
     hex::encode(bytes)
 }

@@ -23,10 +23,11 @@ fn now_secs() -> i64 {
 impl Cache {
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent()
-            && !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)
-                    .with_context(|| format!("creating cache dir {}", parent.display()))?;
-            }
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating cache dir {}", parent.display()))?;
+        }
         let conn = Connection::open(path)
             .with_context(|| format!("opening cache db {}", path.display()))?;
         conn.execute_batch(

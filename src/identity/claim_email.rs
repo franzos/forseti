@@ -21,7 +21,7 @@ use axum::Router;
 use axum::extract::{Query, State};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::get;
-use rand::Rng;
+use rand::RngExt;
 use serde::Deserialize;
 
 use crate::admin::actions::{DeleteActor, DeleteReason, delete_identity_audited};
@@ -204,7 +204,7 @@ async fn claim_post(
 /// stored `secret_reveals` row. The confirm POST treats unknown tokens
 /// as expired, so the user-visible UX matches a real-but-stale claim.
 fn decoy_token() -> String {
-    use rand::Rng;
+    use rand::RngExt;
     let bytes: [u8; 16] = rand::rng().random();
     hex::encode(bytes)
 }

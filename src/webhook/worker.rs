@@ -387,7 +387,7 @@ fn aged_out(row_id: &str, created_at: &str, max_age_hours: i64) -> bool {
 
 /// Exponential backoff with ±25% jitter, capped at `cap_secs`.
 fn backoff_seconds(attempt: i32, cap_secs: i64) -> i64 {
-    use rand::Rng;
+    use rand::RngExt;
     // Anything past 30d is operator misconfig — the outbox DEADs rows long
     // before that. Clamping here keeps the f64 jitter math well inside range
     // and stops a zero/negative `cap_secs` from panicking `random_range`.

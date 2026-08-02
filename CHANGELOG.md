@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.21] - 2026-08-02
+
+### Changed
+- All dependencies updated to their latest releases
+
 ## [0.1.20] - 2026-08-01
 
 ### Fixed

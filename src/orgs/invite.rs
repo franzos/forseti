@@ -10,7 +10,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
-use rand::Rng;
+use rand::RngExt;
 use serde::Deserialize;
 
 use crate::audit::{self, AuditCtx, AuditEvent, action, target_kind};

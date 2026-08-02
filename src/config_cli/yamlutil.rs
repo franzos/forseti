@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use rand::Rng;
+use rand::RngExt;
 use rand::distr::Alphanumeric;
 use serde_yaml_ng::{Mapping, Value};
 

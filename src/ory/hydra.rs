@@ -761,7 +761,7 @@ pub async fn signing_keys(clients: &OryClients) -> Result<Vec<JwkSummary>> {
 
 /// Generate a random client secret. 40 alphanumerics is about 238 bits of entropy, well above the OAuth2 spec's recommendation.
 fn generate_client_secret() -> String {
-    use rand::Rng;
+    use rand::RngExt;
     use rand::distr::Alphanumeric;
     rand::rng()
         .sample_iter(&Alphanumeric)

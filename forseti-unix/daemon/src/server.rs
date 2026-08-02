@@ -102,25 +102,28 @@ impl Handler {
         let key = cache_key(&req);
 
         if let Some(k) = &key
-            && let Some(hit) = self.cache.get(k, self.ttl_secs) {
-                return hit;
-            }
+            && let Some(hit) = self.cache.get(k, self.ttl_secs)
+        {
+            return hit;
+        }
 
         match self.fetch_upstream(&req).await {
             Ok(resp) => {
                 if let Some(k) = &key
-                    && let Err(e) = self.cache.put(k, &resp) {
-                        tracing::warn!(error = %e, key = %k, "cache write failed");
-                    }
+                    && let Err(e) = self.cache.put(k, &resp)
+                {
+                    tracing::warn!(error = %e, key = %k, "cache write failed");
+                }
                 resp
             }
             Err(e) => {
                 // Fail-soft: serve an unexpired cache entry if one exists, else "absent".
                 tracing::warn!(error = %e, "upstream request failed");
                 if let Some(k) = &key
-                    && let Some(hit) = self.cache.get(k, self.ttl_secs) {
-                        return hit;
-                    }
+                    && let Some(hit) = self.cache.get(k, self.ttl_secs)
+                {
+                    return hit;
+                }
                 empty_response(&req)
             }
         }
@@ -255,9 +258,10 @@ impl Handler {
                     // offline_max_lifetime tracks the last real login. Best-effort
                     // and a no-op if the user has no provisioned cred yet.
                     if let Some(u) = &state.username
-                        && let Err(e) = self.keystore.set_last_online_auth(u, now_secs()) {
-                            tracing::warn!(error = %e, "stamping last_online_auth failed");
-                        }
+                        && let Err(e) = self.keystore.set_last_online_auth(u, now_secs())
+                    {
+                        tracing::warn!(error = %e, "stamping last_online_auth failed");
+                    }
                     PamResponse::Success
                 }
                 "denied" | "expired" => {

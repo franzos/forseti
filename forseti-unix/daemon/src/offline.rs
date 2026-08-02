@@ -14,7 +14,7 @@
 use anyhow::{Context, Result};
 use argon2::password_hash::PasswordHash;
 use argon2::{Algorithm, Argon2, Params, Version};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use rusqlite::Connection;
 use sha2::Sha256;
 use std::path::Path;
@@ -260,10 +260,11 @@ impl Keystore {
     /// being `forseti-unixd`-owned `0600` (see `check_credentials_dir`).
     pub fn open(path: &Path, lockout_max: u32, max_lifetime_secs: u64) -> Result<Self> {
         if let Some(parent) = path.parent()
-            && !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)
-                    .with_context(|| format!("creating credentials dir {}", parent.display()))?;
-            }
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating credentials dir {}", parent.display()))?;
+        }
         let conn = Connection::open(path)
             .with_context(|| format!("opening credentials db {}", path.display()))?;
         conn.busy_timeout(std::time::Duration::from_secs(5))

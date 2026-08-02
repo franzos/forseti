@@ -5,7 +5,7 @@ use std::os::unix::io::AsRawFd as _;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rand::Rng as _;
+use rand::RngExt as _;
 use sha2::{Digest as _, Sha256};
 
 const BACKUP_RING_SIZE: usize = 3;

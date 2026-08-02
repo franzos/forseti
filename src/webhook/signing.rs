@@ -129,16 +129,16 @@ impl SigningKey {
 fn generate_and_persist(path: &Path) -> anyhow::Result<EdSigningKey> {
     // `ed25519-dalek` 2's `SigningKey::generate` expects a
     // `rand_core::CryptoRngCore` (rand_core 0.6). Forseti pins
-    // `rand = "0.9"` which ships rand_core 0.9 — trait-incompatible.
+    // `rand = "0.10"` which ships rand_core 0.10 — trait-incompatible.
     // Bypass the version mismatch by drawing a 32-byte seed from the OS
     // CSPRNG explicitly and feeding it to `from_bytes`, which is what
     // `generate` does internally anyway.
-    use rand::TryRngCore;
-    use rand::rngs::OsRng;
+    use rand::TryRng;
+    use rand::rngs::SysRng;
     let mut seed = [0u8; 32];
-    OsRng
+    SysRng
         .try_fill_bytes(&mut seed)
-        .map_err(|e| anyhow::anyhow!("draw Ed25519 key seed from OsRng: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("draw Ed25519 key seed from SysRng: {e}"))?;
     let key = EdSigningKey::from_bytes(&seed);
     persist_new_key(path, &key)?;
     Ok(key)

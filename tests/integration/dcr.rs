@@ -155,7 +155,7 @@ async fn post_consent_chase_code(
 /// Compute a PKCE code_verifier + S256 code_challenge pair.
 fn pkce_pair() -> (String, String) {
     use base64::Engine;
-    use rand::Rng;
+    use rand::RngExt;
     let mut buf = [0u8; 32];
     rand::rng().fill(&mut buf);
     let verifier = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(buf);

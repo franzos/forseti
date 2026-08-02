@@ -28,7 +28,7 @@ use axum::response::{IntoResponse, Redirect, Response};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{Duration, Utc};
 use diesel::prelude::*;
-use rand::Rng;
+use rand::RngExt;
 use serde::Deserialize;
 use uuid::Uuid;
 

@@ -2,7 +2,7 @@
 
 use chrono::Utc;
 use diesel::prelude::*;
-use rand::Rng;
+use rand::RngExt;
 use serde::Serialize;
 
 use crate::db::DbPool;

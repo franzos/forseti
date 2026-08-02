@@ -29,7 +29,7 @@ use axum::response::{IntoResponse, Response};
 use axum_extra::extract::cookie::{Cookie, SameSite};
 use hkdf::Hkdf;
 use hmac::{Hmac, KeyInit, Mac};
-use rand::Rng;
+use rand::RngExt;
 use rand::distr::Alphanumeric;
 use serde::de::DeserializeOwned;
 use sha2::Sha256;

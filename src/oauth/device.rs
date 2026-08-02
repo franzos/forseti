@@ -112,7 +112,7 @@ pub async fn ensure_pam_client(ory: &OryClients, posix: &PosixConfig) -> Result<
 
 /// 40 alphanumerics ≈ 238 bits — same shape as Hydra's own client secrets.
 fn generate_secret() -> String {
-    use rand::Rng;
+    use rand::RngExt;
     use rand::distr::Alphanumeric;
     rand::rng()
         .sample_iter(&Alphanumeric)

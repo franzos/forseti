@@ -1504,7 +1504,7 @@ pub fn mint_dcr_iat(uses_remaining: Option<i32>, _daily_limit: Option<i32>) -> S
     // 32 random bytes, base64url-no-pad. Mirrors the format the admin UI
     // uses so the proxy's `sha256(raw_bytes_as_string)` path lines up.
     let mut buf = [0u8; 32];
-    use rand::Rng;
+    use rand::RngExt;
     rand::rng().fill(&mut buf);
     let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(buf);
 

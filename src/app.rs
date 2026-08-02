@@ -439,7 +439,7 @@ fn resolve_cookie_secret(configured: Option<&str>, self_url: &str) -> Arc<[u8]> 
         );
         std::process::exit(1);
     }
-    use rand::Rng;
+    use rand::RngExt;
     let mut bytes = [0u8; 32];
     rand::rng().fill(&mut bytes);
     tracing::warn!(
