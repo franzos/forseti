@@ -132,6 +132,13 @@ pub struct SecurityConfig {
     /// browsers that predate CSP2 frame-ancestors support.
     #[serde(default = "default_true")]
     pub x_frame_options: bool,
+    /// Extra `form-action` origins, for destinations Forseti can't derive.
+    /// Kratos's own origin, Hydra's, each OAuth client's registered redirect
+    /// URIs and the four built-in social providers are already covered; this
+    /// is for a provider added to `kratos.yml` by hand, or a host one of them
+    /// bounces through.
+    #[serde(default)]
+    pub extra_form_action: Vec<String>,
 }
 
 impl Default for SecurityConfig {
@@ -140,6 +147,7 @@ impl Default for SecurityConfig {
             cookie_secret: None,
             frame_ancestors: default_frame_ancestors(),
             x_frame_options: default_true(),
+            extra_form_action: Vec::new(),
         }
     }
 }

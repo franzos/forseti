@@ -97,6 +97,15 @@ pub(crate) async fn registration(
             if prefill_email.is_some() {
                 attach_prefill_clear_cookie(&mut resp, state.cfg.self_.is_https());
             }
+            let return_to = query
+                .return_to
+                .as_deref()
+                .or_else(|| crate::flow_view::flow_return_to(&flow));
+            crate::oauth::allow_form_action_for_authorize_chain(&state, &mut resp, return_to).await;
+            crate::app::allow_form_action_to(
+                &mut resp,
+                &crate::oidc_providers::flow_auth_origins(&flow),
+            );
             resp
         }
         FlowOutcome::Reinit | FlowOutcome::Privileged(_) => {

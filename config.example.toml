@@ -39,6 +39,15 @@ url = "http://localhost:3000"
 # frame_ancestors = "'self'"
 # Also emit `X-Frame-Options: SAMEORIGIN` for older browsers (default true).
 # x_frame_options = true
+#
+# Extra CSP `form-action` origins. Kratos, Hydra, each OAuth client's registered
+# redirect URIs and the four built-in social providers (Google, GitHub,
+# Microsoft, Apple) are already allowed. Add an entry when a sign-in form's POST
+# legitimately ends somewhere else — an upstream provider added to kratos.yml by
+# hand, or a host one of the built-ins bounces through. A missing origin shows up
+# as a sign-in page that never navigates: the server logs a clean 303, the
+# browser drops it.
+# extra_form_action = ["https://idp.example.com"]
 
 [brand]
 name          = "Forseti"

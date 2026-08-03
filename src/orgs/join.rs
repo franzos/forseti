@@ -169,7 +169,7 @@ async fn join_confirm_get(
         return Redirect::to(&redirect_target(&state.cfg, q.return_to.as_deref())).into_response();
     }
 
-    render(&JoinConfirmTemplate {
+    let mut resp = render(&JoinConfirmTemplate {
         chrome: themed_chrome(
             &state,
             &org,
@@ -182,7 +182,10 @@ async fn join_confirm_get(
         return_to: q.return_to.clone().unwrap_or_default(),
         decline_href: decline_target(&state.cfg, q.return_to.as_deref()).unwrap_or_default(),
         client_id: q.client_id.clone().unwrap_or_default(),
-    })
+    });
+    crate::oauth::allow_form_action_for_authorize_chain(&state, &mut resp, q.return_to.as_deref())
+        .await;
+    resp
 }
 
 #[derive(Debug, Deserialize)]

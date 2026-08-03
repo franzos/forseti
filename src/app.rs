@@ -241,6 +241,7 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         &state.cfg.kratos.public_url,
         &state.cfg.hydra.public_url,
         &hydra_issuer,
+        &state.cfg.security.extra_form_action,
     );
     let csp_value = axum::http::HeaderValue::from_str(&build_csp(
         &state.cfg.security.frame_ancestors,
@@ -497,16 +498,40 @@ fn build_csp(frame_ancestors: &str, form_action: &str) -> String {
 /// `[hydra].public_url` (a container-reachable hostname vs `localhost`), so both are listed when
 /// they differ. Origin only (scheme+host+port); CSP source expressions with a path would not match
 /// the flow's action URL anyway.
-fn csp_form_action(kratos_public_url: &str, hydra_public_url: &str, hydra_issuer: &str) -> String {
+fn csp_form_action(
+    kratos_public_url: &str,
+    hydra_public_url: &str,
+    hydra_issuer: &str,
+    extra: &[String],
+) -> String {
     let mut sources = vec!["'self'".to_string()];
-    for url in [kratos_public_url, hydra_public_url, hydra_issuer] {
-        if let Some(origin) = crate::csrf::url_origin(url)
+    for url in [kratos_public_url, hydra_public_url, hydra_issuer]
+        .into_iter()
+        .chain(extra.iter().map(String::as_str))
+    {
+        if let Some(origin) = csp_origin_source(url)
             && !sources.contains(&origin)
         {
             sources.push(origin);
         }
     }
     sources.join(" ")
+}
+
+/// `url`'s origin as a CSP source expression, or `None` if it isn't a plain
+/// `scheme://host[:port]`.
+///
+/// A `;` is legal in a host and survives origin serialization — Hydra accepts
+/// `https://a;sandbox/cb` as a redirect URI — while in a CSP header a `;` ends
+/// the directive. Without this filter, registering that URI appends an
+/// attacker-chosen directive (`sandbox`, say, which neuters the page) to the
+/// header of whichever page allowlists that client.
+fn csp_origin_source(url: &str) -> Option<String> {
+    let origin = crate::csrf::url_origin(url)?;
+    origin
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':' | '/' | '[' | ']'))
+        .then_some(origin)
 }
 
 /// Base CSP inputs the response-time middleware needs to rebuild the header for
@@ -528,19 +553,38 @@ struct CspSources {
 #[derive(Clone)]
 pub(crate) struct ExtraFormAction(pub(crate) Vec<String>);
 
+/// Ceiling on per-response extra origins. A client registers a handful of
+/// redirect URIs in practice; the registration endpoint accepts far more, and
+/// an unbounded list turns into a header big enough for a reverse proxy to
+/// refuse the response.
+const MAX_EXTRA_FORM_ACTION: usize = 16;
+
 /// Attach the distinct origins of `uris` to `resp` as extra `form-action`
-/// sources. Non-absolute or opaque entries are skipped; a client with none
-/// usable simply adds nothing.
+/// sources. Entries that aren't a plain `scheme://host[:port]` are skipped; a
+/// client with none usable simply adds nothing. Additive: a page whose form can
+/// reach both an OAuth client and an upstream IdP calls this once per set.
 pub(crate) fn allow_form_action_to(resp: &mut Response, uris: &[String]) {
-    let mut origins: Vec<String> = Vec::new();
+    let mut origins: Vec<String> = resp
+        .extensions()
+        .get::<ExtraFormAction>()
+        .map(|e| e.0.clone())
+        .unwrap_or_default();
+    let before = origins.len();
     for uri in uris {
-        if let Some(origin) = crate::csrf::url_origin(uri)
+        if origins.len() >= MAX_EXTRA_FORM_ACTION {
+            tracing::debug!(
+                cap = MAX_EXTRA_FORM_ACTION,
+                "form-action: extra origins capped; the rest are not allowlisted"
+            );
+            break;
+        }
+        if let Some(origin) = csp_origin_source(uri)
             && !origins.contains(&origin)
         {
             origins.push(origin);
         }
     }
-    if !origins.is_empty() {
+    if origins.len() > before {
         resp.extensions_mut().insert(ExtraFormAction(origins));
     }
 }
@@ -588,8 +632,8 @@ async fn strict_frame_for_sensitive(
 #[cfg(test)]
 mod tests {
     use super::{
-        ExtraFormAction, allow_form_action_to, build_csp, csp_form_action, resolve_cookie_secret,
-        worker_stale_threshold_secs,
+        ExtraFormAction, MAX_EXTRA_FORM_ACTION, allow_form_action_to, build_csp, csp_form_action,
+        csp_origin_source, resolve_cookie_secret, worker_stale_threshold_secs,
     };
 
     #[test]
@@ -640,6 +684,7 @@ mod tests {
             "http://localhost:4433",
             "http://localhost:4444",
             "http://localhost:4444",
+            &[],
         );
         assert!(csp.contains("http://localhost:4433"), "kratos: {csp}");
         assert!(csp.contains("http://localhost:4444"), "hydra: {csp}");
@@ -656,6 +701,7 @@ mod tests {
             "http://localhost:4433",
             "http://localhost:4444",
             "http://host.containers.internal:4444",
+            &[],
         );
         assert!(csp.contains("http://localhost:4444"), "{csp}");
         assert!(
@@ -664,9 +710,65 @@ mod tests {
         );
     }
 
+    /// Escape hatch for an upstream Forseti can't derive (a provider added to
+    /// kratos.yml by hand, or a host one of the built-ins bounces through).
+    #[test]
+    fn form_action_appends_operator_supplied_origins() {
+        let csp = csp_form_action(
+            "http://localhost:4433",
+            "http://localhost:4444",
+            "http://localhost:4444",
+            &["https://idp.example.com/authorize".to_string()],
+        );
+        assert!(csp.ends_with("https://idp.example.com"), "{csp}");
+    }
+
+    /// A `;` in a host ends the CSP directive, so a redirect URI like
+    /// `https://a;sandbox/cb` — which Hydra accepts — would otherwise append a
+    /// `sandbox` directive to the page that allowlists that client.
+    #[test]
+    fn csp_origin_source_rejects_directive_separators() {
+        assert_eq!(csp_origin_source("https://a;sandbox/cb"), None);
+        assert_eq!(
+            csp_origin_source("https://ok.example.com/cb").as_deref(),
+            Some("https://ok.example.com")
+        );
+        assert_eq!(
+            csp_origin_source("http://[::1]:4444/cb").as_deref(),
+            Some("http://[::1]:4444")
+        );
+        // Opaque origins (custom schemes) carry no host to allow.
+        assert_eq!(csp_origin_source("myapp://cb"), None);
+    }
+
+    #[test]
+    fn form_action_drops_an_origin_carrying_a_separator() {
+        let csp = csp_form_action(
+            "http://localhost:4433",
+            "",
+            "",
+            &["https://a;sandbox".to_string()],
+        );
+        assert!(!csp.contains("sandbox"), "{csp}");
+    }
+
+    #[test]
+    fn extra_form_action_is_capped() {
+        let uris: Vec<String> = (0..40)
+            .map(|i| format!("https://c{i}.example.com/cb"))
+            .collect();
+        let mut resp = axum::response::Response::new(axum::body::Body::empty());
+        allow_form_action_to(&mut resp, &uris);
+        let extra = resp
+            .extensions()
+            .get::<ExtraFormAction>()
+            .expect("extra set");
+        assert_eq!(extra.0.len(), MAX_EXTRA_FORM_ACTION);
+    }
+
     #[test]
     fn form_action_falls_back_to_self_on_unparseable_urls() {
-        assert_eq!(csp_form_action("", "", ""), "'self'");
+        assert_eq!(csp_form_action("", "", "", &[]), "'self'");
     }
 
     #[test]
@@ -688,25 +790,25 @@ mod tests {
     fn csp_form_action_allows_self_and_kratos_origin() {
         // Kratos renders its flow forms' action; a bare 'self' would break every login POST.
         assert_eq!(
-            csp_form_action("http://127.0.0.1:4433/", "", ""),
+            csp_form_action("http://127.0.0.1:4433/", "", "", &[]),
             "'self' http://127.0.0.1:4433"
         );
         assert_eq!(
-            csp_form_action("https://auth.example.com/self-service/login", "", ""),
+            csp_form_action("https://auth.example.com/self-service/login", "", "", &[]),
             "'self' https://auth.example.com"
         );
     }
 
     #[test]
     fn csp_form_action_falls_back_to_self_on_unparseable_kratos_url() {
-        assert_eq!(csp_form_action("not a url", "", ""), "'self'");
+        assert_eq!(csp_form_action("not a url", "", "", &[]), "'self'");
     }
 
     #[test]
     fn csp_form_action_lands_in_the_header() {
         let csp = build_csp(
             "'none'",
-            &csp_form_action("https://auth.example.com", "", ""),
+            &csp_form_action("https://auth.example.com", "", "", &[]),
         );
         assert!(csp.contains("form-action 'self' https://auth.example.com"));
         assert!(csp.contains("frame-ancestors 'none'"));

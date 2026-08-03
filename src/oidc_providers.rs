@@ -17,6 +17,45 @@ pub(crate) fn display_name(provider_id: &str) -> String {
     }
 }
 
+/// Origin the browser lands on when a provider button is submitted. Kratos
+/// owns the upstream endpoints and never surfaces them in the flow, so the
+/// four providers `forseti config oidc enable` supports are pinned here.
+///
+/// Needed because the button is a submit inside the Kratos form: the POST 303s
+/// on to the provider, and `form-action` is enforced across that redirect. An
+/// origin missing here means the browser drops the hop and the user sits on an
+/// unchanged sign-in page. Providers added to `kratos.yml` by hand — and hosts
+/// a provider bounces to (Entra sending a personal account to `login.live.com`,
+/// say) — belong in `[security].extra_form_action`.
+pub(crate) fn auth_origin(provider_id: &str) -> Option<&'static str> {
+    Some(match provider_id {
+        "google" => "https://accounts.google.com",
+        "github" => "https://github.com",
+        "microsoft" => "https://login.microsoftonline.com",
+        "apple" => "https://appleid.apple.com",
+        _ => return None,
+    })
+}
+
+/// Every known provider origin reachable from this flow's OIDC buttons.
+/// Covers sign-in/sign-up (`provider` nodes) and linking an account (`link`),
+/// whose values are raw provider ids. `unlink` is excluded: it resolves at
+/// Kratos and never bounces to the provider.
+pub(crate) fn flow_auth_origins(flow: &serde_json::Value) -> Vec<String> {
+    let mut origins: Vec<String> = Vec::new();
+    for node in crate::flow_view::collect_input_nodes(flow, "oidc") {
+        if !matches!(node.name.as_str(), "provider" | "link") {
+            continue;
+        }
+        if let Some(origin) = auth_origin(&node.value)
+            && !origins.iter().any(|o| o == origin)
+        {
+            origins.push(origin.to_string());
+        }
+    }
+    origins
+}
+
 fn capitalize_first(s: &str) -> String {
     let mut chars = s.chars();
     match chars.next() {
@@ -56,6 +95,30 @@ mod tests {
         assert_eq!(display_name("github"), "GitHub");
         assert_eq!(display_name("google"), "Google");
         assert_eq!(display_name("microsoft"), "Microsoft");
+    }
+
+    #[test]
+    fn flow_auth_origins_maps_provider_buttons() {
+        let flow = serde_json::json!({"ui": {"nodes": [
+            {"group": "default", "type": "input", "attributes": {"name": "csrf_token", "type": "hidden", "value": "x"}},
+            {"group": "oidc", "type": "input", "attributes": {"name": "provider", "type": "submit", "value": "google"}},
+            {"group": "oidc", "type": "input", "attributes": {"name": "provider", "type": "submit", "value": "github"}},
+        ]}});
+        let origins = flow_auth_origins(&flow);
+        assert!(origins.iter().any(|o| o == "https://accounts.google.com"));
+        assert!(origins.iter().any(|o| o == "https://github.com"));
+        assert_eq!(origins.len(), 2);
+    }
+
+    /// The linked-providers page names its nodes `link` / `unlink`, and an
+    /// upstream Forseti can't map contributes nothing rather than a bad source.
+    #[test]
+    fn flow_auth_origins_covers_link_nodes_and_skips_unknown() {
+        let flow = serde_json::json!({"ui": {"nodes": [
+            {"group": "oidc", "type": "input", "attributes": {"name": "link", "type": "submit", "value": "apple"}},
+            {"group": "oidc", "type": "input", "attributes": {"name": "unlink", "type": "submit", "value": "okta"}},
+        ]}});
+        assert_eq!(flow_auth_origins(&flow), vec!["https://appleid.apple.com"]);
     }
 
     #[test]

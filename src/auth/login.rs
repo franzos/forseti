@@ -90,7 +90,21 @@ pub(crate) async fn login(
                 Some(csrf::delete_csrf_cookie(secure)),
             )
         }
-        FlowOutcome::Ready(flow) => render_login(chrome, &flow, query.return_to.as_deref()),
+        FlowOutcome::Ready(flow) => {
+            let mut resp = render_login(chrome, &flow, query.return_to.as_deref());
+            // The step-up render carries no `return_to` in the URL — Kratos
+            // keeps it in the flow — so fall back to the flow's own copy.
+            let return_to = query
+                .return_to
+                .as_deref()
+                .or_else(|| crate::flow_view::flow_return_to(&flow));
+            crate::oauth::allow_form_action_for_authorize_chain(&state, &mut resp, return_to).await;
+            crate::app::allow_form_action_to(
+                &mut resp,
+                &crate::oidc_providers::flow_auth_origins(&flow),
+            );
+            resp
+        }
         FlowOutcome::Reinit | FlowOutcome::Privileged(_) => {
             Redirect::to(&init_url()).into_response()
         }

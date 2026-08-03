@@ -35,6 +35,69 @@ pub(crate) fn default_scope_description(scope: &str) -> Option<&'static str> {
     })
 }
 
+/// Pull Hydra's `login_challenge` out of a flow's `return_to`.
+///
+/// Only from our own `/oauth/login`, which is the sole `return_to` an
+/// in-flight authorize request produces (`oauth_login` builds it from
+/// `[self].url`). `return_to` reaches us as a query parameter, so without that
+/// check any caller could point an unauthenticated page render at Hydra's
+/// admin API with a challenge of their choosing. Relative and absolute values
+/// both parse; a relative one is same-origin by construction.
+pub(crate) fn login_challenge_from_return_to(self_url: &str, return_to: &str) -> Option<String> {
+    const SENTINEL: &str = "http://return-to.invalid";
+    let parsed = url::Url::parse(return_to)
+        .or_else(|_| url::Url::parse(SENTINEL).and_then(|base| base.join(return_to)))
+        .ok()?;
+    if parsed.path() != "/oauth/login" {
+        return None;
+    }
+    let origin = parsed.origin().ascii_serialization();
+    if origin != SENTINEL && Some(origin) != crate::csrf::url_origin(self_url) {
+        return None;
+    }
+    parsed
+        .query_pairs()
+        .find(|(k, _)| k == "login_challenge")
+        .map(|(_, v)| v.into_owned())
+        .filter(|c| !c.is_empty())
+}
+
+/// Allowlist the OAuth client's registered redirect origins as `form-action`
+/// sources on a flow page rendered inside an authorize chain.
+///
+/// Submitting that page's form starts one navigation that runs Kratos ->
+/// `/oauth/login` -> Hydra -> `/oauth/consent` -> Hydra -> the client's
+/// `redirect_uri`, and `form-action` is enforced across every hop. A client
+/// that skips consent never renders the consent page, so this is the only
+/// place its origins can be attached; without them the browser drops the last
+/// redirect and the user sits on the login (or second-factor) page while the
+/// server logs a completed flow.
+pub(crate) async fn allow_form_action_for_authorize_chain(
+    state: &AppState,
+    resp: &mut axum::response::Response,
+    return_to: Option<&str>,
+) {
+    let Some(challenge) =
+        return_to.and_then(|rt| login_challenge_from_return_to(&state.cfg.self_.url, rt))
+    else {
+        return;
+    };
+    match crate::ory::hydra::get_login_request(&state.ory, &challenge).await {
+        Ok(req) => {
+            if let Some(uris) = req.client.redirect_uris.as_ref() {
+                crate::app::allow_form_action_to(resp, uris);
+            }
+        }
+        // Not fatal, and reachable by anyone who puts a junk challenge in a
+        // link, so it stays out of the warn stream: a stale or already-accepted
+        // challenge just means no extra origins, same as before.
+        Err(e) => tracing::debug!(
+            error = ?e,
+            "form-action: hydra login request lookup failed; client redirect origins not allowlisted"
+        ),
+    }
+}
+
 /// Per-IP rate-limit defaults for `POST /oauth2/register`. 10/min guards
 /// bursts, 100/hour slow-drip abuse; a request must satisfy both buckets.
 const DEFAULT_DCR_IP_RATE_PER_MINUTE: u32 = 10;
@@ -143,7 +206,51 @@ fn register_router(oauth_cfg: &OAuthConfig, proxy_cfg: &ProxyConfig) -> Router<A
 
 #[cfg(test)]
 mod tests {
-    use super::default_scope_description;
+    use super::{default_scope_description, login_challenge_from_return_to};
+
+    const SELF_URL: &str = "http://localhost:3000";
+
+    #[test]
+    fn login_challenge_read_from_absolute_and_relative_return_to() {
+        assert_eq!(
+            login_challenge_from_return_to(
+                SELF_URL,
+                "http://localhost:3000/oauth/login?login_challenge=abc"
+            ),
+            Some("abc".to_string())
+        );
+        assert_eq!(
+            login_challenge_from_return_to(SELF_URL, "/oauth/login?login_challenge=abc&lang=en"),
+            Some("abc".to_string())
+        );
+    }
+
+    #[test]
+    fn login_challenge_none_without_one() {
+        assert_eq!(login_challenge_from_return_to(SELF_URL, "/dashboard"), None);
+        assert_eq!(
+            login_challenge_from_return_to(SELF_URL, "/oauth/login?login_challenge="),
+            None
+        );
+        assert_eq!(login_challenge_from_return_to(SELF_URL, ""), None);
+    }
+
+    /// `return_to` is caller-supplied, so only our own `/oauth/login` may drive
+    /// the Hydra admin lookup.
+    #[test]
+    fn login_challenge_ignores_foreign_origin_and_other_paths() {
+        assert_eq!(
+            login_challenge_from_return_to(
+                SELF_URL,
+                "https://evil.example/oauth/login?login_challenge=abc"
+            ),
+            None
+        );
+        assert_eq!(
+            login_challenge_from_return_to(SELF_URL, "/anything?login_challenge=abc"),
+            None
+        );
+    }
 
     #[test]
     fn default_scope_description_covers_standard_scopes() {

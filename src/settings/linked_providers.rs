@@ -218,7 +218,7 @@ async fn render_linked_providers(
     // Linked providers first, then alphabetical for a stable order.
     rows.sort_by(|a, b| (!a.linked, &a.provider_id).cmp(&(!b.linked, &b.provider_id)));
 
-    render(&SettingsLinkedProvidersTemplate {
+    let mut resp = render(&SettingsLinkedProvidersTemplate {
         chrome: PageChrome::from_parts_themed(
             state,
             memberships,
@@ -233,7 +233,10 @@ async fn render_linked_providers(
         hidden_defaults,
         rows,
         referrer_banner,
-    })
+    });
+    // Linking POSTs to Kratos, which 303s on to the provider.
+    crate::app::allow_form_action_to(&mut resp, &crate::oidc_providers::flow_auth_origins(flow));
+    resp
 }
 
 fn credentials_obj(
