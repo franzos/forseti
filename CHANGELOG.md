@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.1.22] - 2026-08-03
+
+### Added
+- `[security].extra_form_action` for sign-in destinations Forseti can't derive
+
+### Security
+- A registered redirect URI could inject a directive into the sign-in page's CSP
+
+### Fixed
+- Sign-in didn't return to the app when consent was skipped
+- Second-factor sign-in stalled on the challenge page
+- Social sign-in buttons never left the sign-in page
+- Linking an upstream provider from settings was blocked the same way
+
 ## [0.1.21] - 2026-08-02
 
 ### Changed
