@@ -415,6 +415,15 @@ pub struct OAuthConfig {
     /// Unknown scopes fall back to the raw scope name.
     #[serde(default)]
     pub scope_descriptions: std::collections::HashMap<String, String>,
+    /// Resource identifiers (RFC 8707 `resource=` on the authorize request)
+    /// Forseti is allowed to bind into the granted access-token audience, and
+    /// to pre-register on DCR clients. Hydra derives the audience from its own
+    /// non-standard `audience=` parameter only, so without this bridge an RFC
+    /// 8707 client is issued `aud: []`; without the allow-list Forseti would
+    /// mint any audience a caller asked for. Compared with the trailing slash
+    /// and any fragment stripped. Empty (the default) disables the bridge.
+    #[serde(default)]
+    pub allowed_resource_audiences: Vec<String>,
     /// DCR `client_name` denylist. Case-insensitive substring match against
     /// the posted `client_name`. Operators replace the list entirely; if
     /// the key is absent from `config.toml`, the code-baked defaults in

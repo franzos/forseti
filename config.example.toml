@@ -113,6 +113,20 @@ support_email = "support@example.com"
 # suspenders to `uses_remaining`: even an "unlimited" token (`uses=NULL`)
 # is capped here. Default 50. Set to 0 to disable.
 #
+# `allowed_resource_audiences` lists the resource identifiers Forseti may
+# bind into an access token's `aud`. Hydra derives the audience from its own
+# non-standard `audience=` parameter and ignores RFC 8707 `resource=`, so an
+# MCP client (which only ever sends `resource=`) receives `aud: []` and is
+# rejected by its resource server forever. With a resource listed here,
+# Forseti merges it into the consent grant and pre-registers it on
+# DCR-created clients (fosite re-checks the audience against the client
+# record on the refresh grant, so registering it is what keeps refreshes
+# working). Unlisted resources are ignored and logged — without the list
+# Forseti would mint any audience a caller asked for. Compared with the
+# trailing slash and any fragment stripped, so `.../mcp` and `.../mcp/` are
+# the same resource. Empty by default: the bridge is off until an operator
+# opts in.
+#
 # `device_verify_ip_rate_per_minute` / `device_verify_ip_rate_per_hour`
 # cap requests to `/oauth/device` (the RFC 8628 verification screen) from
 # a single IP. The screen is already session-gated; these buckets are
@@ -142,6 +156,7 @@ support_email = "support@example.com"
 # dcr_iat_daily_limit    = 50
 # device_verify_ip_rate_per_minute = 20
 # device_verify_ip_rate_per_hour   = 120
+# allowed_resource_audiences = ["https://stackpit.gofranz.com/mcp"]
 # dcr_reserved_names = [
 #   # Own + upstream brands
 #   "ory", "hydra", "kratos",

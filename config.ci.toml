@@ -28,6 +28,8 @@ support_email = "support@example.com"
 dcr_ip_rate_per_minute = 1000
 dcr_ip_rate_per_hour   = 10000
 dcr_iat_daily_limit    = 2
+# Resource the RFC 8707 bridge test binds into the access-token audience.
+allowed_resource_audiences = ["https://mcp.test"]
 
 # The integration suite inits 140+ registration flows from one loopback IP in
 # a few seconds, so the production per-IP 300/hour default would 429 mid-run.

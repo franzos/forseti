@@ -230,10 +230,11 @@ offline        = "Stay signed in by issuing refresh tokens"
 
 ### `[oauth]` — DCR knobs
 
-Per-IP / per-IAT rate limiting on `POST /oauth2/register`, plus the reserved-name denylist. Defaults are set in code; override per-deployment when needed. See [Dynamic Client Registration (RFC 7591)](#dynamic-client-registration-rfc-7591) for the full picture.
+Per-IP / per-IAT rate limiting on `POST /oauth2/register`, plus the reserved-name denylist and the RFC 8707 resource bridge. Defaults are set in code; override per-deployment when needed. See [Dynamic Client Registration (RFC 7591)](#dynamic-client-registration-rfc-7591) for the full picture.
 
 | Key                        | Type     | Default          | Description                                                                                                                                                |
 |----------------------------|----------|------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `allowed_resource_audiences` | string[] | `[]`           | Resource identifiers Forseti may bind into an access token's `aud` when a client requests them with RFC 8707 `resource=`. Unlisted resources are ignored and logged. Empty disables the bridge. See below. |
 | `dcr_require_iat`          | bool     | `false`          | Require a valid initial access token on `POST /oauth2/register`. Left off, anonymous dynamic client registration stays open; turned on, an anonymous request is rejected with `401 invalid_token`. |
 | `dcr_ip_rate_per_minute`   | u32      | `10`             | Per-IP rate limit on `POST /oauth2/register` — max requests per minute. In-memory, per-process. `0` disables this bucket.                                  |
 | `dcr_ip_rate_per_hour`     | u32      | `100`            | Per-IP rate limit — max requests per hour. Enforced in parallel with the per-minute bucket. `0` disables.                                                  |
@@ -241,6 +242,23 @@ Per-IP / per-IAT rate limiting on `POST /oauth2/register`, plus the reserved-nam
 | `dcr_global_rate_per_hour` | u32      | `400`            | Global rate limit, requests per hour, in parallel with the per-minute global bucket. `0` disables.                                                        |
 | `dcr_iat_daily_limit`      | u32      | `50`             | Per-IAT cap on successful registrations over a rolling 24h window opened by first use. `0` disables.                                                       |
 | `dcr_reserved_names`       | string[] | (code-baked set) | DCR `client_name` denylist. Case-insensitive substring match. When the key is absent from `config.toml`, the defaults in `crate::oauth::register::RESERVED_NAMES_DEFAULT` are used; setting the key replaces the list entirely. |
+
+#### RFC 8707 `resource` → access-token audience
+
+OAuth clients that target a specific resource server — every MCP client, for instance — name it with RFC 8707 `resource=<uri>` on the authorize request. Hydra/fosite ignores that parameter entirely: it derives the requested audience only from Hydra's non-standard `audience=` form parameter. A client that does the standard thing therefore receives a token with `aud: []`, and its resource server rejects it forever.
+
+Listing a resource in `allowed_resource_audiences` makes Forseti bridge the gap:
+
+```toml
+[oauth]
+allowed_resource_audiences = ["https://stackpit.gofranz.com/mcp"]
+```
+
+- At consent, any `resource=` value on the authorize URL that matches the list is merged into the granted access-token audience. Values that don't match are dropped with a `tracing::warn!` — the allow-list is what stops Forseti becoming an open audience-minting service for anyone who can reach `/oauth2/auth`.
+- At registration, the same resources are unioned into the `audience` of every client created through `POST /oauth2/register`. fosite re-validates the granted audience against the client record on the **refresh** grant (but not on the initial code exchange), so without the pre-registration a client gets one working access token and then `invalid_request` on every refresh.
+- Comparison strips the trailing slash and any fragment, so `https://host/mcp` and `https://host/mcp/` are one resource. The no-trailing-slash form is what gets granted and registered.
+
+The list is a ceiling, not a grant: an audience only reaches a token when the user consents to a request that actually asked for that resource. Clients using Hydra's `audience=` parameter are unaffected.
 
 Whether the per-IP limiter trusts forwarded-for headers is a single deployment-wide knob: `[proxy] trust_forwarded_for` (see below). The same flag drives the audit middleware (audited client IP) and the handoff + claim-email limiters — the underlying question ("is there a trusted reverse proxy?") doesn't change per-endpoint.
 

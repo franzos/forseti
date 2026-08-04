@@ -161,16 +161,16 @@ pub(crate) async fn oauth_consent(
         {
             return rejected;
         }
-        let requested_org_id = crate::oauth::login::parse_organization_id_param(
-            req.request_url.as_deref().unwrap_or_default(),
-        )
-        .filter(|s| !s.is_empty());
+        let request_url = req.request_url.as_deref().unwrap_or_default();
+        let requested_org_id =
+            crate::oauth::login::parse_organization_id_param(request_url).filter(|s| !s.is_empty());
         return finalize_consent(
             &state,
             &challenge,
             &subject,
             requested_scope,
             requested_audience,
+            request_url,
             false,
             &headers,
             requested_org_id.as_deref(),
@@ -454,6 +454,7 @@ pub(crate) async fn oauth_consent_submit(
         &subject,
         grant_scope,
         requested_audience,
+        &request_url,
         remember,
         &headers,
         requested_org_id.as_deref(),
@@ -626,24 +627,67 @@ async fn switch_account(
 /// `requested_access_token_audience` entry. `None` when neither yields a
 /// value. Not normalised or validated: this is "what we observed".
 fn extract_resource_url(request_url: &str, requested_audience: &[String]) -> Option<String> {
-    // RFC 8707 §2 allows multiple `resource=` values; take the first.
-    if !request_url.is_empty()
-        && let Ok(url) = url::Url::parse(request_url)
-        && let Some(resource) = url
-            .query_pairs()
-            .find(|(k, _)| k == "resource")
-            .map(|(_, v)| v.into_owned())
-    {
-        let trimmed = resource.trim();
-        if !trimmed.is_empty() {
-            return Some(trimmed.to_string());
+    resource_params(request_url).into_iter().next().or_else(|| {
+        requested_audience
+            .iter()
+            .map(|s| s.trim())
+            .find(|s| !s.is_empty())
+            .map(str::to_string)
+    })
+}
+
+/// Every RFC 8707 `resource` value on the original `/oauth2/auth` URL, in the
+/// order the client sent them (§2 permits more than one). Trimmed but
+/// otherwise verbatim — canonicalisation is the caller's business.
+fn resource_params(request_url: &str) -> Vec<String> {
+    let Ok(url) = url::Url::parse(request_url) else {
+        return Vec::new();
+    };
+    url.query_pairs()
+        .filter(|(k, _)| k == "resource")
+        .map(|(_, v)| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .collect()
+}
+
+/// Bridge RFC 8707 to Hydra's audience grant. Hydra/fosite populates
+/// `requested_access_token_audience` from its non-standard `audience=` form
+/// parameter only and ignores `resource=` entirely, so an RFC 8707 client
+/// (every MCP client) would otherwise be issued a token with `aud: []` that its
+/// resource server rejects forever. Only resources the operator listed in
+/// `[oauth].allowed_resource_audiences` are merged in; anything else is dropped
+/// with a warning, because granting a caller-chosen audience would make Forseti
+/// an open audience-minting service.
+fn merge_allowed_resources(
+    mut grant_audience: Vec<String>,
+    request_url: &str,
+    allowed: &[String],
+) -> Vec<String> {
+    if allowed.is_empty() {
+        return grant_audience;
+    }
+    let allowed: Vec<String> = allowed
+        .iter()
+        .filter_map(|a| crate::oauth::canonical_resource(a))
+        .collect();
+    for raw in resource_params(request_url) {
+        let Some(resource) = crate::oauth::canonical_resource(&raw) else {
+            tracing::warn!(resource = %raw, "consent: ignoring unparseable resource parameter");
+            continue;
+        };
+        if !allowed.contains(&resource) {
+            tracing::warn!(
+                resource = %resource,
+                "consent: ignoring resource; not in oauth.allowed_resource_audiences",
+            );
+            continue;
+        }
+        if !grant_audience.contains(&resource) {
+            tracing::info!(resource = %resource, "consent: granting resource audience");
+            grant_audience.push(resource);
         }
     }
-    requested_audience
-        .iter()
-        .map(|s| s.trim())
-        .find(|s| !s.is_empty())
-        .map(str::to_string)
+    grant_audience
 }
 
 /// Rebuild the original `/oauth2/auth` URL forcing `prompt=login` (merged into
@@ -740,6 +784,8 @@ fn resolve_claim_active_org(
 /// accept the consent challenge. Shared by the auto-grant and Allow paths.
 /// `requested_org_id` (the auth request's `organization_id`, if any) pins the
 /// `org`/`groups` claims to that org; see `resolve_claim_active_org`.
+/// `request_url` is the original `/oauth2/auth` URL, the sole carrier of RFC
+/// 8707 `resource=`; the audience bridge lives here so no grant path can miss it.
 // Cohesive consent-finalization inputs; splitting into a struct adds no clarity.
 #[allow(clippy::too_many_arguments)]
 async fn finalize_consent(
@@ -748,11 +794,17 @@ async fn finalize_consent(
     subject: &str,
     grant_scope: Vec<String>,
     grant_audience: Vec<String>,
+    request_url: &str,
     remember: bool,
     headers: &axum::http::HeaderMap,
     requested_org_id: Option<&str>,
     consent_locale: LanguageIdentifier,
 ) -> FinalizeOutcome {
+    let grant_audience = merge_allowed_resources(
+        grant_audience,
+        request_url,
+        &state.cfg.oauth.allowed_resource_audiences,
+    );
     // Fan out identity + org memberships in parallel; the membership fetch
     // is skipped unless the grant scope consumes it.
     let needs_org_claims = grant_scope
@@ -1137,7 +1189,8 @@ fn build_id_token_claims(
 mod tests {
     use super::{
         build_id_token_claims, extract_resource_url, intersect_requested_scope,
-        project_group_slugs, resolve_claim_active_org, subject_is_signed_in, with_prompt_login,
+        merge_allowed_resources, project_group_slugs, resolve_claim_active_org, resource_params,
+        subject_is_signed_in, with_prompt_login,
     };
     use crate::ory;
 
@@ -1329,6 +1382,151 @@ mod tests {
         assert_eq!(
             extract_resource_url(request_url, &[]),
             Some("https://api".to_string())
+        );
+    }
+
+    const MCP: &str = "https://stackpit.gofranz.com/mcp";
+
+    fn auth_url(query: &str) -> String {
+        format!("https://hydra.example.com/oauth2/auth?client_id=x&{query}")
+    }
+
+    fn resource_query(resource: &str) -> String {
+        let encoded: String = url::form_urlencoded::byte_serialize(resource.as_bytes()).collect();
+        format!("resource={encoded}")
+    }
+
+    #[test]
+    fn resource_params_returns_every_value_in_order() {
+        let url = auth_url(&format!(
+            "{}&{}",
+            resource_query("https://a.example/x"),
+            resource_query("https://b.example/y")
+        ));
+        assert_eq!(
+            resource_params(&url),
+            vec![
+                "https://a.example/x".to_string(),
+                "https://b.example/y".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn resource_params_drops_blanks_and_unparseable_urls() {
+        assert!(resource_params(&auth_url("resource=&resource=%20%20")).is_empty());
+        assert!(resource_params("").is_empty());
+        assert!(resource_params("garbage").is_empty());
+    }
+
+    #[test]
+    fn allowed_resource_is_granted_as_audience() {
+        let got = merge_allowed_resources(
+            Vec::new(),
+            &auth_url(&resource_query(MCP)),
+            &[MCP.to_string()],
+        );
+        assert_eq!(got, vec![MCP.to_string()]);
+    }
+
+    #[test]
+    fn unlisted_resource_is_ignored() {
+        let got = merge_allowed_resources(
+            Vec::new(),
+            &auth_url(&resource_query("https://evil.example/mcp")),
+            &[MCP.to_string()],
+        );
+        assert!(
+            got.is_empty(),
+            "attacker-chosen audience must not be minted"
+        );
+    }
+
+    #[test]
+    fn resource_is_ignored_when_no_allow_list_is_configured() {
+        let got = merge_allowed_resources(Vec::new(), &auth_url(&resource_query(MCP)), &[]);
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn multiple_resources_grant_only_the_allowed_ones() {
+        let url = auth_url(&format!(
+            "{}&{}&{}",
+            resource_query(MCP),
+            resource_query("https://evil.example/mcp"),
+            resource_query("https://other.example/api")
+        ));
+        let allowed = vec![MCP.to_string(), "https://other.example/api".to_string()];
+        assert_eq!(
+            merge_allowed_resources(Vec::new(), &url, &allowed),
+            vec![MCP.to_string(), "https://other.example/api".to_string()]
+        );
+    }
+
+    #[test]
+    fn trailing_slash_matches_either_side_and_grants_the_bare_form() {
+        // Client sends the slash, operator configured it without.
+        assert_eq!(
+            merge_allowed_resources(
+                Vec::new(),
+                &auth_url(&resource_query("https://stackpit.gofranz.com/mcp/")),
+                &[MCP.to_string()]
+            ),
+            vec![MCP.to_string()]
+        );
+        // ...and the other way round.
+        assert_eq!(
+            merge_allowed_resources(
+                Vec::new(),
+                &auth_url(&resource_query(MCP)),
+                &["https://stackpit.gofranz.com/mcp/".to_string()]
+            ),
+            vec![MCP.to_string()]
+        );
+    }
+
+    #[test]
+    fn hydra_audience_param_path_is_unchanged() {
+        // Stackpit's web SSO uses Hydra's non-standard `audience=`, which
+        // arrives as `requested_access_token_audience`. No `resource=` in play.
+        let requested = vec!["https://stackpit.gofranz.com".to_string()];
+        assert_eq!(
+            merge_allowed_resources(requested.clone(), &auth_url("scope=openid"), &[]),
+            requested
+        );
+        assert_eq!(
+            merge_allowed_resources(
+                requested.clone(),
+                &auth_url("scope=openid"),
+                &[MCP.to_string()]
+            ),
+            requested
+        );
+    }
+
+    #[test]
+    fn resource_is_appended_to_an_existing_audience_grant() {
+        let requested = vec!["https://stackpit.gofranz.com".to_string()];
+        assert_eq!(
+            merge_allowed_resources(
+                requested,
+                &auth_url(&resource_query(MCP)),
+                &[MCP.to_string()]
+            ),
+            vec!["https://stackpit.gofranz.com".to_string(), MCP.to_string()]
+        );
+    }
+
+    #[test]
+    fn repeated_resource_is_granted_once() {
+        let url = auth_url(&format!(
+            "{}&{}",
+            resource_query(MCP),
+            resource_query("https://stackpit.gofranz.com/mcp/")
+        ));
+        assert_eq!(
+            merge_allowed_resources(Vec::new(), &url, &[MCP.to_string()]),
+            vec![MCP.to_string()]
         );
     }
 

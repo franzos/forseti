@@ -10,6 +10,7 @@ use serde_json::json;
 
 use crate::audit::{self, AuditCtx, AuditEvent, action};
 use crate::audit_metadata;
+use crate::oauth::canonical_resource;
 use crate::oauth_client_metadata;
 use crate::state::AppState;
 
@@ -146,6 +147,8 @@ pub(crate) async fn register(
         })
         .filter(|v| !v.is_empty())
         .map(|v| v.join(" "));
+
+    inject_allowed_resource_audiences(&mut payload, &state.cfg.oauth.allowed_resource_audiences);
 
     let posted_name_raw = payload
         .get("client_name")
@@ -426,6 +429,34 @@ fn strip_forseti_metadata(payload: &mut serde_json::Value) {
     metadata_obj.remove("forseti");
 }
 
+/// Union `[oauth].allowed_resource_audiences` into the client record Hydra
+/// stores, so the consent-time RFC 8707 bridge survives the refresh grant:
+/// fosite re-validates the granted audience against the client's registered
+/// `audience` there (but not on the code exchange), which otherwise hands a
+/// client one working access token and then permanent refresh failures.
+/// The list is a ceiling, not a grant — an audience still only lands in a token
+/// when the user consents to a request that asked for that resource.
+fn inject_allowed_resource_audiences(payload: &mut serde_json::Value, allowed: &[String]) {
+    if allowed.is_empty() {
+        return;
+    }
+    let Some(obj) = payload.as_object_mut() else {
+        return;
+    };
+    let mut audience: Vec<serde_json::Value> = obj
+        .get("audience")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    for entry in allowed.iter().filter_map(|a| canonical_resource(a)) {
+        let entry = serde_json::Value::String(entry);
+        if !audience.contains(&entry) {
+            audience.push(entry);
+        }
+    }
+    obj.insert("audience".to_string(), serde_json::Value::Array(audience));
+}
+
 /// Realm advertised in `WWW-Authenticate: Bearer` on 401s. Stable so a client
 /// keying per-realm token storage can rely on it (RFC 6750 §3).
 const DCR_BEARER_REALM: &str = "forseti-dcr";
@@ -516,4 +547,60 @@ async fn resolve_dcr_target_org(
     )
     .map(|m| m.org_id)
     .unwrap_or_else(|| crate::orgs::DEFAULT_ORG_ID.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{inject_allowed_resource_audiences, strip_forseti_metadata};
+    use serde_json::json;
+
+    const MCP: &str = "https://stackpit.gofranz.com/mcp";
+
+    #[test]
+    fn allowed_resource_audiences_are_registered_on_the_client() {
+        let mut payload = json!({"client_name": "mcp client"});
+        inject_allowed_resource_audiences(&mut payload, &[MCP.to_string()]);
+        assert_eq!(payload["audience"], json!([MCP]));
+    }
+
+    #[test]
+    fn registered_audiences_are_canonicalised() {
+        let mut payload = json!({});
+        inject_allowed_resource_audiences(
+            &mut payload,
+            &["https://stackpit.gofranz.com/mcp/".to_string()],
+        );
+        assert_eq!(payload["audience"], json!([MCP]));
+    }
+
+    #[test]
+    fn posted_audience_is_preserved_and_not_duplicated() {
+        let mut payload = json!({"audience": ["https://other.example/api", MCP]});
+        inject_allowed_resource_audiences(&mut payload, &[MCP.to_string()]);
+        assert_eq!(
+            payload["audience"],
+            json!(["https://other.example/api", MCP])
+        );
+    }
+
+    #[test]
+    fn empty_allow_list_leaves_the_payload_untouched() {
+        let mut payload = json!({"client_name": "x"});
+        inject_allowed_resource_audiences(&mut payload, &[]);
+        assert_eq!(payload, json!({"client_name": "x"}));
+    }
+
+    #[test]
+    fn unparseable_allow_list_entries_are_dropped() {
+        let mut payload = json!({});
+        inject_allowed_resource_audiences(&mut payload, &["not a uri".to_string()]);
+        assert_eq!(payload["audience"], json!([]));
+    }
+
+    #[test]
+    fn forseti_metadata_is_stripped_from_the_forwarded_payload() {
+        let mut payload = json!({"metadata": {"forseti": {"is_verified": true}, "other": 1}});
+        strip_forseti_metadata(&mut payload);
+        assert_eq!(payload, json!({"metadata": {"other": 1}}));
+    }
 }

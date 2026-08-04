@@ -345,6 +345,250 @@ async fn dcr_golden_path_end_to_end() {
     user.cleanup().await;
 }
 
+/// RFC 8707: a client that names its resource server with `resource=` instead
+/// of Hydra's non-standard `audience=` must still get an audience-bound token.
+/// Hydra/fosite ignores `resource=` entirely, so without Forseti's bridge the
+/// token carries `aud: []` and the resource server rejects it forever.
+///
+/// Also pins the two halves that are easy to get wrong:
+/// - the trailing slash is canonicalised away (`https://mcp.test/` sent,
+///   `https://mcp.test` granted), so the resource server's exact `aud` match holds;
+/// - the **refresh** grant still works. fosite re-validates the granted audience
+///   against the client record there but not on the code exchange, so a client
+///   without the audience pre-registered gets one good token and then fails
+///   every refresh — which is why the DCR proxy registers it.
+///
+/// Requires `[oauth] allowed_resource_audiences = ["https://mcp.test"]`.
+#[tokio::test]
+async fn dcr_rfc_8707_resource_binds_access_token_audience() {
+    assert!(portal_reachable().await);
+
+    let resource = "https://mcp.test";
+    let redirect_uri = "http://127.0.0.1:5555/callback";
+    let scope = "openid offline";
+
+    // No `audience` in the DCR body: the proxy must pre-register the
+    // allow-listed resource on its own, or the refresh below breaks.
+    let (status, _hdrs, body) = dcr_register_anonymous(
+        "integration-test-dcr-resource-bridge",
+        scope,
+        &[redirect_uri],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "DCR register status: {body}");
+    let client_id = body["client_id"]
+        .as_str()
+        .expect("client_id in DCR response")
+        .to_string();
+
+    mark_client_verified(&client_id);
+    let user = register_test_user("dcr-resource").await;
+
+    let (verifier, challenge) = pkce_pair();
+    let state = format!(
+        "dcr-{}",
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+    );
+    // Trailing slash on the wire; the granted audience must come back without it.
+    let auth_url = format!(
+        "{HYDRA_PUBLIC}/oauth2/auth?client_id={client_id}\
+         &response_type=code\
+         &scope={scope}\
+         &redirect_uri={redirect_uri}\
+         &state={state}\
+         &resource={}\
+         &code_challenge={challenge}\
+         &code_challenge_method=S256",
+        form_urlencode("https://mcp.test/")
+    );
+    let res = user.client.get(&auth_url).send().await.expect("auth-chain");
+    let final_url = res.url().to_string();
+    assert!(
+        final_url.contains("/oauth/consent"),
+        "auth chain must land on consent screen; got {final_url}"
+    );
+    let consent_html = res.text().await.expect("consent body");
+    let csrf = extract_input_value(&consent_html, "_csrf").expect("csrf in consent form");
+    let consent_challenge = extract_input_value(&consent_html, "consent_challenge")
+        .expect("consent_challenge hidden input");
+    let code = post_consent_chase_code(
+        &user.manual_client,
+        &csrf,
+        &consent_challenge,
+        &["openid", "offline"],
+    )
+    .await
+    .expect("authorization code on callback URL");
+
+    let token_client = browser_client();
+    let res = token_client
+        .post(format!("{HYDRA_PUBLIC}/oauth2/token"))
+        .form(&[
+            ("grant_type", "authorization_code"),
+            ("client_id", client_id.as_str()),
+            ("redirect_uri", redirect_uri),
+            ("code", code.as_str()),
+            ("code_verifier", verifier.as_str()),
+        ])
+        .send()
+        .await
+        .expect("token exchange transport");
+    assert!(
+        res.status().is_success(),
+        "token exchange: status {} body {}",
+        res.status(),
+        res.text().await.unwrap_or_default()
+    );
+    let token: serde_json::Value = res.json().await.expect("token body");
+    let access_token = token["access_token"]
+        .as_str()
+        .expect("access_token")
+        .to_string();
+    let refresh_token = token["refresh_token"]
+        .as_str()
+        .expect("refresh_token")
+        .to_string();
+
+    let mcp = spawn_fake_mcp_server(resource).await;
+    let res = token_client
+        .get(mcp.tool_url())
+        .bearer_auth(&access_token)
+        .send()
+        .await
+        .expect("fake mcp transport");
+    assert_eq!(
+        res.status(),
+        StatusCode::OK,
+        "resource server must accept a token bound by `resource=`; body: {}",
+        res.text().await.unwrap_or_default()
+    );
+
+    let res = token_client
+        .post(format!("{HYDRA_PUBLIC}/oauth2/token"))
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("client_id", client_id.as_str()),
+            ("refresh_token", refresh_token.as_str()),
+        ])
+        .send()
+        .await
+        .expect("refresh transport");
+    assert!(
+        res.status().is_success(),
+        "refresh must keep the granted audience; status {} body {}",
+        res.status(),
+        res.text().await.unwrap_or_default()
+    );
+    let refreshed: serde_json::Value = res.json().await.expect("refresh body");
+    let refreshed_access = refreshed["access_token"]
+        .as_str()
+        .expect("refreshed access_token")
+        .to_string();
+    let res = token_client
+        .get(mcp.tool_url())
+        .bearer_auth(&refreshed_access)
+        .send()
+        .await
+        .expect("fake mcp transport after refresh");
+    assert_eq!(
+        res.status(),
+        StatusCode::OK,
+        "refreshed token must still carry the resource audience; body: {}",
+        res.text().await.unwrap_or_default()
+    );
+
+    mcp.stop().await;
+    cleanup_dcr_client(&client_id).await;
+    user.cleanup().await;
+}
+
+/// An unlisted `resource=` must not reach the token: Forseti would otherwise
+/// mint any audience a caller asked for.
+#[tokio::test]
+async fn dcr_unlisted_resource_is_not_granted_as_audience() {
+    assert!(portal_reachable().await);
+
+    let redirect_uri = "http://127.0.0.1:5555/callback";
+    let scope = "openid";
+
+    let (status, _hdrs, body) = dcr_register_anonymous(
+        "integration-test-dcr-resource-unlisted",
+        scope,
+        &[redirect_uri],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "DCR register status: {body}");
+    let client_id = body["client_id"]
+        .as_str()
+        .expect("client_id in DCR response")
+        .to_string();
+
+    mark_client_verified(&client_id);
+    let user = register_test_user("dcr-resource-bad").await;
+
+    let (verifier, challenge) = pkce_pair();
+    let state = format!(
+        "dcr-{}",
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+    );
+    let auth_url = format!(
+        "{HYDRA_PUBLIC}/oauth2/auth?client_id={client_id}\
+         &response_type=code\
+         &scope={scope}\
+         &redirect_uri={redirect_uri}\
+         &state={state}\
+         &resource={}\
+         &code_challenge={challenge}\
+         &code_challenge_method=S256",
+        form_urlencode("https://evil.test/mcp")
+    );
+    let res = user.client.get(&auth_url).send().await.expect("auth-chain");
+    let consent_html = res.text().await.expect("consent body");
+    let csrf = extract_input_value(&consent_html, "_csrf").expect("csrf in consent form");
+    let consent_challenge = extract_input_value(&consent_html, "consent_challenge")
+        .expect("consent_challenge hidden input");
+    let code = post_consent_chase_code(&user.manual_client, &csrf, &consent_challenge, &["openid"])
+        .await
+        .expect("authorization code on callback URL");
+
+    let token_client = browser_client();
+    let token: serde_json::Value = token_client
+        .post(format!("{HYDRA_PUBLIC}/oauth2/token"))
+        .form(&[
+            ("grant_type", "authorization_code"),
+            ("client_id", client_id.as_str()),
+            ("redirect_uri", redirect_uri),
+            ("code", code.as_str()),
+            ("code_verifier", verifier.as_str()),
+        ])
+        .send()
+        .await
+        .expect("token exchange transport")
+        .json()
+        .await
+        .expect("token body");
+    let access_token = token["access_token"].as_str().expect("access_token");
+
+    let mcp = spawn_fake_mcp_server("https://evil.test/mcp").await;
+    let res = token_client
+        .get(mcp.tool_url())
+        .bearer_auth(access_token)
+        .send()
+        .await
+        .expect("fake mcp transport");
+    assert_eq!(
+        res.status(),
+        StatusCode::UNAUTHORIZED,
+        "an unlisted resource must never be minted into `aud`"
+    );
+
+    mcp.stop().await;
+    cleanup_dcr_client(&client_id).await;
+    user.cleanup().await;
+}
+
 /// Garbage IAT → 401 with the RFC 6750 `WWW-Authenticate` header.
 #[tokio::test]
 async fn dcr_register_with_bad_iat_returns_401_with_www_authenticate() {

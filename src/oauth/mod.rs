@@ -62,6 +62,18 @@ pub(crate) fn login_challenge_from_return_to(self_url: &str, return_to: &str) ->
         .filter(|c| !c.is_empty())
 }
 
+/// Canonical form of an RFC 8707 resource identifier, used both to match
+/// against `[oauth].allowed_resource_audiences` and as the value actually
+/// granted or registered. Absolute URIs only; the fragment is dropped (RFC 8707
+/// §2 forbids it) and the trailing slash is trimmed, so `https://host/mcp/` and
+/// `https://host/mcp` are one resource. `None` when the input isn't a URI.
+pub(crate) fn canonical_resource(raw: &str) -> Option<String> {
+    let mut url = url::Url::parse(raw.trim()).ok()?;
+    url.set_fragment(None);
+    let canonical = url.as_str().trim_end_matches('/');
+    (!canonical.is_empty()).then(|| canonical.to_string())
+}
+
 /// Allowlist the OAuth client's registered redirect origins as `form-action`
 /// sources on a flow page rendered inside an authorize chain.
 ///
@@ -206,7 +218,7 @@ fn register_router(oauth_cfg: &OAuthConfig, proxy_cfg: &ProxyConfig) -> Router<A
 
 #[cfg(test)]
 mod tests {
-    use super::{default_scope_description, login_challenge_from_return_to};
+    use super::{canonical_resource, default_scope_description, login_challenge_from_return_to};
 
     const SELF_URL: &str = "http://localhost:3000";
 
@@ -275,5 +287,47 @@ mod tests {
     #[test]
     fn default_scope_description_none_for_custom() {
         assert!(default_scope_description("custom:thing").is_none());
+    }
+
+    #[test]
+    fn canonical_resource_collapses_trailing_slash() {
+        let expected = Some("https://stackpit.gofranz.com/mcp".to_string());
+        assert_eq!(
+            canonical_resource("https://stackpit.gofranz.com/mcp"),
+            expected
+        );
+        assert_eq!(
+            canonical_resource("https://stackpit.gofranz.com/mcp/"),
+            expected
+        );
+        assert_eq!(
+            canonical_resource("  https://stackpit.gofranz.com/mcp/  "),
+            expected
+        );
+    }
+
+    #[test]
+    fn canonical_resource_drops_fragment() {
+        assert_eq!(
+            canonical_resource("https://api.example/mcp#frag"),
+            Some("https://api.example/mcp".to_string())
+        );
+    }
+
+    #[test]
+    fn canonical_resource_rejects_non_absolute() {
+        assert_eq!(canonical_resource("/mcp"), None);
+        assert_eq!(canonical_resource(""), None);
+        assert_eq!(canonical_resource("not a uri"), None);
+    }
+
+    #[test]
+    fn canonical_resource_preserves_case_sensitive_path() {
+        // Host normalises to lowercase, the path must not: resource servers
+        // compare `aud` byte-for-byte.
+        assert_eq!(
+            canonical_resource("https://Example.COM/MCP"),
+            Some("https://example.com/MCP".to_string())
+        );
     }
 }
