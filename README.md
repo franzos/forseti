@@ -31,14 +31,29 @@ Because it's backed by software the giants scale with — OpenAI self-hosts Ory 
 | --- | --- |
 | 🔐 **Every Kratos flow, server-rendered** | Login, registration, recovery, verification, and the full settings hub — profile, password, MFA/TOTP, passkeys, social logins, active sessions. |
 | 🪪 **OAuth2 / OIDC bridge** | Login, consent, and logout screens for Hydra's authorization-code flow — turn Forseti into a drop-in OIDC provider for your own apps. |
+| 🤖 **MCP authorization** | Authorize your Model Context Protocol servers off the same stack. Claude Code, Claude Desktop and claude.ai onboard themselves over CIMD — no registration endpoint, nothing to set up per connection — and one registry row decides which audiences consent can mint. [How it works ↓](#authorizing-mcp-servers) |
 | 🧩 **40+ app templates** | One-click, pre-filled OAuth2 client setup for popular self-hosted apps (GitLab, Nextcloud, Vaultwarden, Grafana, Immich, …) — redirect URIs and per-app OIDC quirks already filled in. [Full list →](docs/operator-guide.md#app-templates) |
-| 🛠️ **Admin console** | Manage identities, sessions, and OAuth2 clients; append-only audit log; live status dashboard; dynamic-client-registration tokens. |
+| 🛠️ **Admin console** | Manage identities, sessions, and OAuth2 clients; a resource registry for the audiences consent may grant; append-only audit log; live status dashboard. |
 | 🏢 **Organizations** | Multi-tenant orgs with members, invites, per-org theming (brand colours, a preset, and an uploaded logo — the authenticated app is white-labelled by the active org), and per-org OIDC claims. Each org runs **internal** (invite-only) or **external** — a public self-serve signup page at `/o/{slug}` — plus optional email-domain auto-join for workforce orgs. |
 | 📊 **Observability** *(licensed)* | Prometheus `/metrics` on the internal listener, token-gated: HTTP request counts and latency plus a couple of bridged operational gauges. [Setup →](docs/commercial/observability.md) |
 | 🐧 **Linux host auth** *(preview)* | Back your Linux logins off the identity store: NSS `passwd`/`group` + per-user SSH-key distribution, interactive `ssh`/console login via the OAuth Device Authorization Grant (RFC 8628), and offline passphrase login when the server's unreachable. [Setup →](docs/operator-guide.md#linux-authentication) |
 | 🌍 **Nine languages** | UI translated into English, German, French, Spanish, Italian, Portuguese, Russian, Thai, and Arabic (RTL-aware), including Kratos's own error messages. A footer switcher sets the language; otherwise it follows the browser's `Accept-Language`. |
 | 🌗 **Light & dark** | A built-in theme toggle (light / dark / follow-system) across every page. |
-| 🛡️ **Production-minded** | CSRF on every form, signed cookies, rate-limited DCR, and an account-deletion webhook saga with retries. |
+| 🛡️ **Production-minded** | CSRF on every form, signed cookies, rate-limited public endpoints, and an account-deletion webhook saga with retries. |
+
+## Authorizing MCP servers
+
+The MCP 2025-06-18 spec is OAuth 2.1 + OIDC, so Hydra fits. What it's missing is CIMD ([ory/hydra#4061](https://github.com/ory/hydra/issues/4061)) and RFC 8707 `resource=`, which it ignores entirely. Forseti fills both gaps:
+
+- **Clients onboard themselves.** Under CIMD the `client_id` *is* an HTTPS URL pointing at a metadata document the client's vendor hosts. Forseti's `/oauth2/authorize` shim fetches it (https only, public IPs, no redirects, 5 s timeout, 64 KiB cap), validates it, upserts the Hydra client and forwards into Hydra. Someone runs `claude mcp add yourapp https://mcp.yourapp.com/mcp --transport http`, signs in, and it works. RFC 7591 Dynamic Client Registration is retired: no `registration_endpoint` anywhere.
+- **You decide which audiences exist.** One row at `/admin/resources` naming your canonical resource URI lets consent bind it into an access token's `aud`. Default deny: an unregistered resource comes back `aud: []`, and a CIMD document can't mint itself an audience. Effective on the next consent, no restart.
+- **Discovery says so.** Forseti serves the RFC 8414 path-insertion documents with `client_id_metadata_document_supported: true` and the shim's `authorization_endpoint`, cross-origin, because claude.ai reads them from the browser.
+
+A CIMD client's consent screen leads with the **host** of its metadata URL (`claude.ai`) — the part whoever runs it provably controls — with the self-asserted name on a second line. No verified badge, no auto-grant; the screen renders every time.
+
+Your side is two endpoints and a header: an RFC 9728 metadata document, `WWW-Authenticate` on the 401, and local JWT validation against Hydra's JWKS.
+
+Two limits: tokens are bearer-only, no DPoP yet, and clients that speak only DCR — Cursor, as of mid-2026 — won't connect until they ship CIMD. Details in the [integration guide](docs/integration-guide.md#protecting-an-mcp-server); the operator checklist is in the [operator guide](docs/operator-guide.md#mcp-support).
 
 ## Organization claims over OIDC
 
@@ -91,7 +106,7 @@ Legend: **✓** built-in · **◐** partial / via add-on / consumes-not-serves �
 
 ¹ Forseti's own data. Kratos and Hydra each bring their own Postgres, so a full deployment runs several services — more moving parts than a single-binary Rauthy or Kanidm. † Organizations, SAML SSO, and the Prometheus `/metrics` endpoint are commercial features; the AGPL core runs as a fully working single tenant. SCIM, SIEM streaming and bulk-admin are on the roadmap, not shipped. ² Linux host auth (POSIX accounts, NSS, SSH-key distribution, PAM device-auth + offline login) ships as a **preview** — it backs POSIX hosts, but it's not an LDAP/RADIUS/Kerberos directory.
 
-**Where Forseti wins.** If you've already bet on Ory — or you want a certified OAuth2/OIDC engine rather than a bespoke one — nothing else gives Kratos and Hydra real screens *and* an admin console *and* first-class multi-tenant organizations (members, invites, per-org branding, `org`/`orgs` OIDC claims). Rauthy, Kanidm and FreeIPA have no organizations model at all; only Keycloak does, and it costs you a JVM and a couple of gigs of RAM. You also get governance the others don't bundle: an append-only audit log, RFC 7591 dynamic client registration, and an account-deletion webhook saga that emits signed RISC events.
+**Where Forseti wins.** If you've already bet on Ory — or you want a certified OAuth2/OIDC engine rather than a bespoke one — nothing else gives Kratos and Hydra real screens *and* an admin console *and* first-class multi-tenant organizations (members, invites, per-org branding, `org`/`orgs` OIDC claims). Rauthy, Kanidm and FreeIPA have no organizations model at all; only Keycloak does, and it costs you a JVM and a couple of gigs of RAM. You also get governance the others don't bundle: an append-only audit log, CIMD client onboarding for MCP with a default-deny audience registry, and an account-deletion webhook saga that emits signed RISC events.
 
 **Where it doesn't.** Forseti is not a full directory. It now *can* back Linux logins — POSIX accounts, SSH-key distribution, and interactive PAM login for a fleet of hosts (a preview feature) — but if you need an LDAP server, RADIUS, or Kerberos, that's still Kanidm or FreeIPA territory, not this. If you want the absolute smallest footprint and a single self-contained binary with no Ory alongside, Rauthy or Kanidm will be lighter to run. And if you need the full enterprise kitchen sink — UMA, fine-grained authz, every protocol under one roof — Keycloak still does more, at the cost of operating Keycloak. Do take the table with a grain of salt: these projects move, and the facts here are current as of mid-2026.
 
@@ -179,6 +194,7 @@ Full documentation is published at **<https://franzos.github.io/forseti/>**.
 - [Operator guide](docs/operator-guide.md) — deployment topology, Kratos/Hydra config, secrets, backups
 - [Operator guide — reverse proxy](docs/operator-guide-proxy.md) — proxy topology, cookies, CSRF, CORS
 - [Integration guide](docs/integration-guide.md) — consuming Forseti as an OIDC provider
+- [Protecting an MCP server](docs/integration-guide.md#protecting-an-mcp-server) — CIMD onboarding, the resource registry, token validation, and what your MCP server has to implement
 - [Linux authentication](docs/operator-guide.md#linux-authentication) — enroll hosts, provision POSIX accounts + SSH keys, PAM device-auth login, and offline access (preview)
 - [Commercial features](docs/commercial/) — licensing model, plus the [Organizations](docs/commercial/organizations.md), [Enterprise SAML SSO](docs/commercial/saml.md), and [Observability](docs/commercial/observability.md) guides
 
