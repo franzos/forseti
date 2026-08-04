@@ -538,6 +538,50 @@ async fn cimd_golden_path_end_to_end() {
     user.cleanup().await;
 }
 
+/// Regression: consent used to dedup the audience write against the
+/// source-filtered policy view of the record, which is empty for every client
+/// no operator created — so a CIMD client re-appended the same audience on
+/// every consent and its record grew without bound.
+#[tokio::test]
+async fn repeat_consent_does_not_duplicate_the_client_audience() {
+    assert!(portal_reachable().await);
+
+    let resource = "https://mcp.test";
+    let url = serve_cimd_doc(|_| {}).await;
+    let redirect = "http://127.0.0.1:43433/callback";
+    let user = register_test_user("cimd-audience-dup").await;
+
+    for round in 0..2 {
+        let (_verifier, challenge) = pkce_pair();
+        let auth_url = shim_auth_url_with(
+            &url,
+            redirect,
+            &format!("cimd-dup-{round}"),
+            &challenge,
+            &format!("&resource={}", form_urlencode(resource)),
+        );
+        let (consent_challenge, csrf, _body) = drive_to_consent(&user.client, &auth_url).await;
+        consent_accept_chase_code(
+            &user.manual_client,
+            &csrf,
+            &consent_challenge,
+            &["openid", "offline"],
+            false,
+        )
+        .await
+        .expect("authorization code on callback URL");
+    }
+
+    assert_eq!(
+        hydra_client_audience(&url).await,
+        vec![resource.to_string()],
+        "a repeat consent for the same resource must not re-append it"
+    );
+
+    cleanup_cimd_client(&url).await;
+    user.cleanup().await;
+}
+
 /// Port of `dcr_client_cannot_grant_itself_a_self_written_audience`: a CIMD
 /// client's Hydra record stays reachable out of band (admin API here,
 /// standing in for any credential that can rewrite the record), and fosite

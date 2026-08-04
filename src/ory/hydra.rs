@@ -584,26 +584,25 @@ pub async fn delete_client(clients: &OryClients, id: &str) -> Result<()> {
 /// Ceiling on how many audiences consent may accumulate on one client record.
 const CLIENT_AUDIENCE_CAP: usize = 20;
 
-/// Add `granted` to the client's registered `audience` allow-list, skipping
-/// whatever `existing` (the record as already read by the caller) covers.
-/// fosite re-validates the granted audience against the client record on the
-/// refresh grant (`handler/oauth2/flow_refresh.go`) but not on the code
-/// exchange, so a granted resource that never lands here buys the client one
-/// working access token and then permanent refresh failures. Idempotent, and
-/// capped so a client can't grow the record without bound.
-pub async fn add_client_audiences(
-    clients: &OryClients,
+/// The append-only patch that brings the client's `audience` up to `granted`.
+///
+/// `on_record` must be the `audience` array as Hydra stores it now, whoever
+/// wrote it — it is both the dedup set and the cap accounting. Handing this a
+/// source-filtered view (say, only what an operator wrote) makes every entry
+/// look new, so the same resource is re-appended on every consent and the cap
+/// never binds.
+pub(crate) fn audience_patch(
     client_id: &str,
-    existing: &[String],
+    on_record: &[String],
     granted: &[String],
-) -> Result<()> {
-    let mut len = existing.len();
+) -> Vec<ory_client::models::JsonPatch> {
+    let mut have: Vec<&str> = on_record.iter().map(String::as_str).collect();
     let mut patch = Vec::new();
     for resource in granted {
-        if existing.iter().any(|a| a == resource) {
+        if have.contains(&resource.as_str()) {
             continue;
         }
-        if len >= CLIENT_AUDIENCE_CAP {
+        if have.len() >= CLIENT_AUDIENCE_CAP {
             tracing::warn!(
                 client_id,
                 resource = %resource,
@@ -611,7 +610,7 @@ pub async fn add_client_audiences(
             );
             break;
         }
-        len += 1;
+        have.push(resource);
         patch.push(ory_client::models::JsonPatch {
             from: None,
             op: ory_client::models::json_patch::OpEnum::Add,
@@ -619,6 +618,23 @@ pub async fn add_client_audiences(
             value: Some(Some(serde_json::Value::String(resource.clone()))),
         });
     }
+    patch
+}
+
+/// Add `granted` to the client's registered `audience` allow-list, skipping
+/// whatever `on_record` (the record as the caller just read it) already
+/// covers. fosite re-validates the granted audience against the client record
+/// on the refresh grant (`handler/oauth2/flow_refresh.go`) but not on the code
+/// exchange, so a granted resource that never lands here buys the client one
+/// working access token and then permanent refresh failures. Idempotent, and
+/// capped so a client can't grow the record without bound.
+pub async fn add_client_audiences(
+    clients: &OryClients,
+    client_id: &str,
+    on_record: &[String],
+    granted: &[String],
+) -> Result<()> {
+    let patch = audience_patch(client_id, on_record, granted);
     if patch.is_empty() {
         return Ok(());
     }
@@ -1133,5 +1149,80 @@ SRZ/w8gQ2ALLGaApskC1zn5ojdqqjTvXWmW9bccCeGYJ8yOu4oWP/QLkNzM4WVKA\n\
     fn next_link_missing_header() {
         let h = HeaderMap::new();
         assert_eq!(next_link(&h), None);
+    }
+
+    // --- client audience patch --------------------------------------------
+
+    const MCP: &str = "https://stackpit.gofranz.com/mcp";
+
+    fn owned(xs: &[&str]) -> Vec<String> {
+        xs.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    /// The audience values a patch would append, in order.
+    fn appended(patch: &[ory_client::models::JsonPatch]) -> Vec<String> {
+        patch
+            .iter()
+            .map(|p| {
+                assert_eq!(p.path, "/audience/-");
+                p.value
+                    .clone()
+                    .flatten()
+                    .and_then(|v| v.as_str().map(str::to_string))
+                    .expect("patch value")
+            })
+            .collect()
+    }
+
+    #[test]
+    fn audience_patch_appends_a_resource_the_record_lacks() {
+        let patch = audience_patch("c", &[], &owned(&[MCP]));
+        assert_eq!(appended(&patch), vec![MCP.to_string()]);
+    }
+
+    #[test]
+    fn second_consent_for_the_same_resource_emits_no_patch() {
+        // The bug: an empty `on_record` made every consent re-append, so one
+        // client's record grew an identical entry per grant, unbounded.
+        assert!(audience_patch("c", &owned(&[MCP]), &owned(&[MCP])).is_empty());
+    }
+
+    #[test]
+    fn audience_patch_dedups_against_a_self_written_record() {
+        // Whoever wrote the entry, it is already there — a CIMD client's own
+        // `audience` still suppresses the write.
+        let self_written = "http://127.0.0.1:3333/mcp";
+        assert!(audience_patch("c", &owned(&[self_written]), &owned(&[self_written])).is_empty());
+    }
+
+    #[test]
+    fn audience_patch_dedups_a_record_that_already_repeats() {
+        // The bloated records the bug left behind must not keep growing.
+        assert!(audience_patch("c", &owned(&[MCP, MCP, MCP]), &owned(&[MCP])).is_empty());
+    }
+
+    #[test]
+    fn audience_patch_appends_each_resource_once() {
+        let patch = audience_patch(
+            "c",
+            &owned(&[MCP]),
+            &owned(&[MCP, "https://a.test", "https://a.test"]),
+        );
+        assert_eq!(appended(&patch), vec!["https://a.test".to_string()]);
+    }
+
+    #[test]
+    fn audience_patch_stops_at_the_cap() {
+        let full: Vec<String> = (0..CLIENT_AUDIENCE_CAP)
+            .map(|i| format!("https://r{i}.test"))
+            .collect();
+        assert!(audience_patch("c", &full, &owned(&["https://new.test"])).is_empty());
+        // One slot left: the first granted resource lands, the rest don't.
+        let patch = audience_patch(
+            "c",
+            &full[..CLIENT_AUDIENCE_CAP - 1],
+            &owned(&["https://a.test", "https://b.test"]),
+        );
+        assert_eq!(appended(&patch), vec!["https://a.test".to_string()]);
     }
 }

@@ -697,7 +697,7 @@ fn resource_params(request_url: &str) -> Vec<String> {
 /// `resource_registry` rows (see [`crate::resource_registry::list_enabled`]) —
 /// or on `registered` — the client's own registered `audience`, passed in only
 /// when Forseti knows an operator wrote that record (see
-/// [`operator_written_audiences`]). Default deny: everything else is dropped.
+/// [`ClientAudience::policy`]). Default deny: everything else is dropped.
 ///
 /// Both arms compare verbatim first, because an audience is an opaque
 /// identifier and need not be a URI (Stackpit's web SSO uses a bare hostname,
@@ -748,32 +748,46 @@ fn resolve_granted_audience(
     granted
 }
 
-/// The client's registered `audience`, but only for a client Forseti knows an
-/// operator created (`oauth_client_metadata.source = 'admin'`). Empty for
-/// anything else, which leaves the allow-list as the only policy.
-///
-/// A DCR client can rewrite its own Hydra record — including `audience` —
-/// through RFC 7592 with the registration access token Hydra mints for it, so
-/// `source = 'dcr'` is caller-controlled. A client with no row at all is
-/// ambiguous: it may be an operator's out-of-band `hydra create client`, or it
-/// may have registered straight at Hydra's own `/oauth2/register`, which is
-/// publicly routed in this deployment and equally caller-controlled. Forseti
-/// can't tell those apart, so it doesn't guess. Operators of out-of-band
-/// clients register the audience at `/admin/resources` instead.
-async fn operator_written_audiences(state: &AppState, client_id: &str) -> Vec<String> {
-    match oauth_client_metadata::get(&state.db, client_id).await {
-        Ok(Some(row)) if row.source == oauth_client_metadata::source::ADMIN => {}
-        Ok(_) => return Vec::new(),
-        Err(e) => {
-            tracing::error!(
-                error = ?e,
-                client_id,
-                "consent: client metadata lookup failed; ignoring the client's registered audience",
-            );
-            return Vec::new();
+/// One read of the client's Hydra `audience`, split by what a caller may do
+/// with it. The two are not interchangeable: only `policy` may grant, only
+/// `on_record` may dedup.
+#[derive(Default)]
+struct ClientAudience {
+    /// The array as Hydra stores it, whoever wrote it. Dedup and cap
+    /// accounting for the write-back, never grounds for a grant.
+    on_record: Vec<String>,
+    /// The same array, but only for a client Forseti knows an operator created
+    /// (`oauth_client_metadata.source = 'admin'`). Empty for anything else,
+    /// which leaves the allow-list as the only policy.
+    policy: Vec<String>,
+}
+
+impl ClientAudience {
+    /// `operator_written` is the only thing that turns a record into policy.
+    fn split(on_record: Vec<String>, operator_written: bool) -> Self {
+        Self {
+            policy: if operator_written {
+                on_record.clone()
+            } else {
+                Vec::new()
+            },
+            on_record,
         }
     }
-    match ory::hydra::get_client(&state.ory, client_id).await {
+}
+
+/// Read the client's `audience` once and split it (see [`ClientAudience`]).
+///
+/// A CIMD or DCR client can rewrite its own Hydra record — including
+/// `audience` — so `source = 'cimd'`/`'dcr'` is caller-controlled. A client
+/// with no row at all is ambiguous: it may be an operator's out-of-band
+/// `hydra create client`, or it may have registered straight at Hydra's own
+/// `/oauth2/register`, which is publicly routed in this deployment and equally
+/// caller-controlled. Forseti can't tell those apart, so it doesn't guess.
+/// Operators of out-of-band clients register the audience at
+/// `/admin/resources` instead.
+async fn read_client_audience(state: &AppState, client_id: &str) -> ClientAudience {
+    let on_record = match ory::hydra::get_client(&state.ory, client_id).await {
         Ok(c) => c.audience.unwrap_or_default(),
         Err(e) => {
             tracing::warn!(
@@ -781,9 +795,24 @@ async fn operator_written_audiences(state: &AppState, client_id: &str) -> Vec<St
                 client_id,
                 "consent: client lookup failed; falling back to the resource allow-list alone",
             );
+            // Writing blind risks one duplicate entry; not writing breaks the
+            // refresh grant for good.
             Vec::new()
         }
-    }
+    };
+    let operator_written = match oauth_client_metadata::get(&state.db, client_id).await {
+        Ok(Some(row)) => row.source == oauth_client_metadata::source::ADMIN,
+        Ok(None) => false,
+        Err(e) => {
+            tracing::error!(
+                error = ?e,
+                client_id,
+                "consent: client metadata lookup failed; ignoring the client's registered audience",
+            );
+            false
+        }
+    };
+    ClientAudience::split(on_record, operator_written)
 }
 
 /// Rebuild the original `/oauth2/auth` URL forcing `prompt=login` (merged into
@@ -899,13 +928,13 @@ async fn finalize_consent(
 ) -> FinalizeOutcome {
     // Both policy arms are fetched lazily: skipped entirely when nothing was
     // requested, so a consent with no audience carrier costs no extra
-    // round-trips. `registered` is reused for the write below.
+    // round-trips.
     let audience_requested =
         !requested_audience.is_empty() || !resource_params(request_url).is_empty();
-    let registered = if client_id.is_empty() || !audience_requested {
-        Vec::new()
+    let client_audience = if client_id.is_empty() || !audience_requested {
+        ClientAudience::default()
     } else {
-        operator_written_audiences(state, client_id).await
+        read_client_audience(state, client_id).await
     };
     let allowed = if audience_requested {
         // Fail closed: an unreadable registry denies every requested audience.
@@ -928,12 +957,16 @@ async fn finalize_consent(
         &requested_audience,
         request_url,
         &allowed,
-        &registered,
+        &client_audience.policy,
     );
     if !client_id.is_empty()
-        && let Err(e) =
-            ory::hydra::add_client_audiences(&state.ory, client_id, &registered, &grant_audience)
-                .await
+        && let Err(e) = ory::hydra::add_client_audiences(
+            &state.ory,
+            client_id,
+            &client_audience.on_record,
+            &grant_audience,
+        )
+        .await
     {
         tracing::error!(
             error = ?e,
@@ -1324,7 +1357,7 @@ fn build_id_token_claims(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_id_token_claims, extract_resource_url, intersect_requested_scope,
+        ClientAudience, build_id_token_claims, extract_resource_url, intersect_requested_scope,
         project_group_slugs, resolve_claim_active_org, resolve_granted_audience, resource_params,
         subject_is_signed_in, with_prompt_login,
     };
@@ -1658,11 +1691,47 @@ mod tests {
     }
 
     #[test]
+    fn a_self_written_record_dedups_the_write_but_is_never_policy() {
+        // The two uses of one record, which the audience-duplication bug
+        // conflated: dedup material for the write-back, and never a grant.
+        let self_written = "http://127.0.0.1:3333/mcp";
+        let audience = ClientAudience::split(vec![self_written.to_string()], false);
+        assert!(audience.policy.is_empty());
+        assert_eq!(audience.on_record, vec![self_written.to_string()]);
+        assert!(
+            resolve_granted_audience(
+                "client-1",
+                &[self_written.to_string()],
+                &auth_url("scope=openid"),
+                &[MCP.to_string()],
+                &audience.policy,
+            )
+            .is_empty(),
+            "an unregistered resource must stay denied even when it sits on the client record"
+        );
+        assert!(
+            crate::ory::hydra::audience_patch(
+                "client-1",
+                &audience.on_record,
+                &[self_written.to_string()]
+            )
+            .is_empty(),
+            "...and the same record must still suppress a duplicate write"
+        );
+    }
+
+    #[test]
+    fn an_operator_written_record_is_policy_and_write_state_alike() {
+        let audience = ClientAudience::split(vec!["stackpit-web".to_string()], true);
+        assert_eq!(audience.policy, audience.on_record);
+    }
+
+    #[test]
     fn a_dcr_clients_own_record_is_never_policy() {
-        // `operator_written_audiences` hands the resolver an empty `registered`
-        // for every client Forseti didn't see an operator create, so a record
-        // the client wrote itself (RFC 7592 PUT with its registration access
-        // token, or a registration straight at Hydra) buys it nothing.
+        // `read_client_audience` hands the resolver an empty `policy` for every
+        // client Forseti didn't see an operator create, so a record the client
+        // wrote itself (RFC 7592 PUT with its registration access token, or a
+        // registration straight at Hydra) buys it nothing.
         let self_written = "http://127.0.0.1:3333/mcp";
         assert!(
             granted_for(&[self_written], "scope=openid", &[MCP], &[]).is_empty(),
