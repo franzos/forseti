@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.1.23] - 2026-08-04
+
+### Added
+- `[oauth].allowed_resource_audiences` binds RFC 8707 `resource` to the token audience
+- Dynamically registered clients get those audiences pre-registered
+
 ## [0.1.22] - 2026-08-03
 
 ### Added
