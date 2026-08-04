@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.2.1] - 2026-08-04
+
+### Fixed
+- Repeat consent duplicated a client's registered audience on every grant
+
 ## [0.2.0] - 2026-08-04
 
 ### Added
