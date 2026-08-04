@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.2.0] - 2026-08-04
+
+### Added
+- MCP clients connect via CIMD (URL client IDs), no registration step
+- Resource registry with admin UI replaces the audience config allow-list
+- Forseti can front Hydra's issuer: augmented discovery plus a `/hydra` proxy
+- Consent shows a CIMD client's host as its primary identity
+
+### Changed
+- Client audiences are trusted only from admin-created records
+
+### Removed
+- Dynamic Client Registration (RFC 7591) and initial access tokens
+
+### Fixed
+- Client metadata rows failed to load on Postgres deployments
+
 ## [0.1.23] - 2026-08-04
 
 ### Added
