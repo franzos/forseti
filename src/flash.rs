@@ -37,8 +37,6 @@ pub enum SecretReveal {
     ClientSecretRotated { secret: String },
     /// `/admin/identities/{id}/recovery`: Kratos recovery code + the matching recovery URL.
     RecoveryCode { code: String, link: String },
-    /// `/admin/dcr-tokens` issue: raw Initial Access Token (shown once; only the hash is persisted).
-    DcrInitialAccessToken { token: String },
     /// `/admin/hosts` enroll / rotate: `host_id` plus the raw host secret (shown once; only the hash is persisted).
     HostSecret { host_id: String, secret: String },
     /// `/claim-email` mint: 6-digit code + the target identity id the confirm step deletes on match.

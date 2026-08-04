@@ -7,9 +7,9 @@ use unicode_normalization::UnicodeNormalization;
 use unicode_normalization::char::is_combining_mark;
 use unicode_security::skeleton;
 
-/// Default `client_name` denylist. Case-insensitive substring match so a
-/// self-registered client can't pose as e.g. "Microsoft Login" on the consent
-/// screen. Operators replace it wholesale via `oauth.dcr_reserved_names`.
+/// Default name denylist. Case-insensitive substring match so an org can't
+/// pose as e.g. "Microsoft Login" on member-facing surfaces. Operators
+/// replace it wholesale via `[orgs].reserved_names`.
 pub const RESERVED_NAMES_DEFAULT: &[&str] = &[
     "ory",
     "hydra",
@@ -32,16 +32,13 @@ pub const RESERVED_NAMES_DEFAULT: &[&str] = &[
     "root",
 ];
 
-/// Substring search for any reserved-name pattern in `client_name`, returning
+/// Substring search for any reserved-name pattern in `name`, returning
 /// the match (for logging only; the response doesn't echo it). Falls back to
 /// [`RESERVED_NAMES_DEFAULT`] when unconfigured. Inputs are normalised first
 /// (see [`normalise_for_reserved_check`]) so Unicode spoofs collapse to the
 /// covered skeleton.
-pub(crate) fn reserved_name_hit(
-    configured: &Option<Vec<String>>,
-    client_name: &str,
-) -> Option<String> {
-    let needle = normalise_for_reserved_check(client_name);
+pub(crate) fn reserved_name_hit(configured: &Option<Vec<String>>, name: &str) -> Option<String> {
+    let needle = normalise_for_reserved_check(name);
     if needle.is_empty() {
         return None;
     }
@@ -105,14 +102,6 @@ fn is_invisible_control(c: char) -> bool {
         | 0x202A..=0x202E // LRE, RLE, PDF, LRO, RLO
         | 0x2066..=0x2069 // LRI, RLI, FSI, PDI
     )
-}
-
-/// Clip a string to `max_chars` chars (not bytes) for safe audit-row inclusion.
-pub(super) fn truncate_for_audit(s: &str, max_chars: usize) -> String {
-    if s.chars().count() <= max_chars {
-        return s.to_string();
-    }
-    s.chars().take(max_chars).collect()
 }
 
 #[cfg(test)]
@@ -192,9 +181,9 @@ mod tests {
         assert!(hit.is_none());
     }
 
-    /// Empty / whitespace-only `client_name` short-circuits without a
-    /// match — preserves the existing behaviour where an absent name
-    /// isn't a reserved-name hit (Hydra rejects empties downstream).
+    /// Empty / whitespace-only names short-circuit without a match — an
+    /// absent name isn't a reserved-name hit (emptiness is rejected by
+    /// the caller's own validation downstream).
     #[test]
     fn empty_name_does_not_match() {
         assert!(reserved_name_hit(&None, "").is_none());

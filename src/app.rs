@@ -101,6 +101,7 @@ pub(crate) async fn run() -> anyhow::Result<()> {
     db.ping().await?;
     maybe_run_migrations(&db, &cfg.database).await?;
     warn_if_sqlite_in_production(&db, &cfg.self_.url);
+    import_config_resources(&db, &cfg.oauth.allowed_resource_audiences).await;
 
     // Load before the worker spins up so the JWKS endpoint is queryable by the first delivery.
     let signing_key =
@@ -224,18 +225,24 @@ pub(crate) async fn run() -> anyhow::Result<()> {
             "/.well-known/webhook-jwks.json",
             get(webhook::jwks_endpoint),
         )
-        .merge(discovery::router());
+        .merge(discovery::router())
+        // CIMD: augmented AS discovery (always), the gated Hydra front proxy,
+        // and the rate-limited /oauth2/authorize shim — all public, outside CSRF.
+        .merge(crate::hydra_front::well_known_router(&state.cfg.hydra))
+        .merge(crate::hydra_front::router(&state.cfg.hydra))
+        .merge(oauth::cimd::router(&state.cfg.oauth, &state.cfg.proxy));
     // SSO routes mount only when [saml] is configured; outside CSRF (Jackson's callback is a cross-site GET).
     if state.cfg.saml.is_some() {
         public_app = public_app.merge(crate::saml::router());
     }
-    // Falls back to `[hydra].public_url` the same way the device id_token's
-    // issuer check does, so a deployment where the two match needs no extra config.
+    // Browser-facing issuer origin: [hydra].issuer → [posix].hydra_issuer (legacy
+    // narrow override) → [hydra].public_url.
     let hydra_issuer = state
         .cfg
-        .posix
-        .hydra_issuer
+        .hydra
+        .issuer
         .clone()
+        .or_else(|| state.cfg.posix.hydra_issuer.clone())
         .unwrap_or_else(|| state.cfg.hydra.public_url.clone());
     let form_action = csp_form_action(
         &state.cfg.kratos.public_url,
@@ -371,6 +378,33 @@ async fn maybe_run_migrations(db: &DbPool, cfg: &DatabaseConfig) -> anyhow::Resu
     tracing::info!(backend = ?db.backend(), "running database migrations");
     db.run_migrations().await?;
     Ok(())
+}
+
+/// One-time idempotent import of the deprecated `[oauth].allowed_resource_audiences`
+/// entries into the resource registry. Warns whenever the key is present —
+/// its presence is the deprecation signal, regardless of whether rows were
+/// newly inserted — so the operator cutover is: deploy, verify the rows at
+/// `/admin/resources`, delete the key.
+async fn import_config_resources(db: &DbPool, entries: &[String]) {
+    if entries.is_empty() {
+        return;
+    }
+    for entry in entries {
+        let new = crate::resource_registry::NewResource {
+            resource: entry.clone(),
+            display_name: entry.clone(),
+            org_id: orgs::DEFAULT_ORG_ID.to_string(),
+            created_by: "config-import".to_string(),
+        };
+        if let Err(e) = crate::resource_registry::insert_ignore(db, new).await {
+            tracing::error!(error = ?e, resource = %entry, "resource registry config import failed");
+        }
+    }
+    tracing::warn!(
+        entries = ?entries,
+        "[oauth].allowed_resource_audiences is deprecated: entries were imported into the \
+         resource registry; manage them at /admin/resources and remove the config key"
+    );
 }
 
 /// Sqlite + a production-shaped Forseti URL is a multi-instance corruption footgun.

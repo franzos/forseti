@@ -20,7 +20,7 @@ admin-nav-license = ใบอนุญาต
 admin-nav-identities = ตัวตน
 admin-nav-sessions = เซสชัน
 admin-nav-clients = ไคลเอนต์ OAuth2
-admin-nav-dcr-tokens = โทเคน DCR
+admin-nav-resources = ทรัพยากร
 admin-nav-saml = SAML SSO
 admin-nav-hosts = โฮสต์
 admin-nav-accounts = บัญชี
@@ -219,35 +219,45 @@ admin-client-type-subtitle = เลือกประเภทแอปพลิ
 admin-client-type-popular-heading = แอปยอดนิยม
 admin-client-type-action-cancel = ยกเลิก
 
-# รายการโทเคน DCR (dcr_tokens_list.html)
-admin-dcr-page-title = โทเคนการเข้าถึงเริ่มต้น DCR
-admin-dcr-action-issue = ออกโทเคน
-admin-dcr-token-revealed-heading = โทเคนการเข้าถึงเริ่มต้น (แสดงครั้งเดียว)
-admin-dcr-col-status = สถานะ
-admin-dcr-col-note = หมายเหตุ
-admin-dcr-col-created-by = สร้างโดย
-admin-dcr-col-created = สร้างเมื่อ
-admin-dcr-col-expires = หมดอายุ
-admin-dcr-col-uses-left = จำนวนครั้งที่เหลือ
-admin-dcr-status-active = ใช้งานอยู่
-admin-dcr-status-revoked = เพิกถอนแล้ว
-admin-dcr-status-expired = หมดอายุแล้ว
-admin-dcr-status-exhausted = ใช้หมดแล้ว
-admin-dcr-empty-prefix = ยังไม่ได้ออกโทเคน
-admin-dcr-empty-link = ออกสักหนึ่ง
-admin-dcr-empty-suffix = เพื่อเปิดใช้งานการลงทะเบียนด้วยตนเอง
-admin-dcr-action-revoke = เพิกถอน
+# Resource registry list (resources_list.html)
+admin-resources-page-title = ทะเบียนทรัพยากร
+admin-resources-subtitle = เซิร์ฟเวอร์ทรัพยากรที่อนุญาตให้เป็น audience ของโทเคนการเข้าถึง การให้ความยินยอมจะมอบ audience เฉพาะที่ตรงกับรายการที่เปิดใช้งานที่นี่เท่านั้น
+admin-resources-action-new = ลงทะเบียนทรัพยากร
+admin-resources-col-resource = ทรัพยากร
+admin-resources-col-name = ชื่อ
+admin-resources-col-org = องค์กร
+admin-resources-col-corroboration = การยืนยัน
+admin-resources-col-enabled = เปิดใช้งาน
+admin-resources-col-created = สร้างเมื่อ
+admin-resources-empty-prefix = ยังไม่มีทรัพยากรที่ลงทะเบียน
+admin-resources-empty-link = ลงทะเบียนตอนนี้
+admin-resources-empty-suffix = เพื่ออนุญาตให้เป็น audience ของโทเคนการเข้าถึง
+admin-resources-corroboration-corroborated = ยืนยันแล้ว
+admin-resources-corroboration-mismatch = ไม่ตรงกัน
+admin-resources-corroboration-unreachable = เข้าถึงไม่ได้
+admin-resources-corroboration-unchecked = ยังไม่ตรวจสอบ
+admin-resources-status-enabled = เปิดใช้งาน
+admin-resources-status-disabled = ปิดใช้งาน
+admin-resources-action-enable = เปิดใช้งาน
+admin-resources-action-disable = ปิดใช้งาน
+admin-resources-action-recheck = ตรวจสอบอีกครั้ง
+admin-resources-action-delete = ลบ
+admin-resources-corroboration-note = การยืนยันเป็นเพียงข้อมูลประกอบ: Forseti จะดึงเอกสารเมทาดาทา RFC 9728 ของทรัพยากรและตรวจสอบว่าระบุทรัพยากรนี้และผู้ออกโทเคนนี้ โดยจะไม่บล็อกการลงทะเบียนหรือการให้ความยินยอม
 
-# โทเคน DCR ใหม่ (dcr_token_new.html)
-admin-dcr-new-page-title = ออกโทเคน DCR
-admin-dcr-new-heading = ออกโทเคนการเข้าถึงเริ่มต้น DCR
-admin-dcr-new-field-note = หมายเหตุ
-admin-dcr-new-field-note-placeholder = โทเคนนี้ใช้ทำอะไร (เช่น 'Claude Desktop for formshive')
-admin-dcr-new-field-note-hint = ไม่บังคับ สำหรับบันทึกของคุณเท่านั้น ผู้เขียนไคลเอนต์จะไม่เห็นข้อความนี้
-admin-dcr-new-field-ttl = TTL (ชั่วโมง)
-admin-dcr-new-field-ttl-hint = เว้นว่างไว้เพื่อไม่ให้หมดอายุ
-admin-dcr-new-field-max-uses = จำนวนครั้งใช้งานสูงสุด
-admin-dcr-new-action-cancel = ยกเลิก
+# Resource registry new (resource_new.html)
+admin-resources-new-page-title = ลงทะเบียนทรัพยากร
+admin-resources-new-heading = ลงทะเบียนทรัพยากร
+admin-resources-new-subtitle = ทรัพยากรที่ลงทะเบียนแล้วจะกลายเป็น audience ของโทเคนการเข้าถึงที่มอบได้ ไคลเอนต์ยังต้องร้องขอ และผู้ใช้ยังต้องให้ความยินยอม
+admin-resources-new-field-resource = ทรัพยากร
+admin-resources-new-field-resource-hint = URI แบบสัมบูรณ์ (ปรับให้เป็นรูปแบบมาตรฐาน: ตัดเครื่องหมายทับท้ายและ fragment ออก) หรือตัวระบุที่ไม่ใช่ URI สำหรับ audience แบบเดิม ซึ่งจะเปรียบเทียบตรงตามที่ป้อนทุกตัวอักษร
+admin-resources-new-field-name = ชื่อที่แสดง
+admin-resources-new-field-name-hint = ใช้ในรายการนี้เท่านั้น ค่าเริ่มต้นคือตัวระบุทรัพยากร
+admin-resources-new-field-org = องค์กร
+admin-resources-new-org-hint = องค์กรที่เป็นเจ้าของทรัพยากรนี้
+admin-resources-new-org-pinned-part1 = จะลงทะเบียนใน
+admin-resources-new-org-pinned-part2 = โดยโฮสต์ของทรัพยากรต้องเป็นหนึ่งในโดเมนที่ยืนยันแล้วขององค์กร
+admin-resources-new-action-submit = ลงทะเบียน
+admin-resources-new-action-cancel = ยกเลิก
 
 # หน้าสถานะ (status.html)
 admin-status-page-title = สถานะ
@@ -583,24 +593,6 @@ admin-client-discovery-error-part2 = .
 # client_show.html - บทนำส่วนแก้ไข (code: PUT /admin/clients/<id>)
 admin-client-edit-intro-part1 = อัปเดตฟิลด์ไคลเอนต์ด้านล่าง การเปลี่ยนแปลงถูกส่งผ่าน
 admin-client-edit-intro-part2 = ของ Hydra ฟิลด์ที่ไม่เกี่ยวข้องจะถูกเก็บรักษาไว้
-
-# dcr_tokens_list.html - คำบรรยาย (code: POST /oauth2/register)
-admin-dcr-subtitle-part1 = Bearer token ที่อนุญาต
-admin-dcr-subtitle-part2 = ส่งให้ผู้เขียนไคลเอนต์ MCP หนึ่งอันเพื่อให้พวกเขาลงทะเบียนด้วยตนเองได้โดยที่คุณไม่ต้องทำเอง
-
-# dcr_tokens_list.html - คำอธิบายโทเคนที่แสดง (code: Authorization: Bearer <token>, POST /oauth2/register)
-admin-dcr-revealed-desc-part1 = แบ่งปันสิ่งนี้กับผู้เขียนไคลเอนต์ พวกเขาส่งมันเป็น
-admin-dcr-revealed-desc-part2 = เมื่อเรียก
-admin-dcr-revealed-desc-part3 = เราไม่เก็บค่าดิบ เก็บเพียง SHA-256 ของมัน
-
-# dcr_token_new.html - คำบรรยาย (code: Authorization: Bearer <token>, POST /oauth2/register)
-admin-dcr-new-subtitle-part1 = โทเคนจะถูกแสดงครั้งเดียวในหน้าถัดไป ส่งให้ผู้เขียนไคลเอนต์ พวกเขาส่งมันเป็น
-admin-dcr-new-subtitle-part2 = ในการเรียก
-admin-dcr-new-subtitle-part3 = ครั้งเดียว
-
-# dcr_token_new.html - คำแนะนำจำนวนครั้งใช้งานสูงสุด (code: 1)
-admin-dcr-new-field-max-uses-hint-part1 = เว้นว่างไว้เพื่อไม่จำกัด การใช้ครั้งเดียว (
-admin-dcr-new-field-max-uses-hint-part2 = ) เป็นค่าเริ่มต้นที่ปลอดภัยที่สุด
 
 # client_type_picker.html - คำอธิบายแอปยอดนิยม (code: YOUR_DOMAIN, PROVIDER_NAME)
 admin-client-type-popular-desc-part1 = กรอกไว้ล่วงหน้าสำหรับแอปที่รู้จัก URL ใช้ตัวยึด

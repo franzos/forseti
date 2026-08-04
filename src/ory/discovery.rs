@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 use serde::Deserialize;
+use serde_json::Value;
 
 use super::OryClients;
 
@@ -44,9 +45,11 @@ pub struct OidcDiscovery {
     pub frontchannel_logout_supported: bool,
 }
 
-/// Fetch Hydra's discovery doc. Checks `.status()` manually rather than `.error_for_status()`, which would
+/// Fetch Hydra's discovery doc, returning the typed projection alongside the raw
+/// JSON (the CIMD augmentation needs the full document, not just the admin-UI
+/// subset). Checks `.status()` manually rather than `.error_for_status()`, which would
 /// cross the `ory_reqwest` 0.12 / reqwest 0.13 type boundary.
-pub async fn fetch(clients: &OryClients, public_url: &str) -> Result<OidcDiscovery> {
+pub async fn fetch(clients: &OryClients, public_url: &str) -> Result<(OidcDiscovery, Value)> {
     let url = format!(
         "{}/.well-known/openid-configuration",
         public_url.trim_end_matches('/')
@@ -63,9 +66,13 @@ pub async fn fetch(clients: &OryClients, public_url: &str) -> Result<OidcDiscove
         let body = resp.text().await.unwrap_or_default();
         return Err(anyhow::anyhow!("hydra discovery returned {status}: {body}"));
     }
-    resp.json::<OidcDiscovery>()
+    let raw = resp
+        .json::<Value>()
         .await
-        .map_err(|e| anyhow::anyhow!("hydra discovery decode: {e}"))
+        .map_err(|e| anyhow::anyhow!("hydra discovery decode: {e}"))?;
+    let doc = serde_json::from_value::<OidcDiscovery>(raw.clone())
+        .map_err(|e| anyhow::anyhow!("hydra discovery decode: {e}"))?;
+    Ok((doc, raw))
 }
 
 #[cfg(test)]

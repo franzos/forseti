@@ -927,23 +927,14 @@ async fn admin_client_verify_unverify_toggle() {
         return;
     };
 
-    // Spin up a DCR-registered client so the metadata row already exists
-    // with `verification = unverified`. Saves us walking the admin form.
-    let iat = mint_dcr_iat(Some(1), None);
-    let (status, _hdrs, body) = dcr_register(
-        &iat,
-        "verify-toggle-integration",
-        "openid",
-        &["http://127.0.0.1:5555/callback"],
-        None,
-    )
-    .await;
-    assert_eq!(status.as_u16(), 201, "DCR register: {body}");
-    let client_id = body["client_id"].as_str().expect("client_id").to_string();
+    // Create a Hydra client via the admin API and seed its metadata row as
+    // `verification = unverified`. Saves us walking the admin form.
+    let (client_id, _secret, _redirect) = hydra_create_test_client(&["openid"]).await;
+    mark_client_unverified(&client_id);
     assert_eq!(
         read_client_verification(&client_id).as_deref(),
         Some("unverified"),
-        "fresh DCR client must be unverified"
+        "seeded metadata row must be unverified"
     );
 
     // POST /verify (no interstitial; standard CSRF). Pull a CSRF token

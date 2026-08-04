@@ -10,8 +10,17 @@ pub mod scope;
 pub(crate) mod sequences;
 
 use axum::Router;
+use sha2::{Digest, Sha256};
 
 use crate::state::AppState;
+
+/// SHA-256 hex of `raw_token`. Tokens are 32 random bytes base64url-encoded;
+/// we never persist the plaintext, only this hash.
+pub(crate) fn hash_token(raw_token: &str) -> String {
+    let mut h = Sha256::new();
+    h.update(raw_token.as_bytes());
+    hex::encode(h.finalize())
+}
 
 /// Internal-listener POSIX router: NSS/SSH resolver plus host-authenticated
 /// device-auth endpoints, both gated by `RequirePosixHost`. Neither is

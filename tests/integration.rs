@@ -45,8 +45,8 @@ mod admin;
 #[path = "integration/bug_regressions.rs"]
 mod bug_regressions;
 
-#[path = "integration/dcr.rs"]
-mod dcr;
+#[path = "integration/cimd.rs"]
+mod cimd;
 
 #[path = "integration/kratos_contracts.rs"]
 mod kratos_contracts;
@@ -77,6 +77,9 @@ mod regressions;
 
 #[path = "integration/registration.rs"]
 mod registration;
+
+#[path = "integration/resources_admin.rs"]
+mod resources_admin;
 
 #[path = "integration/saml.rs"]
 mod saml;

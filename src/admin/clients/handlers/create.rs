@@ -357,10 +357,10 @@ pub async fn create(
                 }
             }
             // Admin-created clients are implicitly verified (creating via the
-            // form is the vouching). DCR clients arrive via `/oauth2/register`
-            // as `source = "dcr"` + `verification = "unverified"`. INSERT
-            // failure is logged but doesn't fail the create (Hydra already
-            // committed); the row is created lazily on first verify/unverify.
+            // form is the vouching); CIMD clients arrive `source = "cimd"` +
+            // `verification = "unverified"`. INSERT failure is logged but
+            // doesn't fail the create (Hydra already committed); the row is
+            // created lazily on first verify/unverify.
             if !id.is_empty() {
                 let target_org = resolve_create_target_org(&state, &headers, &ctx, &scope).await;
                 if let Err(e) = oauth_client_metadata::insert_admin_verified(

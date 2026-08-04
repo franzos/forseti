@@ -11,14 +11,16 @@ Forseti
   /login
   /settings
   /...
+  /oauth2/authorize                                   (CIMD authorization shim)
   /.well-known/webhook-jwks.json
+  /.well-known/oauth-authorization-server/hydra       (augmented AS discovery, RFC 8414 path insertion)
+  /.well-known/openid-configuration/hydra             (augmented, OIDC path insertion)
 
 Hydra                    (iss = https://accounts.example.com/hydra)
   /hydra/.well-known/openid-configuration
   /hydra/.well-known/jwks.json
   /hydra/oauth2/auth
   /hydra/oauth2/token
-  /hydra/oauth2/register
   /hydra/oauth2/sessions/logout
   /hydra/userinfo
   /hydra/...
@@ -31,6 +33,8 @@ Kratos                   (server-to-server from Forseti; browser hits webauthn.j
 ```
 
 Proxy must rewrite `/hydra/*` and `/kratos/*` to the upstream root path — Hydra and Kratos do not honour subpath mounting ([hydra#352](https://github.com/ory/hydra/issues/352), [kratos#1152](https://github.com/ory/kratos/issues/1152)).
+
+**Issuer fronting (CIMD / MCP).** The two path-insertion well-known URLs and `/oauth2/authorize` carry no `/hydra/` prefix, so a `path_beg /hydra/` ACL naturally leaves them on the Forseti backend — which is exactly right: Forseti serves the augmented discovery document (`client_id_metadata_document_supported: true`, `authorization_endpoint` → the shim, no `registration_endpoint`) and the CIMD shim there. Do not add ACLs that capture them for Hydra. Set `[hydra].issuer = "https://accounts.example.com/hydra"` in Forseti's config so those routes mount under the right path segment. Alternative for single-binary deployments without haproxy: set `[hydra].front_proxy = true` and Forseti itself reverse-proxies `/hydra/{path}` to Hydra (cookie-preserving, non-redirect-following); with haproxy in place, leave it `false`. See [Fronting the issuer](./operator-guide.md#fronting-the-issuer-front-proxy-vs-haproxy) in the operator guide.
 
 ### Example (2) — Forseti at root, Hydra/Kratos on subdomains
 
@@ -46,7 +50,6 @@ hydra.accounts.example.com     (iss = https://hydra.accounts.example.com)
   /.well-known/jwks.json
   /oauth2/auth
   /oauth2/token
-  /oauth2/register
   /oauth2/sessions/logout
   /userinfo
   /...
@@ -162,6 +165,8 @@ Fine — it's a navigation, not an XHR. Token/userinfo CORS is per-client via `a
 
 **Gotchas.** Wildcard TLS cert or three SANs. Three DNS records. HSTS preload covers the parent — fine, but means no plaintext on any subdomain forever.
 
+**CIMD caveat.** A path-less subdomain issuer has no RFC 8414 path-insertion form, so Forseti's augmented discovery routes don't mount and clients fetching `/.well-known/oauth-authorization-server` on the Hydra subdomain get Hydra's un-augmented document — no `client_id_metadata_document_supported`, no shim `authorization_endpoint`. CIMD clients (Claude Code, claude.ai) therefore won't onboard in this shape. If you need MCP/CIMD, use Shape (1).
+
 ### Shape (3) details
 
 **Feasibility.** Kratos docs confirm cookies cross ports: *"HTTP Cookies ignore ports."* So cookies flow across `:443`/`:8443`/`:9443`. But Hydra's CSRF debug guide treats host/port inconsistency as a top failure mode, and no Ory example uses this shape.
@@ -179,7 +184,7 @@ Fine — it's a navigation, not an XHR. Token/userinfo CORS is per-client via `a
 
 ## haproxy sketches
 
-**Strip inbound `X-Forwarded-*` before setting your own.** Forseti's per-IP rate limiters (DCR proxy, handoff, claim-email) and the audit middleware default to keying on the TCP peer IP (`proxy.trust_forwarded_for = false`) — secure but, behind a proxy, every caller shares one bucket. To restore per-real-client buckets, operators set `proxy.trust_forwarded_for = true` *and* must guarantee the proxy strips client-sent `X-Forwarded-*` headers before re-adding its own; without the strip, a caller forges `X-Forwarded-For: <random>` and bypasses the limit (and spoofs their audited IP). The sketches below delete the inbound headers before `set-header`; operators using a different proxy (nginx, caddy, envoy) must do the equivalent before turning the flag on.
+**Strip inbound `X-Forwarded-*` before setting your own.** Forseti's per-IP rate limiters (CIMD shim, handoff, claim-email) and the audit middleware default to keying on the TCP peer IP (`proxy.trust_forwarded_for = false`) — secure but, behind a proxy, every caller shares one bucket. To restore per-real-client buckets, operators set `proxy.trust_forwarded_for = true` *and* must guarantee the proxy strips client-sent `X-Forwarded-*` headers before re-adding its own; without the strip, a caller forges `X-Forwarded-For: <random>` and bypasses the limit (and spoofs their audited IP). The sketches below delete the inbound headers before `set-header`; operators using a different proxy (nginx, caddy, envoy) must do the equivalent before turning the flag on.
 
 **And keep the listener unreachable except through that proxy.** Stripping at the proxy only helps for traffic that goes through the proxy. Forseti has no trusted-proxy allowlist: with `trust_forwarded_for = true` it takes the first `X-Forwarded-For` hop from whatever peer opened the connection. So the flag is only safe while Forseti's own listener refuses direct connections — bind it to loopback or a private interface, or firewall the port to the proxy's address. If the listener is directly reachable, a caller bypasses the proxy entirely and picks their own `X-Forwarded-For`, which sets both the client IP written to the audit log and the key for every per-IP rate-limit bucket; rotating the header value per request gives them an unlimited supply of fresh buckets, leaving only the global limits in the way. Leave `trust_forwarded_for = false` (the default) until both conditions hold.
 
@@ -211,6 +216,9 @@ frontend fe_accounts
 
     use_backend be_hydra  if is_hydra
     use_backend be_kratos if is_kratos
+    # Everything else — including /oauth2/authorize (CIMD shim) and the
+    # path-insertion well-knowns /.well-known/oauth-authorization-server/hydra
+    # + /.well-known/openid-configuration/hydra — must land on Forseti.
     default_backend be_forseti
 
 backend be_forseti
@@ -339,11 +347,23 @@ Migrate to (2) only when there's a concrete need — different rate-limit tiers 
 
 ## Content-Security-Policy
 
-Forseti does not set a `Content-Security-Policy` itself. If you add one at the
-proxy, it must allow Forseti's inline `<head>` scripts: a pre-paint theme
-resolver (reads the saved light/dark/system choice and sets the `dark` class
-before first paint) and a couple of input-handling helpers. Either permit
-inline scripts (`script-src 'unsafe-inline'`) or, if you need a strict policy,
-inject a per-request nonce. The pre-paint theme script is the one inline script
-that cannot be moved to an external file without reintroducing a flash of the
-wrong theme on load.
+Forseti sets its own `Content-Security-Policy` on every public response:
+`object-src`, `base-uri`, `frame-ancestors` (configurable via `[security]`),
+and `form-action` — the last one built from Kratos's public URL, Hydra's
+public URL, the issuer origin (`[hydra].issuer`), the consenting client's
+registered redirect URIs, and `[security].extra_form_action`. It deliberately
+omits `default-src` / `script-src` / `style-src` / `img-src`. A stale
+`[hydra].issuer` shows up as a consent screen whose Allow button "does
+nothing" — the browser blocks the 303 into Hydra while the server logs it
+cleanly; see the operator guide's
+[CSP `form-action` requirement](./operator-guide.md#fronting-the-issuer-front-proxy-vs-haproxy).
+
+If you layer additional directives at the proxy, they must allow Forseti's
+inline `<head>` scripts: a pre-paint theme resolver (reads the saved
+light/dark/system choice and sets the `dark` class before first paint) and a
+couple of input-handling helpers. Either permit inline scripts
+(`script-src 'unsafe-inline'`) or, if you need a strict policy, inject a
+per-request nonce. The pre-paint theme script is the one inline script that
+cannot be moved to an external file without reintroducing a flash of the wrong
+theme on load. Never emit a proxy-side `form-action` narrower than Forseti's
+own, or you reintroduce the silent consent block described above.

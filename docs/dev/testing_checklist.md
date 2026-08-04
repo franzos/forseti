@@ -16,7 +16,7 @@ For each section you exercise, don't just check that the page renders and the au
 - [ ] **Screen-reader sanity?** Form labels present, buttons have text (icon-only buttons need `aria-label`), flash messages in an `aria-live` region.
 - [ ] **Narrow viewport sane?** At ~400px width, sidebar collapses cleanly, dialogs reachable, no horizontal scroll on form pages.
 - [ ] **Destructive POSTs guarded?** Double-click doesn't double-submit; pending state visible; confirm pages can be backed out of.
-- [ ] **Copy reads naturally?** No unexplained jargon (`AAL2`, `IAT`, `SET`, `consent grant`) on user-facing pages; admin pages may use it but should still be self-explanatory in context.
+- [ ] **Copy reads naturally?** No unexplained jargon (`AAL2`, `CIMD`, `SET`, `consent grant`) on user-facing pages; admin pages may use it but should still be self-explanatory in context.
 - [ ] **Console clean?** No JS errors, no 4xx/5xx for static assets in DevTools network tab.
 
 ## 0. Pre-flight (automated sanity)
@@ -198,19 +198,21 @@ These are the classic spec-violation bugs custom IdPs ship. Drive each via Chrom
 - [ ] **PKCE negatives:** start a flow with `code_challenge` + `S256`, then exchange (a) without `code_verifier` and (b) with a wrong verifier → both → `invalid_grant`
 - [ ] **Consent "Deny":** repeat §5.1 happy path but click Deny → RP receives `error=access_denied`; no consent grant in `hydra list oauth2-consent`; no `oauth.consent.granted` audit row
 
-### 5.5 Dynamic Client Registration (`/oauth2/register`)
+### 5.5 CIMD shim (`/oauth2/authorize`) + augmented discovery
 
-- [ ] Anonymous DCR (no `Authorization` header) → 201 with `client_id` + `client_secret` + `registration_access_token`
-- [ ] DCR client lands in `oauth_client_metadata` as `source='dcr'`, `verification='unverified'`
-- [ ] Consent screen for an unverified DCR client shows the caution banner
-- [ ] DCR with malformed `Authorization` header → 401 (no silent fallback)
-- [ ] DCR with valid IAT → audit row keyed off the IAT actor; `uses_remaining` decrements
-- [ ] DCR with revoked / expired IAT → 401
-- [ ] Reserved client names rejected
-- [ ] **`redirect_uri` scheme validation:** DCR requests with `http://` non-loopback, `javascript:`, `file://`, `data:`, or a raw IP literal in the host → 400, no client written
-- [ ] `metadata.forseti.*` keys in the request body are stripped (verify via `hydra get client ...`)
-- [ ] Rate limit: 11th request in a minute → 429 with a clean error body
-- [ ] Audit rows: `dcr_registered` / `dcr_rejected`
+- [ ] `GET /.well-known/oauth-authorization-server/hydra` and `/.well-known/openid-configuration/hydra` → Hydra's discovery doc with `client_id_metadata_document_supported: true`, `authorization_endpoint` pointing at `/oauth2/authorize`, **no** `registration_endpoint`, `Access-Control-Allow-Origin: *`, `issuer` byte-identical to Hydra's
+- [ ] `GET /hydra/.well-known/openid-configuration` through the front proxy → same augmented doc, never Hydra's verbatim
+- [ ] Shim with a non-URL `client_id` → 302 to `/hydra/oauth2/auth` with the query string byte-identical (pre-registered clients unaffected)
+- [ ] Shim with a URL `client_id` (fixture doc, `allow_private_targets = true`) → Hydra client upserted, 302 into the flow; client lands in `oauth_client_metadata` as `source='cimd'`, `verification='unverified'`
+- [ ] Document `client_id` mismatch → 400 (plain page, no redirect)
+- [ ] Confidential doc (`token_endpoint_auth_method != "none"`) → 400
+- [ ] `redirect_uri` not matching the document → 400; loopback `localhost:{ephemeral}` matches a port-less doc entry and the literal is upserted (max 5, oldest evicted)
+- [ ] `client_id` colliding with an existing admin-created client → 400, Hydra row untouched
+- [ ] Warm path: second flow with unchanged doc + known redirect_uri makes no Hydra admin write
+- [ ] Consent for a CIMD client always renders (no remembered-consent skip) and shows the client_id host as the primary identity, no verified checkmark
+- [ ] CIMD client's self-written Hydra `audience` never grants (registry rows only)
+- [ ] Rate limit: 11th shim request in a minute from one IP → 429 with a clean error body
+- [ ] Audit rows: `oauth.client.cimd_seen` / `oauth.client.cimd_rejected`
 
 ## 6. Organizations (commercial-gated, OSS Default works)
 
@@ -299,12 +301,18 @@ All admin pages require AAL2 + Forseti-admin allowlist or org ownership.
 - [ ] CSRF on all destructive POSTs
 - [ ] Audit rows: `oauth.client.created`, `.updated`, `.deleted`, `.secret_rotated`, `.verified`, `.unverified`
 
-### 7.3 DCR tokens (`/admin/dcr-tokens`)
+### 7.3 Resource registry (`/admin/resources`)
 
-- [ ] List renders existing IATs with `uses_remaining`, `expires_at`, `revoked_at`
-- [ ] Issue new IAT → token revealed once
-- [ ] Revoke IAT → `revoked_at` stamped → subsequent DCR with that token rejected
-- [ ] Audit rows: `dcr.iat.issued`, `dcr.iat.revoked`
+- [ ] List renders rows with corroboration badge, enabled state, org, created-by
+- [ ] Create with a URI resource → canonicalised, appears in list; consent binds it as `aud` end-to-end
+- [ ] Create with a non-URI identifier (e.g. `stackpit-web`) → stored verbatim, re-check button hidden
+- [ ] Duplicate resource → inline "already registered" error, input echoed back
+- [ ] Corroboration on create + **Re-check**: `corroborated` when the RFC 9728 doc matches resource + issuer, `mismatch` when it disagrees, `unreachable` on fetch failure — never blocks creation
+- [ ] Disable toggle → next consent requesting that resource gets no `aud`; re-enable restores it
+- [ ] Delete with confirm → row gone, consent denies the audience
+- [ ] Org-scoped admin (`?org=`): sees only own-org rows; create on a non-verified domain → fail-closed error; sibling-org row id → "Not found" (no existence leak)
+- [ ] CSRF on toggle / re-check / delete POSTs
+- [ ] Audit rows: `admin.resource.created`, `admin.resource.toggled`, `admin.resource.deleted` (critical)
 
 ### 7.4 Identities (`/admin/identities`)
 

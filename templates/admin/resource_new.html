@@ -1,0 +1,74 @@
+{% extends "admin/admin_shell.html" %}
+
+{% block admin_title %}{{ chrome.t("admin-resources-new-page-title") }}{% endblock %}
+
+{% block admin_content %}
+  <div class="max-w-2xl">
+    <h1 class="font-headline-lg text-headline-lg text-on-surface mb-stack-sm">{{ chrome.t("admin-resources-new-heading") }}</h1>
+    <p class="font-body-md text-body-md text-on-surface-variant mb-stack-lg">
+      {{ chrome.t("admin-resources-new-subtitle") }}
+    </p>
+
+    {% if !error_message.is_empty() %}
+      <div class="bg-error-container border border-error rounded-lg p-3 mb-stack-md">
+        <p class="font-body-sm text-body-sm text-on-error-container">{{ error_message }}</p>
+      </div>
+    {% endif %}
+
+    <form method="POST"
+          action="{{ form_action }}"
+          class="flex flex-col gap-stack-md">
+      <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+
+      <label class="flex flex-col gap-stack-xs">
+        <span class="font-label-md text-label-md text-on-surface">{{ chrome.t("admin-resources-new-field-resource") }}</span>
+        <input type="text"
+               name="resource"
+               value="{{ resource }}"
+               placeholder="https://mcp.example.com/mcp"
+               required
+               class="font-mono text-sm bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2">
+        <span class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-resources-new-field-resource-hint") }}</span>
+      </label>
+
+      <label class="flex flex-col gap-stack-xs">
+        <span class="font-label-md text-label-md text-on-surface">{{ chrome.t("admin-resources-new-field-name") }}</span>
+        <input type="text"
+               name="display_name"
+               value="{{ display_name }}"
+               class="font-body-md text-body-md bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2">
+        <span class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-resources-new-field-name-hint") }}</span>
+      </label>
+
+      {% if scoped %}
+        <p class="font-body-sm text-body-sm text-on-surface-variant">
+          {{ chrome.t("admin-resources-new-org-pinned-part1") }} <span class="font-semibold">{{ scoped_org_name }}</span>{{ chrome.t("admin-resources-new-org-pinned-part2") }}
+        </p>
+      {% else %}
+        <label class="flex flex-col gap-stack-xs">
+          <span class="font-label-md text-label-md text-on-surface">{{ chrome.t("admin-resources-new-field-org") }}</span>
+          <select name="org_id"
+                  class="font-body-md text-body-md bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2">
+            {% for o in orgs %}
+              <option value="{{ o.id }}" {% if o.id == org_id %}selected{% endif %}>{{ o.name }} ({{ o.slug }})</option>
+            {% endfor %}
+          </select>
+          <span class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-resources-new-org-hint") }}</span>
+        </label>
+      {% endif %}
+
+      <p class="font-body-sm text-body-sm text-on-surface-variant">
+        {{ chrome.t("admin-resources-corroboration-note") }}
+      </p>
+
+      <div class="flex items-center gap-stack-md mt-stack-sm">
+        <button type="submit"
+                class="bg-primary text-on-primary font-label-md text-label-md font-bold px-4 py-2 rounded-lg hover:opacity-90 transition-opacity">
+          {{ chrome.t("admin-resources-new-action-submit") }}
+        </button>
+        <a href="{{ cancel_url }}"
+           class="font-label-md text-label-md text-on-surface-variant border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">{{ chrome.t("admin-resources-new-action-cancel") }}</a>
+      </div>
+    </form>
+  </div>
+{% endblock %}

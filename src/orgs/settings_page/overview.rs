@@ -248,11 +248,8 @@ pub(super) async fn overview_save(
     }
     let new_name = form.name.trim();
     if new_name != target.org.name
-        && crate::oauth::register::reserved_names::reserved_name_hit(
-            &state.cfg.orgs.reserved_names,
-            new_name,
-        )
-        .is_some()
+        && crate::orgs::reserved_names::reserved_name_hit(&state.cfg.orgs.reserved_names, new_name)
+            .is_some()
     {
         return (StatusCode::CONFLICT, "that name is not allowed").into_response();
     }

@@ -39,28 +39,6 @@ const POSTGRES_MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations/po
 /// SQLite has one writer at a time; more connections only deepen the write-lock queue and burn blocking workers.
 const SQLITE_MAX_POOL: usize = 8;
 
-/// Whether the only correct response to `e` is to roll back and retry the whole
-/// transaction.
-///
-/// A transaction that reads before it writes takes a read lock first, and under
-/// WAL sqlite fails the upgrade to a write lock outright rather than honouring
-/// `busy_timeout` — waiting mid-upgrade could deadlock two transactions against
-/// each other, so it returns `SQLITE_BUSY_SNAPSHOT` and expects a rollback and
-/// retry. Postgres surfaces the same situation as a serialization failure.
-/// Callers that treat any error as a business outcome will otherwise report
-/// plain write contention as a permanent rejection.
-pub fn is_retryable_tx_error(e: &diesel::result::Error) -> bool {
-    use diesel::result::{DatabaseErrorKind, Error};
-    match e {
-        Error::DatabaseError(DatabaseErrorKind::SerializationFailure, _) => true,
-        Error::DatabaseError(_, info) => {
-            let m = info.message();
-            m.contains("database is locked") || m.contains("database table is locked")
-        }
-        _ => false,
-    }
-}
-
 /// Pool handle stored in `AppState`; both variants share one Rust query API via `interact`.
 #[derive(Clone)]
 pub enum DbPool {

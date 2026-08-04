@@ -20,7 +20,7 @@ admin-nav-license = License
 admin-nav-identities = Identities
 admin-nav-sessions = Sessions
 admin-nav-clients = OAuth2 clients
-admin-nav-dcr-tokens = DCR tokens
+admin-nav-resources = Resources
 admin-nav-saml = SAML SSO
 admin-nav-hosts = Hosts
 admin-nav-accounts = Accounts
@@ -219,35 +219,45 @@ admin-client-type-subtitle = Pick the application type. The next page is the sam
 admin-client-type-popular-heading = Popular apps
 admin-client-type-action-cancel = Cancel
 
-# DCR tokens list (dcr_tokens_list.html)
-admin-dcr-page-title = DCR initial access tokens
-admin-dcr-action-issue = Issue token
-admin-dcr-token-revealed-heading = Initial access token (shown once)
-admin-dcr-col-status = Status
-admin-dcr-col-note = Note
-admin-dcr-col-created-by = Created by
-admin-dcr-col-created = Created
-admin-dcr-col-expires = Expires
-admin-dcr-col-uses-left = Uses left
-admin-dcr-status-active = Active
-admin-dcr-status-revoked = Revoked
-admin-dcr-status-expired = Expired
-admin-dcr-status-exhausted = Exhausted
-admin-dcr-empty-prefix = No tokens issued.
-admin-dcr-empty-link = Issue one
-admin-dcr-empty-suffix = to enable self-registration.
-admin-dcr-action-revoke = Revoke
+# Resource registry list (resources_list.html)
+admin-resources-page-title = Resource registry
+admin-resources-subtitle = Resource servers allowed as access-token audiences. Consent only grants an audience that matches an enabled row here.
+admin-resources-action-new = Register resource
+admin-resources-col-resource = Resource
+admin-resources-col-name = Name
+admin-resources-col-org = Organization
+admin-resources-col-corroboration = Corroboration
+admin-resources-col-enabled = Enabled
+admin-resources-col-created = Created
+admin-resources-empty-prefix = No resources registered.
+admin-resources-empty-link = Register one
+admin-resources-empty-suffix = to allow it as an access-token audience.
+admin-resources-corroboration-corroborated = Corroborated
+admin-resources-corroboration-mismatch = Mismatch
+admin-resources-corroboration-unreachable = Unreachable
+admin-resources-corroboration-unchecked = Unchecked
+admin-resources-status-enabled = Enabled
+admin-resources-status-disabled = Disabled
+admin-resources-action-enable = Enable
+admin-resources-action-disable = Disable
+admin-resources-action-recheck = Re-check
+admin-resources-action-delete = Delete
+admin-resources-corroboration-note = Corroboration is advisory: Forseti fetches the resource's RFC 9728 metadata document and checks that it names this resource and issuer. It never blocks registration or consent.
 
-# DCR token new (dcr_token_new.html)
-admin-dcr-new-page-title = Issue DCR token
-admin-dcr-new-heading = Issue a DCR initial access token
-admin-dcr-new-field-note = Note
-admin-dcr-new-field-note-placeholder = What is this token for? (e.g. 'Claude Desktop for formshive')
-admin-dcr-new-field-note-hint = Optional, for your records only. The client author never sees this.
-admin-dcr-new-field-ttl = TTL (hours)
-admin-dcr-new-field-ttl-hint = Leave blank for no expiry.
-admin-dcr-new-field-max-uses = Max uses
-admin-dcr-new-action-cancel = Cancel
+# Resource registry new (resource_new.html)
+admin-resources-new-page-title = Register resource
+admin-resources-new-heading = Register a resource
+admin-resources-new-subtitle = Registered resources become grantable access-token audiences. Clients still have to request them, and the user still has to consent.
+admin-resources-new-field-resource = Resource
+admin-resources-new-field-resource-hint = An absolute URI (canonicalized: trailing slash and fragment dropped), or a verbatim non-URI identifier for legacy audiences, matched exactly as entered.
+admin-resources-new-field-name = Display name
+admin-resources-new-field-name-hint = For this list only; defaults to the resource identifier.
+admin-resources-new-field-org = Organization
+admin-resources-new-org-hint = The organization that owns this resource.
+admin-resources-new-org-pinned-part1 = Registered into
+admin-resources-new-org-pinned-part2 = ; the resource host must be one of its verified domains.
+admin-resources-new-action-submit = Register
+admin-resources-new-action-cancel = Cancel
 
 # Status page (status.html)
 admin-status-page-title = Status
@@ -584,24 +594,6 @@ admin-client-discovery-error-part2 = .
 # client_show.html - edit section intro (code: PUT /admin/clients/<id>)
 admin-client-edit-intro-part1 = Update the client fields below. Changes are pushed via Hydra's
 admin-client-edit-intro-part2 = ; unrelated fields are preserved.
-
-# dcr_tokens_list.html - subtitle (code: POST /oauth2/register)
-admin-dcr-subtitle-part1 = Bearer tokens that authorize
-admin-dcr-subtitle-part2 = . Hand one to an MCP-client author so they can self-register without you doing it manually.
-
-# dcr_tokens_list.html - revealed-token desc (code: Authorization: Bearer <token>, POST /oauth2/register)
-admin-dcr-revealed-desc-part1 = Share this with the client author. They send it as
-admin-dcr-revealed-desc-part2 = when calling
-admin-dcr-revealed-desc-part3 = . We don't store the raw value, only its SHA-256.
-
-# dcr_token_new.html - subtitle (code: Authorization: Bearer <token>, POST /oauth2/register)
-admin-dcr-new-subtitle-part1 = The token is revealed once on the next page. Hand it to the client author. They send it as
-admin-dcr-new-subtitle-part2 = on a single
-admin-dcr-new-subtitle-part3 = call.
-
-# dcr_token_new.html - max-uses hint (code: 1)
-admin-dcr-new-field-max-uses-hint-part1 = Leave blank for unlimited. Single-use (
-admin-dcr-new-field-max-uses-hint-part2 = ) is the safest default.
 
 # client_type_picker.html - popular-apps desc (code: YOUR_DOMAIN, PROVIDER_NAME)
 admin-client-type-popular-desc-part1 = Pre-filled for a known app. URLs use

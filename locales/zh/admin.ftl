@@ -20,7 +20,7 @@ admin-nav-license = 许可证
 admin-nav-identities = 身份
 admin-nav-sessions = 会话
 admin-nav-clients = OAuth2 客户端
-admin-nav-dcr-tokens = DCR 令牌
+admin-nav-resources = 资源
 admin-nav-saml = SAML 单点登录
 admin-nav-hosts = 主机
 admin-nav-accounts = 账户
@@ -219,35 +219,45 @@ admin-client-type-subtitle = 选择应用类型。下一页是同一张表单，
 admin-client-type-popular-heading = 常见应用
 admin-client-type-action-cancel = 取消
 
-# DCR tokens list (dcr_tokens_list.html)
-admin-dcr-page-title = DCR 初始访问令牌
-admin-dcr-action-issue = 签发令牌
-admin-dcr-token-revealed-heading = 初始访问令牌（仅显示一次）
-admin-dcr-col-status = 状态
-admin-dcr-col-note = 备注
-admin-dcr-col-created-by = 创建者
-admin-dcr-col-created = 创建时间
-admin-dcr-col-expires = 过期时间
-admin-dcr-col-uses-left = 剩余次数
-admin-dcr-status-active = 有效
-admin-dcr-status-revoked = 已撤销
-admin-dcr-status-expired = 已过期
-admin-dcr-status-exhausted = 已用尽
-admin-dcr-empty-prefix = 尚未签发令牌。
-admin-dcr-empty-link = 签发一个
-admin-dcr-empty-suffix = 以启用自助注册。
-admin-dcr-action-revoke = 撤销
+# Resource registry list (resources_list.html)
+admin-resources-page-title = 资源注册表
+admin-resources-subtitle = 允许作为访问令牌受众的资源服务器。同意流程只会授予与此处已启用条目匹配的受众。
+admin-resources-action-new = 注册资源
+admin-resources-col-resource = 资源
+admin-resources-col-name = 名称
+admin-resources-col-org = 组织
+admin-resources-col-corroboration = 核验
+admin-resources-col-enabled = 已启用
+admin-resources-col-created = 创建时间
+admin-resources-empty-prefix = 尚未注册任何资源。
+admin-resources-empty-link = 立即注册
+admin-resources-empty-suffix = 以允许其作为访问令牌受众。
+admin-resources-corroboration-corroborated = 已核验
+admin-resources-corroboration-mismatch = 不匹配
+admin-resources-corroboration-unreachable = 无法访问
+admin-resources-corroboration-unchecked = 未检查
+admin-resources-status-enabled = 已启用
+admin-resources-status-disabled = 已禁用
+admin-resources-action-enable = 启用
+admin-resources-action-disable = 禁用
+admin-resources-action-recheck = 重新检查
+admin-resources-action-delete = 删除
+admin-resources-corroboration-note = 核验仅供参考：Forseti 会获取资源的 RFC 9728 元数据文档，并检查其中是否声明了该资源和该颁发者。它绝不会阻止注册或同意。
 
-# DCR token new (dcr_token_new.html)
-admin-dcr-new-page-title = 签发 DCR 令牌
-admin-dcr-new-heading = 签发一个 DCR 初始访问令牌
-admin-dcr-new-field-note = 备注
-admin-dcr-new-field-note-placeholder = 这个令牌是做什么用的？（例如 “Claude Desktop for formshive”）
-admin-dcr-new-field-note-hint = 可选，仅供你自己记录。客户端作者永远看不到。
-admin-dcr-new-field-ttl = 有效期（小时）
-admin-dcr-new-field-ttl-hint = 留空表示永不过期。
-admin-dcr-new-field-max-uses = 最大使用次数
-admin-dcr-new-action-cancel = 取消
+# Resource registry new (resource_new.html)
+admin-resources-new-page-title = 注册资源
+admin-resources-new-heading = 注册资源
+admin-resources-new-subtitle = 已注册的资源可作为访问令牌受众被授予。客户端仍需请求，用户仍需同意。
+admin-resources-new-field-resource = 资源
+admin-resources-new-field-resource-hint = 绝对 URI（规范化：去除末尾斜杠和片段），或用于旧受众的非 URI 字面标识符，将按输入原样精确匹配。
+admin-resources-new-field-name = 显示名称
+admin-resources-new-field-name-hint = 仅用于此列表；默认为资源标识符。
+admin-resources-new-field-org = 组织
+admin-resources-new-org-hint = 拥有此资源的组织。
+admin-resources-new-org-pinned-part1 = 将注册到
+admin-resources-new-org-pinned-part2 = ；资源主机必须是其已验证域名之一。
+admin-resources-new-action-submit = 注册
+admin-resources-new-action-cancel = 取消
 
 # Status page (status.html)
 admin-status-page-title = 状态
@@ -583,24 +593,6 @@ admin-client-discovery-error-part2 = 。
 # client_show.html - edit section intro (code: PUT /admin/clients/<id>)
 admin-client-edit-intro-part1 = 在下方更新客户端字段。更改通过 Hydra 的
 admin-client-edit-intro-part2 = 推送；无关字段会被保留。
-
-# dcr_tokens_list.html - subtitle (code: POST /oauth2/register)
-admin-dcr-subtitle-part1 = 用于授权
-admin-dcr-subtitle-part2 = 的 Bearer 令牌。把它交给 MCP 客户端作者，他们就能自助注册，无需你手动操作。
-
-# dcr_tokens_list.html - revealed-token desc (code: Authorization: Bearer <token>, POST /oauth2/register)
-admin-dcr-revealed-desc-part1 = 请把它分享给客户端作者。他们在调用
-admin-dcr-revealed-desc-part2 = 时以
-admin-dcr-revealed-desc-part3 = 的形式发送。我们不保存原始值，只保存其 SHA-256。
-
-# dcr_token_new.html - subtitle (code: Authorization: Bearer <token>, POST /oauth2/register)
-admin-dcr-new-subtitle-part1 = 令牌将在下一页显示一次。请交给客户端作者。他们会在单次
-admin-dcr-new-subtitle-part2 = 调用中以
-admin-dcr-new-subtitle-part3 = 的形式发送。
-
-# dcr_token_new.html - max-uses hint (code: 1)
-admin-dcr-new-field-max-uses-hint-part1 = 留空表示不限次数。单次使用（
-admin-dcr-new-field-max-uses-hint-part2 = ）是最安全的默认值。
 
 # client_type_picker.html - popular-apps desc (code: YOUR_DOMAIN, PROVIDER_NAME)
 admin-client-type-popular-desc-part1 = 已针对已知应用预填。URL 使用

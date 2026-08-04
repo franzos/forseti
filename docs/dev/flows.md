@@ -878,19 +878,21 @@ Behaviour:
 ### Consent
 
 `GET /oauth/consent?consent_challenge=...` — handler `oauth_consent`
-(`src/oauth/consent.rs:50`), template `templates/consent.html`.
+(`src/oauth/consent.rs:79`), template `templates/consent.html`.
 
-`POST /oauth/consent` — `oauth_consent_submit` (`src/oauth/consent.rs:206`).
+`POST /oauth/consent` — `oauth_consent_submit` (`src/oauth/consent.rs:371`).
 
 Two paths through this handler:
 
 **Auto-grant**: Hydra's `skip == true` (it remembers a previous consent
 decision for this user × client × scope tuple) OR the client carries
-`skip_consent == true`. Before auto-granting, the handler verifies the
-Kratos session subject matches Hydra's claimed subject — without this
-check a crafted consent link bound to identity A could be auto-granted
-while identity B is signed in. Mismatch → `reject_consent_request` with
-`access_denied`.
+`skip_consent == true` — but only when the client is `verified`
+(`oauth_client_metadata` lookup, fail-closed on DB error), which excludes
+every CIMD/DCR row, and never for the PAM device client. Before
+auto-granting, the handler verifies the Kratos session subject matches
+Hydra's claimed subject — without this check a crafted consent link bound
+to identity A could be auto-granted while identity B is signed in.
+Mismatch → `reject_consent_request` with `access_denied`.
 
 **Interactive**: render the consent page. Scopes come from
 `req.requested_scope`; descriptions are pulled from
@@ -902,15 +904,46 @@ shown in the "Signed in as ..." line is fetched out-of-band via
 `kratos::admin_get_identity` (the Kratos session cookie may not be
 scoped to this path, and we already trust `subject` from Hydra).
 
+**CIMD client identity**: when the metadata row has `source = 'cimd'`,
+the client_id URL's host renders as the primary identity line
+(`cimd_host`, `src/oauth/consent.rs:203`) with the document's
+self-asserted `client_name` demoted to a secondary line, and the
+"Reviewed by your administrator" checkmark is suppressed (the template
+guards it on `verified && cimd_host.is_empty()`). Names inside a CIMD
+document are self-asserted; the host is what its operator provably
+controls.
+
 Submission decisions:
 
 - `decision = deny` → `hydra::reject_consent_request` with
   `access_denied`. RP gets an OAuth2 error redirect.
-- `decision = accept` → `finalize_consent` (`src/oauth/consent.rs:330`).
-  Fetches the identity, folds traits into id_token claims by granted
-  scope (`build_id_token_claims`, `src/oauth/consent.rs:370`), then
-  `hydra::accept_consent_request` with the requested audiences and
+- `decision = accept` → `finalize_consent` (`src/oauth/consent.rs:885`).
+  Resolves the audience policy (below), fetches the identity, folds
+  traits into id_token claims by granted scope
+  (`build_id_token_claims`, `src/oauth/consent.rs:1110`), then
+  `hydra::accept_consent_request` with the granted audiences and
   `remember = form.remember == "true"`.
+
+Audience resolution (both grant paths go through `finalize_consent`, so
+neither can miss it):
+
+- `resolve_granted_audience` (`src/oauth/consent.rs:705`) unions both
+  carriers — Hydra's `requested_access_token_audience` (its non-standard
+  `audience=` parameter) and RFC 8707 `resource=` values parsed off the
+  challenge's `request_url` — and default-denies anything that is not on
+  one of two arms, comparing verbatim first and canonically second.
+- The `allowed` arm is the enabled **resource registry** rows
+  (`resource_registry::list_enabled`, fetched lazily at
+  `src/oauth/consent.rs:910` only when an audience was actually
+  requested; an unreadable registry fails closed and denies everything).
+- The `registered` arm is the client's own registered `audience`, but
+  only when `oauth_client_metadata.source = 'admin'`
+  (`operator_written_audiences`, `src/oauth/consent.rs:761`) — CIMD/DCR
+  rows and row-less clients never count.
+- Granted audiences are then healed onto the client record
+  (`hydra::add_client_audiences`, `src/ory/hydra.rs:594`) because fosite
+  re-validates the granted audience against the client record on the
+  **refresh** grant, not the code exchange.
 
 Both decisions emit an audit row (`oauth.consent.granted` or
 `oauth.consent.denied`) with the user as actor. `actor_email` is resolved
@@ -986,7 +1019,7 @@ Edge cases:
 
 ### MCP authorization (resource server)
 
-MCP servers (Claude Desktop, Claude Code, claude.ai, ChatGPT) are OAuth2 public clients that delegate to Hydra; the MCP server itself is the resource server. Forseti is not in the protected-resource path — it shows up only during login + consent, exactly like any other client. What's MCP-specific is the discovery chain (RFC 9728), the audience binding (Hydra's non-standard `audience` parameter, RFC 8707 not yet in Hydra), and the per-request introspection on the MCP server.
+MCP servers (Claude Desktop, Claude Code, claude.ai) are reached by OAuth2 public clients that delegate to Hydra; the MCP server itself is the resource server. Forseti sits in three places: the augmented AS discovery + CIMD shim (see [CIMD authorization shim](#cimd-authorization-shim-get-oauth2authorize) below), login + consent like any other client, and the consent-time `resource=` → `aud` bridge backed by the resource registry. The MCP-specific pieces on the RS side are the RFC 9728 discovery chain and local JWT validation.
 
 ```mermaid
 sequenceDiagram
@@ -1000,19 +1033,17 @@ sequenceDiagram
     Note over CD,MCP: User asks Claude to use a tool on the MCP server.
     CD->>MCP: GET /tool (no token)
     MCP-->>CD: 401 + WWW-Authenticate: Bearer resource_metadata="…"
-    CD->>MCP: GET /.well-known/oauth-protected-resource
-    MCP-->>CD: { authorization_servers: ["https://hydra…"], scopes_supported: […] }
-    CD->>H: GET /.well-known/openid-configuration
-    H-->>CD: { issuer, registration_endpoint, code_challenge_methods_supported: ["S256"], … }
+    CD->>MCP: GET /.well-known/oauth-protected-resource/mcp
+    MCP-->>CD: { resource, authorization_servers: ["{issuer}"], scopes_supported: […] }
+    CD->>P: GET /.well-known/oauth-authorization-server/hydra (RFC 8414 path insertion)
+    P-->>CD: Hydra's doc + client_id_metadata_document_supported: true, authorization_endpoint → shim, no registration_endpoint
 
-    alt DCR (RFC 7591) enabled
-        CD->>H: POST /oauth2/register { redirect_uris, scope, … }
-        H-->>CD: { client_id, registration_access_token }
-    end
-
-    Note over CD: PKCE: code_verifier + code_challenge=S256(verifier)
+    Note over CD: PKCE: code_verifier + code_challenge=S256(verifier); client_id = the hosted CIMD doc URL
     CD-->>U: open auth URL in browser
-    U->>H: /oauth2/auth?client_id=…&audience=https://mcp.example.com&scope=…&code_challenge=…
+    U->>P: GET /oauth2/authorize?client_id=https://claude.ai/…&resource=https://mcp…&scope=…&code_challenge=…
+    Note over P: CIMD shim: fetch doc, validate, upsert Hydra client (see flow below)
+    P-->>U: 302 → /hydra/oauth2/auth?… (query byte-identical)
+    U->>H: GET /hydra/oauth2/auth?…
     H-->>U: 302 → Forseti /oauth/login?login_challenge=<c1>
 
     Note over U,P: Standard OAuth Login + Consent flow (see above).
@@ -1021,181 +1052,143 @@ sequenceDiagram
     P->>H: accept_login_request(subject, amr, acr)
     H-->>U: 302 → /oauth/consent?consent_challenge=<c2>
     U->>P: /oauth/consent?consent_challenge=<c2>
-    P-->>U: render consent.html (scopes from req.requested_scope)
+    P-->>U: render consent.html (client host primary, scopes from req.requested_scope)
     U->>P: POST /oauth/consent (decision=accept, grant_scope[])
-    Note over P: requested_access_token_audience comes from req → audience pre-registered on client
+    Note over P: resource= from request_url ∩ enabled resource_registry rows → grant audience + heal client record
     P->>H: accept_consent_request(c2, grant_scope, audience=[mcp_url], id_token_claims)
     H-->>U: 302 → CD callback with ?code=…&state=…
 
-    CD->>H: POST /oauth2/token (code, code_verifier, client_id)
+    CD->>H: POST /hydra/oauth2/token (code, code_verifier, client_id)
     H-->>CD: { access_token (JWT, 5m), refresh_token, id_token, token_type: Bearer }
 
     Note over MCP: One-time: fetch + cache Hydra JWKS (~24h TTL).
     CD->>MCP: GET /tool (Authorization: Bearer <jwt>)
-    Note over MCP: Verify RS256 sig vs JWKS && iss && aud contains canonical URL && exp && scope.
+    Note over MCP: Verify RS256 sig vs JWKS && iss && aud contains canonical URL && exp && scp.
     MCP-->>CD: 200 + tool result
 ```
 
 Code references:
 
-- Forseti's login+consent handlers are unchanged for MCP — `src/oauth/login.rs:22` and `src/oauth/consent.rs:50`. The MCP-specific part on the AS side lives in `accept_consent_request`'s `grant_access_token_audience` argument, which Forseti forwards from the consent-request's pre-registered `audience` field (`src/ory/hydra.rs:65-72`).
-- The Hydra config that makes this work (PKCE enforcement, DCR, registration_endpoint exposure) is in `infra/hydra/hydra.yml`. See [`operator-guide.md#mcp-support`](../operator-guide.md#mcp-support).
-- The admin UI's MCP preset (which pre-fills the right client config) lives in `src/admin/clients.rs` — `Preset::Mcp` in the preset enum (~line 45), defaults applied in `Preset::defaults()` (~line 102).
+- Forseti's login+consent handlers are unchanged for MCP — `src/oauth/login.rs:23` and `src/oauth/consent.rs:79`. The audience decision is the consent-time resolution documented in the [Consent](#consent) section (`resolve_granted_audience`, `src/oauth/consent.rs:705`, fed by `resource_registry::list_enabled`).
+- The Hydra config that makes this work (PKCE enforcement, DCR off) is in `infra/hydra/hydra.yml`. See [`operator-guide.md#mcp-support`](../operator-guide.md#mcp-support).
+- The admin UI's MCP preset (pre-registered non-CIMD clients) lives in `src/admin/clients/` — `Preset::Mcp`.
 
 Edge cases worth knowing:
 
-- **No `aud` binding.** If the operator forgets to add the MCP server's URL to the client's `audience` allow-list, Hydra silently drops the `audience` parameter — the issued token has no `aud` (or only Hydra's default). The MCP server must reject tokens with missing/mismatched `aud`, otherwise any Hydra-issued token works at it.
+- **No `aud` binding.** If the requested resource has no enabled `resource_registry` row (and isn't on an admin-created client's registered audience), consent drops it — the issued token has no `aud`. The MCP server must reject tokens with missing/mismatched `aud`, otherwise any Hydra-issued token works at it.
+- **The refresh leg.** fosite re-validates the granted audience against the *client record* on the refresh grant only, which is why `finalize_consent` heals granted audiences onto the record (`add_client_audiences`, `src/ory/hydra.rs:594`). Without it a client gets one working access token and then `invalid_request` on every refresh — the failure mode a naive E2E test misses.
 - **JWT vs opaque.** Default is JWT with a 5m TTL (`strategies.access_token: jwt`, `ttl.access_token: 5m` in `hydra.yml`) — RSes validate locally against JWKS, revocation lag is bounded to 5 minutes. Operators can flip to `opaque` for true immediate revocation, but introspection then requires admin-API reach (`/admin/oauth2/introspect` on `:4445`, **private network only**). Forseti doesn't choose; the operator does.
-- **`scope` missing on auth request.** Claude Code as of mid-2025 omitted `scope` in some configurations, which Hydra refuses. Use Claude Desktop or claude.ai if you hit this — Anthropic's tracking issue is upstream.
-- **No RFC 8707.** As of Hydra v26.2.0, `resource` indicators aren't supported. The `audience` query parameter is Hydra-native and bound to the pre-registered allow-list. Track [`ory/hydra` RFC 8707 issues](https://github.com/ory/hydra/issues?q=RFC+8707).
+- **Scope spelling.** Hydra emits granted scopes as a `scp` JSON array, not RFC 9068's `scope` string; resource servers must accept either.
 
-### Dynamic Client Registration (RFC 7591)
+### CIMD authorization shim (`GET /oauth2/authorize`)
 
-`POST /oauth2/register` — handler `register` (`src/oauth/register.rs`).
-This is Forseti's thin proxy in front of Hydra's RFC 7591 endpoint.
+`GET /oauth2/authorize` — handler `authorize` (`src/oauth/cimd.rs:57`),
+mounted with dual per-IP + global rate limits
+(`oauth::cimd::router`, `src/oauth/cimd.rs:39`). Document fetching and
+caching live in `src/oauth/cimd_fetch.rs`; the discovery augmentation and
+the `/hydra/{*rest}` front proxy in `src/hydra_front.rs`.
 
-Why Forseti is here at all: Hydra exposes `/oauth2/register` openly
-once `dynamic_client_registration.enabled` is `true` — no token, no
-allowlist, no CIDR gate (verified against Hydra v26.2.0
-`client/handler.go`). Claude Code refuses any AS that doesn't advertise
-`registration_endpoint` in its discovery document
-(anthropics/claude-code#38102), so DCR has to be on. To avoid an open
-endpoint in production, Forseti advertises *itself* as the
-`registration_endpoint` in Hydra's webfinger
-(`webfinger.oidc_discovery.client_registration_url` in
-`infra/hydra/hydra.yml`), validates an Initial Access Token (IAT) on
-each request, then forwards the body verbatim to Hydra.
-
-Wire path:
-
-1. Operator issues an IAT through `/admin/dcr-tokens/new`
-   (`src/admin/dcr_tokens.rs::issue`). 32 random bytes, base64url-encoded,
-   shown once via the `SecretReveal` flash pattern. Only the SHA-256 hash
-   is persisted (`dcr_initial_access_tokens` table — sqlite + postgres
-   migrations at `20260517000000_initial_schema`).
-2. Operator hands the raw token to the client author.
-3. Client author posts an RFC 7591 registration request to
-   `https://forseti.example.com/oauth2/register` with
-   `Authorization: Bearer <token>`.
-4. Forseti:
-   - Resolves the token by `sha256(token)` → row.
-   - Rejects on `revoked_at`, on `expires_at <= now`, or on
-     `uses_remaining <= 0` with `{"error":"invalid_token", ...}`.
-   - Decrements `uses_remaining` (when non-null) inside the same
-     transaction so two concurrent requests with the same single-use
-     token can't both win.
-   - Stamps `metadata.forseti.source = "dcr"`,
-     `metadata.forseti.dcr_iat_id = <id>`, and
-     `metadata.forseti.dcr_registered_at = <iso>` onto the JSON body.
-     Security-relevant fields (`redirect_uris`, `grant_types`, scope)
-     are passed through unchanged or the whole request is rejected —
-     the proxy never rewrites the OAuth2 shape.
-   - Forwards to Hydra's own `POST /oauth2/register` on the public port
-     and returns Hydra's response **verbatim**. The
-     `registration_access_token` Hydra returns is Hydra-validated, so
-     follow-up `GET/PUT/DELETE /oauth2/register/{id}` calls bypass the
-     Forseti entirely — clients hit Hydra directly. This proxy gates only
-     the initial registration.
-5. On success Forseti emits an
-   `audit::action::OAUTH_CLIENT_DCR_REGISTERED` row capturing IAT id,
-   returned `client_id`, posted `client_name` + `scope`, and a
-   redirect-URI **count** (not the full list — those live on the client
-   itself).
-
-Surfacing the result downstream: the DCR proxy stamps
-`metadata.forseti.verification = "unverified"` on every self-registered
-client (`src/oauth/register.rs::stamp_metadata`). The consent screen
-(`templates/consent.html`) reads `metadata.forseti.verification` off
-`req.client.metadata` in `oauth_consent` (`src/oauth/consent.rs:50`)
-and renders the **Caution** banner whenever the value is
-`"unverified"`. Verified clients (admin-created, or DCR clients an
-admin has explicitly vouched for via `/admin/clients/{id}/verify`)
-get a subtle "Reviewed by your administrator" checkmark instead. The
-admin clients list (`src/admin/clients.rs::project_row`) renders both
-a "Verified" / "Unverified" pill and a separate "Self-registered" pill
-on each row. Operators can revoke the IAT used (audit metadata carries
-the `iat_id`), delete the client, or flip the verification state at any
-time; existing access tokens issued by Hydra are unaffected by IAT or
-verification changes — they're Hydra-bound.
-
-The verify / unverify workflow lives in `src/admin/clients.rs::verify`
-and `unverify`, both `POST`-only routes under `/admin/clients/{id}/...`.
-Verify emits `oauth.client.verified` (INFO); unverify emits
-`oauth.client.unverified` (CRITICAL). Both stamp the admin's email +
-timestamp into `metadata.forseti.verified_by` / `verified_at` (or the
-`*_revoked_*` pair on unverify) so the trust history travels with the
-client itself, not only in the audit log.
+Why Forseti is here at all: the MCP spec's client model is CIMD
+(draft-ietf-oauth-client-id-metadata-document) — `client_id` is an HTTPS
+URL the AS fetches to learn the client's metadata — and Hydra doesn't
+implement it (ory/hydra#4061). Hydra does accept URL-shaped client_ids
+via its admin API, so the shim resolves the document and materialises
+the Hydra client *before* Hydra sees the authorize request; the token
+endpoint needs no interception. RFC 7591 DCR is retired — this replaced
+it.
 
 ```mermaid
 sequenceDiagram
-    actor Op as Operator
+    actor U as User (browser)
+    participant CD as CIMD client (Claude)
     participant P as Forseti
+    participant Doc as client_id URL (claude.ai)
     participant H as Hydra
     participant DB as Forseti DB
-    Op->>P: GET /admin/clients?verification=unverified
-    P->>H: GET /admin/clients (filter client-side)
-    P-->>Op: render list (Unverified pill on DCR rows)
-    Op->>P: GET /admin/clients/{id}
-    P->>H: GET /admin/clients/{id}
-    P-->>Op: render show (Mark as verified button)
-    Op->>P: POST /admin/clients/{id}/verify (_csrf)
-    P->>H: GET + PUT /admin/clients/{id} (stamp verification metadata)
-    P->>DB: INSERT audit_events (oauth.client.verified)
-    P-->>Op: 303 → /admin/clients/{id} (flash: "Client verified.")
-```
 
-```mermaid
-sequenceDiagram
-    actor Op as Operator
-    actor C as Client author
-    participant P as Forseti
-    participant DB as Forseti DB
-    participant H as Hydra
-    Op->>P: GET /admin/dcr-tokens/new
-    Op->>P: POST /admin/dcr-tokens/new (note, ttl, max_uses)
-    P->>DB: INSERT dcr_initial_access_tokens (sha256(token), …)
-    P->>P: flash::store_secret_reveal → reveal_token
-    P-->>Op: 302 → /admin/dcr-tokens?reveal=<reveal_token>
-    P-->>Op: render dcr_tokens_list.html (token shown once)
-    Op->>C: out-of-band: hand over raw token
-    C->>P: POST /oauth2/register {Authorization: Bearer <iat>}
-    P->>DB: SELECT by sha256(iat); validate not-revoked/expired/exhausted
-    alt token invalid / exhausted
-        P-->>C: 401 {"error":"invalid_token"}
-    else valid
-        P->>DB: UPDATE uses_remaining = uses_remaining - 1 (if non-null)
-        P->>P: stamp metadata.forseti.{source, dcr_iat_id, dcr_registered_at}
-        P->>H: POST /oauth2/register (stamped JSON)
-        H-->>P: 201 {client_id, client_secret?, registration_access_token, …}
-        P->>DB: INSERT audit_events (oauth.client.dcr_registered)
-        P-->>C: 201 (Hydra's body verbatim)
+    CD->>P: GET /.well-known/oauth-authorization-server/hydra
+    Note over P: hydra_front::well_known_router (src/hydra_front.rs:45) via the shared DiscoveryCache;<br/>augment_discovery_doc (src/hydra_front.rs:183): +cimd flag, authorization_endpoint → shim, −registration_endpoint
+    P-->>CD: augmented doc (CORS *)
+    CD-->>U: open {origin}/oauth2/authorize?client_id=https://…&redirect_uri=…&resource=…&code_challenge=…
+    U->>P: GET /oauth2/authorize (src/oauth/cimd.rs:57)
+    alt client_id is not an https:// URL
+        P-->>U: 302 → /hydra/oauth2/auth?… (query byte-identical — pre-registered clients pass through)
+    else CIMD path
+        P->>DB: oauth_client_metadata::get(client_id)
+        Note over P: source != 'cimd' → 400 (never mutate an admin client)
+        P->>P: host policy (allowed_client_hosts, src/oauth/cimd.rs:244)
+        P->>Doc: GET client_id URL (cimd_fetch::fetch_document, src/oauth/cimd_fetch.rs:107)
+        Note over P,Doc: SSRF guard + cache: single-flight, TTL from Cache-Control clamped [60s,24h],<br/>64 KiB cap, 5s timeout, no redirects, serve-stale-on-error 1h
+        P->>P: validate_doc (src/oauth/cimd.rs:258): client_id byte-equal, auth method none,<br/>code flow only, https/loopback redirect URIs
+        P->>P: match_redirect_uri (src/oauth/cimd.rs:313): exact, or loopback any-port
+        P->>H: GET /admin/clients/{id} (get_client_opt, src/ory/hydra.rs:552)
+        alt warm path: doc hash unchanged && redirect_uri already on row
+            Note over P: skip every write (src/oauth/cimd.rs:154)
+        else cold path
+            P->>H: create/update client (upsert_hydra_client, src/oauth/cimd.rs:378)<br/>scope union capped 30, ≤5 loopback literals, audience preserved
+            P->>DB: insert_or_get_cimd + set_cimd_doc_hash (src/oauth_client_metadata.rs:139)
+        end
+        P->>DB: audit oauth.client.cimd_seen
+        P-->>U: 302 → /hydra/oauth2/auth?… (query byte-identical)
     end
+    U->>H: GET /hydra/oauth2/auth → login → consent (registry-backed audience) → token
 ```
 
-Edge cases:
+Details that matter:
 
-- **Authorization header missing / malformed scheme.** Returns 401 with
-  `invalid_token`. Case-insensitive `Bearer` match per RFC 6750 §2.1.
-- **Body is not a JSON object.** Returns 400 with
-  `invalid_client_metadata`.
-- **Hydra rejects the registration** (bad redirect URI, unsupported
-  grant type, etc.). Hydra's RFC 7591 error body is passed through
-  verbatim — Forseti doesn't rewrite Hydra's `error_description`.
-- **Hydra unreachable.** Returns 502 with `server_error`. No client
-  was created; no audit row is written.
-- **Existing `metadata.forseti.*` fields posted by the client.** The
-  Forseti merges its three keys (`source`, `dcr_iat_id`,
-  `dcr_registered_at`) on top of whatever the client posted under
-  `metadata`. Other Forseti-side fields the client tries to spoof
-  (`client_type`, `account_deletion_url`) are not validated here —
-  they're stamped onto the client and a malicious caller could
-  pre-claim them. The admin clients page treats `metadata.forseti.source
-  == "dcr"` as the trust signal, not `client_type`.
+- **The redirect into Hydra is a relative path** (`/hydra/oauth2/auth?…`
+  when `[hydra].issuer` carries a path, `redirect_to_hydra`,
+  `src/oauth/cimd.rs:210`): the browser must stay on the issuer origin
+  it arrived on or Hydra's host-scoped CSRF cookies are lost. A
+  path-less issuer (front-proxy-less deployment) falls back to the
+  absolute `public_url`.
+- **Rejections render a plain 400** naming the reason
+  (`reject`, `src/oauth/cimd.rs:231`) — never a redirect, because the
+  redirect_uri is not yet trusted. Each emits an
+  `oauth.client.cimd_rejected` audit row (WARNING).
+- **The `localhost` gap.** Hydra port-matches loopback redirect URIs
+  only for IP literals; `http://localhost:{port}/callback` (what Claude
+  Code builds) does not match a registered port-less
+  `http://localhost/callback`. When the request matched only via the
+  any-port rule, the literal is upserted onto the Hydra row, capped at
+  5 non-document entries with oldest-first eviction
+  (`src/oauth/cimd.rs:396-405`).
+- **Scope union never shrinks** the existing row's scope
+  (`scope_union`, `src/oauth/cimd.rs:341`): existing entries first, then
+  base `openid offline offline_access`, the request's scopes,
+  `client_scope_extra`, the document's scope; capped at 30 with a
+  warn-log on truncation.
+- **Updates start from the existing Hydra record** so the `audience`
+  array written by the consent-time heal survives Hydra's PUT-override
+  (`upsert_hydra_client`, `src/oauth/cimd.rs:378`).
+- **`http://` client_ids** count as CIMD only under the
+  `[oauth.cimd].allow_private_targets` test/dev hatch (loopback fixture
+  servers); in production they pass through to Hydra like any other
+  non-CIMD client_id.
 
-Out of scope for the MVP (tracked in `TODO_MCP.md`):
+The front proxy (`hydra_front::passthrough`, `src/hydra_front.rs:60`,
+gated on `[hydra].front_proxy`) forwards
+Content-Type/Accept/Authorization/Cookie/X-Forwarded-\* request headers
+and Content-Type/Location/WWW-Authenticate/Cache-Control/Vary + all
+Set-Cookie response headers, buffers bodies under a 2 MiB cap, and never
+follows redirects — Hydra's 302s belong to the browser. `GET
+/hydra/.well-known/openid-configuration` (the path-appending form)
+through the passthrough is served augmented, never proxied verbatim
+(`src/hydra_front.rs:68-75`).
 
-- Rate limiting (per-IP, per-token).
-- TTL sweep that auto-deletes unused DCR clients.
+Trust state: the shim inserts `oauth_client_metadata` rows with
+`source = 'cimd'`, `verification = 'unverified'`
+(`insert_or_get_cimd`, `src/oauth_client_metadata.rs:139`; `org_id`
+stamped to the Default org). Because the auto-grant guard requires
+`verified`, an unverified CIMD row always renders consent — with the
+client host as the primary identity (see [Consent](#consent)) and never
+the admin checkmark (the template keys it on `cimd_host` being empty).
+A `cimd` row never satisfies `operator_written_audiences`; the client
+record is not policy. The always-render guarantee is hard: the auto-grant
+guard (`src/oauth/consent.rs:169`) excludes `source = 'cimd'` outright, so
+even a row an operator verified through `/admin/clients/{id}/verify` never
+skips the screen. The admin list's "Self-registered" pill covers both
+`'dcr'` (historical) and `'cimd'` rows.
 
 ### OAuth Client Logout (RP-initiated)
 
@@ -2043,7 +2036,7 @@ The gate runs via the `RequireAdminScoped` extractor (`src/extractors.rs:145`), 
 | `/admin/audit/{event_id}` | yes | direct compare against the row's `org_id` column | Row tagged via `.org(...)` on the originating `AuditEvent`. Untagged rows are invisible to org-scoped views by design (the gap noted in the audit log section). |
 | `/admin/audit` (list) | yes | filter pushed into SQL via `AuditFilter.org_id` | Each row's `org_id` matched at query time. |
 | `/admin/status` | no (Forseti-tier-only) | — | Cluster-wide health probe; no org dimension. |
-| `/admin/dcr-tokens/*` | no (Forseti-tier-only) | — | `dcr_initial_access_tokens` schema has no `org_id` column — an IAT can mint into any org based on the registrant's `?org=` at `/oauth2/register`. Forseti-tier-only by intent; documented in the module doc at `src/admin/dcr_tokens.rs`. |
+| `/admin/resources/*` | yes | `load_row_in_scope` (`src/admin/resources.rs:401`) — direct compare against the row's `org_id`; same "Not found" for missing and sibling-org rows | Org-scoped create is additionally gated on the resource host being a **verified domain** of the org (`orgs::domains::get_domain`, fail closed). List filters rows to the scope org; Forseti-tier picks the target org in the create form. |
 
 #### 404-shape probe defence
 
@@ -2076,7 +2069,7 @@ These are deliberately duplicated rather than centralised — each surface has s
 
 Hydra's `oauth2_clients` table is unchanged — `org_id` lives Forseti-side in `oauth_client_metadata`. The list view fetches a page from Hydra, joins our metadata in memory, and post-filters. v1 shortcut: post-filtering after Hydra paginates can shrink a page below `CLIENTS_PAGE_SIZE`, so an org with sparse clients spread across Hydra's ordering may need multiple "Next page" clicks to reach all its rows. A Forseti-owned client mirror would lift this; not on the roadmap until list sizes warrant it.
 
-DCR-registered clients (`POST /oauth2/register`) default to Default. When the request happens to carry a valid Forseti session cookie, the new client is attributed to that caller's active org instead — uncommon path (Claude / Code can't carry Forseti cookies), but useful for scripted dev flows.
+CIMD-registered clients (the `/oauth2/authorize` shim) are always attributed to the Default org (`insert_or_get_cimd` stamps `orgs::DEFAULT_ORG_ID`); historical `source='dcr'` rows keep whatever org the retired DCR proxy stamped.
 
 ### Create org
 

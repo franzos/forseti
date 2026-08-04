@@ -25,6 +25,9 @@ const DISCOVERY_RETRY: Duration = Duration::from_secs(30);
 struct CachedDiscovery {
     next_refresh_at: Instant,
     doc: OidcDiscovery,
+    /// Full document as Hydra served it; the CIMD discovery augmentation
+    /// works on this rather than the typed admin-UI subset.
+    raw: Arc<serde_json::Value>,
 }
 
 /// Lazily-populated, TTL'd cache of Hydra's OIDC discovery doc. Shared
@@ -59,28 +62,47 @@ pub struct AppState {
 impl AppState {
     /// Return the cached discovery doc + an `ok` flag, refreshing if stale. A cold fetch failure returns an
     /// EMPTY doc (not a `public_url` guess) so the template's `is_empty()` guards hide endpoints rather than
-    /// show a wrong issuer. The lock is released before the network fetch; a cold-boot double-fetch is idempotent.
+    /// show a wrong issuer.
     pub async fn openid_configuration(&self) -> (OidcDiscovery, bool) {
+        match self.cached_discovery().await {
+            Some(c) => (c.doc, true),
+            None => (OidcDiscovery::default(), false),
+        }
+    }
+
+    /// The cached discovery doc exactly as Hydra served it, for consumers that
+    /// need fields beyond the [`OidcDiscovery`] subset. `None` only on a cold
+    /// cache with Hydra unreachable.
+    pub async fn openid_configuration_raw(&self) -> Option<Arc<serde_json::Value>> {
+        self.cached_discovery().await.map(|c| c.raw)
+    }
+
+    /// Shared cache/refresh policy: serve fresh, refresh when stale, serve stale with a retry
+    /// backoff while Hydra is down. The lock is released before the network fetch; a cold-boot
+    /// double-fetch is idempotent.
+    async fn cached_discovery(&self) -> Option<CachedDiscovery> {
         {
             let guard = self.discovery.0.lock().await;
             if let Some(c) = guard.as_ref()
                 && Instant::now() < c.next_refresh_at
             {
-                return (c.doc.clone(), true);
+                return Some(c.clone());
             }
         }
         match crate::ory::discovery::fetch(&self.ory, &self.cfg.hydra.public_url).await {
-            Ok(doc) => {
-                let mut guard = self.discovery.0.lock().await;
-                *guard = Some(CachedDiscovery {
+            Ok((doc, raw)) => {
+                let cached = CachedDiscovery {
                     next_refresh_at: Instant::now() + DISCOVERY_TTL,
-                    doc: doc.clone(),
-                });
-                (doc, true)
+                    doc,
+                    raw: Arc::new(raw),
+                };
+                let mut guard = self.discovery.0.lock().await;
+                *guard = Some(cached.clone());
+                Some(cached)
             }
             Err(e) => {
                 tracing::warn!(error = ?e, "hydra discovery fetch failed");
-                // Serve a stale value if we have one; otherwise an empty doc.
+                // Serve a stale value if we have one; otherwise nothing.
                 let mut guard = self.discovery.0.lock().await;
                 match guard.as_mut() {
                     // Stale but valid (issuer/endpoints are stable); serve it without warning,
@@ -88,9 +110,9 @@ impl AppState {
                     // request into a failing network fetch.
                     Some(c) => {
                         c.next_refresh_at = Instant::now() + DISCOVERY_RETRY;
-                        (c.doc.clone(), true)
+                        Some(c.clone())
                     }
-                    None => (OidcDiscovery::default(), false),
+                    None => None,
                 }
             }
         }

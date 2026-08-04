@@ -82,8 +82,10 @@ The authoritative schema is `src/config.rs`. The example file is `config.example
 
 | Key          | Type   | Default | Description                              |
 |--------------|--------|---------|------------------------------------------|
-| `public_url` | string | —       | Public Hydra issuer URL (token endpoint, JWKS, OAuth2 endpoints). |
+| `public_url` | string | —       | Hydra's public URL as reachable from Forseti (token endpoint, JWKS, OAuth2 endpoints). |
 | `admin_url`  | string | —       | Server-only Hydra admin URL. Used to fetch and accept login/consent/logout challenges. |
+| `issuer`     | string | unset (falls back to `public_url`) | Hydra's advertised issuer (`urls.self.issuer` in `hydra.yml`) when it differs from `public_url` — the normal case behind a front proxy, e.g. `https://accounts.example.com/hydra`. Drives the CSP `form-action` origin, the path-insertion well-known discovery routes, and the CIMD shim's redirect base. See [Fronting the issuer](#fronting-the-issuer-front-proxy-vs-haproxy). |
+| `front_proxy`| bool   | `false` | Reverse-proxy `GET/POST /hydra/{path}` on Forseti's public listener to `public_url`, so Forseti itself owns the issuer origin (single-binary deployments, the dev playground). Keep `false` when an external proxy (haproxy) already routes `/hydra/` to Hydra. |
 
 ### `[self]`
 
@@ -228,37 +230,38 @@ offline_access = "Stay signed in by issuing refresh tokens"
 offline        = "Stay signed in by issuing refresh tokens"
 ```
 
-### `[oauth]` — DCR knobs
-
-Per-IP / per-IAT rate limiting on `POST /oauth2/register`, plus the reserved-name denylist and the RFC 8707 resource bridge. Defaults are set in code; override per-deployment when needed. See [Dynamic Client Registration (RFC 7591)](#dynamic-client-registration-rfc-7591) for the full picture.
+### `[oauth]` — audience policy
 
 | Key                        | Type     | Default          | Description                                                                                                                                                |
 |----------------------------|----------|------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `allowed_resource_audiences` | string[] | `[]`           | Resource identifiers Forseti may bind into an access token's `aud` when a client requests them with RFC 8707 `resource=`. Unlisted resources are ignored and logged. Empty disables the bridge. See below. |
-| `dcr_require_iat`          | bool     | `false`          | Require a valid initial access token on `POST /oauth2/register`. Left off, anonymous dynamic client registration stays open; turned on, an anonymous request is rejected with `401 invalid_token`. |
-| `dcr_ip_rate_per_minute`   | u32      | `10`             | Per-IP rate limit on `POST /oauth2/register` — max requests per minute. In-memory, per-process. `0` disables this bucket.                                  |
-| `dcr_ip_rate_per_hour`     | u32      | `100`            | Per-IP rate limit — max requests per hour. Enforced in parallel with the per-minute bucket. `0` disables.                                                  |
-| `dcr_global_rate_per_minute` | u32    | `40`             | Global (all-callers-share-one-bucket) rate limit, requests per minute. Bounds total traffic even when a spoofed `X-Forwarded-For` defeats the per-IP bucket. `0` disables. |
-| `dcr_global_rate_per_hour` | u32      | `400`            | Global rate limit, requests per hour, in parallel with the per-minute global bucket. `0` disables.                                                        |
-| `dcr_iat_daily_limit`      | u32      | `50`             | Per-IAT cap on successful registrations over a rolling 24h window opened by first use. `0` disables.                                                       |
-| `dcr_reserved_names`       | string[] | (code-baked set) | DCR `client_name` denylist. Case-insensitive substring match. When the key is absent from `config.toml`, the defaults in `crate::oauth::register::RESERVED_NAMES_DEFAULT` are used; setting the key replaces the list entirely. |
+| `allowed_resource_audiences` | string[] | `[]`           | **Deprecated.** The consent-time audience allow-list lives in the [resource registry](#the-resource-registry-adminresources) now, managed at `/admin/resources`. Entries still listed here are imported into the registry once at startup (idempotent, `created_by = 'config-import'`) and a deprecation warning is logged; the values are never read at consent time. Cutover: deploy, verify the rows appear at `/admin/resources`, then delete the key. |
+
+### `[oauth.cimd]` — CIMD shim knobs
+
+Settings for the CIMD authorization shim at `GET /oauth2/authorize` (see [CIMD](#cimd-zero-config-client-onboarding) for the full picture). Defaults are set in code; override per-deployment when needed.
+
+| Key                        | Type     | Default          | Description                                                                                                                                                |
+|----------------------------|----------|------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `allow_private_targets`    | bool     | `false`          | Stand down the SSRF guard on outbound document fetches: allows `http://` and loopback/private-IP client_id and metadata URLs, so local fixture servers work in development and CI. **Never enable in production.** |
+| `client_scope_extra`       | string[] | `[]`             | Extra scope entries unioned into every CIMD client's Hydra `scope` ceiling, on top of the built-in `openid offline offline_access`, the scopes each authorize request asks for, and the document's own `scope`. |
+| `allowed_client_hosts`     | string[] | `[]`             | When non-empty, only client_id URLs whose host matches an entry exactly (case-insensitive; subdomains do NOT match) may use the shim. Empty = open: any HTTPS client_id host is accepted, consent-gated, per the MCP open-client model. A client-vendor list (`["claude.ai"]`), not a per-resource list. |
+| `ip_rate_per_minute`       | u32      | `10`             | Per-IP rate limit on `GET /oauth2/authorize` — max requests per minute. In-memory, per-process. `0` disables this bucket.                                  |
+| `ip_rate_per_hour`         | u32      | `100`            | Per-IP rate limit — max requests per hour. Enforced in parallel with the per-minute bucket. `0` disables.                                                  |
+| `global_rate_per_minute`   | u32      | `40`             | Global (all-callers-share-one-bucket) rate limit, requests per minute. Bounds total traffic even when a spoofed `X-Forwarded-For` defeats the per-IP bucket. `0` disables. |
+| `global_rate_per_hour`     | u32      | `400`            | Global rate limit, requests per hour, in parallel with the per-minute global bucket. `0` disables.                                                        |
 
 #### RFC 8707 `resource` → access-token audience
 
-OAuth clients that target a specific resource server — every MCP client, for instance — name it with RFC 8707 `resource=<uri>` on the authorize request. Hydra/fosite ignores that parameter entirely: it derives the requested audience only from Hydra's non-standard `audience=` form parameter. A client that does the standard thing therefore receives a token with `aud: []`, and its resource server rejects it forever.
+OAuth clients that target a specific resource server — every MCP client, for instance — name it with RFC 8707 `resource=<uri>` on the authorize request. Hydra/fosite ignores that parameter entirely: it derives the requested audience only from Hydra's non-standard `audience=` form parameter. A client that does the standard thing would therefore receive a token with `aud: []`, and its resource server rejects it forever.
 
-Listing a resource in `allowed_resource_audiences` makes Forseti bridge the gap:
+Enrolling the resource in the [resource registry](#the-resource-registry-adminresources) (`/admin/resources`) makes Forseti bridge the gap:
 
-```toml
-[oauth]
-allowed_resource_audiences = ["https://stackpit.gofranz.com/mcp"]
-```
+- Consent is the only place an audience is decided. It takes the union of both carriers — `resource=` on the authorize URL and Hydra's `audience=` — and grants a value only when it is **either** an enabled registry row **or** on the registered `audience` of a client Forseti knows an operator created. Everything else is dropped with a `tracing::warn!`.
+- "Knows an operator created" means `oauth_client_metadata.source = 'admin'`, i.e. the client was made through Forseti's admin UI. Self-registered clients (`source = 'cimd'`, or historical `'dcr'` rows) and clients with no metadata row at all never count — their record content is not operator policy.
+- So the registry is where an audience for **any other client** goes, including one created outside Forseti (`hydra create client`). Entries are matched verbatim first and canonically second, so a non-URI identifier like `stackpit-web` can be registered and works; URI entries additionally match across a trailing slash or fragment (`https://host/mcp` and `https://host/mcp/` are one resource, and the no-slash form is what gets granted).
+- Granting an audience the client's record doesn't carry yet also registers it there (capped, idempotent). fosite re-validates the granted audience against the client record on the **refresh** grant (but not on the initial code exchange), so without that a client gets one working access token and then `invalid_request` on every refresh.
 
-- At consent, any `resource=` value on the authorize URL that matches the list is merged into the granted access-token audience. Values that don't match are dropped with a `tracing::warn!` — the allow-list is what stops Forseti becoming an open audience-minting service for anyone who can reach `/oauth2/auth`.
-- At registration, the same resources are unioned into the `audience` of every client created through `POST /oauth2/register`. fosite re-validates the granted audience against the client record on the **refresh** grant (but not on the initial code exchange), so without the pre-registration a client gets one working access token and then `invalid_request` on every refresh.
-- Comparison strips the trailing slash and any fragment, so `https://host/mcp` and `https://host/mcp/` are one resource. The no-trailing-slash form is what gets granted and registered.
-
-The list is a ceiling, not a grant: an audience only reaches a token when the user consents to a request that actually asked for that resource. Clients using Hydra's `audience=` parameter are unaffected.
+The registry is a ceiling, not a grant: an audience only reaches a token when the user consents to a request that actually asked for that resource. If the registry is unreadable at consent time, Forseti fails closed and denies every requested audience.
 
 Whether the per-IP limiter trusts forwarded-for headers is a single deployment-wide knob: `[proxy] trust_forwarded_for` (see below). The same flag drives the audit middleware (audited client IP) and the handoff + claim-email limiters — the underlying question ("is there a trusted reverse proxy?") doesn't change per-endpoint.
 
@@ -425,8 +428,8 @@ The two-tier code lives at `src/admin/mod.rs::require_admin` (Tier 1) and `src/a
 | `/admin/webhooks/{id}`                | Full detail page for a dead-lettered webhook row — payload, attempt history, last error.       |
 | `/admin/webhooks/{id}/requeue`        | POST — flip a `DEAD` row back to `CONFIRMED` so the background worker picks it up again.        |
 | `/admin/webhooks/{id}/discard`        | POST — drop the row without further delivery attempts.                                          |
-| `/admin/dcr-tokens`                   | List Initial Access Tokens for `POST /oauth2/register`. Issue / revoke from here.               |
-| `/admin/dcr-tokens/{id}/revoke`       | POST — revoke an IAT. Future registrations presenting it return 401 with `iat_exhausted`.       |
+| `/admin/resources`                    | The resource registry: MCP/API resource servers whose audiences consent may grant. List with corroboration badge, enable/disable toggle, delete. See [The resource registry](#the-resource-registry-adminresources). |
+| `/admin/resources/new`                | Enroll a resource. Org-scoped admins may only register resources on a verified domain of their org. |
 | `/admin/license`                      | View current license status (Unlicensed / Active / Grace / Expired), tier, expiry. Activate or deactivate from here. |
 | `/admin/license/activate`             | POST — verify a pasted signed license blob against the baked-in Ed25519 pubkey and persist.    |
 | `/admin/license/deactivate`           | POST — drop the current license row. Premium features fall back to the upsell page.             |
@@ -908,9 +911,7 @@ Why `config-init`'s baked-in recommendations are set the way they are. This used
 
 **Hydra `urls.self.issuer`.** The issuer must be reachable under the same hostname from both the browser and any resource servers so the `iss` claim in id_tokens validates everywhere.
 
-**Hydra `oidc.dynamic_client_registration`.** This is Dynamic Client Registration (RFC 7591). The portal advertises itself as the `registration_endpoint` and gates inbound requests with an Initial Access Token before forwarding to Hydra. See `src/oauth/register.rs`.
-
-**Hydra `webfinger.oidc_discovery.client_registration_url`.** Points at the portal, not Hydra — the portal validates an Initial Access Token before forwarding to Hydra.
+**Hydra `oidc.dynamic_client_registration: enabled: false`.** Dynamic Client Registration (RFC 7591) is retired: no anonymous registration surface, no `registration_endpoint` anywhere, and Hydra's RFC 7592 `/oauth2/register/{id}` management endpoints die with it. MCP clients self-identify via [CIMD](#cimd-zero-config-client-onboarding) instead; everything else is pre-registered through the admin UI. Do not set `webfinger.oidc_discovery.client_registration_url` either.
 
 **Hydra `oauth2.pkce.enforced_for_public_clients: true`.** MCP 2025-06-18 requires PKCE with S256 for public clients.
 
@@ -1333,7 +1334,7 @@ hydra create client \
 ```
 
 - `skip_consent: true` in client metadata auto-grants consent without prompting. Set this only for clients the operator trusts to honor scope semantics (typically first-party apps).
-- Capture the printed `client_id`, `client_secret`, and `registration_access_token` and pass them to the downstream app's operator.
+- Capture the printed `client_id` and `client_secret` and pass them to the downstream app's operator. (With DCR retired, Hydra's RFC 7592 management endpoints are gone — a `registration_access_token` has nothing to talk to; client changes go through the admin UI or the admin API.)
 
 See [`integration-guide.md`](./integration-guide.md) for the downstream-app perspective on registration parameters.
 
@@ -1349,17 +1350,24 @@ Where the playground sits relative to current OAuth / OIDC normative work (as of
 | OAuth 2.1 — Exact-string redirect matching | Hydra default; no wildcard / prefix matching |
 | OAuth 2.1 — Refresh tokens sender-constrained OR rotated | Rotated (Hydra default; one-shot with reuse detection) |
 | RFC 9068 JWT Access Token profile (`typ=at+jwt`) | Partial — Hydra v26 emits JWT access tokens with `typ: JWT`. Strict RFC 9068 validators that require `typ=at+jwt` will reject. Either relax your validator or stay on opaque tokens + introspection until Hydra ships the profile |
-| RFC 8707 Resource Indicators (`resource=` parameter) | Hydra does not yet bind `resource=` into the access token's `aud` — use Hydra's `audience=` allow-list for that. Forseti *does* parse `resource=` off the original auth URL and records it as provenance on `oauth_client_metadata.resource_url` (`src/oauth/consent.rs:412-437`) |
+| RFC 8707 Resource Indicators (`resource=` parameter) | Hydra ignores `resource=` entirely; Forseti's consent handler bridges it — a requested `resource` is bound into the access token's `aud` when it matches an enabled [resource registry](#the-resource-registry-adminresources) row (default deny). See [RFC 8707 `resource` → access-token audience](#rfc-8707-resource--access-token-audience) |
 | RFC 9449 DPoP | **Not implemented.** Tokens are bearer-only |
 | RFC 8705 mTLS client auth + cert-bound tokens | Not configured |
 | RFC 9126 PAR (Pushed Authorization Requests) | Supported by Hydra; no Forseti-side enforcement |
 | RFC 9101 JAR (signed request objects) | Supported by Hydra; no Forseti-side enforcement |
 | RFC 9396 RAR (Rich Authorization Requests) | Not used |
 | RFC 9700 OAuth Security BCP (Jan 2025) | Reference document — the items above cover the BCP's MUST-level requirements except DPoP/mTLS |
+| CIMD (draft-ietf-oauth-client-id-metadata-document) | Implemented by Forseti's `/oauth2/authorize` shim + augmented discovery, since Hydra has no native support ([ory/hydra#4061](https://github.com/ory/hydra/issues/4061)). Public clients (`token_endpoint_auth_method: "none"`) only |
 
 ### MCP support
 
-Hydra works as the authorization server for [Model Context Protocol](https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization) servers (Claude Desktop, Claude Code, claude.ai, ChatGPT). Forseti handles the UX side — the admin UI's "MCP server" preset on `/admin/clients/new` pre-fills the right defaults (public client, PKCE, audience allow-list). This section is the operator-side checklist for the Hydra config that makes those clients work.
+Hydra works as the authorization server for [Model Context Protocol](https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization) servers (Claude Desktop, Claude Code, claude.ai). Forseti supplies what Hydra lacks for MCP: CIMD client onboarding (Hydra has no native support, [ory/hydra#4061](https://github.com/ory/hydra/issues/4061)), the RFC 8707 `resource` → `aud` bridge at consent, and the augmented discovery documents that advertise both. This section is the operator-side checklist.
+
+The moving pieces, in the order a first connection touches them:
+
+1. **Discovery** — the MCP client fetches AS metadata at the RFC 8414 path-insertion URL (`/.well-known/oauth-authorization-server/hydra` on the issuer host). Forseti serves it: Hydra's own document with `client_id_metadata_document_supported: true` added and `authorization_endpoint` pointed at the shim. See [Fronting the issuer](#fronting-the-issuer-front-proxy-vs-haproxy).
+2. **Client onboarding** — the client identifies itself with a URL-shaped `client_id` (CIMD); Forseti's `/oauth2/authorize` shim fetches, validates and upserts it as a Hydra client on the fly. Zero operator involvement per connection. See [CIMD](#cimd-zero-config-client-onboarding).
+3. **Audience** — the token's `aud` binds to the requested `resource=` only when the resource is enrolled at `/admin/resources`. One registry row per MCP server, no restart. See [The resource registry](#the-resource-registry-adminresources).
 
 #### Required Hydra config
 
@@ -1376,19 +1384,12 @@ oauth2:
     enforced_for_public_clients: true
 
 oidc:
+  # DCR retired: CIMD clients are upserted through the Forseti shim, so no
+  # anonymous registration endpoint exists anywhere. (The old "Claude Code
+  # refuses an AS without /oauth2/register" claim was falsified once
+  # client_id_metadata_document_supported was advertised.)
   dynamic_client_registration:
-    # Required for MCP — Claude Code refuses any AS that doesn't expose
-    # `/oauth2/register` (RFC 7591), even when client_id is pre-configured.
-    enabled: true
-    default_scope:
-      - openid
-      - offline
-      - offline_access
-
-webfinger:
-  oidc_discovery:
-    # Surfaces `registration_endpoint` in /.well-known/openid-configuration.
-    client_registration_url: https://accounts.example.com/oauth2/register
+    enabled: false
 ```
 
 #### Token validation: JWT access tokens (default and recommended)
@@ -1437,67 +1438,88 @@ If any of those apply, stay on the JWT default. The 5-minute revocation window i
 
 If you do flip to opaque, the response shape from `/admin/oauth2/introspect` is RFC 7662 standard plus a custom `ext` field (whatever Forseti stuffed in at consent time). See `src/oauth/consent.rs:build_id_token_claims` for the contents.
 
-#### Audience allow-list (Hydra's non-standard `audience` parameter)
+#### Audience binding (RFC 8707 `resource` and Hydra's non-standard `audience`)
 
-Hydra binds audiences at the auth-request level — clients pass `audience=<url>` on the authorization request, and Hydra issues a token with `aud: ["<url>"]`. The catch: **values must be pre-registered on the client**. Hydra does not yet implement [RFC 8707](https://datatracker.ietf.org/doc/html/rfc8707) as of v26.2.0 (the current latest, March 2026), and emits no `invalid_target` error when a value isn't registered — it silently drops the audience binding.
+Hydra binds audiences at the auth-request level — clients pass `audience=<url>` on the authorization request, and Hydra issues a token with `aud: ["<url>"]`, but **only for values pre-registered on the client**; anything else refuses the whole authorize request. Hydra does not implement [RFC 8707](https://datatracker.ietf.org/doc/html/rfc8707) `resource=` at all as of v26.2.0.
 
-The admin UI's MCP preset surfaces the audience textarea by default. Operators register their MCP server's canonical URL (e.g. `https://mcp.formshive.com`) there; clients reference it on the auth request.
+Forseti's consent handler is where the actual audience decision happens (see [RFC 8707 `resource` → access-token audience](#rfc-8707-resource--access-token-audience) above): it unions both carriers and default-denies anything that is neither an enabled [resource registry](#the-resource-registry-adminresources) row nor the registered `audience` of an admin-created client. The registered `audience` counts as policy only for a client created through the admin UI (`oauth_client_metadata.source = 'admin'`); a CIMD client's record content is never policy — its `audience` array is written only by the consent-time refresh heal.
 
-Track the upstream: [`ory/hydra` RFC 8707 issues](https://github.com/ory/hydra/issues?q=RFC+8707). When shipped, the current allow-list flow keeps working as a fallback — useful even after RFC 8707 lands, because real-world MCP clients (Claude.ai as of January 2026) don't always send `resource` reliably.
+So the two enrolment paths for an MCP server's audience:
 
-#### Dynamic Client Registration (RFC 7591)
+- **Registry row** (`/admin/resources`) — works for every client, including CIMD clients you've never seen. This is the normal path for MCP.
+- **Client audience textarea** (admin UI's MCP preset on a pre-registered client) — binds the audience to that one client only.
 
-DCR is enabled because Claude Code refuses any authorization server that doesn't advertise `registration_endpoint` in its discovery document, even when a `client_id` is pre-configured ([anthropics/claude-code#38102](https://github.com/anthropics/claude-code/issues/38102)). Hydra's own `/oauth2/register` is fully anonymous once `enabled: true` — there is no Hydra-side token, allowlist, or CIDR gate.
+Track the upstream: [`ory/hydra` RFC 8707 issues](https://github.com/ory/hydra/issues?q=RFC+8707). When shipped, the registry keeps working as the policy layer on top.
 
-**Anonymous DCR is the default.** Claude Code, Claude Desktop, and claude.ai have no way to present an Initial Access Token — they discover the registration endpoint from the OIDC document and POST to it directly. Locking DCR behind a mandatory bearer would make these clients unable to self-register, defeating the purpose of advertising the endpoint. Forseti therefore accepts anonymous registrations by default and relies on the **verification badge + admin review** as the safety mechanism: every DCR client lands as `unverified`, the consent screen renders a caution banner ("This application has not been reviewed by an administrator"), and end users see that banner every time until an operator reviews the client at `/admin/clients?verification=unverified` and explicitly promotes it via **Mark as verified**.
+#### CIMD: zero-config client onboarding
 
-**What Forseti still does** (with or without an IAT):
+CIMD ([Client ID Metadata Documents](https://datatracker.ietf.org/doc/draft-ietf-oauth-client-id-metadata-document/)) is the MCP spec's replacement for Dynamic Client Registration: the `client_id` **is** an HTTPS URL, and the authorization server fetches that URL to learn the client's metadata (name, redirect URIs, grant types). No registration endpoint, no per-connection operator work, and the client's identity is a URL whose host its operator provably controls. Claude Code and claude.ai implement it; Hydra doesn't ([ory/hydra#4061](https://github.com/ory/hydra/issues/4061)), so Forseti provides it as a shim in front of Hydra.
 
-- Strips any `metadata.forseti.*` keys from the inbound body — defence against a caller trying to pre-seed trust state on the Hydra client.
-- Applies the reserved-name denylist (see below).
-- Applies the per-IP rate limit (`oauth.dcr_ip_rate_per_minute` / `dcr_ip_rate_per_hour`, see below).
-- Inserts a row into the Forseti-owned `oauth_client_metadata` table recording `source = "dcr"`, `verification = "unverified"`, and the registration timestamp. `dcr_iat_id` is set when an IAT was presented; NULL otherwise.
-- Audits the registration as `oauth.client.dcr_registered`.
-- Normalises Hydra's response before returning it to the caller — empty-string URL fields (`client_uri`, `policy_uri`, `tos_uri`, `logo_uri`) and `null` array fields (`contacts`) are stripped so strict-parser clients (Claude Code, others) don't reject a successful registration on `Invalid URL` / `expected array, received null`.
+**The shim: `GET /oauth2/authorize`.** Forseti's augmented discovery advertises this route as the `authorization_endpoint`. On each request:
 
-**Discovery URL.** Hydra is configured to advertise Forseti's URL as the `registration_endpoint`:
+1. A `client_id` that is **not** an `https://` URL passes straight through — 302 to Hydra's real `/oauth2/auth` with the query string byte-identical. Pre-registered clients are unaffected.
+2. An `https://` URL `client_id` takes the CIMD path: fetch the document through the SSRF guard (https only, public IPs only re-checked at DNS resolution, no redirects, 5 s timeout, 64 KiB cap, 512-byte URL cap, no credentials/fragment in the URL), validate it (its `client_id` member must equal the fetched URL byte-for-byte; `token_endpoint_auth_method` must be `"none"` — public clients only; `grant_types` ⊆ {`authorization_code`, `refresh_token`}; `response_types` = `["code"]`; every `redirect_uris` entry `https://` or loopback `http://`), match the request's `redirect_uri` against the document (exact, except loopback URIs match on any port per RFC 8252 §7.3), then create or update the matching Hydra client row and 302 into Hydra. Validation failures render a plain 400 naming the reason — never a redirect, because the redirect URI isn't trusted yet.
 
-```yaml
-webfinger:
-  oidc_discovery:
-    client_registration_url: https://accounts.example.com/oauth2/register
-```
+Documents are cached in-process (1024 entries, TTL from `Cache-Control: max-age` clamped to [60 s, 24 h], 300 s default, single-flight per URL, 1 h serve-stale-on-error grace), and a warm path skips the Hydra admin calls entirely when the document hash is unchanged and the redirect URI is already registered — the common repeat visit is cache hit → redirect, no writes.
 
-Hydra's response (including its `registration_access_token`) is passed back to the caller verbatim — follow-up `GET/PUT/DELETE /oauth2/register/{id}` calls go straight to Hydra, since the registration access token Hydra issues is Hydra-validated.
+**The `localhost` compensation.** Hydra's loopback redirect matching is IP-literal-only: a registered port-less `http://127.0.0.1/callback` matches any port, but `http://localhost/callback` does not — and Claude Code builds `http://localhost:{ephemeral}/callback` at runtime. The shim compensates by upserting the requested literal onto the Hydra row when it matched a loopback document entry only via the any-port rule. At most 5 such literals are kept (oldest evicted); document URIs are never evicted.
 
-> **Why `oauth_client_metadata` lives Forseti-side**, not on the Hydra client's `metadata` JSON: RFC 7592 PUT `/oauth2/register/{id}` (handled by Hydra, not Forseti) replaces the full client representation including `metadata`. If verification state lived on `metadata.forseti.verification`, a self-registered client could flip its own badge from `"unverified"` to `"verified"` via the RAT Hydra issues on registration. Moving the trust-boundary fields into a Forseti-owned table puts them out of reach of the RAT.
+**Scope ceiling.** The Hydra row's `scope` is the union of the row's existing scope (never shrinks), the built-in `openid offline offline_access`, the request's `scope` values, `[oauth.cimd].client_scope_extra`, and the document's own `scope` — capped at 30 entries with a warning when truncated. This is a ceiling, never a grant: the consent screen and the resource server's own role intersection remain the actual authorization.
 
-**Optional Initial Access Tokens (IATs).** IATs are an opt-in for operators who want to:
+**What CIMD clients can never do:**
 
-- **Pre-vouch a partner integration** — issue an IAT to a known integrator so the resulting client lands attributable to a specific token (auditable via the `dcr_iat:<id>` actor on `oauth.client.dcr_registered`). Auto-promotion to Verified is not implemented yet; the operator still has to click Mark as verified.
-- **Partition rate limits per tenant** — the per-IAT daily counter (`oauth.dcr_iat_daily_limit`) is independent of the per-IP limit, so high-volume integrators can be carved out with their own quota.
-- **Reject specific callers** — when an IAT is revoked, registrations presenting it come back as 401 with the `iat_exhausted` audit reason.
+- A `source='cimd'` metadata row never satisfies the operator-written-audience arm of consent — the client record is not policy (its `audience` is written only by the consent-time refresh heal).
+- The shim refuses (400) any `client_id` that collides with an existing non-CIMD client — a CIMD flow can never mutate an admin-created client.
+- The shim never sets `skip_consent`, `metadata.forseti.*`, or `audience` from document content.
+- No RFC 7592 surface exists: admin-API-created rows carry no usable registration access token, and Hydra's `/oauth2/register/{id}` endpoints are disabled with DCR.
+- Consent is always rendered — the auto-grant guard excludes `source = 'cimd'` rows outright, so neither a remembered consent, `skip_consent`, nor even an operator-verified row bypasses the screen.
 
-`/admin/dcr-tokens` lists existing tokens and `/admin/dcr-tokens/new` mints fresh ones. Each token has:
+**Consent display.** For a CIMD client, the consent screen shows the client_id URL's **host** (e.g. `claude.ai`) as the primary identity with the document's self-asserted `client_name` demoted to a secondary line — names inside the document are self-asserted; the host is what the operator of that URL provably controls. No verification badge is ever rendered for CIMD clients.
 
-- A free-form `note` (visible only to operators).
-- An optional TTL in hours — blank = no expiry.
-- An optional max-use count — blank = unlimited. **Single-use (`1`) is the safest default** for IATs you hand to a specific integrator; Forseti decrements `uses_remaining` inside the same transaction as the lookup so two concurrent registrations with the same single-use token can't both win.
+**Host policy and rate limits.** `[oauth.cimd].allowed_client_hosts` closes the fleet to named client vendors (exact host match); empty means open, consent-gated. The shim carries the same dual per-IP + global rate-limit shape as the other public endpoints (see the [`[oauth.cimd]`](#oauthcimd--cimd-shim-knobs) table).
 
-The raw token (32 random bytes, base64url-encoded, no padding) is revealed exactly once on issue, via the same `SecretReveal` flash pattern as client secrets. Only `sha256(token)` is persisted — there is no way to recover a forgotten token; revoke and reissue.
+**Auditing.** Every completed shim pass emits `oauth.client.cimd_seen` (target = the client_id URL); every rejection emits `oauth.client.cimd_rejected` at WARNING with the reason.
 
-A **malformed `Authorization` header** (wrong scheme, empty bearer value) is rejected with 401 + a `dcr_rejected` audit row, not silently treated as anonymous — that would let an attacker probe IATs without leaving a trail.
+**What happened to DCR?** Retired. The RFC 7591 proxy, the Initial Access Token machinery (`/admin/dcr-tokens`), the `dcr_*` config keys and the reserved-name denylist for client names are all gone; Hydra's `dynamic_client_registration` is `enabled: false` and no `registration_endpoint` is advertised anywhere. The old claim that Claude Code refuses an AS without `/oauth2/register` was falsified once `client_id_metadata_document_supported: true` was advertised — Claude Code 2.1.220 selects CIMD and never attempts DCR. Existing `oauth_client_metadata` rows with `source='dcr'` are kept (history + still-live refresh tokens), but nothing can create new ones. DCR-only clients (Cursor, as of mid-2026) will not work until they ship CIMD.
 
-**Auditing.** Every successful registration emits `oauth.client.dcr_registered` with the returned `client_id`, posted `client_name` + `scope`, source IP hash, user agent, and a redirect-URI count (the full set is on the client itself). The actor is the IAT (`dcr_iat:<id>`) when one was presented, or `system` for anonymous registrations — the latter also carry `anonymous: true` in metadata. IAT lifecycle is auditable too: `oauth.client.dcr_iat_issued` and `oauth.client.dcr_iat_revoked` (the latter at `critical` severity so it surfaces in `/admin/audit?severity=critical`).
+#### The resource registry (`/admin/resources`)
 
-**Surfacing self-registered clients.** The `/admin/clients` list shows a "Self-registered" pill on rows whose Forseti-side `oauth_client_metadata.source == "dcr"`, alongside the per-client verification badge described below.
+The registry is the consent-time audience allow-list: one row per resource server (MCP server, downstream API) whose URI consent may bind into an access token's `aud`. Enrolment is a web-UI action — a row, not a config edit, no restart. It replaces the deprecated `[oauth].allowed_resource_audiences` key (still imported at startup; see the [`[oauth]`](#oauth--audience-policy) table).
 
-**Reviewing self-registered clients (Verified / Unverified).** Every OAuth2 client carries a verification state in the Forseti-owned `oauth_client_metadata` table:
+Each row carries:
+
+- **`resource`** — the canonical resource URI (canonicalised on create; matched across a trailing slash or fragment), or a verbatim non-URI identifier for legacy audiences like `stackpit-web`.
+- **`display_name`**, **`org_id`**, **`enabled`** (the toggle consent actually checks), **`created_by`**, **`created_at`**.
+- **Corroboration badge** — an advisory RFC 9728 check, run on create and via the per-row "re-check" button: Forseti fetches `https://{host}/.well-known/oauth-protected-resource{path}` through the same SSRF guard as the CIMD fetcher and compares the document's `resource` and `authorization_servers` against the row and the configured issuer. Statuses: `unchecked` / `corroborated` / `unreachable` / `mismatch`. It **never gates** creation (the app may not be deployed yet) and never grants anything; non-URI identifiers have nothing to fetch and stay `unchecked`.
+
+**Org scoping.** A Forseti-wide admin can register any resource into any org. An org-scoped admin (`?org=<slug>`) sees only rows stamped with their org and may only create resources whose URI host is a **verified domain** of that org (fail closed) — domain-ownership proof via the existing org domains verification.
+
+Disabling a row denies the audience on the next consent; deleting it does the same permanently. Already-issued tokens keep their `aud` until they expire (5-minute JWTs by default). Audit rows: `admin.resource.created`, `admin.resource.toggled`, `admin.resource.deleted` (the delete at critical severity).
+
+#### Fronting the issuer (front proxy vs haproxy)
+
+CIMD-capable clients discover the AS via RFC 8414 **path insertion**: for issuer `https://accounts.example.com/hydra` they fetch `/.well-known/oauth-authorization-server/hydra` (and the OIDC variant `/.well-known/openid-configuration/hydra`) on the issuer host. Forseti serves both routes with Hydra's own discovery document plus exactly three mutations: `client_id_metadata_document_supported: true`, `authorization_endpoint` → Forseti's `/oauth2/authorize` shim, and `registration_endpoint` removed. Everything else — `issuer` above all, since it's the `iss` in every token — passes through byte-identical. The response carries `Access-Control-Allow-Origin: *` (browser-based clients like claude.ai read it cross-origin).
+
+For all of this to work, the issuer's origin must route three things to the right place:
+
+- The two path-insertion well-known URLs **and** `/oauth2/authorize` → **Forseti**.
+- `/hydra/*` (Hydra's real endpoints: `/hydra/oauth2/auth`, `/hydra/oauth2/token`, JWKS, userinfo) → **Hydra**.
+
+Two ways to arrange that:
+
+- **External proxy (haproxy, prod).** haproxy routes `path_beg /hydra/` to Hydra (stripping the prefix) and everything else — including the well-knowns and the shim — to Forseti. No Forseti config beyond `[hydra].issuer`. See [`operator-guide-proxy.md`](./operator-guide-proxy.md).
+- **Front proxy (`[hydra].front_proxy = true`, single binary / dev).** Forseti itself reverse-proxies `GET/POST /hydra/{path}` to `[hydra].public_url`, so Forseti owns the whole issuer origin. The passthrough forwards `Cookie` and multi-valued `Set-Cookie` both ways (Hydra's login/consent CSRF cookies) and never follows Hydra's redirects — those belong to the browser. Bodies are buffered under a 2 MiB cap. `GET /hydra/.well-known/openid-configuration` through the passthrough is served augmented too, never verbatim.
+
+Set `[hydra].issuer` to the browser-facing issuer in both cases. It drives three things: the path segment the well-known routes mount under, the CIMD shim's redirect base (a *relative* `/hydra/oauth2/auth` redirect, so the browser stays on the issuer origin and Hydra's host-scoped CSRF cookies survive), and the CSP `form-action` origin.
+
+> **The CSP `form-action` requirement.** Forseti's CSP allows form POSTs to end only at known origins, and `form-action` is enforced across the *post-consent redirect chain*, not just the form's own action. The issuer's browser-facing origin comes from `[hydra].issuer` (falling back to `[posix].hydra_issuer`, then `[hydra].public_url`). If that value is stale — pointing at an origin the browser never actually visits — the consent screen's 303 into Hydra is **silently blocked by Chrome**: the server logs a clean 303, the browser sits on an unchanged page, and nothing errors. If consent "does nothing", check `[hydra].issuer` before anything else.
+
+**Reviewing clients (Verified / Unverified).** Every OAuth2 client carries a verification state in the Forseti-owned `oauth_client_metadata` table (Forseti-owned so no client-held credential can ever rewrite it):
 
 - **`"verified"`** — green badge on the admin list + show page. The consent screen renders a subtle "Reviewed by your administrator" checkmark. Operator-created clients (anyone hitting `New client` on `/admin/clients`) are stamped verified at create time, since the act of an operator creating the client is the vouching. The `verified_by` and `verified_at` columns record who and when.
-- **`"unverified"`** — yellow/red badge in the admin UI. The consent screen renders a prominent caution banner: **"This application has not been reviewed by an administrator. Only proceed if you trust it."** Self-registered DCR clients always start in this state. Forseti does not auto-promote — explicit admin action is required.
+- **`"unverified"`** — yellow/red badge in the admin UI. The consent screen renders a prominent caution banner: **"This application has not been reviewed by an administrator. Only proceed if you trust it."** CIMD clients always carry this state (and never auto-grant consent); the "Reviewed by your administrator" checkmark is never rendered for a CIMD client either way — the host-primary identity line is their trust signal. Forseti does not auto-promote — explicit admin action is required.
 
-To review a self-registered client: open `/admin/clients?verification=unverified`, click into the client, eyeball the redirect URIs and `client_name`, and either:
+To review a client: open `/admin/clients?verification=unverified`, click into the client, eyeball the redirect URIs and `client_name`, and either:
 
 - Click **Mark as verified** — POSTs to `/admin/clients/{id}/verify`, sets `verification = 'verified'`, `verified_by`, `verified_at`, and emits an `oauth.client.verified` audit row.
 - Click **Delete** if the client is illegitimate.
@@ -1510,103 +1532,64 @@ Clients that exist on Hydra without a matching `oauth_client_metadata` row defau
 
 Whoever can administer the client can upload — Forseti admins for any client, org-scoped admins for clients in their own org. The image is stored in Forseti's `client_logos` table and served from `/clients/{client_id}/logo` to signed-in callers only; anonymous requests get a 404 whether or not the client exists. The file type comes from the leading bytes, never the declared `Content-Type` or the filename, and SVG is rejected outright (it's script-capable and would be served from your own origin). Uploads and removals emit `oauth.client.logo_uploaded` / `oauth.client.logo_removed` audit rows.
 
-The client's own `logo_uri` is deliberately *not* used here. It's client-controlled through dynamic registration, and rendering a remote URL would make every user's browser hit the relying party's server from your consent page — leaking IP, user-agent and timing before the user has agreed to anything. Unverified clients still show their logo; the caution banner is the trust signal, and hiding the logo would only make "no logo" ambiguous between "not reviewed" and "never uploaded one".
+The client's own `logo_uri` is deliberately *not* used here. It's client-controlled (a CIMD document carries it onto the Hydra row), and rendering a remote URL would make every user's browser hit the relying party's server from your consent page — leaking IP, user-agent and timing before the user has agreed to anything. Unverified clients still show their logo; the caution banner is the trust signal, and hiding the logo would only make "no logo" ambiguous between "not reviewed" and "never uploaded one".
 
-**Reserved-name denylist.** DCR registrations whose `client_name` matches any pattern in `oauth.dcr_reserved_names` are rejected with `invalid_client_metadata` (HTTP 400). The match is case-insensitive substring — `"Microsoft Login"`, `"forseti admin"`, and `"AdminBot"` all trip the default list. The default covers Forseti's own brand, upstream Ory brands, common consumer IDPs (Google, Apple, Microsoft, GitHub, GitLab), AI vendors (Anthropic, Claude, OpenAI, ChatGPT), other identity vendors (Okta, Auth0), and obvious privilege names (admin, portal, system, root). Replace the list entirely in `config.toml` if you need different behaviour. The HTTP response intentionally doesn't echo which pattern matched, so an attacker can't enumerate the list by probing — but a rejected attempt is recorded in the audit log as `oauth.client.dcr_rejected` with `reason = "reserved_name"`, the attempted name (truncated to 100 chars), the IAT id, and the source IP hash. The IAT use is **not** decremented when the name check fails, so an attacker can't drain someone else's single-use IAT by submitting reserved names.
-
-> **Substring matching is too aggressive on short brand names.** Because the match is case-insensitive substring rather than word-boundary, short entries like `ory`, `hydra`, `kratos`, `claude`, `openai` collide with legitimate `client_name` values that merely *contain* them. In real-world testing, Claude Code's DCR was rejected because it sends `client_name: "Claude Code (ory-demo)"` — both `claude` and `ory` trip the default list. Word-boundary matching is a tracked follow-up; until it lands, operators running real Claude integrations should either remove the conflicting short strings from `oauth.dcr_reserved_names` (keeping the less collision-prone entries like `microsoft`, `google`, `apple`, `github`) or empty the list entirely if their threat model accepts it.
-
-**Workflow (default — anonymous DCR).** No operator action required upfront. The MCP-client author calls:
-
-```bash
-curl -X POST https://accounts.example.com/oauth2/register \
-  -H "Content-Type: application/json" \
-  -d '{
-    "client_name": "My MCP server",
-    "redirect_uris": ["http://127.0.0.1:5000/cb"],
-    "grant_types": ["authorization_code", "refresh_token"],
-    "response_types": ["code"],
-    "token_endpoint_auth_method": "none",
-    "scope": "openid offline_access"
-  }'
-```
-
-Hydra's response carries `client_id` and `registration_access_token`; the author keeps both. The client now exists in Hydra and shows up on `/admin/clients` as **Self-registered + Unverified**. Operator opens `/admin/clients?verification=unverified`, eyeballs the redirect URIs, scopes, and `client_name`, then clicks **Mark as verified** (or **Delete** if it looks illegitimate). The consent banner clears on the next consent request.
-
-**Workflow (optional — pre-vouching via IAT).** When you want to pre-attribute a registration to a known integrator: mint an IAT from `/admin/dcr-tokens/new`, hand the integrator the one-shot reveal, and they pass it on the call:
-
-```bash
-curl -X POST https://accounts.example.com/oauth2/register \
-  -H "Authorization: Bearer <iat>" \
-  -H "Content-Type: application/json" \
-  -d '{ ... same body as above ... }'
-```
-
-The audit row for the registration is then keyed on `dcr_iat:<id>` instead of `system`, so an operator triaging suspicious activity can find every event back to that one issued token. The client still lands `unverified` — IAT presentation is not (yet) an auto-promotion signal.
-
-**Rate limiting.** Three independent layers stack in front of `POST /oauth2/register`, all belt-and-suspenders to the IAT itself.
-
-- **Per-IP** (in-memory, per-process). Two buckets enforced in parallel: 10 requests/minute and 100 requests/hour. Limits are configurable via `oauth.dcr_ip_rate_per_minute` and `oauth.dcr_ip_rate_per_hour` in `config.toml`; set either to `0` to disable that bucket. By default the limiter keys on the **TCP peer IP** (`proxy.trust_forwarded_for = false`) — unforgeable, but behind a reverse proxy that means every caller shares a single bucket (key = proxy's IP), so size the limits accordingly. To get per-real-client buckets, set `proxy.trust_forwarded_for = true` — the limiter then reads `X-Forwarded-For` (first hop), falling back to `X-Real-IP`, `Forwarded`, and the socket peer. **Only flip this on when your reverse proxy strips client-sent forwarded-for headers before re-adding its own**; otherwise a direct caller forges `X-Forwarded-For` and bypasses the bucket. The haproxy sketches in [`operator-guide-proxy.md`](./operator-guide-proxy.md) show the correct `http-request del-header X-Forwarded-For` + `set-header X-Forwarded-For %[src]` pattern. A throttled request gets `429 Too Many Requests` with `Retry-After: <seconds>` and an RFC 7591-shaped body (`error: "temporarily_unavailable"`). Per-IP hits are **not** audited — too noisy; a `trace`-level log line is emitted instead. State is in-memory only and does **not** cross-replicate; multi-instance deployments still get useful per-process gating but a determined attacker spread across replicas can exceed the nominal rate by Nx.
-- **Global** (in-memory, per-process). Two buckets shared by **all** callers: 40 requests/minute and 400 requests/hour, configurable via `oauth.dcr_global_rate_per_minute` and `oauth.dcr_global_rate_per_hour` (`0` disables). This bounds total registration traffic even when distributed sources or a spoofed `X-Forwarded-For` defeat the per-IP buckets — the same pattern as `/registration`'s global limiter.
-- **Per-IAT** (DB-backed, persists across restarts). Cap on successful registrations per IAT over a rolling 24-hour window opened by the first successful use. Default 50, configurable via `oauth.dcr_iat_daily_limit` (set to `0` to disable). The window resets in-place when 24h have elapsed since `daily_window_started_at`. Only **successful** registrations count — failed lookups, reserved-name rejects, and Hydra rejections don't burn the counter. Both the `uses_remaining` decrement and the daily-counter increment are gated by the UPDATE's `WHERE` clause inside a single transaction (`uses_remaining > 0` AND, when the window is live and `daily_limit > 0`, `daily_use_count < daily_limit`), so two concurrent successes at either boundary can't both win — the second UPDATE matches zero rows and falls through to the rejection path. A per-IAT rejection emits an audit row at `WARNING` severity (`oauth.client.dcr_rate_limited`, target = the IAT id) and returns `429` with `error: "temporarily_unavailable", error_description: "iat daily limit exceeded"`.
-
-**Follow-ups tracked but not yet implemented:**
-
-- TTL sweep for unused DCR clients (a self-registered client that never sees a token request after N days is probably abandoned).
-
-If you don't want any DCR at all, set `dynamic_client_registration.enabled: false` in `hydra.yml` — but be aware Claude Code will refuse to talk to your AS.
+**Rate-limit mechanics.** The CIMD shim's per-IP buckets share the deployment-wide behaviour of every other public limiter: in-memory, per-process (no cross-replica coordination), keyed on the TCP peer IP unless `[proxy].trust_forwarded_for = true` behind a header-stripping proxy (see [`[proxy]`](#proxy--reverse-proxy-trust) and the haproxy sketches in [`operator-guide-proxy.md`](./operator-guide-proxy.md)). The global bucket bounds total shim traffic even when a spoofed `X-Forwarded-For` defeats the per-IP one. A throttled request gets `429` with `Retry-After`.
 
 #### RFC 9728 — Protected Resource Metadata
 
 MCP servers advertise their authorization server via [RFC 9728](https://datatracker.ietf.org/doc/html/rfc9728). The chain:
 
 1. Client hits MCP server unauthenticated → `401` with `WWW-Authenticate: Bearer resource_metadata="<url>"`.
-2. Client fetches `<url>` (typically `/.well-known/oauth-protected-resource` on the MCP server's origin) → JSON pointing at Hydra.
-3. Client follows `authorization_servers[0]` to `/.well-known/openid-configuration` on Hydra → standard OIDC discovery.
+2. Client fetches `<url>` (path-aware: `/.well-known/oauth-protected-resource{path}` on the MCP server's origin) → JSON pointing at the issuer.
+3. Client resolves the issuer's AS metadata via RFC 8414 path insertion first — which lands on Forseti's augmented document (see [Fronting the issuer](#fronting-the-issuer-front-proxy-vs-haproxy)).
 
-Forseti isn't in this chain — it's purely MCP-server-side. Sample resource-metadata document (the MCP-server author publishes this; operators just need to make sure Hydra's issuer URL is reachable):
+The document itself is MCP-server-side; Forseti's [corroboration check](#the-resource-registry-adminresources) fetches it as an advisory signal when the resource is enrolled. Sample (the MCP-server author publishes this):
 
 ```json
 {
   "resource": "https://mcp.example.com",
-  "authorization_servers": ["https://hydra.example.com"],
+  "authorization_servers": ["https://accounts.example.com/hydra"],
   "scopes_supported": ["app:tool:invoke"],
   "bearer_methods_supported": ["header"]
 }
 ```
 
-#### Workflow: registering an MCP client from the admin UI
+`authorization_servers` must list the issuer exactly (`[hydra].issuer`); the corroboration badge compares against it trailing-slash-insensitively.
 
-1. `/admin/clients/new` → click the **MCP server** card.
-2. Name the client (e.g. "Claude Desktop — formshive MCP").
-3. The form is pre-filled: `authorization_code` + `refresh_token`, `none` auth method, PKCE on, audience textarea visible, redirect-URI hints showing the common Claude callbacks.
-4. Set the audience allow-list to the MCP server's canonical URL (one per line).
-5. Paste the MCP client's redirect URIs. For Claude Desktop / Code these are loopback URLs (`http://127.0.0.1:PORT/cb`); for claude.ai, Anthropic's hosted callback (`https://claude.ai/api/mcp/auth_callback`).
-6. Define custom scopes — `<app>:<resource>:<verb>` convention. Add corresponding descriptions under `[oauth.scope_descriptions]` in `config.toml` so the consent screen reads naturally. The client show page surfaces a warning banner for scopes that don't have a description.
-7. Submit. The next page shows a one-shot reveal of the registration access token (no client secret — public client).
+#### Workflow: enrolling an MCP server
+
+1. `/admin/resources/new` → enter the MCP server's canonical resource URI (e.g. `https://mcp.example.com/mcp`) and a display name. Org-scoped admins can only use hosts on a verified org domain.
+2. Submit. The corroboration check runs immediately; an `unreachable` badge is normal when the app isn't deployed yet — use **Re-check** later.
+3. Add scope descriptions under `[oauth.scope_descriptions]` in `config.toml` (`<app>:<resource>:<verb>` convention) so the consent screen reads naturally.
+4. Done — CIMD clients (Claude Code, claude.ai) connect with no further operator work.
+
+Pre-registering a client is only needed for non-CIMD clients: `/admin/clients/new` → the **MCP server** card pre-fills `authorization_code` + `refresh_token`, `none` auth method, PKCE, the audience textarea and redirect-URI hints. A client created this way is `verified`, and its registered audience counts as consent policy on its own.
 
 #### Verifying the discovery document
 
-After bringing the stack up, confirm Hydra's discovery doc carries everything MCP clients read:
+After bringing the stack up, confirm the augmented discovery doc at the path-insertion URL carries everything MCP clients read (issuer `https://accounts.example.com/hydra` shown; adjust the path segment to your issuer's):
 
 ```bash
-curl -s http://localhost:4444/.well-known/openid-configuration | jq '{
+curl -s https://accounts.example.com/.well-known/oauth-authorization-server/hydra | jq '{
   issuer,
+  authorization_endpoint,
+  client_id_metadata_document_supported,
   registration_endpoint,
   code_challenge_methods_supported,
-  grant_types_supported,
   token_endpoint_auth_methods_supported
 }'
 ```
 
 Expected:
 
-- `registration_endpoint` present (DCR enabled).
-- `code_challenge_methods_supported` includes `"S256"`.
-- `grant_types_supported` includes `authorization_code`, `refresh_token`, `client_credentials`.
-- `token_endpoint_auth_methods_supported` includes `"none"`, `"client_secret_post"`, `"client_secret_basic"`.
+- `issuer` byte-identical to Hydra's own (`urls.self.issuer`).
+- `authorization_endpoint` pointing at Forseti's `/oauth2/authorize` on the issuer origin (the CIMD shim).
+- `client_id_metadata_document_supported: true`.
+- `registration_endpoint` **absent** (DCR retired).
+- `code_challenge_methods_supported` includes `"S256"`; `token_endpoint_auth_methods_supported` includes `"none"`.
 
-Hydra does not advertise `resource_indicators_supported` (no RFC 8707 yet). Spec-strict MCP clients haven't been observed to reject Hydra for that omission — track it in case behaviour changes.
+The same document must come back from `/.well-known/openid-configuration/hydra` and — when `front_proxy = true` — from `{issuer}/.well-known/openid-configuration`. Hydra does not advertise `resource_indicators_supported` (no RFC 8707 yet); spec-strict MCP clients haven't been observed to reject it for that omission.
 
 #### State parameter
 
@@ -1836,7 +1819,7 @@ Generate fresh values with `openssl rand -base64 64` (cookie/session secrets) or
 
 - **Kratos's Postgres database** holds every identity, credential hash, and active session. Restoring it restores user accounts.
 - **Hydra's Postgres database** holds OAuth2 client registrations, consent grants, refresh tokens, and the JWKS used to sign id_tokens. Losing the JWKS invalidates every previously-issued id_token's signature.
-- **Forseti's own database** holds organizations, the audit log, the webhook outbox, DCR tokens, and POSIX accounts. On the default sqlite backend that's `forseti.db` next to the binary: copy it while Forseti is stopped, or use `sqlite3 forseti.db ".backup backup.db"` online (a plain file copy of a live WAL-mode database can be inconsistent). On Postgres, include it in the `pg_dump` routine.
+- **Forseti's own database** holds organizations, the audit log, the webhook outbox, the resource registry, client trust metadata, and POSIX accounts. On the default sqlite backend that's `forseti.db` next to the binary: copy it while Forseti is stopped, or use `sqlite3 forseti.db ".backup backup.db"` online (a plain file copy of a live WAL-mode database can be inconsistent). On Postgres, include it in the `pg_dump` routine.
 - **Forseti's webhook signing key** (`[webhook].signing_key_path`, default `data/webhook-signing-key.pem`, created `0600`) signs outbound Security Event Tokens. Without a backup, a rebuilt host mints a fresh key and `kid`, and receivers that pinned the old JWKS reject deliveries (see [Rotating the webhook signing key](#rotating-the-webhook-signing-key)).
 - Take daily logical backups (`pg_dump`) at minimum. Streaming replication or PITR is preferable for production.
 - Test restore quarterly. A backup you have never restored is not a backup.
@@ -2017,7 +2000,7 @@ The active org's theme white-labels the whole authenticated app, not just the lo
 |-----------------------------------|----------|-----------|------------------------------------------------------------------------------------------------|
 | `active_org_cookie_ttl_seconds`   | u64      | `2592000` (30d) | Validity of the signed `forseti_active_org` switcher cookie.                            |
 | `invite_ttl_days`                 | i64      | `7`       | How long a minted org invite stays claimable.                                                  |
-| `reserved_names`                  | string[] | (code-baked set) | Org-name denylist (create + rename), case-insensitive/confusable-folded substring match. When absent, falls back to the same built-in operator-brand denylist as `oauth.dcr_reserved_names`. |
+| `reserved_names`                  | string[] | (code-baked set) | Org-name denylist (create + rename), case-insensitive/confusable-folded substring match. When absent, falls back to the built-in operator-brand denylist (`src/orgs/reserved_names.rs`). |
 | `logo_ip_rate_per_minute`         | u32      | `60`      | Per-IP rate limit on `GET /branding/{slug}/logo`, requests per minute. `0` disables the bucket. |
 | `logo_ip_rate_per_hour`           | u32      | `600`     | Per-IP rate limit on `GET /branding/{slug}/logo`, requests per hour, in parallel with the per-minute bucket. `0` disables the bucket. |
 | `landing_ip_rate_per_minute`      | u32      | `60`      | Per-IP rate limit on `GET /o/{slug}` (the public landing page), requests per minute. `0` disables the bucket. |

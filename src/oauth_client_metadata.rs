@@ -24,8 +24,11 @@ use crate::schema::oauth_client_metadata as ocm;
 pub mod source {
     /// Created through the admin UI. Implicitly verified at create time.
     pub const ADMIN: &str = "admin";
-    /// Self-registered via the DCR proxy. Always starts `unverified`.
+    /// Self-registered via the retired RFC 7591 DCR proxy. Nothing creates
+    /// new rows; existing ones stay (history + still-live refresh tokens).
     pub const DCR: &str = "dcr";
+    /// Auto-registered by the CIMD authorization shim. Always starts `unverified`.
+    pub const CIMD: &str = "cimd";
 }
 
 /// Verification state values.
@@ -66,6 +69,9 @@ pub struct Row {
     /// Curated app-template slug stamped at admin-create time; drives the
     /// app logo on the client list. Cosmetic only.
     pub template_slug: Option<String>,
+    /// SHA-256 (hex) of the CIMD document as of the last Hydra client upsert;
+    /// the shim's warm path skips the admin write while it still matches.
+    pub cimd_doc_hash: Option<String>,
 }
 
 impl Row {
@@ -76,7 +82,7 @@ impl Row {
     /// True when this row records a DCR-registered client. Drives the
     /// "Self-registered" badge.
     pub fn is_self_registered(&self) -> bool {
-        self.source == source::DCR
+        self.source == source::DCR || self.source == source::CIMD
     }
 }
 
@@ -127,23 +133,16 @@ pub async fn get_many(db: &DbPool, client_ids: &[String]) -> anyhow::Result<Vec<
     Ok(rows)
 }
 
-/// INSERT a fresh row for a DCR-registered client (always `unverified`).
-/// `iat_id` is `Some` for an IAT-bound registration, `None` for anonymous.
-/// Errs if the row exists (shouldn't, `client_id` is Hydra-minted) so the
-/// caller logs loudly without retrying.
-pub async fn insert_dcr(
+/// INSERT an `unverified` `source='cimd'` row unless one already exists.
+/// Idempotent via ON CONFLICT DO NOTHING; the shim rejects non-`cimd` sources
+/// before calling, so an existing row here is always a prior CIMD visit.
+pub async fn insert_or_get_cimd(
     db: &DbPool,
     client_id: &str,
-    iat_id: Option<&str>,
-    audience: Option<&str>,
-    org_id: &str,
     now: chrono::DateTime<Utc>,
 ) -> anyhow::Result<()> {
     let now_str = now.to_rfc3339();
     let id = client_id.to_string();
-    let iat = iat_id.map(str::to_string);
-    let aud = audience.map(str::to_string);
-    let org = org_id.to_string();
     db_interact!(db, |conn| {
         diesel::insert_into(ocm::table)
             .values(InsertRow {
@@ -151,15 +150,31 @@ pub async fn insert_dcr(
                 verification: verification::UNVERIFIED,
                 verified_by: None,
                 verified_at: None,
-                source: source::DCR,
-                dcr_iat_id: iat.as_deref(),
-                dcr_registered_at: Some(now_str.clone()),
+                source: source::CIMD,
+                dcr_iat_id: None,
+                dcr_registered_at: None,
                 created_at: now_str.clone(),
-                audience: aud.as_deref(),
+                audience: None,
                 resource_url: None,
-                org_id: &org,
+                org_id: crate::orgs::DEFAULT_ORG_ID,
                 template_slug: None,
             })
+            .on_conflict_do_nothing()
+            .execute(conn)
+            .map(|_| ())
+    })?;
+    Ok(())
+}
+
+/// Record the hash of the CIMD document behind the latest Hydra upsert.
+/// Zero-row match (no metadata row yet) returns Ok; the shim inserts the
+/// row before calling this.
+pub async fn set_cimd_doc_hash(db: &DbPool, client_id: &str, hash: &str) -> anyhow::Result<()> {
+    let id = client_id.to_string();
+    let h = hash.to_string();
+    db_interact!(db, |conn| {
+        diesel::update(ocm::table.filter(ocm::client_id.eq(&id)))
+            .set(ocm::cimd_doc_hash.eq(Some(h.clone())))
             .execute(conn)
             .map(|_| ())
     })?;

@@ -206,8 +206,8 @@ pub struct PosixConfig {
     pub id_token_iat_window_secs: u64,
     /// `auth_time` freshness window (seconds) for `force_mfa` hosts; an hours-old AAL2 session shouldn't grant root.
     pub mfa_auth_time_window_secs: u64,
-    /// Expected `iss` on the device id_token. Hydra's `urls.self.issuer` can differ from `[hydra].public_url`
-    /// (e.g. `host.containers.internal` vs `localhost`); `None` falls back to `[hydra].public_url`.
+    /// Expected `iss` on the device id_token when it differs from the general issuer config.
+    /// Narrow override: [posix].hydra_issuer → [hydra].issuer → [hydra].public_url.
     #[serde(default)]
     pub hydra_issuer: Option<String>,
     /// Master switch for offline auth. Off hides the offline-passphrase surface and provisions no verifiers.
@@ -321,6 +321,32 @@ pub struct KratosConfig {
 pub struct HydraConfig {
     pub public_url: String,
     pub admin_url: String,
+    /// Reverse-proxy `/hydra/{path}` to `public_url` so Forseti owns the issuer origin (dev parity with the prod haproxy topology).
+    #[serde(default)]
+    pub front_proxy: bool,
+    /// Hydra's advertised issuer (`urls.self.issuer`) when it differs from `public_url`,
+    /// e.g. `http://host:3000/hydra` behind a front proxy. Drives the CSP `form-action`
+    /// origin ([hydra].issuer → [posix].hydra_issuer → [hydra].public_url), the well-known
+    /// path-insertion discovery routes and the CIMD shim redirect base.
+    #[serde(default)]
+    pub issuer: Option<String>,
+}
+
+impl HydraConfig {
+    /// The effective issuer: `[hydra].issuer` when set, else `public_url`.
+    pub fn issuer_or_public(&self) -> &str {
+        self.issuer.as_deref().unwrap_or(&self.public_url)
+    }
+
+    /// Path component of the effective issuer without surrounding slashes
+    /// (`Some("hydra")` for `http://host:3000/hydra`), `None` when path-less.
+    pub fn issuer_path(&self) -> Option<&str> {
+        let issuer = self.issuer_or_public();
+        let after_scheme = issuer.split_once("://").map_or(issuer, |(_, rest)| rest);
+        let (_, path) = after_scheme.split_once('/')?;
+        let path = path.trim_matches('/');
+        (!path.is_empty()).then_some(path)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -415,49 +441,14 @@ pub struct OAuthConfig {
     /// Unknown scopes fall back to the raw scope name.
     #[serde(default)]
     pub scope_descriptions: std::collections::HashMap<String, String>,
-    /// Resource identifiers (RFC 8707 `resource=` on the authorize request)
-    /// Forseti is allowed to bind into the granted access-token audience, and
-    /// to pre-register on DCR clients. Hydra derives the audience from its own
-    /// non-standard `audience=` parameter only, so without this bridge an RFC
-    /// 8707 client is issued `aud: []`; without the allow-list Forseti would
-    /// mint any audience a caller asked for. Compared with the trailing slash
-    /// and any fragment stripped. Empty (the default) disables the bridge.
+    /// DEPRECATED: the consent-time audience allow-list lives in the
+    /// `resource_registry` table now (managed at `/admin/resources`). Entries
+    /// listed here are imported into the registry once at startup
+    /// (`created_by = 'config-import'`, idempotent) and the key's presence
+    /// logs a deprecation warning; the values are never read at consent time.
+    /// Remove the key once the rows are visible in the admin UI.
     #[serde(default)]
     pub allowed_resource_audiences: Vec<String>,
-    /// DCR `client_name` denylist. Case-insensitive substring match against
-    /// the posted `client_name`. Operators replace the list entirely; if
-    /// the key is absent from `config.toml`, the code-baked defaults in
-    /// `crate::oauth::register::RESERVED_NAMES_DEFAULT` are used.
-    #[serde(default)]
-    pub dcr_reserved_names: Option<Vec<String>>,
-    /// Require a valid Initial Access Token on `POST /oauth2/register`. Off by
-    /// default: anonymous DCR stays open unless the operator closes it.
-    #[serde(default)]
-    pub dcr_require_iat: bool,
-    /// Per-IP rate limit on `POST /oauth2/register`, max requests per minute. In-memory, per-process.
-    /// `None` falls back to the code-side default (10). Set to `0` to disable the per-minute bucket.
-    #[serde(default)]
-    pub dcr_ip_rate_per_minute: Option<u32>,
-    /// Per-IP rate limit on `POST /oauth2/register`, max requests per hour, in parallel with the per-minute bucket.
-    /// `None` falls back to 100. Set to `0` to disable the per-hour bucket.
-    #[serde(default)]
-    pub dcr_ip_rate_per_hour: Option<u32>,
-    /// Global (all-callers-share-one-bucket) rate limit on `POST /oauth2/register`,
-    /// max requests per minute. Bounds total traffic even when `trust_xff` trusts
-    /// a spoofable header. `None` falls back to the code-side default (40).
-    #[serde(default)]
-    pub dcr_global_rate_per_minute: Option<u32>,
-    /// Global rate limit on `POST /oauth2/register`, max requests per hour, in
-    /// parallel with the per-minute global bucket. `None` falls back to 400.
-    /// Set to `0` to disable the bucket.
-    #[serde(default)]
-    pub dcr_global_rate_per_hour: Option<u32>,
-    /// Per-IAT registration cap over a rolling 24-hour window opened by
-    /// the first successful use. Counts successful registrations only
-    /// (failed lookups, reserved-name rejects, Hydra failures don't
-    /// count). `None` falls back to 50. Set to `0` to disable.
-    #[serde(default)]
-    pub dcr_iat_daily_limit: Option<u32>,
     /// Per-IP rate limit on `/oauth/device` (the RFC 8628 verification screen),
     /// max requests per minute. The screen is session-gated; this is
     /// defence-in-depth against grinding low-entropy user codes. `None` falls
@@ -478,6 +469,53 @@ pub struct OAuthConfig {
     /// persist indefinitely once the user opts to be remembered.
     #[serde(default)]
     pub login_session_remember_for: Option<i64>,
+    /// CIMD (URL-shaped client_id) shim settings; see [`CimdConfig`].
+    #[serde(default)]
+    pub cimd: CimdConfig,
+}
+
+/// `[oauth.cimd]` — settings for the CIMD authorization shim.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct CimdConfig {
+    /// Let the CIMD document fetcher hit `http://` and loopback/private-IP
+    /// targets. Test/dev escape hatch for loopback fixture servers — it stands
+    /// the SSRF guard down, so never enable it in production.
+    #[serde(default)]
+    pub allow_private_targets: bool,
+    /// Extra scope entries unioned into every CIMD client's Hydra `scope`
+    /// ceiling, alongside the built-in `openid offline offline_access`, the
+    /// scopes each authorize request asks for and the document's own `scope`.
+    /// The union is capped at 30 entries. Scope stays a ceiling — consent is
+    /// the actual authorization. Empty by default.
+    #[serde(default)]
+    pub client_scope_extra: Vec<String>,
+    /// When non-empty, only client_id URLs whose host matches one of these
+    /// entries exactly (case-insensitive) may use the shim; everything else is
+    /// rejected with 400. Empty (the default) accepts any HTTPS client_id
+    /// host, consent-gated per the MCP open-client model.
+    #[serde(default)]
+    pub allowed_client_hosts: Vec<String>,
+    /// Per-IP rate limit on `GET /oauth2/authorize`, max requests per minute.
+    /// `None` falls back to the code-side default (10). Set to `0` to disable
+    /// the per-minute bucket.
+    #[serde(default)]
+    pub ip_rate_per_minute: Option<u32>,
+    /// Per-IP rate limit on `GET /oauth2/authorize`, max requests per hour, in
+    /// parallel with the per-minute bucket. `None` falls back to 100. Set to
+    /// `0` to disable the per-hour bucket.
+    #[serde(default)]
+    pub ip_rate_per_hour: Option<u32>,
+    /// Global (all-callers-share-one-bucket) rate limit on
+    /// `GET /oauth2/authorize`, max requests per minute. Bounds total shim
+    /// traffic even when a spoofable forwarded-for header defeats the per-IP
+    /// buckets. `None` falls back to 40. Set to `0` to disable.
+    #[serde(default)]
+    pub global_rate_per_minute: Option<u32>,
+    /// Global rate limit on `GET /oauth2/authorize`, max requests per hour, in
+    /// parallel with the per-minute global bucket. `None` falls back to 400.
+    /// Set to `0` to disable the bucket.
+    #[serde(default)]
+    pub global_rate_per_hour: Option<u32>,
 }
 
 /// Admin-surface gating: emails allowed through `/admin/*`; everyone else gets 403 even with a valid session.
@@ -1082,7 +1120,7 @@ pub struct OrgsConfig {
     pub logo_ip_rate_per_hour: Option<u32>,
     /// Org-name denylist (create + rename). Case-insensitive, confusable-folded
     /// substring match against the submitted name. `None` falls back to
-    /// `crate::oauth::register::RESERVED_NAMES_DEFAULT`.
+    /// `crate::orgs::reserved_names::RESERVED_NAMES_DEFAULT`.
     #[serde(default)]
     pub reserved_names: Option<Vec<String>>,
     /// Per-IP rate limit on `GET /o/{slug}`, max requests per minute. `None`
@@ -1157,7 +1195,6 @@ fn default_domain_max_per_org() -> u32 {
 /// Sanity ceilings for rate-limit knobs: a typo like `per_window = 1_000_000` is clamped at load with a warn, so it can't silently disable protection.
 const RATE_LIMIT_PER_MINUTE_CEILING: u32 = 1_000;
 const RATE_LIMIT_PER_HOUR_CEILING: u32 = 10_000;
-const RATE_LIMIT_PER_DAY_CEILING: u32 = 100_000;
 
 fn clamp_rate(field: &str, value: u32, ceiling: u32) -> u32 {
     if value > ceiling {
@@ -1264,31 +1301,26 @@ impl AppConfig {
             *value = clamp_rate(field, *value, ceiling);
         }
 
-        let optional: [(&str, &mut Option<u32>, u32); 17] = [
+        let optional: [(&str, &mut Option<u32>, u32); 16] = [
             (
-                "oauth.dcr_ip_rate_per_minute",
-                &mut self.oauth.dcr_ip_rate_per_minute,
+                "oauth.cimd.ip_rate_per_minute",
+                &mut self.oauth.cimd.ip_rate_per_minute,
                 RATE_LIMIT_PER_MINUTE_CEILING,
             ),
             (
-                "oauth.dcr_ip_rate_per_hour",
-                &mut self.oauth.dcr_ip_rate_per_hour,
+                "oauth.cimd.ip_rate_per_hour",
+                &mut self.oauth.cimd.ip_rate_per_hour,
                 RATE_LIMIT_PER_HOUR_CEILING,
             ),
             (
-                "oauth.dcr_global_rate_per_minute",
-                &mut self.oauth.dcr_global_rate_per_minute,
+                "oauth.cimd.global_rate_per_minute",
+                &mut self.oauth.cimd.global_rate_per_minute,
                 RATE_LIMIT_PER_MINUTE_CEILING,
             ),
             (
-                "oauth.dcr_global_rate_per_hour",
-                &mut self.oauth.dcr_global_rate_per_hour,
+                "oauth.cimd.global_rate_per_hour",
+                &mut self.oauth.cimd.global_rate_per_hour,
                 RATE_LIMIT_PER_HOUR_CEILING,
-            ),
-            (
-                "oauth.dcr_iat_daily_limit",
-                &mut self.oauth.dcr_iat_daily_limit,
-                RATE_LIMIT_PER_DAY_CEILING,
             ),
             (
                 "oauth.device_verify_ip_rate_per_minute",
@@ -1373,6 +1405,8 @@ impl AppConfig {
             hydra: HydraConfig {
                 public_url: "http://hydra:4444".into(),
                 admin_url: "http://hydra:4445".into(),
+                front_proxy: false,
+                issuer: None,
             },
             self_: SelfConfig {
                 url: "http://localhost:3000".into(),
@@ -1458,6 +1492,55 @@ mod tests {
         let cfg = admin_cfg(&[]);
         assert!(!cfg.is_admin("admin@example.com"));
         assert!(!cfg.is_admin(""));
+    }
+
+    // --- HydraConfig issuer helpers ----------------------------------------
+
+    fn hydra_cfg(public_url: &str, issuer: Option<&str>) -> HydraConfig {
+        HydraConfig {
+            public_url: public_url.to_string(),
+            admin_url: "http://hydra:4445".to_string(),
+            front_proxy: false,
+            issuer: issuer.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn issuer_or_public_prefers_issuer() {
+        let cfg = hydra_cfg(
+            "http://localhost:4444",
+            Some("http://host.containers.internal:3000/hydra"),
+        );
+        assert_eq!(
+            cfg.issuer_or_public(),
+            "http://host.containers.internal:3000/hydra"
+        );
+    }
+
+    #[test]
+    fn issuer_or_public_falls_back_to_public_url() {
+        let cfg = hydra_cfg("http://localhost:4444", None);
+        assert_eq!(cfg.issuer_or_public(), "http://localhost:4444");
+    }
+
+    #[test]
+    fn issuer_path_extracts_path_segment() {
+        let cfg = hydra_cfg("http://localhost:4444", Some("http://host:3000/hydra"));
+        assert_eq!(cfg.issuer_path(), Some("hydra"));
+    }
+
+    #[test]
+    fn issuer_path_none_for_pathless_issuer() {
+        let cfg = hydra_cfg("http://localhost:4444", Some("http://host:4444"));
+        assert_eq!(cfg.issuer_path(), None);
+    }
+
+    #[test]
+    fn issuer_path_trims_trailing_slash() {
+        let cfg = hydra_cfg("http://localhost:4444", Some("http://host:3000/hydra/"));
+        assert_eq!(cfg.issuer_path(), Some("hydra"));
+        let bare = hydra_cfg("http://localhost:4444/", None);
+        assert_eq!(bare.issuer_path(), None);
     }
 
     // --- DatabaseConfig::looks_like_production -----------------------------

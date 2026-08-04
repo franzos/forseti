@@ -1529,7 +1529,7 @@ mod tests {
                 host,
                 username,
                 "2099-01-01T00:00:00+00:00",
-                &crate::oauth::register::hash_token(code),
+                &crate::posix::hash_token(code),
             )
             .await
             .expect("insert session")

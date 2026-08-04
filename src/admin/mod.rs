@@ -34,10 +34,10 @@ pub mod actions;
 pub mod audit;
 pub mod clients;
 pub mod configuration;
-pub mod dcr_tokens;
 pub mod hosts;
 pub mod identities;
 pub mod posix;
+pub mod resources;
 pub mod saml;
 pub mod sessions;
 pub mod status;
@@ -109,15 +109,17 @@ pub fn router() -> Router<AppState> {
             get(saml::delete_confirm).post(saml::delete),
         )
         .route("/admin/saml/{org_id}/toggle", post(saml::toggle))
-        // DCR initial access tokens
-        .route("/admin/dcr-tokens", get(dcr_tokens::list))
+        // Resource registry (RFC 8707 audiences)
+        .route("/admin/resources", get(resources::list))
         .route(
-            "/admin/dcr-tokens/new",
-            get(dcr_tokens::new).post(dcr_tokens::issue),
+            "/admin/resources/new",
+            get(resources::new).post(resources::create),
         )
+        .route("/admin/resources/{id}/toggle", post(resources::toggle))
+        .route("/admin/resources/{id}/recheck", post(resources::recheck))
         .route(
-            "/admin/dcr-tokens/{id}/revoke",
-            get(dcr_tokens::revoke_confirm).post(dcr_tokens::revoke),
+            "/admin/resources/{id}/delete",
+            get(resources::delete_confirm).post(resources::delete),
         )
         // Linux host enrollment
         .route("/admin/hosts", get(hosts::list))
@@ -447,7 +449,7 @@ pub(crate) enum AdminSection {
     Status,
     Configuration,
     Clients,
-    DcrTokens,
+    Resources,
     Hosts,
     Posix,
     Identities,
@@ -464,7 +466,7 @@ impl AdminSection {
             AdminSection::Status => "status",
             AdminSection::Configuration => "configuration",
             AdminSection::Clients => "clients",
-            AdminSection::DcrTokens => "dcr-tokens",
+            AdminSection::Resources => "resources",
             AdminSection::Hosts => "hosts",
             AdminSection::Posix => "posix",
             AdminSection::Identities => "identities",

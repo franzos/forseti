@@ -8,7 +8,6 @@
 
 #![allow(dead_code)]
 
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -680,6 +679,16 @@ pub fn extract_code_from_email(body: &str) -> Option<String> {
 /// the same `http://127.0.0.1:5555/callback` the playground uses (intentionally
 /// unreachable — tests grab the `code` from the redirect Location header).
 pub async fn hydra_create_test_client(scopes: &[&str]) -> (String, String, String) {
+    hydra_create_test_client_with_audience(scopes, &[]).await
+}
+
+/// As [`hydra_create_test_client`], with an operator-written `audience` on the
+/// client record — the shape an admin-created SSO client has, and the only
+/// thing that authorises Hydra's non-standard `audience=` parameter.
+pub async fn hydra_create_test_client_with_audience(
+    scopes: &[&str],
+    audience: &[&str],
+) -> (String, String, String) {
     let client = browser_client();
     let redirect_uri = "http://127.0.0.1:5555/callback";
     let scope = scopes.join(" ");
@@ -691,6 +700,7 @@ pub async fn hydra_create_test_client(scopes: &[&str]) -> (String, String, Strin
         "redirect_uris": [redirect_uri],
         "token_endpoint_auth_method": "client_secret_post",
         "subject_type": "public",
+        "audience": audience,
     });
     let res = client
         .post(format!("{HYDRA_ADMIN}/admin/clients"))
@@ -711,6 +721,71 @@ pub async fn hydra_create_test_client(scopes: &[&str]) -> (String, String, Strin
         .expect("client_secret")
         .to_string();
     (id, secret, redirect_uri.to_string())
+}
+
+/// Write `audience` onto a client's Hydra record via the admin API. Stands in
+/// for any out-of-band credential that can rewrite the record. The client_id
+/// path segment is percent-encoded so URL-shaped (CIMD) ids work too.
+pub async fn hydra_patch_client_audience(client_id: &str, audience: &[&str]) {
+    let client = browser_client();
+    let patch = serde_json::json!([
+        { "op": "replace", "path": "/audience", "value": audience }
+    ]);
+    let res = client
+        .patch(format!(
+            "{HYDRA_ADMIN}/admin/clients/{}",
+            form_urlencode(client_id)
+        ))
+        .header("content-type", "application/json")
+        .json(&patch)
+        .send()
+        .await
+        .expect("hydra patch audience transport");
+    assert!(
+        res.status().is_success(),
+        "hydra PATCH /audience: status {} body {}",
+        res.status(),
+        res.text().await.unwrap_or_default()
+    );
+}
+
+/// RFC 7662 introspection of an access token via Hydra admin. Returns the raw
+/// JSON so callers can assert on `active`, `aud`, `scope`, …
+pub async fn hydra_introspect(token: &str) -> Value {
+    let client = browser_client();
+    let res = client
+        .post(format!("{HYDRA_ADMIN}/admin/oauth2/introspect"))
+        .form(&[("token", token)])
+        .send()
+        .await
+        .expect("hydra introspect transport");
+    res.json().await.unwrap_or(Value::Null)
+}
+
+/// The `audience` allow-list Hydra has stored for a client. Empty when the
+/// client is unknown or carries none. Percent-encodes the client_id path
+/// segment so URL-shaped (CIMD) ids work too.
+pub async fn hydra_client_audience(client_id: &str) -> Vec<String> {
+    let client = browser_client();
+    let Ok(res) = client
+        .get(format!(
+            "{HYDRA_ADMIN}/admin/clients/{}",
+            form_urlencode(client_id)
+        ))
+        .send()
+        .await
+    else {
+        return Vec::new();
+    };
+    let v: Value = res.json().await.unwrap_or(Value::Null);
+    v["audience"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Delete a Hydra client. Best-effort.
@@ -939,10 +1014,10 @@ fn compute_totp_now(secret_b32: &str) -> String {
     totp_lite::totp_custom::<totp_lite::Sha1>(30, 6, &secret_bytes, seconds)
 }
 
-// --- DCR helpers ----------------------------------------------------------
+// --- Portal DB helpers -----------------------------------------------------
 //
-// The portal owns the IAT + verification tables; the admin UI is the
-// production knob for both, but the DCR integration tests reach into the
+// The portal owns the verification / registry tables; the admin UI is the
+// production knob for them, but the integration tests reach into the
 // sqlite file directly so a fresh suite run doesn't depend on an admin
 // session being wired up. Postgres mode is panic-on-use (sqlite is the
 // playground default — TODO: postgres path).
@@ -951,14 +1026,14 @@ fn compute_totp_now(secret_b32: &str) -> String {
 /// next to the binary (`./forseti.db`) by default; the operator can override
 /// via `FORSETI_DATABASE_URL` if their playground points somewhere else.
 ///
-/// Panics with a clear message when the URL points at postgres — the DCR
-/// tests speak sqlite only for now.
+/// Panics with a clear message when the URL points at postgres — the DB
+/// helpers speak sqlite only for now.
 pub fn forseti_db_path() -> PathBuf {
     let raw = std::env::var("FORSETI_DATABASE_URL")
         .unwrap_or_else(|_| "sqlite://./forseti.db".to_string());
     if raw.starts_with("postgres://") || raw.starts_with("postgresql://") {
         panic!(
-            "DCR tests only support the sqlite playground; got `{raw}`. \
+            "the DB helpers only support the sqlite playground; got `{raw}`. \
              Point FORSETI_DATABASE_URL at the sqlite file or unset it."
         );
     }
@@ -969,7 +1044,7 @@ pub fn forseti_db_path() -> PathBuf {
     PathBuf::from(path)
 }
 
-/// Open a direct sqlite connection to the portal DB. Used by the DCR
+/// Open a direct sqlite connection to the portal DB. Used by the DB
 /// helpers below; tests don't open this themselves.
 fn forseti_db_conn() -> rusqlite::Connection {
     let p = forseti_db_path();
@@ -1490,60 +1565,9 @@ pub fn delete_posix_account(identity_id: &str) {
     .unwrap_or_else(|e| panic!("delete posix_accounts: {e}"));
 }
 
-/// Mint a fresh DCR Initial Access Token directly via the portal DB,
-/// bypassing the admin UI. Returns the raw bearer string the caller sends
-/// in `Authorization: Bearer ...`.
-///
-/// * `uses_remaining` — `None` means unlimited, an integer is decremented
-///   per accepted registration.
-/// * `daily_limit` — present here as a no-op placeholder for the per-IAT
-///   rolling 24h cap. The actual threshold is read from the portal's
-///   config (`oauth.dcr_iat_daily_limit`), not the row; pass it through
-///   so the call site stays readable even when the column isn't writable.
-pub fn mint_dcr_iat(uses_remaining: Option<i32>, _daily_limit: Option<i32>) -> String {
-    // 32 random bytes, base64url-no-pad. Mirrors the format the admin UI
-    // uses so the proxy's `sha256(raw_bytes_as_string)` path lines up.
-    let mut buf = [0u8; 32];
-    use rand::RngExt;
-    rand::rng().fill(&mut buf);
-    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(buf);
-
-    let mut h = Sha256::new();
-    h.update(raw.as_bytes());
-    let token_hash = hex::encode(h.finalize());
-
-    let id = uuid::Uuid::new_v4().to_string();
-    let now = chrono::Utc::now().to_rfc3339();
-    let conn = forseti_db_conn();
-    conn.execute(
-        "INSERT INTO dcr_initial_access_tokens (\
-            id, token_hash, created_by, created_at, expires_at, \
-            uses_remaining, revoked_at, note, daily_use_count, daily_window_started_at\
-         ) VALUES (?1, ?2, 'test-fixture', ?3, NULL, ?4, NULL, 'integration test', 0, NULL)",
-        params![id, token_hash, now, uses_remaining],
-    )
-    .unwrap_or_else(|e| panic!("insert IAT: {e}"));
-    raw
-}
-
-/// Revoke an IAT by its raw bearer string. Used by the
-/// `dcr_register_with_revoked_iat_returns_401` test.
-pub fn revoke_dcr_iat(raw_token: &str) {
-    let mut h = Sha256::new();
-    h.update(raw_token.as_bytes());
-    let token_hash = hex::encode(h.finalize());
-    let now = chrono::Utc::now().to_rfc3339();
-    let conn = forseti_db_conn();
-    conn.execute(
-        "UPDATE dcr_initial_access_tokens SET revoked_at = ?1 WHERE token_hash = ?2",
-        params![now, token_hash],
-    )
-    .unwrap_or_else(|e| panic!("revoke IAT: {e}"));
-}
-
 /// UPSERT `oauth_client_metadata` so the row records `verification =
 /// 'verified'`, `source = 'admin'`, `verified_by = 'test-fixture'`. Works
-/// whether or not a DCR row already exists.
+/// whether or not a row already exists.
 pub fn mark_client_verified(client_id: &str) {
     let now = chrono::Utc::now().to_rfc3339();
     let conn = forseti_db_conn();
@@ -1647,229 +1671,64 @@ pub fn read_client_metadata_row(client_id: &str) -> Option<(String, String, Opti
     .ok()
 }
 
-/// POST `/oauth2/register` with the given IAT and a minimal body. Returns
-/// the parsed status + JSON response. On non-2xx the caller still gets the
-/// body so it can assert on `error` / `error_description`.
-pub async fn dcr_register(
-    iat: &str,
-    client_name: &str,
-    scope: &str,
-    redirect_uris: &[&str],
-    audience: Option<&[&str]>,
-) -> (StatusCode, reqwest::header::HeaderMap, Value) {
-    let client = browser_client();
-    let body = dcr_register_body(client_name, scope, redirect_uris, audience);
-    let res = client
-        .post(format!("{PORTAL}/oauth2/register"))
-        .bearer_auth(iat)
-        .header("content-type", "application/json")
-        .json(&body)
-        .send()
-        .await
-        .expect("dcr register transport");
-    let status = res.status();
-    let headers = res.headers().clone();
-    let bytes = res.bytes().await.unwrap_or_default();
-    let json = serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null);
-    (status, headers, json)
+/// Read `oauth_client_metadata.cimd_doc_hash` for the given `client_id`.
+/// `None` when no row exists or the hash was never stored.
+pub fn read_client_cimd_doc_hash(client_id: &str) -> Option<String> {
+    let conn = forseti_db_conn();
+    conn.query_row(
+        "SELECT cimd_doc_hash FROM oauth_client_metadata WHERE client_id = ?1",
+        params![client_id],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .ok()
+    .flatten()
 }
 
-/// POST `/oauth2/register` **without** an `Authorization` header — the
-/// anonymous DCR path. Used by tests that exercise the default behaviour
-/// (any MCP client can self-register; the resulting client lands as
-/// `unverified` and the consent screen renders the caution banner until
-/// an operator promotes it).
-pub async fn dcr_register_anonymous(
-    client_name: &str,
-    scope: &str,
-    redirect_uris: &[&str],
-    audience: Option<&[&str]>,
-) -> (StatusCode, reqwest::header::HeaderMap, Value) {
-    let client = browser_client();
-    let body = dcr_register_body(client_name, scope, redirect_uris, audience);
-    let res = client
-        .post(format!("{PORTAL}/oauth2/register"))
-        .header("content-type", "application/json")
-        .json(&body)
-        .send()
-        .await
-        .expect("dcr register transport");
-    let status = res.status();
-    let headers = res.headers().clone();
-    let bytes = res.bytes().await.unwrap_or_default();
-    let json = serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null);
-    (status, headers, json)
+/// Seed a `resource_registry` row directly (enabled, column defaults),
+/// mirroring `resource_registry::insert`. INSERT OR IGNORE so a leftover row
+/// from an earlier run doesn't trip the UNIQUE constraint — callers that need
+/// a known `enabled` state set it explicitly afterwards.
+pub fn seed_registry_resource(resource: &str) {
+    let conn = forseti_db_conn();
+    conn.execute(
+        "INSERT OR IGNORE INTO resource_registry (resource, display_name, org_id, created_by) \
+         VALUES (?1, ?1, 'default', 'test-fixture')",
+        params![resource],
+    )
+    .unwrap_or_else(|e| panic!("seed resource_registry: {e}"));
 }
 
-/// POST `/oauth2/register` with a caller-supplied `Authorization` header
-/// value verbatim — used by negative tests that need to exercise
-/// malformed-header rejection (wrong scheme, missing token, etc).
-pub async fn dcr_register_with_authorization(
-    authorization: &str,
-    client_name: &str,
-    scope: &str,
-    redirect_uris: &[&str],
-    audience: Option<&[&str]>,
-) -> (StatusCode, reqwest::header::HeaderMap, Value) {
-    let client = browser_client();
-    let body = dcr_register_body(client_name, scope, redirect_uris, audience);
-    let res = client
-        .post(format!("{PORTAL}/oauth2/register"))
-        .header("authorization", authorization)
-        .header("content-type", "application/json")
-        .json(&body)
-        .send()
-        .await
-        .expect("dcr register transport");
-    let status = res.status();
-    let headers = res.headers().clone();
-    let bytes = res.bytes().await.unwrap_or_default();
-    let json = serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null);
-    (status, headers, json)
+/// Flip `resource_registry.enabled` for `resource`. Mirrors
+/// `resource_registry::set_enabled`.
+pub fn set_registry_resource_enabled(resource: &str, enabled: bool) {
+    let conn = forseti_db_conn();
+    conn.execute(
+        "UPDATE resource_registry SET enabled = ?1 WHERE resource = ?2",
+        params![i32::from(enabled), resource],
+    )
+    .unwrap_or_else(|e| panic!("set resource_registry.enabled: {e}"));
 }
 
-fn dcr_register_body(
-    client_name: &str,
-    scope: &str,
-    redirect_uris: &[&str],
-    audience: Option<&[&str]>,
-) -> Value {
-    let mut body = serde_json::json!({
-        "client_name": client_name,
-        "grant_types": ["authorization_code", "refresh_token"],
-        "response_types": ["code"],
-        "scope": scope,
-        "redirect_uris": redirect_uris,
-        "token_endpoint_auth_method": "none",
-    });
-    if let Some(aud) = audience {
-        body["audience"] = serde_json::json!(aud);
-    }
-    body
+/// Delete a `resource_registry` row (test cleanup).
+pub fn delete_registry_resource(resource: &str) {
+    let conn = forseti_db_conn();
+    conn.execute(
+        "DELETE FROM resource_registry WHERE resource = ?1",
+        params![resource],
+    )
+    .unwrap_or_else(|e| panic!("delete resource_registry: {e}"));
 }
 
-/// A fake MCP resource server. Spawned for the golden-path test to assert
-/// that an access token introspects successfully against Hydra and carries
-/// the expected audience.
-pub struct FakeMcpServer {
-    pub addr: SocketAddr,
-    pub expected_audience: String,
-    handle: tokio::task::JoinHandle<()>,
-    shutdown: tokio::sync::oneshot::Sender<()>,
-}
-
-impl FakeMcpServer {
-    /// `GET /tool` URL the test client hits with `Authorization: Bearer ...`.
-    pub fn tool_url(&self) -> String {
-        format!("http://{}/tool", self.addr)
-    }
-
-    /// Stop the server. Best-effort — the listener falls over at drop time
-    /// either way, but cleaning up the task lets `cargo test` exit promptly.
-    pub async fn stop(self) {
-        let _ = self.shutdown.send(());
-        let _ = self.handle.await;
-    }
-}
-
-/// Spawn a tiny axum server with one route, `GET /tool`. It introspects
-/// the bearer token against Hydra admin and returns 200 only when both
-/// `active` is true and `aud` contains `expected_audience`.
-///
-/// Binds to `127.0.0.1:0` so concurrent test runs don't fight over a port.
-pub async fn spawn_fake_mcp_server(expected_audience: &str) -> FakeMcpServer {
-    use axum::Router;
-    use axum::extract::State;
-    use axum::http::{HeaderMap, StatusCode as AxStatus};
-    use axum::routing::get;
-
-    #[derive(Clone)]
-    struct St {
-        expected_audience: String,
-    }
-
-    async fn tool(
-        State(st): State<St>,
-        headers: HeaderMap,
-    ) -> (AxStatus, [(axum::http::HeaderName, String); 1], String) {
-        let bearer = headers
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.strip_prefix("Bearer "))
-            .or_else(|| {
-                headers
-                    .get("authorization")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|s| s.strip_prefix("bearer "))
-            })
-            .unwrap_or("")
-            .trim()
-            .to_string();
-        let deny = (
-            AxStatus::UNAUTHORIZED,
-            [(
-                axum::http::HeaderName::from_static("www-authenticate"),
-                r#"Bearer error="invalid_token""#.to_string(),
-            )],
-            r#"{"error":"invalid_token"}"#.to_string(),
-        );
-        if bearer.is_empty() {
-            return deny;
-        }
-        let client = reqwest::Client::new();
-        let resp = client
-            .post(format!("{HYDRA_ADMIN}/admin/oauth2/introspect"))
-            .form(&[("token", bearer.as_str())])
-            .send()
-            .await;
-        let body: serde_json::Value = match resp {
-            Ok(r) if r.status().is_success() => r.json().await.unwrap_or(serde_json::Value::Null),
-            _ => return deny,
-        };
-        let active = body["active"].as_bool().unwrap_or(false);
-        let aud_match = body["aud"]
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .any(|v| v.as_str() == Some(st.expected_audience.as_str()))
-            })
-            .unwrap_or(false);
-        if active && aud_match {
-            (
-                AxStatus::OK,
-                [(
-                    axum::http::HeaderName::from_static("content-type"),
-                    "application/json".to_string(),
-                )],
-                r#"{"ok":true}"#.to_string(),
-            )
-        } else {
-            deny
-        }
-    }
-
-    let app: Router = Router::new().route("/tool", get(tool)).with_state(St {
-        expected_audience: expected_audience.to_string(),
-    });
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind fake mcp listener");
-    let addr = listener.local_addr().expect("local_addr");
-    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-    let handle = tokio::spawn(async move {
-        let _ = axum::serve(listener, app)
-            .with_graceful_shutdown(async move {
-                let _ = rx.await;
-            })
-            .await;
-    });
-    FakeMcpServer {
-        addr,
-        expected_audience: expected_audience.to_string(),
-        handle,
-        shutdown: tx,
-    }
+/// Read `(enabled, created_by)` of a `resource_registry` row; `None` when no
+/// row exists for `resource`.
+pub fn read_registry_resource(resource: &str) -> Option<(bool, String)> {
+    let conn = forseti_db_conn();
+    conn.query_row(
+        "SELECT enabled, created_by FROM resource_registry WHERE resource = ?1",
+        params![resource],
+        |row| Ok((row.get::<_, bool>(0)?, row.get::<_, String>(1)?)),
+    )
+    .ok()
 }
 
 // --- OAuth/OIDC flow helpers ----------------------------------------------

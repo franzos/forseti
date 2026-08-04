@@ -3,19 +3,19 @@
 //! into id_token claims, and accepts (or rejects) the Hydra challenge.
 
 use axum::Router;
-use axum::extract::DefaultBodyLimit;
 use axum::routing::{get, post};
 
 use crate::config::{OAuthConfig, ProxyConfig};
 use crate::rate_limit;
 use crate::state::AppState;
 
+pub(crate) mod cimd;
+pub(crate) mod cimd_fetch;
 pub(crate) mod consent;
 pub(crate) mod device;
 pub(crate) mod device_verify;
 pub(crate) mod login;
 pub(crate) mod logout;
-pub(crate) mod register;
 
 /// Consent-screen descriptions for built-in scopes (standard OIDC plus
 /// Forseti's `groups`), used when the operator hasn't supplied one in
@@ -110,16 +110,6 @@ pub(crate) async fn allow_form_action_for_authorize_chain(
     }
 }
 
-/// Per-IP rate-limit defaults for `POST /oauth2/register`. 10/min guards
-/// bursts, 100/hour slow-drip abuse; a request must satisfy both buckets.
-const DEFAULT_DCR_IP_RATE_PER_MINUTE: u32 = 10;
-const DEFAULT_DCR_IP_RATE_PER_HOUR: u32 = 100;
-/// Global (all-callers-share-one-bucket) defaults, bounding total DCR traffic
-/// regardless of claimed source IP. 4x the per-IP caps, mirroring the
-/// `/registration` ratio.
-const DEFAULT_DCR_GLOBAL_RATE_PER_MINUTE: u32 = 40;
-const DEFAULT_DCR_GLOBAL_RATE_PER_HOUR: u32 = 400;
-
 pub(crate) fn router(oauth_cfg: &OAuthConfig, proxy_cfg: &ProxyConfig) -> Router<AppState> {
     Router::new()
         .route("/oauth/login", get(login::oauth_login))
@@ -136,10 +126,6 @@ pub(crate) fn router(oauth_cfg: &OAuthConfig, proxy_cfg: &ProxyConfig) -> Router
         // session-gated and per-IP rate-limited (see `device_router`).
         .merge(device_router(oauth_cfg, proxy_cfg))
         .route("/oauth/device/done", get(device_verify::device_done))
-        // Forseti-fronted RFC 7591 DCR endpoint at the canonical
-        // `/oauth2/register` path Hydra advertises in discovery. No CSRF (not
-        // a browser form); rate-limited via the nested router below.
-        .merge(register_router(oauth_cfg, proxy_cfg))
 }
 
 /// Per-IP rate-limit defaults for `/oauth/device`, used when
@@ -176,43 +162,6 @@ fn device_router(oauth_cfg: &OAuthConfig, proxy_cfg: &ProxyConfig) -> Router<App
         per_minute,
         per_hour,
         rate_limit::plain_text_error("device_verify"),
-    )
-}
-
-/// Per-request body cap for the DCR proxy. A valid RFC 7591 payload is a few
-/// hundred bytes; 64 KiB leaves headroom for verbose `redirect_uris` without
-/// giving abusers a multi-megabyte slot. Exceeding it yields a 413.
-const DCR_BODY_LIMIT_BYTES: usize = 64 * 1024;
-
-fn register_router(oauth_cfg: &OAuthConfig, proxy_cfg: &ProxyConfig) -> Router<AppState> {
-    let r = Router::new()
-        .route("/oauth2/register", post(register::register))
-        .layer(DefaultBodyLimit::max(DCR_BODY_LIMIT_BYTES));
-
-    let per_minute = oauth_cfg
-        .dcr_ip_rate_per_minute
-        .unwrap_or(DEFAULT_DCR_IP_RATE_PER_MINUTE);
-    let per_hour = oauth_cfg
-        .dcr_ip_rate_per_hour
-        .unwrap_or(DEFAULT_DCR_IP_RATE_PER_HOUR);
-    let global_per_minute = oauth_cfg
-        .dcr_global_rate_per_minute
-        .unwrap_or(DEFAULT_DCR_GLOBAL_RATE_PER_MINUTE);
-    let global_per_hour = oauth_cfg
-        .dcr_global_rate_per_hour
-        .unwrap_or(DEFAULT_DCR_GLOBAL_RATE_PER_HOUR);
-
-    // Strict (peer-IP) mode requires
-    // `into_make_service_with_connect_info::<SocketAddr>()` at the serve site
-    // so `ConnectInfo` is in extensions; see `app::run`.
-    rate_limit::dual_window_with_global(
-        r,
-        proxy_cfg.trust_forwarded_for,
-        per_minute,
-        per_hour,
-        global_per_minute,
-        global_per_hour,
-        register::rate_limit_error_response,
     )
 }
 
@@ -319,6 +268,16 @@ mod tests {
         assert_eq!(canonical_resource("/mcp"), None);
         assert_eq!(canonical_resource(""), None);
         assert_eq!(canonical_resource("not a uri"), None);
+    }
+
+    #[test]
+    fn canonical_resource_rejects_bare_audience_identifiers() {
+        // Why `allowed_resource_audiences` can only ever hold RFC 8707 URIs,
+        // and why a client's registered `audience` is compared verbatim
+        // instead: Stackpit's web SSO names itself `stackpit-web` /
+        // `stackpit.gofranz.com`, neither of which is an absolute URI.
+        assert_eq!(canonical_resource("stackpit-web"), None);
+        assert_eq!(canonical_resource("stackpit.gofranz.com"), None);
     }
 
     #[test]

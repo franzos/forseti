@@ -548,6 +548,15 @@ pub async fn get_client(clients: &OryClients, id: &str) -> Result<OAuth2Client> 
         .map_err(|e| anyhow::anyhow!("hydra get_client failed: {e}"))
 }
 
+/// [`get_client`] with Hydra's 404 mapped to `None`, so upsert callers can branch on existence.
+pub async fn get_client_opt(clients: &OryClients, id: &str) -> Result<Option<OAuth2Client>> {
+    match o_auth2_api::get_o_auth2_client(&clients.hydra_admin, id).await {
+        Ok(c) => Ok(Some(c)),
+        Err(ory_client::apis::Error::ResponseError(rc)) if rc.status.as_u16() == 404 => Ok(None),
+        Err(e) => Err(anyhow::anyhow!("hydra get_client failed: {e}")),
+    }
+}
+
 pub async fn create_client(clients: &OryClients, client: OAuth2Client) -> Result<OAuth2Client> {
     o_auth2_api::create_o_auth2_client(&clients.hydra_admin, client)
         .await
@@ -570,6 +579,53 @@ pub async fn delete_client(clients: &OryClients, id: &str) -> Result<()> {
     o_auth2_api::delete_o_auth2_client(&clients.hydra_admin, id)
         .await
         .map_err(|e| anyhow::anyhow!("hydra delete_client failed: {e}"))
+}
+
+/// Ceiling on how many audiences consent may accumulate on one client record.
+const CLIENT_AUDIENCE_CAP: usize = 20;
+
+/// Add `granted` to the client's registered `audience` allow-list, skipping
+/// whatever `existing` (the record as already read by the caller) covers.
+/// fosite re-validates the granted audience against the client record on the
+/// refresh grant (`handler/oauth2/flow_refresh.go`) but not on the code
+/// exchange, so a granted resource that never lands here buys the client one
+/// working access token and then permanent refresh failures. Idempotent, and
+/// capped so a client can't grow the record without bound.
+pub async fn add_client_audiences(
+    clients: &OryClients,
+    client_id: &str,
+    existing: &[String],
+    granted: &[String],
+) -> Result<()> {
+    let mut len = existing.len();
+    let mut patch = Vec::new();
+    for resource in granted {
+        if existing.iter().any(|a| a == resource) {
+            continue;
+        }
+        if len >= CLIENT_AUDIENCE_CAP {
+            tracing::warn!(
+                client_id,
+                resource = %resource,
+                "hydra: client audience cap reached; not registering",
+            );
+            break;
+        }
+        len += 1;
+        patch.push(ory_client::models::JsonPatch {
+            from: None,
+            op: ory_client::models::json_patch::OpEnum::Add,
+            path: "/audience/-".to_string(),
+            value: Some(Some(serde_json::Value::String(resource.clone()))),
+        });
+    }
+    if patch.is_empty() {
+        return Ok(());
+    }
+    o_auth2_api::patch_o_auth2_client(&clients.hydra_admin, client_id, patch)
+        .await
+        .map(|_| ())
+        .map_err(|e| anyhow::anyhow!("hydra add_client_audiences failed: {e}"))
 }
 
 /// Rotate a client's secret. Hydra has no dedicated rotate endpoint, so we POST a JSON Patch asking it to

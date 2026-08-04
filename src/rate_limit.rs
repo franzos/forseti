@@ -1,5 +1,5 @@
 //! Shared per-IP rate-limit helper wrapping `tower_governor::GovernorLayer`. The error handler is
-//! caller-supplied so JSON (RFC 7591 DCR) and HTML (`/claim-email`) endpoints render their own shapes.
+//! caller-supplied so JSON (the CIMD shim) and HTML (`/claim-email`) endpoints render their own shapes.
 
 use std::sync::{Arc, Mutex};
 
@@ -75,7 +75,7 @@ where
 
 /// Plain-text `429` for browser-facing endpoints, with `Retry-After` when the
 /// governor surfaces a wait time. `context` only labels the trace line. JSON
-/// endpoints (RFC 7591 DCR) render their own shape instead.
+/// endpoints render their own shape instead.
 pub(crate) fn plain_text_error(
     context: &'static str,
 ) -> impl Fn(tower_governor::GovernorError) -> Response + Copy {

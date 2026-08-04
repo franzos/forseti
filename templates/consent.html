@@ -32,6 +32,15 @@
 {% block card_subtitle %}{{ consent_intro }}{% endblock %}
 
 {% block card_body %}
+  {# CIMD clients: the card title carries the client_id URL's host (the
+     provable identity); the document's self-asserted name is only this
+     secondary line. #}
+  {% if !cimd_client_name.is_empty() %}
+    <p class="font-body-sm text-body-sm text-on-surface-variant">
+      {{ chrome.tv1("consent-cimd-self-asserted-name", "name", &cimd_client_name) }}
+    </p>
+  {% endif %}
+
   <div class="flex flex-col gap-stack-sm">
     <p class="font-body-sm text-body-sm text-on-surface-variant">
       {{ chrome.t("consent-signed-in-as-prefix") }} <strong class="text-on-surface"><bdi>{{ subject_email }}</bdi></strong>.
@@ -66,7 +75,7 @@
     </div>
   {% endif %}
 
-  {% if verified %}
+  {% if verified && cimd_host.is_empty() %}
     <p class="flex items-center gap-1 font-label-sm text-label-sm text-on-surface-variant"
        title="{{ chrome.t("consent-verified-by-admin") }}">
       <svg xmlns="http://www.w3.org/2000/svg"

@@ -20,7 +20,7 @@ admin-nav-license = Licence
 admin-nav-identities = Identités
 admin-nav-sessions = Sessions
 admin-nav-clients = Clients OAuth2
-admin-nav-dcr-tokens = Jetons DCR
+admin-nav-resources = Ressources
 admin-nav-saml = SAML SSO
 admin-nav-hosts = Hôtes
 admin-nav-accounts = Comptes
@@ -219,35 +219,45 @@ admin-client-type-subtitle = Choisissez le type d'application. La page suivante 
 admin-client-type-popular-heading = Applications connues
 admin-client-type-action-cancel = Annuler
 
-# Liste des jetons DCR (dcr_tokens_list.html)
-admin-dcr-page-title = Jetons d'accès initiaux DCR
-admin-dcr-action-issue = Émettre un jeton
-admin-dcr-token-revealed-heading = Jeton d'accès initial (affiché une seule fois)
-admin-dcr-col-status = Statut
-admin-dcr-col-note = Note
-admin-dcr-col-created-by = Créé par
-admin-dcr-col-created = Créé
-admin-dcr-col-expires = Expire
-admin-dcr-col-uses-left = Utilisations restantes
-admin-dcr-status-active = Actif
-admin-dcr-status-revoked = Révoqué
-admin-dcr-status-expired = Expiré
-admin-dcr-status-exhausted = Épuisé
-admin-dcr-empty-prefix = Aucun jeton émis.
-admin-dcr-empty-link = En émettre un
-admin-dcr-empty-suffix = pour activer l'auto-enregistrement.
-admin-dcr-action-revoke = Révoquer
+# Resource registry list (resources_list.html)
+admin-resources-page-title = Registre des ressources
+admin-resources-subtitle = Serveurs de ressources autorisés comme audiences du jeton d'accès. Le consentement n'accorde qu'une audience correspondant à une entrée activée ici.
+admin-resources-action-new = Enregistrer une ressource
+admin-resources-col-resource = Ressource
+admin-resources-col-name = Nom
+admin-resources-col-org = Organisation
+admin-resources-col-corroboration = Corroboration
+admin-resources-col-enabled = Activé
+admin-resources-col-created = Créé
+admin-resources-empty-prefix = Aucune ressource enregistrée.
+admin-resources-empty-link = Enregistrez-en une
+admin-resources-empty-suffix = pour l'autoriser comme audience du jeton d'accès.
+admin-resources-corroboration-corroborated = Corroboré
+admin-resources-corroboration-mismatch = Discordance
+admin-resources-corroboration-unreachable = Injoignable
+admin-resources-corroboration-unchecked = Non vérifié
+admin-resources-status-enabled = Activé
+admin-resources-status-disabled = Désactivé
+admin-resources-action-enable = Activer
+admin-resources-action-disable = Désactiver
+admin-resources-action-recheck = Revérifier
+admin-resources-action-delete = Supprimer
+admin-resources-corroboration-note = La corroboration est indicative : Forseti récupère le document de métadonnées RFC 9728 de la ressource et vérifie qu'il nomme cette ressource et cet émetteur. Elle ne bloque jamais l'enregistrement ni le consentement.
 
-# Nouveau jeton DCR (dcr_token_new.html)
-admin-dcr-new-page-title = Émettre un jeton DCR
-admin-dcr-new-heading = Émettre un jeton d'accès initial DCR
-admin-dcr-new-field-note = Note
-admin-dcr-new-field-note-placeholder = À quoi sert ce jeton ? (p. ex. 'Claude Desktop pour formshive')
-admin-dcr-new-field-note-hint = Facultatif, pour vos archives uniquement. L'auteur du client ne le voit jamais.
-admin-dcr-new-field-ttl = TTL (heures)
-admin-dcr-new-field-ttl-hint = Laisser vide pour aucune expiration.
-admin-dcr-new-field-max-uses = Utilisations maximales
-admin-dcr-new-action-cancel = Annuler
+# Resource registry new (resource_new.html)
+admin-resources-new-page-title = Enregistrer une ressource
+admin-resources-new-heading = Enregistrer une ressource
+admin-resources-new-subtitle = Les ressources enregistrées deviennent des audiences de jeton d'accès accordables. Les clients doivent toujours les demander, et l'utilisateur doit toujours consentir.
+admin-resources-new-field-resource = Ressource
+admin-resources-new-field-resource-hint = Une URI absolue (canonisée : barre oblique finale et fragment supprimés), ou un identifiant littéral non-URI pour les audiences héritées, comparé exactement tel que saisi.
+admin-resources-new-field-name = Nom d'affichage
+admin-resources-new-field-name-hint = Pour cette liste uniquement ; par défaut, l'identifiant de la ressource.
+admin-resources-new-field-org = Organisation
+admin-resources-new-org-hint = L'organisation propriétaire de cette ressource.
+admin-resources-new-org-pinned-part1 = Enregistré dans
+admin-resources-new-org-pinned-part2 = ; l'hôte de la ressource doit être l'un de ses domaines vérifiés.
+admin-resources-new-action-submit = Enregistrer
+admin-resources-new-action-cancel = Annuler
 
 # Page de statut (status.html)
 admin-status-page-title = Statut
@@ -584,24 +594,6 @@ admin-client-discovery-error-part2 = .
 # client_show.html - introduction de la section de modification (code: PUT /admin/clients/<id>)
 admin-client-edit-intro-part1 = Mettez à jour les champs du client ci-dessous. Les modifications sont appliquées via le
 admin-client-edit-intro-part2 = de Hydra ; les champs non concernés sont préservés.
-
-# dcr_tokens_list.html - sous-titre (code: POST /oauth2/register)
-admin-dcr-subtitle-part1 = Jetons Bearer qui autorisent
-admin-dcr-subtitle-part2 = . Remettez-en un à l'auteur d'un client MCP pour qu'il puisse s'enregistrer lui-même, sans intervention manuelle de votre part.
-
-# dcr_tokens_list.html - description du jeton révélé (code: Authorization: Bearer <token>, POST /oauth2/register)
-admin-dcr-revealed-desc-part1 = Partagez-le avec l'auteur du client. Il l'envoie sous la forme
-admin-dcr-revealed-desc-part2 = lors de l'appel à
-admin-dcr-revealed-desc-part3 = . Nous ne stockons pas la valeur brute, seulement son SHA-256.
-
-# dcr_token_new.html - sous-titre (code: Authorization: Bearer <token>, POST /oauth2/register)
-admin-dcr-new-subtitle-part1 = Le jeton est affiché une seule fois sur la page suivante. Remettez-le à l'auteur du client. Il l'envoie sous la forme
-admin-dcr-new-subtitle-part2 = sur un unique appel
-admin-dcr-new-subtitle-part3 = .
-
-# dcr_token_new.html - indice d'utilisations max (code: 1)
-admin-dcr-new-field-max-uses-hint-part1 = Laissez vide pour un usage illimité. L'usage unique (
-admin-dcr-new-field-max-uses-hint-part2 = ) est l'option la plus sûre par défaut.
 
 # client_type_picker.html - description des applications connues (code: YOUR_DOMAIN, PROVIDER_NAME)
 admin-client-type-popular-desc-part1 = Prérempli pour une application connue. Les URL utilisent les espaces réservés

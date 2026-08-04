@@ -20,7 +20,7 @@ admin-nav-license = Лицензия
 admin-nav-identities = Личности
 admin-nav-sessions = Сеансы
 admin-nav-clients = Клиенты OAuth2
-admin-nav-dcr-tokens = Токены DCR
+admin-nav-resources = Ресурсы
 admin-nav-saml = SAML SSO
 admin-nav-hosts = Хосты
 admin-nav-accounts = Учётные записи
@@ -219,35 +219,45 @@ admin-client-type-subtitle = Выберите тип приложения. Сл�
 admin-client-type-popular-heading = Популярные приложения
 admin-client-type-action-cancel = Отмена
 
-# Список токенов DCR (dcr_tokens_list.html)
-admin-dcr-page-title = Начальные токены доступа DCR
-admin-dcr-action-issue = Выпустить токен
-admin-dcr-token-revealed-heading = Начальный токен доступа (показан один раз)
-admin-dcr-col-status = Статус
-admin-dcr-col-note = Заметка
-admin-dcr-col-created-by = Кем создан
-admin-dcr-col-created = Создан
-admin-dcr-col-expires = Истекает
-admin-dcr-col-uses-left = Осталось использований
-admin-dcr-status-active = Активен
-admin-dcr-status-revoked = Отозван
-admin-dcr-status-expired = Истёк
-admin-dcr-status-exhausted = Исчерпан
-admin-dcr-empty-prefix = Токены не выпущены.
-admin-dcr-empty-link = Выпустите токен
-admin-dcr-empty-suffix = чтобы включить саморегистрацию.
-admin-dcr-action-revoke = Отозвать
+# Resource registry list (resources_list.html)
+admin-resources-page-title = Реестр ресурсов
+admin-resources-subtitle = Серверы ресурсов, разрешённые как аудитории токена доступа. Согласие выдаёт только аудиторию, совпадающую с включённой записью здесь.
+admin-resources-action-new = Зарегистрировать ресурс
+admin-resources-col-resource = Ресурс
+admin-resources-col-name = Название
+admin-resources-col-org = Организация
+admin-resources-col-corroboration = Подтверждение
+admin-resources-col-enabled = Включено
+admin-resources-col-created = Создано
+admin-resources-empty-prefix = Ресурсы не зарегистрированы.
+admin-resources-empty-link = Зарегистрируйте один
+admin-resources-empty-suffix = , чтобы разрешить его как аудиторию токена доступа.
+admin-resources-corroboration-corroborated = Подтверждено
+admin-resources-corroboration-mismatch = Несовпадение
+admin-resources-corroboration-unreachable = Недоступно
+admin-resources-corroboration-unchecked = Не проверено
+admin-resources-status-enabled = Включено
+admin-resources-status-disabled = Отключено
+admin-resources-action-enable = Включить
+admin-resources-action-disable = Отключить
+admin-resources-action-recheck = Проверить снова
+admin-resources-action-delete = Удалить
+admin-resources-corroboration-note = Подтверждение носит информационный характер: Forseti запрашивает документ метаданных RFC 9728 ресурса и проверяет, что в нём указаны этот ресурс и этот издатель. Оно никогда не блокирует регистрацию или согласие.
 
-# Новый токен DCR (dcr_token_new.html)
-admin-dcr-new-page-title = Выпустить токен DCR
-admin-dcr-new-heading = Выпустить начальный токен доступа DCR
-admin-dcr-new-field-note = Заметка
-admin-dcr-new-field-note-placeholder = Для чего этот токен? (например, «Claude Desktop для formshive»)
-admin-dcr-new-field-note-hint = Необязательно, только для ваших записей. Автор клиента этого никогда не видит.
-admin-dcr-new-field-ttl = TTL (часы)
-admin-dcr-new-field-ttl-hint = Оставьте пустым для бессрочного действия.
-admin-dcr-new-field-max-uses = Максимум использований
-admin-dcr-new-action-cancel = Отмена
+# Resource registry new (resource_new.html)
+admin-resources-new-page-title = Зарегистрировать ресурс
+admin-resources-new-heading = Зарегистрировать ресурс
+admin-resources-new-subtitle = Зарегистрированные ресурсы становятся аудиториями токена доступа, которые можно выдавать. Клиенты по-прежнему должны их запрашивать, а пользователь — давать согласие.
+admin-resources-new-field-resource = Ресурс
+admin-resources-new-field-resource-hint = Абсолютный URI (канонизированный: завершающий слэш и фрагмент удаляются) или дословный не-URI идентификатор для устаревших аудиторий, сравниваемый точно как введено.
+admin-resources-new-field-name = Отображаемое имя
+admin-resources-new-field-name-hint = Только для этого списка; по умолчанию — идентификатор ресурса.
+admin-resources-new-field-org = Организация
+admin-resources-new-org-hint = Организация, которой принадлежит этот ресурс.
+admin-resources-new-org-pinned-part1 = Будет зарегистрирован в
+admin-resources-new-org-pinned-part2 = ; хост ресурса должен быть одним из её подтверждённых доменов.
+admin-resources-new-action-submit = Зарегистрировать
+admin-resources-new-action-cancel = Отмена
 
 # Страница статуса (status.html)
 admin-status-page-title = Статус
@@ -586,24 +596,6 @@ admin-client-discovery-error-part2 = .
 # client_show.html - вступление раздела редактирования (code: PUT /admin/clients/<id>)
 admin-client-edit-intro-part1 = Обновите поля клиента ниже. Изменения отправляются через
 admin-client-edit-intro-part2 = Hydra; несвязанные поля сохраняются.
-
-# dcr_tokens_list.html - подзаголовок (code: POST /oauth2/register)
-admin-dcr-subtitle-part1 = Bearer-токены, авторизующие
-admin-dcr-subtitle-part2 = . Передайте один автору MCP-клиента, чтобы он мог зарегистрироваться сам без вашего ручного участия.
-
-# dcr_tokens_list.html - описание показанного токена (code: Authorization: Bearer <token>, POST /oauth2/register)
-admin-dcr-revealed-desc-part1 = Передайте это автору клиента. Он отправляет это как
-admin-dcr-revealed-desc-part2 = при вызове
-admin-dcr-revealed-desc-part3 = . Мы не храним исходное значение, только его SHA-256.
-
-# dcr_token_new.html - подзаголовок (code: Authorization: Bearer <token>, POST /oauth2/register)
-admin-dcr-new-subtitle-part1 = Токен показывается один раз на следующей странице. Передайте его автору клиента. Он отправляет его как
-admin-dcr-new-subtitle-part2 = в одном вызове
-admin-dcr-new-subtitle-part3 = .
-
-# dcr_token_new.html - подсказка по максимуму использований (code: 1)
-admin-dcr-new-field-max-uses-hint-part1 = Оставьте пустым для неограниченного числа. Одноразовое (
-admin-dcr-new-field-max-uses-hint-part2 = ) — самое безопасное значение по умолчанию.
 
 # client_type_picker.html - описание популярных приложений (code: YOUR_DOMAIN, PROVIDER_NAME)
 admin-client-type-popular-desc-part1 = Заполнено заранее для известного приложения. URL используют заполнители

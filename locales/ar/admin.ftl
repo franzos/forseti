@@ -20,7 +20,7 @@ admin-nav-license = الترخيص
 admin-nav-identities = الهويات
 admin-nav-sessions = الجلسات
 admin-nav-clients = عملاء OAuth2
-admin-nav-dcr-tokens = رموز DCR
+admin-nav-resources = الموارد
 admin-nav-saml = الدخول الموحّد SAML
 admin-nav-hosts = المضيفات
 admin-nav-accounts = الحسابات
@@ -219,35 +219,45 @@ admin-client-type-subtitle = اختر نوع التطبيق. الصفحة الت
 admin-client-type-popular-heading = التطبيقات الشائعة
 admin-client-type-action-cancel = إلغاء
 
-# قائمة رموز DCR (dcr_tokens_list.html)
-admin-dcr-page-title = رموز الوصول الأولية لـ DCR
-admin-dcr-action-issue = إصدار رمز
-admin-dcr-token-revealed-heading = رمز الوصول الأولي (يُعرَض مرة واحدة)
-admin-dcr-col-status = الحالة
-admin-dcr-col-note = ملاحظة
-admin-dcr-col-created-by = أنشأه
-admin-dcr-col-created = تاريخ الإنشاء
-admin-dcr-col-expires = تنتهي
-admin-dcr-col-uses-left = الاستخدامات المتبقية
-admin-dcr-status-active = نشط
-admin-dcr-status-revoked = مُلغى
-admin-dcr-status-expired = منتهي الصلاحية
-admin-dcr-status-exhausted = مُستنفَد
-admin-dcr-empty-prefix = لم تُصدَر أي رموز.
-admin-dcr-empty-link = أصدر واحدًا
-admin-dcr-empty-suffix = لتفعيل التسجيل الذاتي.
-admin-dcr-action-revoke = إلغاء
+# Resource registry list (resources_list.html)
+admin-resources-page-title = سجل الموارد
+admin-resources-subtitle = خوادم الموارد المسموح بها كجمهور لرمز الوصول. لا تمنح الموافقة إلا جمهورًا يطابق صفًا مفعّلًا هنا.
+admin-resources-action-new = تسجيل مورد
+admin-resources-col-resource = المورد
+admin-resources-col-name = الاسم
+admin-resources-col-org = المؤسسة
+admin-resources-col-corroboration = التحقق
+admin-resources-col-enabled = مفعّل
+admin-resources-col-created = تاريخ الإنشاء
+admin-resources-empty-prefix = لا توجد موارد مسجلة.
+admin-resources-empty-link = سجّل واحدًا
+admin-resources-empty-suffix = للسماح به كجمهور لرمز الوصول.
+admin-resources-corroboration-corroborated = مؤكد
+admin-resources-corroboration-mismatch = عدم تطابق
+admin-resources-corroboration-unreachable = تعذر الوصول
+admin-resources-corroboration-unchecked = غير مفحوص
+admin-resources-status-enabled = مفعّل
+admin-resources-status-disabled = معطّل
+admin-resources-action-enable = تفعيل
+admin-resources-action-disable = تعطيل
+admin-resources-action-recheck = إعادة الفحص
+admin-resources-action-delete = حذف
+admin-resources-corroboration-note = التحقق إرشادي فقط: يجلب Forseti مستند بيانات التعريف RFC 9728 الخاص بالمورد ويتحقق من أنه يذكر هذا المورد وهذا المُصدر. ولا يمنع التسجيل أو الموافقة أبدًا.
 
-# رمز DCR جديد (dcr_token_new.html)
-admin-dcr-new-page-title = إصدار رمز DCR
-admin-dcr-new-heading = إصدار رمز وصول أولي لـ DCR
-admin-dcr-new-field-note = ملاحظة
-admin-dcr-new-field-note-placeholder = ما الغرض من هذا الرمز؟ (مثل 'Claude Desktop لـ formshive')
-admin-dcr-new-field-note-hint = اختياري، لسجلاتك فقط. لا يرى مؤلف العميل هذا أبدًا.
-admin-dcr-new-field-ttl = مدة البقاء (بالساعات)
-admin-dcr-new-field-ttl-hint = اتركه فارغًا لعدم انتهاء الصلاحية.
-admin-dcr-new-field-max-uses = الحد الأقصى للاستخدامات
-admin-dcr-new-action-cancel = إلغاء
+# Resource registry new (resource_new.html)
+admin-resources-new-page-title = تسجيل مورد
+admin-resources-new-heading = تسجيل مورد
+admin-resources-new-subtitle = تصبح الموارد المسجلة جماهير لرمز الوصول يمكن منحها. لا يزال على العملاء طلبها، ولا يزال على المستخدم الموافقة.
+admin-resources-new-field-resource = المورد
+admin-resources-new-field-resource-hint = معرّف URI مطلق (بعد التوحيد القياسي: تُحذف الشرطة المائلة الأخيرة والجزء fragment)، أو معرّف حرفي ليس URI للجماهير القديمة، ويُقارن تمامًا كما أُدخل.
+admin-resources-new-field-name = الاسم المعروض
+admin-resources-new-field-name-hint = لهذه القائمة فقط؛ الافتراضي هو معرّف المورد.
+admin-resources-new-field-org = المؤسسة
+admin-resources-new-org-hint = المؤسسة المالكة لهذا المورد.
+admin-resources-new-org-pinned-part1 = سيُسجَّل في
+admin-resources-new-org-pinned-part2 = ؛ يجب أن يكون مضيف المورد أحد نطاقاتها المتحقق منها.
+admin-resources-new-action-submit = تسجيل
+admin-resources-new-action-cancel = إلغاء
 
 # صفحة الحالة (status.html)
 admin-status-page-title = الحالة
@@ -588,24 +598,6 @@ admin-client-discovery-error-part2 = .
 # client_show.html - مقدمة قسم التعديل (شيفرة: PUT /admin/clients/<id>)
 admin-client-edit-intro-part1 = حدّث حقول العميل أدناه. تُدفَع التغييرات عبر واجهة
 admin-client-edit-intro-part2 = في Hydra؛ تُحفظ الحقول غير ذات الصلة.
-
-# dcr_tokens_list.html - العنوان الفرعي (شيفرة: POST /oauth2/register)
-admin-dcr-subtitle-part1 = رموز حاملة تُصرّح بـ
-admin-dcr-subtitle-part2 = . سلّم واحدًا لمؤلف عميل MCP ليتمكّن من التسجيل الذاتي دون أن تفعله أنت يدويًا.
-
-# dcr_tokens_list.html - وصف الرمز المكشوف (شيفرة: Authorization: Bearer <token>, POST /oauth2/register)
-admin-dcr-revealed-desc-part1 = شارك هذا مع مؤلف العميل. يرسله بصيغة
-admin-dcr-revealed-desc-part2 = عند استدعاء
-admin-dcr-revealed-desc-part3 = . لا نخزّن القيمة الخام، بل تجزئتها SHA-256 فقط.
-
-# dcr_token_new.html - العنوان الفرعي (شيفرة: Authorization: Bearer <token>, POST /oauth2/register)
-admin-dcr-new-subtitle-part1 = يُكشَف الرمز مرة واحدة في الصفحة التالية. سلّمه لمؤلف العميل. يرسله بصيغة
-admin-dcr-new-subtitle-part2 = في استدعاء
-admin-dcr-new-subtitle-part3 = واحد.
-
-# dcr_token_new.html - تلميح الحد الأقصى للاستخدامات (شيفرة: 1)
-admin-dcr-new-field-max-uses-hint-part1 = اتركه فارغًا لاستخدام غير محدود. الاستخدام لمرة واحدة (
-admin-dcr-new-field-max-uses-hint-part2 = ) هو الافتراضي الأكثر أمانًا.
 
 # client_type_picker.html - وصف التطبيقات الشائعة (شيفرة: YOUR_DOMAIN, PROVIDER_NAME)
 admin-client-type-popular-desc-part1 = مُعبّأ مسبقًا لتطبيق معروف. تستخدم الروابط عناصر نائبة

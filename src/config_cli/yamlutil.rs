@@ -132,7 +132,7 @@ pub(crate) fn reject_control_chars(label: &str, value: &str) -> Result<(), Strin
 
 /// CSPRNG-backed alphanumeric secret of exactly `len` chars. `rand::rng()` is
 /// `ThreadRng`, seeded from the OS RNG, the same source the rest of the crate
-/// uses for tokens (`csrf.rs`, `dcr_tokens.rs`).
+/// uses for tokens (`csrf.rs`, `admin/hosts.rs`).
 pub(crate) fn random_secret(len: usize) -> String {
     rand::rng()
         .sample_iter(&Alphanumeric)

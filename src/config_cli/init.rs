@@ -328,7 +328,6 @@ fn render_hydra(t: HydraTemplate) -> String {
     let forseti_consent = yaml_scalar(&format!("{f}/oauth/consent"));
     let forseti_login = yaml_scalar(&format!("{f}/oauth/login"));
     let forseti_logout = yaml_scalar(&format!("{f}/oauth/logout"));
-    let forseti_register = yaml_scalar(&format!("{f}/oauth2/register"));
     let system_secret = yaml_scalar(t.system_secret);
     let cookie_secret = yaml_scalar(t.cookie_secret);
     let pairwise_salt = yaml_scalar(t.pairwise_salt);
@@ -359,15 +358,7 @@ oidc:
       salt: {pairwise_salt}
 
   dynamic_client_registration:
-    enabled: true
-    default_scope:
-      - openid
-      - offline
-      - offline_access
-
-webfinger:
-  oidc_discovery:
-    client_registration_url: {forseti_register}
+    enabled: false
 
 oauth2:
   expose_internal_errors: false

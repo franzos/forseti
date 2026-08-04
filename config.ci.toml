@@ -11,6 +11,10 @@ admin_url  = "http://localhost:4434"
 [hydra]
 public_url = "http://localhost:4444"
 admin_url  = "http://localhost:4445"
+# Forseti fronts Hydra's issuer origin (infra/hydra/hydra.yml sets the issuer
+# to http://host.containers.internal:3000/hydra).
+front_proxy = true
+issuer = "http://host.containers.internal:3000/hydra"
 
 [self]
 url = "http://localhost:3000"
@@ -20,20 +24,23 @@ name          = "Forseti CI"
 support_email = "support@example.com"
 
 # Playground / integration-test overrides (NOT production values).
-# tests/integration/dcr.rs fires 20+ DCR registrations from one host IP in a
-# few seconds, so the production 10/min default would throttle the suite.
-# `dcr_iat_daily_limit = 2` is the value `dcr_per_iat_daily_limit_returns_429`
-# asserts against.
 [oauth]
-dcr_ip_rate_per_minute = 1000
-dcr_ip_rate_per_hour   = 10000
-dcr_iat_daily_limit    = 2
 # Resource the RFC 8707 bridge test binds into the access-token audience.
 allowed_resource_audiences = ["https://mcp.test"]
 
+# Integration fixtures serve CIMD documents from loopback http, so the SSRF
+# guard stands down in CI. Never enable in production. Rate buckets relaxed
+# for the suite's burst traffic.
+[oauth.cimd]
+allow_private_targets = true
+ip_rate_per_minute = 1000
+ip_rate_per_hour   = 10000
+global_rate_per_minute = 1000
+global_rate_per_hour   = 10000
+
 # The integration suite inits 140+ registration flows from one loopback IP in
 # a few seconds, so the production per-IP 300/hour default would 429 mid-run.
-# Relaxed here the same way DCR + claim_email are.
+# Relaxed here the same way claim_email is.
 [auth]
 registration_ip_rate_per_minute     = 1000
 registration_ip_rate_per_hour        = 10000
@@ -94,8 +101,9 @@ client_secret_verifier = "dev-client-secret-verifier"
 [posix]
 pam_client_id = "forseti-linux-pam"
 pam_client_secret = "dev-posix-pam-secret-change-me"
-# Hydra stamps id_tokens with iss=http://host.containers.internal:4444 (see
+# Hydra stamps id_tokens with iss=http://host.containers.internal:3000/hydra (see
 # infra/hydra/hydra.yml). The device-auth binding validates that iss, so it must
 # match here; without it we fall back to [hydra].public_url (localhost:4444) and
-# every device approval is denied as token_invalid.
-hydra_issuer = "http://host.containers.internal:4444"
+# every device approval is denied as token_invalid. Also feeds the CSP
+# form-action allowlist with the issuer's browser-facing origin.
+hydra_issuer = "http://host.containers.internal:3000/hydra"

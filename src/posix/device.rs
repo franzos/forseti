@@ -197,7 +197,7 @@ async fn device_init(
         &host.host_id,
         &username,
         &expires_at,
-        &crate::oauth::register::hash_token(&client_code),
+        &crate::posix::hash_token(&client_code),
     )
     .await
     {
@@ -259,7 +259,7 @@ async fn device_poll(
     // `req.device_code` is the code minted in `device_init`, not Hydra's; it is
     // stored hashed, so a DB read never yields a redeemable code.
     let _ = db::lazy_prune_expired(&state.db, &now.to_rfc3339()).await;
-    let presented = crate::oauth::register::hash_token(&req.device_code);
+    let presented = crate::posix::hash_token(&req.device_code);
     let session = match db::device_session_by_client_code_hash(&state.db, &presented).await {
         Ok(Some(s)) if s.host_id == host.host_id => s,
         Ok(_) => return json_error(StatusCode::NOT_FOUND),
@@ -347,14 +347,15 @@ async fn handle_token(
         audit_denied(state, actx, host, session, "token_invalid").await;
         return deny_and_respond(state, session, "token_invalid").await;
     };
+    // Narrow override chain: [posix].hydra_issuer → [hydra].issuer → [hydra].public_url.
     let issuer = cfg
         .hydra_issuer
-        .clone()
-        .unwrap_or_else(|| state.cfg.hydra.public_url.clone());
+        .as_deref()
+        .unwrap_or_else(|| state.cfg.hydra.issuer_or_public());
     let claims = match hydra::verify_id_token(
         &state.ory,
         id_token,
-        &issuer,
+        issuer,
         &cfg.pam_client_id,
         cfg.id_token_iat_window_secs,
     )

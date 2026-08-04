@@ -10,8 +10,8 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::{DateTime, Utc};
 use subtle::ConstantTimeEq;
 
-use crate::oauth::register::hash_token;
 use crate::posix::db;
+use crate::posix::hash_token;
 use crate::state::AppState;
 
 /// An authenticated host enrollment, handed to resolver handlers as a typed

@@ -20,7 +20,7 @@ admin-nav-license = Licenza
 admin-nav-identities = Identità
 admin-nav-sessions = Sessioni
 admin-nav-clients = Client OAuth2
-admin-nav-dcr-tokens = Token DCR
+admin-nav-resources = Risorse
 admin-nav-saml = SAML SSO
 admin-nav-hosts = Host
 admin-nav-accounts = Account
@@ -219,35 +219,45 @@ admin-client-type-subtitle = Scegli il tipo di applicazione. La pagina successiv
 admin-client-type-popular-heading = App popolari
 admin-client-type-action-cancel = Annulla
 
-# Elenco token DCR (dcr_tokens_list.html)
-admin-dcr-page-title = Token di accesso iniziale DCR
-admin-dcr-action-issue = Emetti token
-admin-dcr-token-revealed-heading = Token di accesso iniziale (mostrato una volta)
-admin-dcr-col-status = Stato
-admin-dcr-col-note = Nota
-admin-dcr-col-created-by = Creato da
-admin-dcr-col-created = Creato
-admin-dcr-col-expires = Scade
-admin-dcr-col-uses-left = Utilizzi rimasti
-admin-dcr-status-active = Attivo
-admin-dcr-status-revoked = Revocato
-admin-dcr-status-expired = Scaduto
-admin-dcr-status-exhausted = Esaurito
-admin-dcr-empty-prefix = Nessun token emesso.
-admin-dcr-empty-link = Emettine uno
-admin-dcr-empty-suffix = per abilitare l'auto-registrazione.
-admin-dcr-action-revoke = Revoca
+# Resource registry list (resources_list.html)
+admin-resources-page-title = Registro delle risorse
+admin-resources-subtitle = Server di risorse consentiti come audience del token di accesso. Il consenso concede solo un'audience che corrisponde a una riga abilitata qui.
+admin-resources-action-new = Registra risorsa
+admin-resources-col-resource = Risorsa
+admin-resources-col-name = Nome
+admin-resources-col-org = Organizzazione
+admin-resources-col-corroboration = Corroborazione
+admin-resources-col-enabled = Abilitata
+admin-resources-col-created = Creata
+admin-resources-empty-prefix = Nessuna risorsa registrata.
+admin-resources-empty-link = Registrane una
+admin-resources-empty-suffix = per consentirla come audience del token di accesso.
+admin-resources-corroboration-corroborated = Corroborata
+admin-resources-corroboration-mismatch = Discrepanza
+admin-resources-corroboration-unreachable = Irraggiungibile
+admin-resources-corroboration-unchecked = Non verificata
+admin-resources-status-enabled = Abilitata
+admin-resources-status-disabled = Disabilitata
+admin-resources-action-enable = Abilita
+admin-resources-action-disable = Disabilita
+admin-resources-action-recheck = Ricontrolla
+admin-resources-action-delete = Elimina
+admin-resources-corroboration-note = La corroborazione è indicativa: Forseti recupera il documento di metadati RFC 9728 della risorsa e verifica che nomini questa risorsa e questo issuer. Non blocca mai la registrazione né il consenso.
 
-# Nuovo token DCR (dcr_token_new.html)
-admin-dcr-new-page-title = Emetti token DCR
-admin-dcr-new-heading = Emetti un token di accesso iniziale DCR
-admin-dcr-new-field-note = Nota
-admin-dcr-new-field-note-placeholder = A cosa serve questo token? (ad es. 'Claude Desktop per formshive')
-admin-dcr-new-field-note-hint = Facoltativa, solo per i tuoi archivi. L'autore del client non la vede mai.
-admin-dcr-new-field-ttl = TTL (ore)
-admin-dcr-new-field-ttl-hint = Lascia vuoto per nessuna scadenza.
-admin-dcr-new-field-max-uses = Utilizzi massimi
-admin-dcr-new-action-cancel = Annulla
+# Resource registry new (resource_new.html)
+admin-resources-new-page-title = Registra risorsa
+admin-resources-new-heading = Registra una risorsa
+admin-resources-new-subtitle = Le risorse registrate diventano audience del token di accesso concedibili. I client devono comunque richiederle e l'utente deve comunque acconsentire.
+admin-resources-new-field-resource = Risorsa
+admin-resources-new-field-resource-hint = Un URI assoluto (canonicalizzato: barra finale e frammento rimossi), oppure un identificatore letterale non-URI per audience legacy, confrontato esattamente come inserito.
+admin-resources-new-field-name = Nome visualizzato
+admin-resources-new-field-name-hint = Solo per questo elenco; per impostazione predefinita è l'identificatore della risorsa.
+admin-resources-new-field-org = Organizzazione
+admin-resources-new-org-hint = L'organizzazione proprietaria di questa risorsa.
+admin-resources-new-org-pinned-part1 = Registrata in
+admin-resources-new-org-pinned-part2 = ; l'host della risorsa deve essere uno dei suoi domini verificati.
+admin-resources-new-action-submit = Registra
+admin-resources-new-action-cancel = Annulla
 
 # Pagina di stato (status.html)
 admin-status-page-title = Stato
@@ -584,24 +594,6 @@ admin-client-discovery-error-part2 = .
 # client_show.html - introduzione della sezione di modifica (code: PUT /admin/clients/<id>)
 admin-client-edit-intro-part1 = Aggiorna i campi del client qui sotto. Le modifiche vengono inviate tramite la
 admin-client-edit-intro-part2 = di Hydra; i campi non correlati vengono preservati.
-
-# dcr_tokens_list.html - sottotitolo (code: POST /oauth2/register)
-admin-dcr-subtitle-part1 = Token bearer che autorizzano
-admin-dcr-subtitle-part2 = . Consegnane uno all'autore di un client MCP così può auto-registrarsi senza che tu debba farlo manualmente.
-
-# dcr_tokens_list.html - descrizione del token mostrato (code: Authorization: Bearer <token>, POST /oauth2/register)
-admin-dcr-revealed-desc-part1 = Condividilo con l'autore del client. Lo invia come
-admin-dcr-revealed-desc-part2 = quando chiama
-admin-dcr-revealed-desc-part3 = . Non memorizziamo il valore grezzo, solo il suo SHA-256.
-
-# dcr_token_new.html - sottotitolo (code: Authorization: Bearer <token>, POST /oauth2/register)
-admin-dcr-new-subtitle-part1 = Il token viene rivelato una sola volta nella pagina successiva. Consegnalo all'autore del client. Lo invia come
-admin-dcr-new-subtitle-part2 = in una singola chiamata
-admin-dcr-new-subtitle-part3 = .
-
-# dcr_token_new.html - suggerimento sugli utilizzi massimi (code: 1)
-admin-dcr-new-field-max-uses-hint-part1 = Lascia vuoto per utilizzi illimitati. Monouso (
-admin-dcr-new-field-max-uses-hint-part2 = ) è l'impostazione predefinita più sicura.
 
 # client_type_picker.html - descrizione delle app popolari (code: YOUR_DOMAIN, PROVIDER_NAME)
 admin-client-type-popular-desc-part1 = Precompilato per un'app conosciuta. Gli URL usano i segnaposto

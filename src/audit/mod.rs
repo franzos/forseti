@@ -107,14 +107,23 @@ pub mod action {
     /// Verification-state lookup against `oauth_client_metadata` failed
     /// (DB blip). The consent flow fails closed and shows the caution
     /// banner — this event gives operators a signal so they notice when
-    /// a flaky table is silently flipping every DCR client to unverified.
+    /// a flaky table is silently flipping every client to unverified.
     pub const CONSENT_VERIFICATION_LOOKUP_FAILED: &str = "consent.verification_lookup_failed";
-    // oauth — Dynamic Client Registration (RFC 7591) proxy
+    // oauth — retired RFC 7591 DCR proxy. Nothing emits these anymore, but
+    // historical rows still carry the strings; kept as the reference vocabulary.
+    #[allow(dead_code)]
     pub const OAUTH_CLIENT_DCR_REGISTERED: &str = "oauth.client.dcr_registered";
+    #[allow(dead_code)]
     pub const OAUTH_CLIENT_DCR_REJECTED: &str = "oauth.client.dcr_rejected";
+    #[allow(dead_code)]
     pub const OAUTH_CLIENT_DCR_RATE_LIMITED: &str = "oauth.client.dcr_rate_limited";
+    #[allow(dead_code)]
     pub const OAUTH_CLIENT_DCR_IAT_ISSUED: &str = "oauth.client.dcr_iat_issued";
+    #[allow(dead_code)]
     pub const OAUTH_CLIENT_DCR_IAT_REVOKED: &str = "oauth.client.dcr_iat_revoked";
+    // oauth — CIMD authorization shim
+    pub const OAUTH_CIMD_CLIENT_SEEN: &str = "oauth.client.cimd_seen";
+    pub const OAUTH_CIMD_CLIENT_REJECTED: &str = "oauth.client.cimd_rejected";
     // admin
     pub const ADMIN_CLIENT_CREATED: &str = "oauth.client.created";
     pub const ADMIN_CLIENT_UPDATED: &str = "oauth.client.updated";
@@ -124,6 +133,9 @@ pub mod action {
     pub const ADMIN_CLIENT_UNVERIFIED: &str = "oauth.client.unverified";
     pub const ADMIN_CLIENT_LOGO_UPLOADED: &str = "oauth.client.logo_uploaded";
     pub const ADMIN_CLIENT_LOGO_REMOVED: &str = "oauth.client.logo_removed";
+    pub const ADMIN_RESOURCE_CREATED: &str = "admin.resource.created";
+    pub const ADMIN_RESOURCE_TOGGLED: &str = "admin.resource.toggled";
+    pub const ADMIN_RESOURCE_DELETED: &str = "admin.resource.deleted";
     pub const ADMIN_IDENTITY_DISABLED: &str = "admin.identity.disabled";
     pub const ADMIN_IDENTITY_ENABLED: &str = "admin.identity.enabled";
     pub const ADMIN_IDENTITY_DELETED: &str = "admin.identity.deleted";
@@ -229,7 +241,10 @@ pub mod target_kind {
     pub const OAUTH_CLIENT: &str = "oauth_client";
     pub const SESSION: &str = "session";
     pub const WEBHOOK_OUTBOX: &str = "webhook_outbox";
+    // Retired with the DCR proxy; historical rows still carry the string.
+    #[allow(dead_code)]
     pub const DCR_IAT: &str = "dcr_iat";
+    pub const RESOURCE: &str = "resource";
     pub const HOST: &str = "host";
     pub const POSIX_ACCOUNT: &str = "posix_account";
     pub const LICENSE: &str = "license";
@@ -561,18 +576,6 @@ impl AuditEvent {
         self.actor_kind = actor_kind::ADMIN;
         self.actor_id = Some(id.into());
         self.actor_email = Some(email.into());
-        self
-    }
-
-    /// DCR proxy actor: unauthenticated browser-wise (no user / admin
-    /// session), but bound to a specific Initial Access Token. Records
-    /// the actor_id as `"dcr_iat:<id>"` so a triage query filtering on
-    /// `actor_id` finds every event back to one issued token without
-    /// having to dig into `metadata`. Kind stays `system` — DCR is not
-    /// a user-driven flow.
-    pub fn actor_dcr_iat(mut self, iat_id: impl AsRef<str>) -> Self {
-        self.actor_kind = actor_kind::SYSTEM;
-        self.actor_id = Some(format!("dcr_iat:{}", iat_id.as_ref()));
         self
     }
 

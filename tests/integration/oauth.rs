@@ -2,6 +2,72 @@
 
 use crate::common::*;
 
+/// Hydra's non-standard `audience=` for an operator-created client. Stackpit's
+/// web SSO passes a bare hostname (`auth.oauth.web_audience`), which is not a
+/// URI, so canonicalisation can never match it — the client's own registered
+/// `audience` is what authorises it, and consent trusts that record only
+/// because `oauth_client_metadata.source = 'admin'` says an operator wrote it.
+///
+/// Drives the real `/oauth/consent` handler; accepting via Hydra's admin API
+/// would bypass the resolver this pins.
+#[tokio::test]
+async fn registered_bare_hostname_audience_survives_consent() {
+    assert!(portal_reachable().await);
+
+    let audience = "stackpit-web";
+    let user = register_test_user("oauth-aud").await;
+    let (client_id, client_secret, redirect_uri) =
+        hydra_create_test_client_with_audience(&["openid", "offline"], &[audience]).await;
+    // What the admin-UI create path writes: source = 'admin', verified.
+    mark_client_verified(&client_id);
+
+    let auth_url = oauth_auth_url(
+        &client_id,
+        &redirect_uri,
+        "openid offline",
+        &format!("&audience={audience}"),
+    );
+    let (consent_challenge, csrf, _body) = drive_to_consent(&user.client, &auth_url).await;
+    let code = consent_accept_chase_code(
+        &user.manual_client,
+        &csrf,
+        &consent_challenge,
+        &["openid", "offline"],
+        false,
+    )
+    .await
+    .expect("authorization code on callback URL");
+
+    let tokens = exchange_code_for_tokens(&client_id, &client_secret, &redirect_uri, &code).await;
+    let access_token = tokens["access_token"].as_str().expect("access_token");
+    let introspected = hydra_introspect(access_token).await;
+    assert_eq!(
+        introspected["active"],
+        serde_json::json!(true),
+        "access token must be active; got {introspected}"
+    );
+    let aud: Vec<String> = introspected["aud"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect();
+    assert_eq!(
+        aud,
+        vec![audience.to_string()],
+        "a bare-hostname audience registered on the client must survive consent; got {introspected}"
+    );
+    assert_eq!(
+        hydra_client_audience(&client_id).await,
+        vec![audience.to_string()],
+        "granting an already-registered audience must not rewrite the client record"
+    );
+
+    hydra_delete_client(&client_id).await;
+    user.cleanup().await;
+}
+
 #[tokio::test]
 async fn auth_code_flow_with_reduced_scope_drops_email_from_token() {
     assert!(portal_reachable().await);

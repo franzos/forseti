@@ -61,6 +61,14 @@ struct ConsentTemplate {
     /// Other accounts remembered on this device (current subject excluded);
     /// each offers a one-click switch via the OAuth restart.
     known_accounts: Vec<ConsentAccountView>,
+    /// The client_id URL's host for a `source='cimd'` client — the primary
+    /// identity (`client_name` then carries it too). Empty for non-CIMD
+    /// clients or when the client_id fails URL parse; both render as before.
+    /// Also suppresses the verification badge, which never applies to CIMD.
+    cimd_host: String,
+    /// The CIMD document's self-asserted `client_name`, demoted to a
+    /// secondary line. Empty when absent or outside the CIMD rendering.
+    cimd_client_name: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -122,12 +130,15 @@ pub(crate) async fn oauth_consent(
         .as_ref()
         .and_then(|c| c.client_id.as_deref())
         .unwrap_or_default();
-    let verified = if client_id_lookup.is_empty() {
-        true
+    let (verified, is_cimd) = if client_id_lookup.is_empty() {
+        (true, false)
     } else {
         match oauth_client_metadata::get(&state.db, client_id_lookup).await {
-            Ok(Some(row)) => row.is_verified(),
-            Ok(None) => true,
+            Ok(Some(row)) => (
+                row.is_verified(),
+                row.source == oauth_client_metadata::source::CIMD,
+            ),
+            Ok(None) => (true, false),
             Err(e) => {
                 // Fail closed: a DB blip must not silently auto-grant a
                 // DCR-registered client that hasn't been admin-reviewed.
@@ -142,7 +153,7 @@ pub(crate) async fn oauth_consent(
                     .severity(severity::WARNING)
                     .failed(e.to_string());
                 let _ = audit::log(&state.db, ev).await;
-                false
+                (false, false)
             }
         }
     };
@@ -154,8 +165,10 @@ pub(crate) async fn oauth_consent(
         !client_id_lookup.is_empty() && client_id_lookup == state.cfg.posix.pam_client_id;
 
     // Auto-grant path (remembered consent or trusted client). Unverified
-    // clients never auto-grant.
-    if !is_pam_client && verified && (hydra_skip || client_skip_consent) {
+    // clients never auto-grant, and CIMD clients never skip regardless of
+    // verification: their identity is a fetched URL, so the host must be
+    // shown on every consent (spec invariant D.5).
+    if !is_pam_client && verified && !is_cimd && (hydra_skip || client_skip_consent) {
         if let Some(rejected) =
             reject_unless_session_subject(&state, &challenge, &subject, &session).await
         {
@@ -167,6 +180,7 @@ pub(crate) async fn oauth_consent(
         return finalize_consent(
             &state,
             &challenge,
+            client_id_lookup,
             &subject,
             requested_scope,
             requested_audience,
@@ -180,12 +194,32 @@ pub(crate) async fn oauth_consent(
         .into_response();
     }
 
-    let client_name = req
+    let self_asserted_name = req
         .client
         .as_ref()
-        .and_then(|c| c.client_name.clone().filter(|n| !n.is_empty()))
-        .or_else(|| req.client.as_ref().and_then(|c| c.client_id.clone()))
-        .unwrap_or_else(|| "this application".to_string());
+        .and_then(|c| c.client_name.clone().filter(|n| !n.is_empty()));
+    // CIMD identity: the client_id is a URL whose host is what its operator
+    // provably controls, so the host renders primary and the document's
+    // self-asserted client_name is demoted to a secondary line. A parse
+    // failure falls back to the regular rendering.
+    let cimd_host = if is_cimd {
+        url::Url::parse(client_id_lookup)
+            .ok()
+            .and_then(|u| u.host_str().map(str::to_string))
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let (client_name, cimd_client_name) = if cimd_host.is_empty() {
+        (
+            self_asserted_name
+                .or_else(|| req.client.as_ref().and_then(|c| c.client_id.clone()))
+                .unwrap_or_else(|| "this application".to_string()),
+            String::new(),
+        )
+    } else {
+        (cimd_host.clone(), self_asserted_name.unwrap_or_default())
+    };
 
     let scopes: Vec<ConsentScopeView> = requested_scope
         .iter()
@@ -286,6 +320,8 @@ pub(crate) async fn oauth_consent(
         client_id: client_id_lookup.to_string(),
         has_logo,
         known_accounts,
+        cimd_host,
+        cimd_client_name,
     });
     // Granting consent navigates portal -> Hydra -> this client's redirect_uri,
     // and `form-action` is enforced across that whole chain. Hydra registered
@@ -451,6 +487,7 @@ pub(crate) async fn oauth_consent_submit(
     let outcome = finalize_consent(
         &state,
         &form.consent_challenge,
+        &client_id,
         &subject,
         grant_scope,
         requested_audience,
@@ -650,44 +687,103 @@ fn resource_params(request_url: &str) -> Vec<String> {
         .collect()
 }
 
-/// Bridge RFC 8707 to Hydra's audience grant. Hydra/fosite populates
-/// `requested_access_token_audience` from its non-standard `audience=` form
-/// parameter only and ignores `resource=` entirely, so an RFC 8707 client
-/// (every MCP client) would otherwise be issued a token with `aud: []` that its
-/// resource server rejects forever. Only resources the operator listed in
-/// `[oauth].allowed_resource_audiences` are merged in; anything else is dropped
-/// with a warning, because granting a caller-chosen audience would make Forseti
-/// an open audience-minting service.
-fn merge_allowed_resources(
-    mut grant_audience: Vec<String>,
+/// The audiences a consent is allowed to grant, from the union of both
+/// carriers: Hydra/fosite fills `requested_access_token_audience` from its
+/// non-standard `audience=` form parameter, and RFC 8707 clients put
+/// `resource=` on the auth URL (which fosite ignores entirely, so an MCP client
+/// would otherwise get `aud: []`).
+///
+/// A requested value is granted when it is on `allowed` — the enabled
+/// `resource_registry` rows (see [`crate::resource_registry::list_enabled`]) —
+/// or on `registered` — the client's own registered `audience`, passed in only
+/// when Forseti knows an operator wrote that record (see
+/// [`operator_written_audiences`]). Default deny: everything else is dropped.
+///
+/// Both arms compare verbatim first, because an audience is an opaque
+/// identifier and need not be a URI (Stackpit's web SSO uses a bare hostname,
+/// which no amount of canonicalisation can match). The canonical comparison is
+/// the fallback, so an RFC 8707 §2 resource still matches its allow-list entry
+/// across a trailing slash or fragment.
+fn resolve_granted_audience(
+    client_id: &str,
+    requested_audience: &[String],
     request_url: &str,
     allowed: &[String],
+    registered: &[String],
 ) -> Vec<String> {
-    if allowed.is_empty() {
-        return grant_audience;
-    }
-    let allowed: Vec<String> = allowed
+    let allowed_canonical: Vec<String> = allowed
         .iter()
         .filter_map(|a| crate::oauth::canonical_resource(a))
         .collect();
-    for raw in resource_params(request_url) {
-        let Some(resource) = crate::oauth::canonical_resource(&raw) else {
-            tracing::warn!(resource = %raw, "consent: ignoring unparseable resource parameter");
-            continue;
+    let mut granted: Vec<String> = Vec::new();
+    for raw in requested_audience
+        .iter()
+        .cloned()
+        .chain(resource_params(request_url))
+    {
+        let raw = raw.trim();
+        let permitted_verbatim =
+            registered.iter().any(|r| r == raw) || allowed.iter().any(|a| a.trim() == raw);
+        let resolved = if permitted_verbatim {
+            raw.to_string()
+        } else {
+            match crate::oauth::canonical_resource(raw) {
+                Some(resource) if allowed_canonical.contains(&resource) => resource,
+                _ => {
+                    tracing::warn!(
+                        client_id,
+                        requested = %raw,
+                        "consent: dropping requested audience; neither operator-registered on the \
+                         client nor an enabled resource registry entry",
+                    );
+                    continue;
+                }
+            }
         };
-        if !allowed.contains(&resource) {
-            tracing::warn!(
-                resource = %resource,
-                "consent: ignoring resource; not in oauth.allowed_resource_audiences",
-            );
-            continue;
-        }
-        if !grant_audience.contains(&resource) {
-            tracing::info!(resource = %resource, "consent: granting resource audience");
-            grant_audience.push(resource);
+        if !granted.contains(&resolved) {
+            tracing::info!(client_id, audience = %resolved, "consent: granting access-token audience");
+            granted.push(resolved);
         }
     }
-    grant_audience
+    granted
+}
+
+/// The client's registered `audience`, but only for a client Forseti knows an
+/// operator created (`oauth_client_metadata.source = 'admin'`). Empty for
+/// anything else, which leaves the allow-list as the only policy.
+///
+/// A DCR client can rewrite its own Hydra record — including `audience` —
+/// through RFC 7592 with the registration access token Hydra mints for it, so
+/// `source = 'dcr'` is caller-controlled. A client with no row at all is
+/// ambiguous: it may be an operator's out-of-band `hydra create client`, or it
+/// may have registered straight at Hydra's own `/oauth2/register`, which is
+/// publicly routed in this deployment and equally caller-controlled. Forseti
+/// can't tell those apart, so it doesn't guess. Operators of out-of-band
+/// clients register the audience at `/admin/resources` instead.
+async fn operator_written_audiences(state: &AppState, client_id: &str) -> Vec<String> {
+    match oauth_client_metadata::get(&state.db, client_id).await {
+        Ok(Some(row)) if row.source == oauth_client_metadata::source::ADMIN => {}
+        Ok(_) => return Vec::new(),
+        Err(e) => {
+            tracing::error!(
+                error = ?e,
+                client_id,
+                "consent: client metadata lookup failed; ignoring the client's registered audience",
+            );
+            return Vec::new();
+        }
+    }
+    match ory::hydra::get_client(&state.ory, client_id).await {
+        Ok(c) => c.audience.unwrap_or_default(),
+        Err(e) => {
+            tracing::warn!(
+                error = ?e,
+                client_id,
+                "consent: client lookup failed; falling back to the resource allow-list alone",
+            );
+            Vec::new()
+        }
+    }
 }
 
 /// Rebuild the original `/oauth2/auth` URL forcing `prompt=login` (merged into
@@ -784,27 +880,67 @@ fn resolve_claim_active_org(
 /// accept the consent challenge. Shared by the auto-grant and Allow paths.
 /// `requested_org_id` (the auth request's `organization_id`, if any) pins the
 /// `org`/`groups` claims to that org; see `resolve_claim_active_org`.
-/// `request_url` is the original `/oauth2/auth` URL, the sole carrier of RFC
-/// 8707 `resource=`; the audience bridge lives here so no grant path can miss it.
+/// `request_url` is the original `/oauth2/auth` URL, the carrier of RFC 8707
+/// `resource=`; the audience policy lives here so no grant path can miss it.
 // Cohesive consent-finalization inputs; splitting into a struct adds no clarity.
 #[allow(clippy::too_many_arguments)]
 async fn finalize_consent(
     state: &AppState,
     challenge: &str,
+    client_id: &str,
     subject: &str,
     grant_scope: Vec<String>,
-    grant_audience: Vec<String>,
+    requested_audience: Vec<String>,
     request_url: &str,
     remember: bool,
     headers: &axum::http::HeaderMap,
     requested_org_id: Option<&str>,
     consent_locale: LanguageIdentifier,
 ) -> FinalizeOutcome {
-    let grant_audience = merge_allowed_resources(
-        grant_audience,
+    // Both policy arms are fetched lazily: skipped entirely when nothing was
+    // requested, so a consent with no audience carrier costs no extra
+    // round-trips. `registered` is reused for the write below.
+    let audience_requested =
+        !requested_audience.is_empty() || !resource_params(request_url).is_empty();
+    let registered = if client_id.is_empty() || !audience_requested {
+        Vec::new()
+    } else {
+        operator_written_audiences(state, client_id).await
+    };
+    let allowed = if audience_requested {
+        // Fail closed: an unreadable registry denies every requested audience.
+        match crate::resource_registry::list_enabled(&state.db).await {
+            Ok(resources) => resources,
+            Err(e) => {
+                tracing::error!(
+                    error = ?e,
+                    client_id,
+                    "consent: resource registry read failed; denying all requested audiences",
+                );
+                Vec::new()
+            }
+        }
+    } else {
+        Vec::new()
+    };
+    let grant_audience = resolve_granted_audience(
+        client_id,
+        &requested_audience,
         request_url,
-        &state.cfg.oauth.allowed_resource_audiences,
+        &allowed,
+        &registered,
     );
+    if !client_id.is_empty()
+        && let Err(e) =
+            ory::hydra::add_client_audiences(&state.ory, client_id, &registered, &grant_audience)
+                .await
+    {
+        tracing::error!(
+            error = ?e,
+            client_id,
+            "consent: could not register the granted audience on the client; the refresh grant will fail",
+        );
+    }
     // Fan out identity + org memberships in parallel; the membership fetch
     // is skipped unless the grant scope consumes it.
     let needs_org_claims = grant_scope
@@ -1189,7 +1325,7 @@ fn build_id_token_claims(
 mod tests {
     use super::{
         build_id_token_claims, extract_resource_url, intersect_requested_scope,
-        merge_allowed_resources, project_group_slugs, resolve_claim_active_org, resource_params,
+        project_group_slugs, resolve_claim_active_org, resolve_granted_audience, resource_params,
         subject_is_signed_in, with_prompt_login,
     };
     use crate::ory;
@@ -1419,46 +1555,56 @@ mod tests {
         assert!(resource_params("garbage").is_empty());
     }
 
+    /// A client with nothing on its registered `audience` — the allow-list is
+    /// the only policy in play.
+    fn granted(requested_audience: &[&str], query: &str, allowed: &[&str]) -> Vec<String> {
+        granted_for(requested_audience, query, allowed, &[])
+    }
+
+    fn granted_for(
+        requested_audience: &[&str],
+        query: &str,
+        allowed: &[&str],
+        registered: &[&str],
+    ) -> Vec<String> {
+        let owned = |xs: &[&str]| xs.iter().map(|s| (*s).to_string()).collect::<Vec<String>>();
+        resolve_granted_audience(
+            "client-1",
+            &owned(requested_audience),
+            &auth_url(query),
+            &owned(allowed),
+            &owned(registered),
+        )
+    }
+
     #[test]
     fn allowed_resource_is_granted_as_audience() {
-        let got = merge_allowed_resources(
-            Vec::new(),
-            &auth_url(&resource_query(MCP)),
-            &[MCP.to_string()],
-        );
-        assert_eq!(got, vec![MCP.to_string()]);
+        assert_eq!(granted(&[], &resource_query(MCP), &[MCP]), vec![MCP]);
     }
 
     #[test]
     fn unlisted_resource_is_ignored() {
-        let got = merge_allowed_resources(
-            Vec::new(),
-            &auth_url(&resource_query("https://evil.example/mcp")),
-            &[MCP.to_string()],
-        );
         assert!(
-            got.is_empty(),
+            granted(&[], &resource_query("https://evil.example/mcp"), &[MCP]).is_empty(),
             "attacker-chosen audience must not be minted"
         );
     }
 
     #[test]
     fn resource_is_ignored_when_no_allow_list_is_configured() {
-        let got = merge_allowed_resources(Vec::new(), &auth_url(&resource_query(MCP)), &[]);
-        assert!(got.is_empty());
+        assert!(granted(&[], &resource_query(MCP), &[]).is_empty());
     }
 
     #[test]
     fn multiple_resources_grant_only_the_allowed_ones() {
-        let url = auth_url(&format!(
+        let query = format!(
             "{}&{}&{}",
             resource_query(MCP),
             resource_query("https://evil.example/mcp"),
             resource_query("https://other.example/api")
-        ));
-        let allowed = vec![MCP.to_string(), "https://other.example/api".to_string()];
+        );
         assert_eq!(
-            merge_allowed_resources(Vec::new(), &url, &allowed),
+            granted(&[], &query, &[MCP, "https://other.example/api"]),
             vec![MCP.to_string(), "https://other.example/api".to_string()]
         );
     }
@@ -1467,67 +1613,186 @@ mod tests {
     fn trailing_slash_matches_either_side_and_grants_the_bare_form() {
         // Client sends the slash, operator configured it without.
         assert_eq!(
-            merge_allowed_resources(
-                Vec::new(),
-                &auth_url(&resource_query("https://stackpit.gofranz.com/mcp/")),
-                &[MCP.to_string()]
+            granted(
+                &[],
+                &resource_query("https://stackpit.gofranz.com/mcp/"),
+                &[MCP]
             ),
-            vec![MCP.to_string()]
+            vec![MCP]
         );
         // ...and the other way round.
         assert_eq!(
-            merge_allowed_resources(
-                Vec::new(),
-                &auth_url(&resource_query(MCP)),
-                &["https://stackpit.gofranz.com/mcp/".to_string()]
+            granted(
+                &[],
+                &resource_query(MCP),
+                &["https://stackpit.gofranz.com/mcp/"]
             ),
-            vec![MCP.to_string()]
+            vec![MCP]
         );
     }
 
     #[test]
-    fn hydra_audience_param_path_is_unchanged() {
-        // Stackpit's web SSO uses Hydra's non-standard `audience=`, which
-        // arrives as `requested_access_token_audience`. No `resource=` in play.
-        let requested = vec!["https://stackpit.gofranz.com".to_string()];
-        assert_eq!(
-            merge_allowed_resources(requested.clone(), &auth_url("scope=openid"), &[]),
-            requested
-        );
-        assert_eq!(
-            merge_allowed_resources(
-                requested.clone(),
-                &auth_url("scope=openid"),
-                &[MCP.to_string()]
-            ),
-            requested
+    fn unlisted_audience_parameter_is_dropped() {
+        // Hydra's non-standard `audience=` arrives as
+        // `requested_access_token_audience`; with anonymous DCR the caller also
+        // writes the client record fosite validates it against, so it is not a
+        // permission.
+        assert!(
+            granted(
+                &["https://not-on-the-allowlist.example.com/mcp"],
+                "scope=openid",
+                &[MCP]
+            )
+            .is_empty()
         );
     }
 
     #[test]
-    fn resource_is_appended_to_an_existing_audience_grant() {
-        let requested = vec!["https://stackpit.gofranz.com".to_string()];
+    fn audience_parameter_is_dropped_when_no_allow_list_is_configured() {
+        assert!(granted(&["https://stackpit.gofranz.com"], "scope=openid", &[]).is_empty());
+    }
+
+    #[test]
+    fn allowed_audience_parameter_is_granted() {
+        assert_eq!(granted(&[MCP], "scope=openid", &[MCP]), vec![MCP]);
+    }
+
+    #[test]
+    fn a_dcr_clients_own_record_is_never_policy() {
+        // `operator_written_audiences` hands the resolver an empty `registered`
+        // for every client Forseti didn't see an operator create, so a record
+        // the client wrote itself (RFC 7592 PUT with its registration access
+        // token, or a registration straight at Hydra) buys it nothing.
+        let self_written = "http://127.0.0.1:3333/mcp";
+        assert!(
+            granted_for(&[self_written], "scope=openid", &[MCP], &[]).is_empty(),
+            "a self-written audience must not be minted"
+        );
+        assert!(
+            granted_for(&[], &resource_query(self_written), &[MCP], &[]).is_empty(),
+            "...by either carrier"
+        );
+    }
+
+    #[test]
+    fn non_uri_allow_list_entry_is_matched_verbatim() {
+        // The remedy for a client created outside Forseti: an audience
+        // identifier that isn't a URI can still be listed by the operator.
         assert_eq!(
-            merge_allowed_resources(
-                requested,
-                &auth_url(&resource_query(MCP)),
-                &[MCP.to_string()]
+            granted_for(&["stackpit-web"], "scope=openid", &["stackpit-web"], &[]),
+            vec!["stackpit-web"]
+        );
+    }
+
+    #[test]
+    fn bare_hostname_audience_registered_on_the_client_is_granted() {
+        // Stackpit's web SSO sends `audience=stackpit.gofranz.com` — an
+        // identifier, not a URI, so it never survives canonicalisation. An
+        // operator-created client carries it on its record, which is the grant.
+        assert_eq!(
+            granted_for(
+                &["stackpit.gofranz.com"],
+                "scope=openid",
+                &[],
+                &["stackpit.gofranz.com"]
             ),
-            vec!["https://stackpit.gofranz.com".to_string(), MCP.to_string()]
+            vec!["stackpit.gofranz.com"]
+        );
+        assert_eq!(
+            granted_for(&["stackpit-web"], "scope=openid", &[], &["stackpit-web"]),
+            vec!["stackpit-web"]
+        );
+    }
+
+    #[test]
+    fn bare_hostname_audience_is_dropped_when_not_registered() {
+        assert!(
+            granted_for(
+                &["stackpit.gofranz.com"],
+                "scope=openid",
+                &[MCP],
+                &["something-else"]
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn registered_audience_is_compared_verbatim() {
+        // No canonicalisation on this arm, so a near-miss is still a miss.
+        assert!(
+            granted_for(&["stackpit-web "], "scope=openid", &[], &["stackpit-webb"]).is_empty()
+        );
+        // ...and the trimmed form of the same request matches.
+        assert_eq!(
+            granted_for(&["stackpit-web "], "scope=openid", &[], &["stackpit-web"]),
+            vec!["stackpit-web"]
+        );
+    }
+
+    #[test]
+    fn registered_audience_grants_a_uri_the_allow_list_omits() {
+        // An operator-written record is policy in its own right; fosite already
+        // refuses any `audience=` outside it.
+        assert_eq!(
+            granted_for(
+                &["https://internal.example/api"],
+                "scope=openid",
+                &[MCP],
+                &["https://internal.example/api"]
+            ),
+            vec!["https://internal.example/api"]
+        );
+    }
+
+    #[test]
+    fn registered_resource_is_granted_via_the_rfc_8707_carrier() {
+        assert_eq!(
+            granted_for(&[], &resource_query(MCP), &[], &[MCP]),
+            vec![MCP]
+        );
+    }
+
+    #[test]
+    fn allow_list_still_grants_what_the_record_does_not_carry_yet() {
+        // The DCR path: first consent grants from the allow-list, and the
+        // record is patched afterwards so the refresh grant keeps working.
+        assert_eq!(
+            granted_for(&[], &resource_query(MCP), &[MCP], &[]),
+            vec![MCP]
+        );
+    }
+
+    #[test]
+    fn both_carriers_are_unioned_and_filtered() {
+        let query = format!(
+            "{}&{}",
+            resource_query(MCP),
+            resource_query("https://evil.example/mcp")
+        );
+        assert_eq!(
+            granted(
+                &["https://other.example/api", "https://evil.example/api"],
+                &query,
+                &[MCP, "https://other.example/api"]
+            ),
+            vec!["https://other.example/api".to_string(), MCP.to_string()]
         );
     }
 
     #[test]
     fn repeated_resource_is_granted_once() {
-        let url = auth_url(&format!(
+        let query = format!(
             "{}&{}",
             resource_query(MCP),
             resource_query("https://stackpit.gofranz.com/mcp/")
-        ));
-        assert_eq!(
-            merge_allowed_resources(Vec::new(), &url, &[MCP.to_string()]),
-            vec![MCP.to_string()]
         );
+        assert_eq!(granted(&[MCP], &query, &[MCP]), vec![MCP]);
+    }
+
+    #[test]
+    fn unparseable_requested_audience_is_dropped() {
+        assert!(granted(&["not a uri", ""], "scope=openid", &[MCP]).is_empty());
     }
 
     #[test]

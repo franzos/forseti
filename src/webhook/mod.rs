@@ -34,5 +34,5 @@ pub use outbox::{
     find_by_id, list_dead, reconcile_pending, requeue_dead,
 };
 pub use signing::SigningKey;
-pub use validate::{guarded_resolver, validate_webhook_url};
+pub use validate::{guarded_resolver, is_blocked_ip, validate_webhook_url};
 pub use worker::{WorkerHandle, spawn_reconcile, spawn_worker};

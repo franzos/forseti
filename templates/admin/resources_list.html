@@ -1,0 +1,103 @@
+{% extends "admin/admin_shell.html" %}
+
+{% block admin_title %}{{ chrome.t("admin-resources-page-title") }}{% endblock %}
+
+{% block admin_content %}
+  <div class="flex items-center justify-between mt-2 mb-stack-lg">
+    <div>
+      <h1 class="font-headline-lg-mobile md:font-headline-lg text-headline-lg-mobile md:text-headline-lg text-on-surface">
+        {{ chrome.t("admin-resources-page-title") }}
+      </h1>
+      <p class="font-body-md text-body-md text-on-surface-variant mt-1">{{ chrome.t("admin-resources-subtitle") }}</p>
+    </div>
+    <a href="{{ new_url }}"
+       class="bg-primary text-on-primary font-label-md text-label-md font-bold px-4 py-2 rounded-lg hover:opacity-90 transition-opacity">{{ chrome.t("admin-resources-action-new") }}</a>
+  </div>
+
+<div class="bg-surface-container-lowest border border-outline-variant rounded-xl overflow-x-auto">
+  <table class="w-full text-start">
+    <thead class="bg-surface-container-low">
+      <tr>
+        <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">{{ chrome.t("admin-resources-col-resource") }}</th>
+        <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">{{ chrome.t("admin-resources-col-name") }}</th>
+        <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">{{ chrome.t("admin-resources-col-org") }}</th>
+        <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">{{ chrome.t("admin-resources-col-corroboration") }}</th>
+        <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">{{ chrome.t("admin-resources-col-enabled") }}</th>
+        <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">{{ chrome.t("admin-resources-col-created") }}</th>
+        <th class="px-4 py-3"></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% if rows.is_empty() %}
+        <tr>
+          <td colspan="7"
+              class="px-4 py-6 text-center font-body-md text-body-md text-on-surface-variant">
+            {{ chrome.t("admin-resources-empty-prefix") }} <a href="{{ new_url }}" class="text-primary hover:underline">{{ chrome.t("admin-resources-empty-link") }}</a> {{ chrome.t("admin-resources-empty-suffix") }}
+          </td>
+        </tr>
+      {% else %}
+        {% for r in rows %}
+          <tr class="border-t border-outline-variant">
+            <td class="px-4 py-3">
+              <code class="font-mono text-xs select-all">{{ r.resource }}</code>
+            </td>
+            <td class="px-4 py-3 font-body-md text-body-md text-on-surface">{{ r.display_name }}</td>
+            <td class="px-4 py-3 font-body-sm text-body-sm text-on-surface-variant">{{ r.org_name }}</td>
+            <td class="px-4 py-3"
+                title="{{ r.corroborated_at }}">
+              {% if r.corroboration == "corroborated" %}
+                <span class="font-label-sm text-label-sm bg-success-container text-on-success-container px-2 py-0.5 rounded-full font-semibold">{{ chrome.t("admin-resources-corroboration-corroborated") }}</span>
+              {% else if r.corroboration == "mismatch" %}
+                <span class="font-label-sm text-label-sm bg-error-container text-on-error-container px-2 py-0.5 rounded-full font-semibold">{{ chrome.t("admin-resources-corroboration-mismatch") }}</span>
+              {% else if r.corroboration == "unreachable" %}
+                <span class="font-label-sm text-label-sm bg-tertiary-container text-on-tertiary-container px-2 py-0.5 rounded-full font-semibold">{{ chrome.t("admin-resources-corroboration-unreachable") }}</span>
+              {% else %}
+                <span class="font-label-sm text-label-sm bg-surface-container-high text-on-surface-variant px-2 py-0.5 rounded-full font-semibold">{{ chrome.t("admin-resources-corroboration-unchecked") }}</span>
+              {% endif %}
+            </td>
+            <td class="px-4 py-3">
+              {% if r.enabled %}
+                <span class="font-label-sm text-label-sm bg-success-container text-on-success-container px-2 py-0.5 rounded-full font-semibold">{{ chrome.t("admin-resources-status-enabled") }}</span>
+              {% else %}
+                <span class="font-label-sm text-label-sm bg-surface-container-high text-on-surface-variant px-2 py-0.5 rounded-full font-semibold">{{ chrome.t("admin-resources-status-disabled") }}</span>
+              {% endif %}
+            </td>
+            <td class="px-4 py-3 font-body-sm text-body-sm text-on-surface-variant"
+                title="{{ r.created_at }} · {{ r.created_by }}">{{ r.created_at_pretty }}</td>
+            <td class="px-4 py-3 text-end whitespace-nowrap">
+              <form method="POST"
+                    action="{{ r.toggle_url }}"
+                    class="inline">
+                <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+                <button type="submit"
+                        class="font-label-sm text-label-sm text-primary border border-outline-variant rounded-lg px-3 py-1 hover:bg-surface-container-high transition-colors">
+                  {% if r.enabled %}
+                    {{ chrome.t("admin-resources-action-disable") }}
+                  {% else %}
+                    {{ chrome.t("admin-resources-action-enable") }}
+                  {% endif %}
+                </button>
+              </form>
+              {% if r.can_recheck %}
+                <form method="POST"
+                      action="{{ r.recheck_url }}"
+                      class="inline ms-2">
+                  <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+                  <button type="submit"
+                          class="font-label-sm text-label-sm text-primary border border-outline-variant rounded-lg px-3 py-1 hover:bg-surface-container-high transition-colors">{{ chrome.t("admin-resources-action-recheck") }}</button>
+                </form>
+              {% endif %}
+              <a href="{{ r.delete_url }}"
+                 class="font-label-sm text-label-sm text-error border border-error rounded-lg px-3 py-1 ms-2 hover:bg-error-container hover:text-on-error-container transition-colors">{{ chrome.t("admin-resources-action-delete") }}</a>
+            </td>
+          </tr>
+        {% endfor %}
+      {% endif %}
+    </tbody>
+  </table>
+</div>
+
+<p class="font-body-sm text-body-sm text-on-surface-variant mt-stack-md">
+  {{ chrome.t("admin-resources-corroboration-note") }}
+</p>
+{% endblock %}

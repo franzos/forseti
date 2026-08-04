@@ -2,7 +2,9 @@
 //! print-schema` so they're identical for both backends — every column is
 //! `Text` / `Nullable<Text>` / `Integer`, with timestamps as ISO-8601 UTC
 //! strings, except the `bytes` columns on `org_logos` / `client_logos`
-//! which are `Binary` (`BLOB`/`BYTEA`).
+//! which are `Binary` (`BLOB`/`BYTEA`), and `resource_registry` whose DDL
+//! uses native `BIGSERIAL`/`BOOLEAN`/`TIMESTAMP` on postgres, so it maps
+//! `BigInt`/`Bool`/`Timestamp` (valid for both backends).
 //! See `migrations/{sqlite,postgres}/...` for the SQL.
 
 diesel::table! {
@@ -39,21 +41,6 @@ diesel::table! {
 }
 
 diesel::table! {
-    dcr_initial_access_tokens (id) {
-        id -> Text,
-        token_hash -> Text,
-        created_by -> Text,
-        created_at -> Text,
-        expires_at -> Nullable<Text>,
-        uses_remaining -> Nullable<Integer>,
-        revoked_at -> Nullable<Text>,
-        note -> Text,
-        daily_use_count -> Integer,
-        daily_window_started_at -> Nullable<Text>,
-    }
-}
-
-diesel::table! {
     oauth_client_metadata (client_id) {
         client_id -> Text,
         verification -> Text,
@@ -69,6 +56,7 @@ diesel::table! {
         resource_url -> Nullable<Text>,
         org_id -> Text,
         template_slug -> Nullable<Text>,
+        cimd_doc_hash -> Nullable<Text>,
     }
 }
 
@@ -361,6 +349,20 @@ diesel::table! {
         content_type -> Text,
         etag -> Text,
         updated_at -> Text,
+    }
+}
+
+diesel::table! {
+    resource_registry (id) {
+        id -> BigInt,
+        resource -> Text,
+        display_name -> Text,
+        org_id -> Text,
+        enabled -> Bool,
+        corroboration -> Text,
+        corroborated_at -> Nullable<Timestamp>,
+        created_by -> Text,
+        created_at -> Timestamp,
     }
 }
 

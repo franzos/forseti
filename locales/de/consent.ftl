@@ -19,6 +19,7 @@ consent-account-switcher-heading = Konto wechseln
 consent-verified-by-admin = Von Ihrem Administrator überprüft
 consent-unverified-warning-title = Diese Anwendung wurde nicht von einem Administrator überprüft.
 consent-unverified-warning-body = Fahren Sie nur fort, wenn Sie ihr vertrauen.
+consent-cimd-self-asserted-name = Nennt sich „{ $name }“. Der Name ist selbst angegeben und nicht überprüft.
 consent-requesting-heading = Diese App fordert Folgendes an
 consent-required-for-signin = Erforderlich für die Anmeldung
 consent-remember-decision = Meine Entscheidung für diese Anwendung merken

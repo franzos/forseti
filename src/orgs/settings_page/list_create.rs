@@ -125,11 +125,8 @@ pub(super) async fn orgs_create(
     if name.is_empty() {
         return (StatusCode::BAD_REQUEST, "name required").into_response();
     }
-    if crate::oauth::register::reserved_names::reserved_name_hit(
-        &state.cfg.orgs.reserved_names,
-        name,
-    )
-    .is_some()
+    if crate::orgs::reserved_names::reserved_name_hit(&state.cfg.orgs.reserved_names, name)
+        .is_some()
     {
         return (StatusCode::CONFLICT, "that name is not allowed").into_response();
     }

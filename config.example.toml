@@ -13,6 +13,15 @@ admin_url  = "http://localhost:4434"
 [hydra]
 public_url = "http://localhost:4444"
 admin_url  = "http://localhost:4445"
+# Reverse-proxy GET/POST /hydra/{path} on Forseti's public listener to public_url,
+# so Forseti owns the issuer origin (dev-playground parity with the prod haproxy
+# topology; keep false where a front proxy already routes /hydra/ to Hydra).
+# front_proxy = false
+# Hydra's advertised issuer (urls.self.issuer) when it differs from public_url,
+# e.g. behind a front proxy. Drives the CSP form-action origin, the well-known
+# path-insertion discovery routes and the CIMD shim redirect base; defaults to
+# public_url when unset.
+# issuer = "http://localhost:3000/hydra"
 
 [self]
 # Forseti's own externally reachable URL. Used to build `return_to` round-trips.
@@ -84,48 +93,12 @@ support_email = "support@example.com"
 
 # OAuth2 bridge settings.
 #
-# `dcr_reserved_names` is the DCR (Dynamic Client Registration) `client_name`
-# denylist. Case-insensitive substring match — any pattern that appears
-# anywhere in the posted `client_name` causes the registration to be rejected
-# with `invalid_client_metadata`. Stops self-registered clients from
-# impersonating your own brand or common IDPs on the consent screen
-# ("Microsoft Login", "Forseti Admin", etc).
-#
-# `dcr_ip_rate_per_minute` / `dcr_ip_rate_per_hour` cap requests to
-# `POST /oauth2/register` from a single IP. In-memory, per-process; the
-# bucket refills to full over the named window. Defaults are 10/min and
-# 100/hour. Set to 0 to disable that bucket entirely. Both run in
-# parallel — a request must satisfy both.
-#
-# `dcr_global_rate_per_minute` / `dcr_global_rate_per_hour` cap requests
-# to `POST /oauth2/register` across ALL callers in one shared bucket, so
-# total registration traffic stays bounded even when distributed sources
-# or a spoofed forwarded-for header defeat the per-IP buckets. Defaults
-# are 40/min and 400/hour. Set to 0 to disable that bucket.
-#
-# `dcr_require_iat` closes anonymous dynamic client registration: with it
-# on, `POST /oauth2/register` without a valid initial access token is
-# rejected with 401. Off by default, so registration stays open unless the
-# operator closes it.
-#
-# `dcr_iat_daily_limit` caps successful registrations per IAT over a
-# rolling 24h window opened on the first successful use. Belt-and-
-# suspenders to `uses_remaining`: even an "unlimited" token (`uses=NULL`)
-# is capped here. Default 50. Set to 0 to disable.
-#
-# `allowed_resource_audiences` lists the resource identifiers Forseti may
-# bind into an access token's `aud`. Hydra derives the audience from its own
-# non-standard `audience=` parameter and ignores RFC 8707 `resource=`, so an
-# MCP client (which only ever sends `resource=`) receives `aud: []` and is
-# rejected by its resource server forever. With a resource listed here,
-# Forseti merges it into the consent grant and pre-registers it on
-# DCR-created clients (fosite re-checks the audience against the client
-# record on the refresh grant, so registering it is what keeps refreshes
-# working). Unlisted resources are ignored and logged — without the list
-# Forseti would mint any audience a caller asked for. Compared with the
-# trailing slash and any fragment stripped, so `.../mcp` and `.../mcp/` are
-# the same resource. Empty by default: the bridge is off until an operator
-# opts in.
+# `allowed_resource_audiences` is DEPRECATED. The consent-time audience
+# allow-list lives in the resource registry now, managed at /admin/resources.
+# Entries still listed here are imported into the registry once at startup
+# (idempotent, `created_by = 'config-import'`) and a deprecation warning is
+# logged; the values are never read at consent time. Cutover: deploy, verify
+# the rows appear at /admin/resources, then delete the key.
 #
 # `device_verify_ip_rate_per_minute` / `device_verify_ip_rate_per_hour`
 # cap requests to `/oauth/device` (the RFC 8628 verification screen) from
@@ -134,41 +107,57 @@ support_email = "support@example.com"
 # 20/min and 120/hour. Set to 0 to disable that bucket.
 #
 # Rate-limit values are clamped at config-load time to sanity ceilings
-# (per-minute: 1_000, per-hour: 10_000, per-day: 100_000) so an operator
-# typo can't silently disable protection. A clamped value emits a
-# `tracing::warn!` at boot.
+# (per-minute: 1_000, per-hour: 10_000) so an operator typo can't
+# silently disable protection. A clamped value emits a `tracing::warn!`
+# at boot.
 #
-# Whether the per-IP DCR rate limiter (and the audit middleware, and
+# Whether the per-IP rate limiters (and the audit middleware, and
 # the handoff + claim-email limiters) trust client-sent forwarded-for
 # headers is now a single deployment-wide knob: `[proxy]
 # trust_forwarded_for` — see further down this file.
 #
-# If the key is omitted, the code-baked default shown below is used. To
-# override, uncomment and edit — the list replaces the default wholesale
-# (there is no merge-with-extras mode by design; copy the entries you want
-# to keep).
+# If the key is omitted, the code-baked default shown below is used.
 # [oauth]
-# dcr_require_iat = false
-# dcr_ip_rate_per_minute = 10
-# dcr_ip_rate_per_hour   = 100
-# dcr_global_rate_per_minute = 40
-# dcr_global_rate_per_hour   = 400
-# dcr_iat_daily_limit    = 50
 # device_verify_ip_rate_per_minute = 20
 # device_verify_ip_rate_per_hour   = 120
 # allowed_resource_audiences = ["https://stackpit.gofranz.com/mcp"]
-# dcr_reserved_names = [
-#   # Own + upstream brands
-#   "ory", "hydra", "kratos",
-#   # Consumer IDPs
-#   "google", "apple", "microsoft", "github", "gitlab",
-#   # AI vendors
-#   "anthropic", "claude", "openai", "chatgpt",
-#   # Identity vendors
-#   "okta", "auth0",
-#   # Privilege / infrastructure names
-#   "admin", "forseti", "portal", "system", "root",
-# ]
+
+# CIMD authorization shim (`GET /oauth2/authorize` with a URL-shaped
+# client_id). The shim fetches the client metadata document from the client_id
+# URL through an SSRF guard: https only, public IPs only (checked again at DNS
+# resolution time), no redirects, 5 s timeout, 64 KiB body cap. Documents are
+# cached in-process (1024 entries, TTL from Cache-Control max-age clamped to
+# [60 s, 24 h], default 300 s), with a 1 h serve-stale-on-error grace.
+#
+# `allow_private_targets` stands the guard down (allows http:// and
+# loopback/private-IP document URLs) so local fixture servers work in
+# development and CI. Never enable it in production.
+#
+# `client_scope_extra` lists extra scope entries unioned into every CIMD
+# client's Hydra `scope` ceiling, alongside the built-in
+# `openid offline offline_access`, the scopes each authorize request asks for
+# and the document's own `scope`. The union is capped at 30 entries (a warning
+# is logged when the cap truncates) and never shrinks on re-registration.
+# Scope stays a ceiling — the consent screen is the actual authorization.
+#
+# `allowed_client_hosts` restricts which client_id URL hosts may use the shim
+# (exact, case-insensitive match; subdomains do NOT match). Empty (the
+# default) accepts any HTTPS client_id host, consent-gated, per the MCP
+# open-client model. This is a client-vendor list, not a per-resource list.
+#
+# `ip_rate_per_minute` / `ip_rate_per_hour` cap `GET /oauth2/authorize`
+# requests from a single IP (defaults 10/min and 100/hour);
+# `global_rate_per_minute` / `global_rate_per_hour` bound the same route
+# across ALL callers in one shared bucket (defaults 40/min and 400/hour).
+# Same clamping and `0`-disables semantics as the other rate keys above.
+# [oauth.cimd]
+# allow_private_targets = false
+# client_scope_extra = []
+# allowed_client_hosts = []
+# ip_rate_per_minute = 10
+# ip_rate_per_hour   = 100
+# global_rate_per_minute = 40
+# global_rate_per_hour   = 400
 
 # Human-readable descriptions for OAuth2 scopes surfaced on the consent screen.
 # Unknown scopes fall back to the raw scope name (the admin client show page
@@ -197,8 +186,8 @@ support_email = "support@example.com"
 # 30/min + 300/hour; because many legitimate users share one egress IP behind a
 # corporate NAT / CGNAT, keep the per-IP window generous and lean on the global
 # bucket (120/min + 1200/hour) as the real abuse backstop. Values are clamped to
-# the same ceilings as the DCR limiter (per-minute 1_000, per-hour 10_000). Set
-# any bucket to 0 to disable it.
+# the same ceilings as the other rate keys (per-minute 1_000, per-hour 10_000).
+# Set any bucket to 0 to disable it.
 # [auth]
 # registration_ip_rate_per_minute     = 30
 # registration_ip_rate_per_hour        = 300
@@ -304,7 +293,7 @@ support_email = "support@example.com"
 # Deployment-shape: is Forseti behind a trusted reverse proxy that
 # strips and re-adds `X-Forwarded-For` / `X-Real-IP` / `Forwarded`?
 # Flipping this on tells the audit middleware (audited client IP) and
-# the per-IP rate limiters (DCR proxy, handoff, claim-email) to honour
+# the per-IP rate limiters (CIMD shim, handoff, claim-email) to honour
 # the forwarded-for chain. Default `false` — secure when Forseti's
 # public listener is exposed directly. Set to `true` ONLY when the
 # upstream proxy is configured to STRIP client-sent forwarded-for
@@ -373,8 +362,7 @@ support_email = "support@example.com"
 #
 # `reserved_names` is the org-name denylist (create + rename), matched
 # case-insensitively/confusable-folded against the submitted name. When
-# omitted, falls back to the built-in operator-brand denylist (same list
-# as `[oauth] dcr_reserved_names`).
+# omitted, falls back to the built-in operator-brand denylist.
 #
 # `logo_ip_rate_per_minute` / `logo_ip_rate_per_hour` cap requests to
 # `GET /branding/{slug}/logo` from a single IP. Defaults are 60/min and
@@ -449,7 +437,7 @@ pam_client_id = "forseti-linux-pam"
 device_poll_cap_secs = 90        # wall-clock cap on a device-auth poll loop; keep < sshd LoginGraceTime (120s)
 id_token_iat_window_secs = 120   # reject device id_tokens whose iat is older than this (replay guard)
 mfa_auth_time_window_secs = 300  # force_mfa hosts: AAL2 session older than this won't unlock (R11 fresh-MFA)
-# hydra_issuer = "http://localhost:4444"  # expected `iss` on the device id_token; defaults to [hydra].public_url.
+# hydra_issuer = "http://localhost:4444"  # expected `iss` on the device id_token; defaults to [hydra].issuer, then [hydra].public_url.
                                           # Override when Hydra's urls.self.issuer differs (e.g. host.containers.internal).
 
 # Offline auth (M3a). A dedicated ≥8-char passphrase (NOT the Forseti password)

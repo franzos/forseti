@@ -17,6 +17,7 @@ pub(crate) mod logo;
 pub mod middleware;
 pub mod nav;
 pub mod public_landing;
+pub(crate) mod reserved_names;
 pub mod settings_page;
 pub mod teams;
 pub mod visibility;

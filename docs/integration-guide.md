@@ -26,7 +26,8 @@ Where the playground sits relative to current OAuth / OIDC normative work (as of
 | OAuth 2.1 — Exact-string redirect matching | Hydra default; no wildcard / prefix matching |
 | OAuth 2.1 — Refresh tokens sender-constrained OR rotated | Rotated (Hydra default; one-shot with reuse detection) |
 | RFC 9068 JWT Access Token profile (`typ=at+jwt`) | Partial — Hydra v26 emits JWT access tokens with `typ: JWT`. Strict RFC 9068 validators that require `typ=at+jwt` will reject. Either relax your validator or stay on opaque tokens + introspection until Hydra ships the profile |
-| RFC 8707 Resource Indicators (`resource=` parameter) | Hydra does not yet bind `resource=` into the access token's `aud` — use Hydra's `audience=` allow-list for that. Forseti *does* parse `resource=` off the original auth URL and records it as provenance on `oauth_client_metadata.resource_url` (`src/oauth/consent.rs:412-437`) |
+| RFC 8707 Resource Indicators (`resource=` parameter) | Hydra ignores `resource=`; Forseti's consent handler bridges it — a requested `resource` is bound into the access token's `aud` when the operator has enrolled that resource in the registry (`/admin/resources`). Default deny for everything else |
+| CIMD (draft-ietf-oauth-client-id-metadata-document) | Implemented by Forseti (Hydra has none): URL-shaped `client_id`s are resolved by the `/oauth2/authorize` shim, public clients (`token_endpoint_auth_method: "none"`) only. RFC 7591 DCR is retired — no `registration_endpoint` exists |
 | RFC 9449 DPoP | **Not implemented.** Tokens are bearer-only |
 | RFC 8705 mTLS client auth + cert-bound tokens | Not configured |
 | RFC 9126 PAR (Pushed Authorization Requests) | Supported by Hydra; no Forseti-side enforcement |
@@ -65,7 +66,8 @@ From the operator, capture:
 
 - `client_id`
 - `client_secret` (confidential clients only)
-- `registration_access_token` — lets you rotate the client config later without going back to the operator.
+
+Config changes later go back through the operator (admin UI or admin API) — there is no client-held management credential.
 
 For the operator-side CLI invocation, see [`operator-guide.md`](./operator-guide.md#client-registration).
 
@@ -756,102 +758,45 @@ Two reasons not to share one MCP client across multiple apps:
 - **Consent leaks.** One client = one consent grant. The user would grant App A's and App B's scopes together; revoking access to one revokes both.
 - **Audience leaks.** A token Claude minted for App A's MCP server could be re-requested for App B's without re-consent, because both audiences live on one client.
 
-Multiple Claude hosts (Desktop, Code, claude.ai) hitting **the same** MCP server share **one** Hydra client — just register every host's redirect URI on it. Split them only if you want per-host isolation (e.g. claude.ai's hosted callback vs a user's loopback URL are different trust environments). With Dynamic Client Registration enabled (see below), each host self-registers and you don't pre-create anything.
+Multiple Claude hosts (Desktop, Code, claude.ai) hitting **the same** MCP server don't even need that: each Claude surface identifies itself by its own CIMD URL (see below), so its client comes into existence on first use and you pre-create nothing. The table above is about clients **you** ship, not about Claude.
 
-### Registering the MCP client
+### Enrolling your MCP server: one registry row
 
-Ask the operator to register a Hydra client for the MCP host. The admin UI has a dedicated **MCP server** preset on `/admin/clients/new` that pre-fills the right defaults — no manual field-twiddling. Settings the preset applies:
+Your MCP server itself needs exactly one thing from the operator: a row in Forseti's **resource registry** (`/admin/resources`) naming your canonical resource URI, e.g. `https://mcp.yourapp.com/mcp`. That row is what lets consent bind your URI into access tokens' `aud` — without it, every token comes back with `aud: []` no matter what the client requests, because Hydra ignores RFC 8707 `resource=` and Forseti default-denies unregistered audiences.
 
-- **Token-endpoint auth method** — `none`. MCP clients are public; they can't keep a secret.
-- **PKCE** — required by Hydra whenever auth method is `none` (and globally enforced via `oauth2.pkce.enforced_for_public_clients: true`). The client library handles the code-verifier/challenge dance.
-- **Redirect URIs** — operator pastes the loopback URLs Claude listens on plus, for claude.ai, Anthropic's hosted callback. The form's placeholder shows the common ones; treat them as opaque exact-match strings.
-- **Scopes** — a custom set scoped to your MCP server. Convention: `<app>:<resource>:<verb>`, e.g. `formshive:forms:read`, `formshive:forms:write`. These show up on Forseti's consent screen with whatever description the operator configured under `[oauth.scope_descriptions]`.
-- **Audience allow-list** — surfaced as a textarea on the MCP preset. Operator registers your MCP server's canonical URL there. Hydra accepts an `audience` query parameter on the auth request (non-standard; RFC 8707 is not yet shipped in Hydra as of v26.2.0). Values passed must appear in this allow-list, and Hydra binds them into the issued access token's `aud` claim. Reject tokens whose `aud` doesn't match — that's what stops a token minted for someone else's MCP server from being replayed at yours.
+Details that matter:
 
-> **Dynamic Client Registration.** Every `forseti` deployment exposes RFC 7591 (`/oauth2/register`) — it's not optional, because Claude Code refuses to talk to any authorization server whose discovery document omits `registration_endpoint`. DCR is **enabled and anonymous by default**: your MCP client (Claude or otherwise) can self-register without any operator coordination upfront.
->
-> The safety mechanism is the verification badge, not the registration endpoint. **Self-registered clients always land as Unverified.** End users see a prominent caution banner on the consent screen ("This application has not been reviewed by an administrator") until an operator reviews the client at `/admin/clients` and clicks **Mark as verified**. There is no auto-promotion path.
->
-> Practical implication for MCP authors: **just register**. No IAT exchange, no operator handshake required to get a working client. Send the request without an `Authorization` header:
->
-> ```bash
-> curl -X POST https://accounts.example.com/oauth2/register \
->   -H "Content-Type: application/json" \
->   -d '{
->     "client_name": "My MCP server",
->     "redirect_uris": ["http://127.0.0.1:5000/cb"],
->     "grant_types": ["authorization_code", "refresh_token"],
->     "response_types": ["code"],
->     "token_endpoint_auth_method": "none",
->     "scope": "openid offline_access"
->   }'
-> ```
->
-> Hydra's response (passed back through Forseti verbatim) carries `client_id` and a `registration_access_token`. Keep both. The `registration_access_token` is what you use for follow-up management calls — `GET/PUT/DELETE /oauth2/register/{id}` go **straight to Hydra**, not back through Forseti, because Hydra validates that token itself.
->
-> **Optional Initial Access Tokens.** Operators who want to pre-vouch clients (e.g. partner integrations that should land as Verified) or partition rate limits per tenant can issue an IAT via `/admin/dcr-tokens/new` and hand it to the MCP author. The author passes it as `Authorization: Bearer <iat>` on the registration call. IATs are entirely optional — if you don't have one, omit the header. A malformed `Authorization` header (wrong scheme, empty token) is rejected with 401 rather than falling through to the anonymous path, so attackers can't probe IATs silently.
->
-> Note: Forseti's **verification badge is independent of the Hydra client `metadata`**. It lives in a Forseti-owned table (`oauth_client_metadata`) and the consent screen reads it directly from there. RFC 7592 PUT-via-RAT can rewrite Hydra's view of the client's `metadata`, but it cannot influence the verified state shown to end users — that requires an administrator to use the `/admin/clients/{id}/verify` UI.
->
-> See [`operator-guide.md#dynamic-client-registration-rfc-7591`](./operator-guide.md#dynamic-client-registration-rfc-7591) for the operator-side workflow (review queue, rate limits, reserved-name denylist, optional IAT issuance, audit trail).
+- **Exact string.** The `aud` your server validates must match the registry row (URI rows tolerate a trailing-slash difference; the no-slash canonical form is what lands in the token). Agree on the canonical form with the operator and use it everywhere: registry row, your `resource` value in the RFC 9728 document, your server's expected audience.
+- **No restart, no config edit.** The row takes effect on the next consent. The operator can disable it (tokens stop carrying your audience on new consents) or delete it.
+- **Corroboration badge.** On create and re-check, Forseti fetches your `/.well-known/oauth-protected-resource` document and compares `resource` + `authorization_servers` against the row and its issuer. It's advisory — an `unreachable` badge before you've deployed is normal — but a green `corroborated` badge is a cheap sanity check that both sides agree.
+- **Org scoping.** If your operator contact is an org-scoped admin (not a Forseti-wide one), they can only register resources on a domain their org has verified.
+- **Scopes** — define a custom set scoped to your MCP server, convention `<app>:<resource>:<verb>` (e.g. `formshive:forms:read`). Have the operator add descriptions under `[oauth.scope_descriptions]` so the consent screen reads naturally.
 
-### Two ways to connect Claude Code
+### The two client paths: CIMD and pre-registered
 
-We've tested two flows end-to-end. They trade off operator coordination against the consent-screen warning users see — pick based on who's going to consent.
+Clients reach Hydra one of two ways. Neither involves a registration endpoint — RFC 7591 Dynamic Client Registration is retired (no `registration_endpoint` is advertised, Hydra's `/oauth2/register` is disabled).
 
-**Flow A — Anonymous DCR (default, lowest friction).** Claude Code does the registration itself; no operator coordination needed before first use.
+**Path 1 — CIMD (Claude Code, claude.ai, any CIMD-capable client; zero coordination).** The client's `client_id` is an HTTPS URL pointing at a JSON metadata document the client's vendor hosts (Claude Code uses `https://claude.ai/oauth/claude-code-client-metadata`). Forseti advertises `client_id_metadata_document_supported: true` in the AS discovery document and serves the `authorization_endpoint` itself: on each authorize request with a URL-shaped `client_id`, it fetches the document (SSRF-guarded, cached), validates it (the document's `client_id` must equal its own URL; `token_endpoint_auth_method: "none"` only; code flow only; https or loopback redirect URIs), upserts the matching Hydra client, and forwards into Hydra's `/oauth2/auth`. Nobody registers anything; the client exists because its metadata URL answered.
 
-```bash
-claude mcp add ory-demo http://localhost:8765/mcp --transport http
-```
+What this means for you as an MCP-server author: **there is no client-side setup step**. A user runs `claude mcp add yourapp https://mcp.yourapp.com/mcp --transport http`, authenticates, and the flow works — provided your registry row (above) and RFC 9728 document (below) are in place.
 
-Then in the Claude session: `/mcp` → **Authenticate**. Browser opens to Forseti's `/oauth2/auth`, user signs in + consents (with the Unverified caution banner showing). Tokens land in Claude's keychain. The client appears on `/admin/clients` as **Self-registered + Unverified** — operator reviews and clicks **Mark as verified** to clear the caution banner for future sessions.
+Properties worth knowing:
 
-Key points:
+- CIMD clients are public clients with PKCE, always. Confidential CIMD (`private_key_jwt`) is not supported.
+- The consent screen shows the client URL's **host** (e.g. `claude.ai`) as the primary identity — the document's self-asserted `client_name` is secondary — and consent is always rendered, never skipped.
+- A CIMD client's record is never audience policy: your registry row is the only thing that grants your `aud`. A malicious CIMD document cannot mint itself an audience.
+- Ephemeral loopback callback ports (Claude Code picks one per login) are handled server-side; you don't care.
 
-- Claude registers a fresh client per `claude mcp add` invocation.
-- The redirect URI uses an ephemeral loopback port that Claude picks itself.
-- End users see the caution banner on every consent until an operator promotes the client.
-- No operator-side work required upfront — the badge is the safety mechanism.
+**Path 2 — Pre-registered client (everything else).** For clients that aren't CIMD-capable, or that you ship yourself: the operator creates a Hydra client via the admin UI's **MCP server** preset on `/admin/clients/new` — `authorization_code` + `refresh_token`, auth method `none`, PKCE enforced, your redirect URIs, your scopes, and optionally your audience directly on the client (an admin-created client's registered `audience` counts as consent policy on its own). Claude Code also supports this shape (`claude mcp add ... --client-id <id> --callback-port 8080`, ≥ v2.1.30), but with CIMD available there's rarely a reason.
 
-**Flow B — Pre-registered client (production-friendly).** Operator creates a Hydra client up-front via the admin UI's MCP preset, hands the `client_id` to the MCP-server author. They configure Claude Code:
+### What end users see
 
-```bash
-claude mcp add ory-demo http://localhost:8765/mcp --transport http \
-  --client-id 66c22c04-bc73-4364-b0b3-5b7fd07203f2 \
-  --callback-port 8080
-```
+Every OAuth2 client carries a verification state the operator manages in a Forseti-owned table (`oauth_client_metadata`) — deliberately out of any client's own reach.
 
-Requires Claude Code ≥ v2.1.30. The `--callback-port` flag pins the loopback port so the operator can register a stable `redirect_uri` like `http://localhost:8080/callback` on the client.
+- **CIMD clients** are permanently `unverified` and the consent screen leads with the client host (`claude.ai`) as the identity line, plus the caution banner; the "Reviewed by your administrator" checkmark is never shown for them. The host is the trust signal: it's what the operator of that URL provably controls, unlike the self-asserted display name.
+- **Pre-registered clients** (admin-created) land **Verified**: a subtle green checkmark, no banner. The operator can revoke verification later (**Revoke verification** on the client's show page), which flips the consent screen back to the caution banner.
 
-Key points:
-
-- The pre-registered client lands as **Verified** immediately (operator-created = implicit trust).
-- End users see "Reviewed by your administrator" instead of the caution banner.
-- Trade-off: operator and MCP-server author coordinate before first use (one-time).
-- Observed behaviour: even with `--client-id`, Claude Code still does an anonymous DCR at `claude mcp add` time (an extra Hydra client gets created but is never used) — minor inefficiency, not a functional break. Filed upstream against Claude Code.
-
-The choice, plainly:
-
-- Use **Flow A** for ad-hoc / experimental MCP servers where the friction of pre-registration outweighs the consent-screen warning.
-- Use **Flow B** for MCP servers shipped to non-technical end users where you can't afford consent-screen abandonment.
-
-**A third flow exists architecturally — IAT-authenticated DCR — but Claude Code can't drive it today.** Forseti accepts `Authorization: Bearer <iat>` on the registration call (see the [Optional Initial Access Tokens](#) note in the DCR callout above), which lets operators pre-vouch a registration with attribution in the audit log. Claude Code has no flag to present an IAT, so this path is useful for *other* clients — `curl`-driven provisioning scripts, CI/CD pipelines, custom MCP-author tooling that wraps DCR — not for Claude Code. If your integrator hand-rolls their registration request, an IAT is the cleanest way to mark the resulting client as theirs in the audit trail.
-
-See [`operator-guide.md#dynamic-client-registration-rfc-7591`](./operator-guide.md#dynamic-client-registration-rfc-7591) for the operator-side workflow on each, including IAT issuance.
-
-### What end users see: Verified vs Unverified
-
-Every OAuth2 client carries a verification state the operator manages. DCR-self-registered clients **start as Unverified** by default — Forseti won't auto-promote them, because admin review is the safety mechanism that lets us keep DCR open to anonymous self-registration in the first place.
-
-What that means at consent time:
-
-- **Unverified client** — the consent screen renders a prominent caution banner: **"This application has not been reviewed by an administrator. Only proceed if you trust it."** End users see this *every time* they consent. Technical users may shrug; non-technical users tend to abandon.
-- **Verified client** — a subtle green checkmark instead. Operator-created clients (anyone using `/admin/clients/new` in the admin UI) are Verified by default, since the act of an admin creating it is the vouching.
-
-The path to a green checkmark is straightforward: once you've DCR-registered, point the operator at your client in `/admin/clients`. They eyeball the redirect URIs, scopes, and `client_name`, then click **Mark as verified**. The operator can also revoke verification later via **Revoke verification** on the show page (POSTs `/admin/clients/{id}/unverify`) — the consent banner snaps back to the caution copy on the next consent request.
-
-**Don't ship your MCP server to non-technical end users with an Unverified client.** Either run the verification handshake with the operator first, or expect a noticeable drop-off at consent. See [`operator-guide.md`](./operator-guide.md#dynamic-client-registration-rfc-7591) for the operator's verify / unverify workflow.
+Users consent to your scopes either way; scope descriptions from `[oauth.scope_descriptions]` are what they actually read. Keep your advertised `scopes_supported` minimal (see below) so the first consent doesn't ask for admin.
 
 ### What your MCP server needs to implement
 
@@ -859,7 +804,7 @@ Two HTTP endpoints + one header. That's the entire OAuth surface; everything els
 
 **1. `GET /.well-known/oauth-protected-resource`** — a static JSON document advertising your authorization server and the scopes you accept. Detail and sample document in [Resource discovery](#resource-discovery) below. Two things worth getting right on first try:
 
-- **Publish `offline_access` in `scopes_supported`** (the OIDC Core 1.0 §11 standard name), not Hydra's legacy `offline` alias. Claude Code reads this list to compose its DCR `scope` field; if you publish `offline`, the registered client can't later request `offline_access` and Hydra rejects with `invalid_scope`. We hit this exact mismatch in our end-to-end tests — costs nothing to get right up front.
+- **Publish `offline_access` in `scopes_supported`** (the OIDC Core 1.0 §11 standard name), not Hydra's legacy `offline` alias. Claude Code requests exactly what this list contains (it does not add `openid` on its own) and the requested scopes are unioned into the CIMD client's scope ceiling; publishing the wrong name earns you `invalid_scope` from Hydra. Keep the list minimal — read scopes only; clients that see no scope hint request everything in it, so an advertised admin scope makes every first connect an admin prompt. We hit both of these in our end-to-end tests — costs nothing to get right up front.
 - **`bearer_methods_supported: ["header"]`** — `Authorization: Bearer <token>` is the only method modern clients use. The other RFC 6750 methods (query param, form body) are deprecated and discouraged.
 
 **2. Your MCP endpoint** (path is yours; the convention is `POST /mcp`). On every request:
@@ -874,20 +819,22 @@ That's the full implementation footprint. A working reference exists — we buil
 
 ### Resource discovery
 
-Claude needs to find Hydra. The MCP spec uses Protected Resource Metadata (RFC 9728): when an unauthenticated request hits your MCP server, respond with `401` and a `WWW-Authenticate: Bearer resource_metadata="https://yourapp.com/.well-known/oauth-protected-resource"` header.
+Claude needs to find the authorization server. The MCP spec uses Protected Resource Metadata (RFC 9728): when an unauthenticated request hits your MCP server, respond with `401` and a `WWW-Authenticate: Bearer resource_metadata="https://mcp.yourapp.com/.well-known/oauth-protected-resource/mcp"` header.
 
-That metadata document points at Hydra:
+Two RFC 9728 details that bite in practice: the well-known path is **path-aware** — for a resource identifier with a path (`https://mcp.yourapp.com/mcp`) the document lives at `/.well-known/oauth-protected-resource/mcp`, and a conformant client discards a document whose `resource` doesn't match the URL it was fetched from. And the document must be readable **cross-origin** (`Access-Control-Allow-Origin: *`) — claude.ai fetches it from the browser.
+
+That metadata document points at the issuer:
 
 ```json
 {
-  "resource": "https://mcp.yourapp.com",
-  "authorization_servers": ["https://hydra.example.com"],
+  "resource": "https://mcp.yourapp.com/mcp",
+  "authorization_servers": ["https://accounts.example.com/hydra"],
   "scopes_supported": ["formshive:forms:read", "formshive:forms:write"],
   "bearer_methods_supported": ["header"]
 }
 ```
 
-The client follows `authorization_servers[0]` to Hydra's OIDC discovery doc and runs the standard auth-code + PKCE flow from there.
+The client resolves the issuer's AS metadata via RFC 8414 path insertion (`/.well-known/oauth-authorization-server/hydra` on the issuer host) — which Forseti serves, augmented with the CIMD flag and its shim `authorization_endpoint` — and runs the standard auth-code + PKCE flow from there, sending your resource URI as RFC 8707 `resource=`.
 
 ### Token validation in the MCP server
 
@@ -903,9 +850,9 @@ Verification checklist:
 
 1. **Signature** — verify against Hydra's JWKS (`<issuer>/.well-known/jwks.json`). Cache the keyset with a ~24h TTL; refetch on unknown `kid`.
 2. **`iss`** — equals the `issuer` configured in `hydra.yml` (`urls.self.issuer`). Pin this value; don't trust the JWT body to tell you who signed it.
-3. **`aud`** — contains your MCP server URL (the audience binding from the client's allowlist; see [Audience allow-list](./operator-guide.md#audience-allow-list-hydras-non-standard-audience-parameter) in the operator guide).
+3. **`aud`** — contains your MCP server URL (the audience bound at consent from your registry row; see [Audience binding](./operator-guide.md#audience-binding-rfc-8707-resource-and-hydras-non-standard-audience) in the operator guide).
 4. **`exp`** — not in the past (with a few seconds of clock skew).
-5. **`scope`** — covers what the tool requires.
+5. **Scopes** — cover what the tool requires. Mind the spelling: Hydra emits the granted scopes as a **`scp` claim holding a JSON array**, not RFC 9068's space-delimited `scope` string. Accept either name in either shape, or every scoped tool 403s while the token looks valid.
 
 Reject with `401` and `WWW-Authenticate: Bearer error="invalid_token"` on signature / aud / exp failures; reject with `403` and `error="insufficient_scope", scope="<required>"` on scope failures. Claude reads these and either refreshes or prompts the user to re-consent.
 
@@ -915,14 +862,14 @@ A typical Hydra-issued JWT access token payload:
 
 ```json
 {
-  "iss": "https://hydra.example.com",
+  "iss": "https://accounts.example.com/hydra",
   "sub": "f8c9d0e1-...",
-  "aud": ["https://mcp.yourapp.com"],
-  "scope": "formshive:forms:read formshive:forms:write",
+  "aud": ["https://mcp.yourapp.com/mcp"],
+  "scp": ["formshive:forms:read", "formshive:forms:write"],
   "exp": 1700000300,
   "iat": 1700000000,
   "jti": "5d7c3a91-2f04-4d8b-9e2c-a3b1d6f0e842",
-  "client_id": "claude-mcp-client-id",
+  "client_id": "https://claude.ai/oauth/claude-code-client-metadata",
   "acr": "aal1",
   "ext": { /* portal-injected extras, if any */ }
 }
@@ -968,13 +915,13 @@ A spec-compliant client reads `acr_values` from the challenge and re-runs the au
 
 - **Don't accept opaque secrets in headers** as a substitute for OAuth tokens. If your MCP server takes an API key, you've opted out of the user's portal identity and lost every benefit (revocation, audit, consent, AAL).
 - **Don't trust `sub` for authorization** beyond identity. The user's *current* permissions belong in scopes; `sub` is just the stable identifier.
-- **Don't skip `aud` validation.** Without it, any Hydra-issued access token works at your MCP server, including tokens minted for unrelated clients.
-- **Don't ship your MCP server to end users before asking the operator to verify your DCR-registered client.** The consent screen shows a prominent "unverified application" caution until an admin clicks "Mark as verified." Non-technical end users may abandon at consent.
+- **Don't skip `aud` validation.** Without it, any Hydra-issued access token works at your MCP server, including tokens minted for unrelated resources.
+- **Don't filter `tools/list` by the token's granted scopes.** It deadlocks incremental consent: the first consent grants read scopes, a filtered list hides the write tools, the client never calls one, so it never receives the `403` + `insufficient_scope` challenge that would prompt the step-up. List every tool, note the required scope in the description of the ones the token can't use yet, and refuse at call time with the HTTP-level challenge.
 
 ### Known issues and further reading
 
-- **Scope name inconsistency in Claude Code.** Claude Code reads `scopes_supported` from the resource server for DCR, then augments the auth-URL scope with `offline_access` per OIDC spec. If the resource server advertises `offline` instead of `offline_access`, the registered client's scope list doesn't include `offline_access` and Hydra rejects with `invalid_scope` ([anthropics/claude-code#4540](https://github.com/anthropics/claude-code/issues/4540) — same Hydra-backed AS as ours). Fix: publish `offline_access` (the OIDC standard name) in your MCP server's `scopes_supported`, not `offline`.
-- **Duplicate DCR with `--client-id`.** Even when configured with a pre-registered `client_id`, Claude Code still does an anonymous DCR call at `claude mcp add` time. Leaks an unused Hydra client per `add` invocation. Auth flow itself uses the pre-registered id correctly.
+- **Scope names come straight from your `scopes_supported`.** Claude Code requests exactly what your RFC 9728 document advertises (no `openid` added on its own). Publish `offline_access` (the OIDC standard name), not Hydra's legacy `offline` alias, or Hydra rejects with `invalid_scope` ([anthropics/claude-code#4540](https://github.com/anthropics/claude-code/issues/4540) — same Hydra-backed AS as ours). If your server can validate tokens against other IdPs too, advertising `openid` keeps those portable.
+- **DCR-only clients don't work.** Cursor and other MCP clients that only implement RFC 7591 can't onboard — there is no registration endpoint. They'll work when they ship CIMD.
 - **`FAST_JWT_MALFORMED` (or any "not a valid JWT") on token validation.** Means the operator has switched Hydra to opaque access tokens (`strategies.access_token: opaque`) but your MCP server is still trying to verify them as JWTs. Either switch your server to use Hydra's admin introspection endpoint (private network only — see [the opaque alternative above](#alternative-opaque--introspection-private-network-only)), or ask the operator to revert to the JWT default.
 - **`active: false` on introspection of every token.** The inverse: operator is on the JWT default but your MCP server is calling introspection. Stop introspecting; verify the JWT against `<issuer>/.well-known/jwks.json` instead.
 - **Testing without a browser.** Hydra's admin API lets you accept login and consent challenges programmatically (`PUT /admin/oauth2/auth/requests/login/accept` and `PUT /admin/oauth2/auth/requests/consent/accept`) with a synthetic subject. Useful for end-to-end tests of your MCP server's token flow without standing up a real Kratos identity.

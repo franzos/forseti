@@ -3,8 +3,8 @@
 //!
 //! Operators enroll a host (minting a one-shot secret), revoke it, and
 //! rotate its secret here. The raw secret is revealed exactly once via the
-//! same `SecretReveal` flash the DCR-token surface uses; only
-//! `sha256(secret)` is persisted (see [`crate::oauth::register::hash_token`]).
+//! `SecretReveal` flash; only `sha256(secret)` is persisted (see
+//! [`crate::posix::hash_token`]).
 //!
 //! ## Scope
 //!
@@ -25,9 +25,9 @@ use crate::csrf::CsrfForm;
 use crate::extractors::{Csrf, RequireAdmin};
 use crate::flash::{self, SecretReveal};
 use crate::format::humanise_timestamp;
-use crate::oauth::register::hash_token;
 use crate::page_chrome::PageChrome;
 use crate::posix::db as posix_db;
+use crate::posix::hash_token;
 use crate::render::render;
 use crate::state::AppState;
 
@@ -767,8 +767,7 @@ fn host_audit_metadata(hostname: &str, team_ids: &[String]) -> SafeMetadata {
     )
 }
 
-/// 32 random bytes (~256 bits), base64url-encoded; mirrors
-/// `dcr_tokens::generate_token`.
+/// 32 random bytes (~256 bits), base64url-encoded.
 fn generate_token() -> String {
     let mut bytes = [0u8; 32];
     rand::rng().fill(&mut bytes[..]);
