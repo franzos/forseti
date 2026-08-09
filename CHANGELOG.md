@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.2.2] - 2026-08-09
+
+### Fixed
+- A CIMD client never picked up a second resource server's scopes
+
 ## [0.2.1] - 2026-08-04
 
 ### Fixed
