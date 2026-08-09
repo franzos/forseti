@@ -148,8 +148,18 @@ async fn authorize(
         }
     };
 
-    // Warm path: unchanged document + already-registered redirect_uri means
-    // the Hydra row and metadata row are both current — skip every write.
+    // Warm path: unchanged document + already-registered redirect_uri + no
+    // scope the row is missing means the Hydra row and metadata row are both
+    // current — skip every write.
+    //
+    // The scope term is load-bearing. `scope_union` is the only thing that
+    // ever widens a CIMD client's ceiling, and the document hash is not a
+    // proxy for it: the document belongs to the client vendor and stays
+    // byte-identical for months, while the scopes a client requests change
+    // whenever a *resource server* introduces new ones. Without this, the
+    // first service to register a CIMD client fixes its ceiling forever and
+    // every later service gets `invalid_scope` from Hydra with nothing in the
+    // logs to explain it.
     let doc_hash = hex::encode(doc.raw_hash);
     let warm = meta_row
         .as_ref()
@@ -157,7 +167,11 @@ async fn authorize(
         && existing
             .as_ref()
             .and_then(|c| c.redirect_uris.as_ref())
-            .is_some_and(|uris| uris.iter().any(|u| u == &request_redirect_uri));
+            .is_some_and(|uris| uris.iter().any(|u| u == &request_redirect_uri))
+        && scopes_already_on_row(
+            existing.as_ref().and_then(|c| c.scope.as_deref()),
+            &requested_scope,
+        );
 
     if !warm {
         if let Err(reason) = upsert_hydra_client(
@@ -333,6 +347,19 @@ fn match_redirect_uri(request_uri: &str, doc_uris: &[String]) -> Option<Redirect
     None
 }
 
+/// Whether every scope the request asks for is already on the Hydra row.
+///
+/// Gates the warm path: if the answer is no, the row needs a `scope_union`
+/// write however unchanged the client's document is. An empty request asks
+/// for nothing, so it is trivially covered.
+fn scopes_already_on_row(existing_scope: Option<&str>, requested_scope: &str) -> bool {
+    let have: std::collections::HashSet<&str> = existing_scope
+        .unwrap_or_default()
+        .split_whitespace()
+        .collect();
+    requested_scope.split_whitespace().all(|s| have.contains(s))
+}
+
 /// The Hydra row's `scope` ceiling: existing entries (never shrink), then the
 /// base scopes, the request's `scope` values, `client_scope_extra` and the
 /// document's `scope`, deduplicated in that order and capped at
@@ -445,7 +472,8 @@ async fn upsert_hydra_client(
 mod tests {
     use super::{
         CimdDocument, MAX_SCOPE_ENTRIES, RedirectMatch, host_policy_violation,
-        is_acceptable_redirect_entry, match_redirect_uri, scope_union, validate_doc,
+        is_acceptable_redirect_entry, match_redirect_uri, scope_union, scopes_already_on_row,
+        validate_doc,
     };
 
     const DOC_URL: &str = "https://claude.ai/oauth/claude-code-client-metadata";
@@ -560,6 +588,51 @@ mod tests {
                 "reason must name the policy: {reason}"
             );
         }
+    }
+
+    // --- warm-path scope gate ------------------------------------------------
+
+    #[test]
+    fn scopes_already_on_row_covers_subsets_and_ignores_order() {
+        assert!(scopes_already_on_row(Some("openid app:read"), "app:read"));
+        assert!(scopes_already_on_row(
+            Some("openid app:read app:write"),
+            "app:write openid"
+        ));
+        // Asking for nothing is trivially covered.
+        assert!(scopes_already_on_row(Some("openid"), ""));
+        assert!(scopes_already_on_row(None, ""));
+    }
+
+    #[test]
+    fn scopes_already_on_row_spots_a_missing_scope() {
+        assert!(!scopes_already_on_row(Some("openid app:read"), "app:write"));
+        assert!(!scopes_already_on_row(None, "openid"));
+        // One missing entry among several present ones is still a miss.
+        assert!(!scopes_already_on_row(
+            Some("openid app:read"),
+            "openid app:read other:read"
+        ));
+    }
+
+    /// The regression this gate exists for: a client registered by one
+    /// resource server, whose document never changes, must still pick up a
+    /// second resource server's scopes. Before the scope term the warm path
+    /// short-circuited the union and Hydra answered `invalid_scope` forever.
+    #[test]
+    fn a_second_resource_servers_scopes_are_not_warm() {
+        let existing = Some("openid offline_access stackpit:events:read");
+        assert!(!scopes_already_on_row(
+            existing,
+            "openid formshive:forms:read"
+        ));
+
+        // ...and once the union has run, the same request is warm again.
+        let (unioned, _) = scope_union(existing, "openid formshive:forms:read", None, &[]);
+        assert!(scopes_already_on_row(
+            Some(&unioned),
+            "openid formshive:forms:read"
+        ));
     }
 
     // --- scope union --------------------------------------------------------
