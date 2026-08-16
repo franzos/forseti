@@ -227,7 +227,7 @@ e2e-licensed: ## Run licensed-bucket Playwright e2e (requires active license act
 # `tests/fixtures/license/` is .gitignored. `--max-seats` on the active blob lifts
 # the POSIX seat cap above `[posix].free_seats` so the licensed bucket exercises
 # the raise. Each run also appends a row to signet's ledger/forseti.jsonl.
-license-fixtures: ## Mint tests/fixtures/license/{active,expired}.blob via the signet issuer
+license-fixtures: ## Mint tests/fixtures/license/{active,expired,web-signed}.blob via the signet issuer
 	@mkdir -p tests/fixtures/license
 	cd $(LICENSE_ISSUER_DIR) && cargo run -p signet-issuer --release --quiet -- \
 		issue --product forseti --tier business \
@@ -241,7 +241,17 @@ license-fixtures: ## Mint tests/fixtures/license/{active,expired}.blob via the s
 		--customer "E2E Test" --email "e2e@example.com" \
 		--expires 2024-01-01 \
 		> $(CURDIR)/tests/fixtures/license/expired.blob
-	@echo "Wrote tests/fixtures/license/{active,expired}.blob"
+# Signed with the shop's web key rather than the offline root, and carrying the
+# exact claim set the Business SKU sells. This is the blob shape a real purchase
+# at licenses.gofranz.com produces, so activating it proves the two-key path.
+	cd $(LICENSE_ISSUER_DIR) && cargo run -p signet-issuer --release --quiet -- \
+		issue --product forseti --tier business \
+		--private-key keys/forseti/web-private.bin \
+		--feature orgs --feature saml --feature linux_auth --feature observability \
+		--max-orgs 25 --max-seats 500 \
+		--customer "E2E Web Test" --email "e2e@example.com" \
+		> $(CURDIR)/tests/fixtures/license/web-signed.blob
+	@echo "Wrote tests/fixtures/license/{active,expired,web-signed}.blob"
 
 e2e-trace: ## Open the Playwright trace viewer for the most recent run
 	podman run --rm -it \
