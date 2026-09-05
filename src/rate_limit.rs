@@ -8,9 +8,17 @@ use axum::response::Response;
 use tokio_util::sync::CancellationToken;
 use tower_governor::GovernorLayer;
 use tower_governor::governor::GovernorConfigBuilder;
-use tower_governor::key_extractor::{GlobalKeyExtractor, PeerIpKeyExtractor, SmartIpKeyExtractor};
+use tower_governor::key_extractor::GlobalKeyExtractor;
 
+use crate::client_ip::ClientIpKeyExtractor;
+use crate::config::ProxyConfig;
 use crate::state::AppState;
+
+/// Global bucket derived for per-IP-only routes: the per-IP cap times this.
+/// A ceiling on total traffic regardless of claimed source, so a
+/// misconfigured proxy (or a forged forwarded-for chain) can't turn a
+/// code-guess endpoint into an unbounded one.
+const GLOBAL_BACKSTOP_FACTOR: u32 = 20;
 
 /// Every keyed limiter registers a `retain_recent` closure here; without the
 /// periodic sweep the per-IP maps grow unboundedly (memory-exhaustion DoS).
@@ -18,7 +26,7 @@ static RETAINERS: Mutex<Vec<Box<dyn Fn() + Send + Sync>>> = Mutex::new(Vec::new(
 
 /// Spawn the single background sweep that drops stale per-IP entries from all
 /// registered limiters. Wired to the same shutdown token as the other workers.
-pub(crate) fn spawn_retention(shutdown: CancellationToken) {
+pub(crate) fn spawn_retention(shutdown: CancellationToken) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
         loop {
@@ -34,12 +42,12 @@ pub(crate) fn spawn_retention(shutdown: CancellationToken) {
                 }
             }
         }
-    });
+    })
 }
 
-/// Mount one `tower_governor` bucket onto `r`. The key extractor picks the trust model (`PeerIpKeyExtractor`
-/// strict, `SmartIpKeyExtractor` when a proxy is trusted). `total_ms` is the window, `per_window` the burst cap;
-/// `per_window == 0` disables the bucket and returns `r` unmodified.
+/// Mount one `tower_governor` bucket onto `r`. The key extractor picks the trust model
+/// (`ClientIpKeyExtractor` over `[proxy]`, or `GlobalKeyExtractor`). `total_ms` is the window,
+/// `per_window` the burst cap; `per_window == 0` disables the bucket and returns `r` unmodified.
 pub(crate) fn apply<K, F>(
     r: Router<AppState>,
     extractor: K,
@@ -100,11 +108,10 @@ pub(crate) fn plain_text_error(
     }
 }
 
-/// Attach one bucket to `r`, picking the key extractor from `trust_xff`
-/// (`cfg.proxy.trust_forwarded_for`).
+/// Attach one per-client bucket to `r`, keyed per `[proxy]`.
 pub(crate) fn single_window<F>(
     r: Router<AppState>,
-    trust_xff: bool,
+    proxy: &ProxyConfig,
     total_ms: u64,
     per_window: u32,
     error_handler: F,
@@ -112,18 +119,14 @@ pub(crate) fn single_window<F>(
 where
     F: Fn(tower_governor::GovernorError) -> Response + Send + Sync + 'static,
 {
-    if trust_xff {
-        apply(r, SmartIpKeyExtractor, total_ms, per_window, error_handler)
-    } else {
-        apply(r, PeerIpKeyExtractor, total_ms, per_window, error_handler)
-    }
+    let key = ClientIpKeyExtractor::from_config(proxy);
+    apply(r, key, total_ms, per_window, error_handler)
 }
 
-/// Attach paired per-minute + per-hour buckets to `r`, picking the key extractor from `trust_xff`
-/// (`cfg.proxy.trust_forwarded_for`).
+/// Attach paired per-minute + per-hour per-client buckets to `r`, keyed per `[proxy]`.
 pub(crate) fn dual_window<F>(
     r: Router<AppState>,
-    trust_xff: bool,
+    proxy: &ProxyConfig,
     per_minute: u32,
     per_hour: u32,
     error_handler: F,
@@ -131,22 +134,42 @@ pub(crate) fn dual_window<F>(
 where
     F: Fn(tower_governor::GovernorError) -> Response + Copy + Send + Sync + 'static,
 {
-    if trust_xff {
-        let r = apply(r, SmartIpKeyExtractor, 60_000, per_minute, error_handler);
-        apply(r, SmartIpKeyExtractor, 3_600_000, per_hour, error_handler)
-    } else {
-        let r = apply(r, PeerIpKeyExtractor, 60_000, per_minute, error_handler);
-        apply(r, PeerIpKeyExtractor, 3_600_000, per_hour, error_handler)
-    }
+    let key = ClientIpKeyExtractor::from_config(proxy);
+    let r = apply(r, key, 60_000, per_minute, error_handler);
+    apply(r, key, 3_600_000, per_hour, error_handler)
+}
+
+/// [`dual_window`] plus a derived global pair ([`GLOBAL_BACKSTOP_FACTOR`]
+/// times each per-client cap) for routes that have no operator-facing
+/// global knob of their own.
+pub(crate) fn dual_window_with_backstop<F>(
+    r: Router<AppState>,
+    proxy: &ProxyConfig,
+    per_minute: u32,
+    per_hour: u32,
+    error_handler: F,
+) -> Router<AppState>
+where
+    F: Fn(tower_governor::GovernorError) -> Response + Copy + Send + Sync + 'static,
+{
+    dual_window_with_global(
+        r,
+        proxy,
+        per_minute,
+        per_hour,
+        per_minute.saturating_mul(GLOBAL_BACKSTOP_FACTOR),
+        per_hour.saturating_mul(GLOBAL_BACKSTOP_FACTOR),
+        error_handler,
+    )
 }
 
 /// Layer a global (all-callers-share-one-bucket) pair on top of `dual_window`'s
-/// per-IP pair. Per-IP alone is bypassed by distributed signup and, when
-/// `trust_xff` trusts a spoofable header, by forged `X-Forwarded-For`; the
-/// global bucket bounds total traffic regardless of claimed source.
+/// per-client pair. Per-client alone is bypassed by distributed signup and by
+/// a forwarded-for chain the proxy failed to append to; the global bucket
+/// bounds total traffic regardless of claimed source.
 pub(crate) fn dual_window_with_global<F>(
     r: Router<AppState>,
-    trust_xff: bool,
+    proxy: &ProxyConfig,
     per_minute: u32,
     per_hour: u32,
     global_per_minute: u32,
@@ -156,7 +179,7 @@ pub(crate) fn dual_window_with_global<F>(
 where
     F: Fn(tower_governor::GovernorError) -> Response + Copy + Send + Sync + 'static,
 {
-    let r = dual_window(r, trust_xff, per_minute, per_hour, error_handler);
+    let r = dual_window(r, proxy, per_minute, per_hour, error_handler);
     let r = apply(
         r,
         GlobalKeyExtractor,
@@ -189,11 +212,12 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let before = RETAINERS.lock().unwrap().len();
+        let key = ClientIpKeyExtractor::from_config(&ProxyConfig::default());
         let r: Router<AppState> = Router::new();
-        let r = apply(r, PeerIpKeyExtractor, 60_000, 0, plain_text_error("test"));
+        let r = apply(r, key, 60_000, 0, plain_text_error("test"));
         let after_noop = RETAINERS.lock().unwrap().len();
         assert_eq!(after_noop, before);
-        let _r = apply(r, PeerIpKeyExtractor, 60_000, 5, plain_text_error("test"));
+        let _r = apply(r, key, 60_000, 5, plain_text_error("test"));
         let after_active = RETAINERS.lock().unwrap().len();
         assert_eq!(after_active, before + 1);
     }
@@ -205,7 +229,28 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let before = RETAINERS.lock().unwrap().len();
         let r: Router<AppState> = Router::new();
-        let _r = dual_window_with_global(r, false, 10, 60, 120, 1200, plain_text_error("test"));
+        let _r = dual_window_with_global(
+            r,
+            &ProxyConfig::default(),
+            10,
+            60,
+            120,
+            1200,
+            plain_text_error("test"),
+        );
+        let after = RETAINERS.lock().unwrap().len();
+        assert_eq!(after, before + 4);
+    }
+
+    #[test]
+    fn dual_window_with_backstop_registers_four_retainers() {
+        let _guard = TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let before = RETAINERS.lock().unwrap().len();
+        let r: Router<AppState> = Router::new();
+        let _r =
+            dual_window_with_backstop(r, &ProxyConfig::default(), 5, 30, plain_text_error("test"));
         let after = RETAINERS.lock().unwrap().len();
         assert_eq!(after, before + 4);
     }

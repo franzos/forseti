@@ -23,10 +23,5 @@ pub async fn account_visible_on_host(
     if team_ids.is_empty() {
         return db::is_org_member_provisioned(db, org, &account.identity_id).await;
     }
-    for tid in team_ids {
-        if db::is_team_member_provisioned(db, org, &tid, &account.identity_id).await? {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+    db::is_member_of_any_team_provisioned(db, org, &team_ids, &account.identity_id).await
 }

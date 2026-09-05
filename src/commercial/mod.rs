@@ -123,7 +123,10 @@ impl LicenseHandle {
 use tokio_util::sync::CancellationToken;
 
 /// Hourly tick that re-runs the expiry math so a license that booted `Active` crosses into grace/expired between restarts.
-pub fn spawn_reclassify(license: LicenseHandle, shutdown: CancellationToken) {
+pub fn spawn_reclassify(
+    license: LicenseHandle,
+    shutdown: CancellationToken,
+) -> tokio::task::JoinHandle<()> {
     use std::time::Duration;
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_secs(60 * 60));
@@ -142,7 +145,7 @@ pub fn spawn_reclassify(license: LicenseHandle, shutdown: CancellationToken) {
                 }
             }
         }
-    });
+    })
 }
 
 #[cfg(test)]

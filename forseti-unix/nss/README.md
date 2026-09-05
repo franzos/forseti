@@ -11,9 +11,10 @@ program calls `getpwnam`, `getpwuid`, `getgrnam`, `getgrgid`, or enumerates with
 calls into this module. The module forwards the request to the daemon socket and
 maps the reply into the C structs glibc expects.
 
-It talks **only** to the daemon socket (`FORSETI_UNIXD_SOCKET`, default
-`/run/forseti/unixd.sock`). There is **no network access and no secret material**
-in the `.so` itself — the daemon owns all of that.
+It talks **only** to the daemon socket at `/run/forseti/unixd.sock`. The path is
+compiled in and never read from the environment, because the module runs inside
+setuid processes that keep the caller's environ. There is **no network access and
+no secret material** in the `.so` itself — the daemon owns all of that.
 
 ## nsswitch.conf
 

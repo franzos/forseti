@@ -121,8 +121,19 @@ fn collapse_sessions_to_apps(
             .clone()
             .filter(|n| !n.is_empty())
             .unwrap_or_else(|| client_id.clone());
-        let client_uri = client.client_uri.clone().unwrap_or_default();
-        let logo_uri = client.logo_uri.clone().unwrap_or_default();
+        // Both are client-authored (CIMD / dynamic registration) and land in
+        // an href / img src, so the scheme gate runs at render time too.
+        let allow_private = state.cfg.oauth.cimd.allow_private_targets;
+        let client_uri = client
+            .client_uri
+            .as_deref()
+            .and_then(|u| crate::web::safe_external_uri(u, allow_private))
+            .unwrap_or_default();
+        let logo_uri = client
+            .logo_uri
+            .as_deref()
+            .and_then(|u| crate::web::safe_external_uri(u, allow_private))
+            .unwrap_or_default();
         let verified = client_metadata_verified(client);
 
         let granted_at = s.handled_at.clone().unwrap_or_default();

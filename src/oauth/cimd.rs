@@ -41,7 +41,7 @@ pub(crate) fn router(oauth_cfg: &OAuthConfig, proxy_cfg: &ProxyConfig) -> Router
     let cimd = &oauth_cfg.cimd;
     rate_limit::dual_window_with_global(
         r,
-        proxy_cfg.trust_forwarded_for,
+        proxy_cfg,
         cimd.ip_rate_per_minute
             .unwrap_or(DEFAULT_CIMD_IP_RATE_PER_MINUTE),
         cimd.ip_rate_per_hour
@@ -449,8 +449,17 @@ async fn upsert_hydra_client(
     let mut c = existing.unwrap_or_default();
     c.client_id = Some(client_id.to_string());
     c.client_name = doc.client_name.clone();
-    c.client_uri = doc.client_uri.clone();
-    c.logo_uri = doc.logo_uri.clone();
+    // Scheme-gated on the way in as well as at render time, so a
+    // `javascript:` value never reaches the Hydra client record.
+    let allow_private = state.cfg.oauth.cimd.allow_private_targets;
+    c.client_uri = doc
+        .client_uri
+        .as_deref()
+        .and_then(|u| crate::web::safe_external_uri(u, allow_private));
+    c.logo_uri = doc
+        .logo_uri
+        .as_deref()
+        .and_then(|u| crate::web::safe_external_uri(u, allow_private));
     c.token_endpoint_auth_method = Some("none".to_string());
     c.grant_types = Some(doc.grant_types.clone());
     c.response_types = Some(doc.response_types.clone());

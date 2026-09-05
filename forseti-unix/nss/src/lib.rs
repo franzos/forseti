@@ -17,13 +17,11 @@ use libnss::libnss_passwd_hooks;
 use libnss::passwd::{Passwd, PasswdHooks};
 use std::time::Duration;
 
-const DEFAULT_SOCKET: &str = "/run/forseti/unixd.sock";
+// Fixed, never read from the environment: this .so runs inside setuid/root
+// processes that keep the caller's environ, so an env override would let a
+// local user substitute their own socket.
+const SOCKET: &str = "/run/forseti/unixd.sock";
 const TIMEOUT: Duration = Duration::from_secs(2);
-
-/// Socket path: `FORSETI_UNIXD_SOCKET` override or the default run path.
-fn socket_path() -> String {
-    std::env::var("FORSETI_UNIXD_SOCKET").unwrap_or_else(|_| DEFAULT_SOCKET.to_string())
-}
 
 fn to_passwd(e: proto::PasswdEntry) -> Passwd {
     Passwd {
@@ -50,7 +48,7 @@ struct ForsetiPasswd;
 
 impl PasswdHooks for ForsetiPasswd {
     fn get_all_entries() -> Response<Vec<Passwd>> {
-        match query(&socket_path(), &ClientRequest::PasswdAll, TIMEOUT) {
+        match query(SOCKET, &ClientRequest::PasswdAll, TIMEOUT) {
             Some(ClientResponse::PasswdList(v)) => {
                 Response::Success(v.into_iter().map(to_passwd).collect())
             }
@@ -60,14 +58,14 @@ impl PasswdHooks for ForsetiPasswd {
     }
 
     fn get_entry_by_uid(uid: libc::uid_t) -> Response<Passwd> {
-        match query(&socket_path(), &ClientRequest::PasswdByUid(uid), TIMEOUT) {
+        match query(SOCKET, &ClientRequest::PasswdByUid(uid), TIMEOUT) {
             Some(ClientResponse::Passwd(Some(e))) => Response::Success(to_passwd(e)),
             _ => Response::NotFound,
         }
     }
 
     fn get_entry_by_name(name: String) -> Response<Passwd> {
-        match query(&socket_path(), &ClientRequest::PasswdByName(name), TIMEOUT) {
+        match query(SOCKET, &ClientRequest::PasswdByName(name), TIMEOUT) {
             Some(ClientResponse::Passwd(Some(e))) => Response::Success(to_passwd(e)),
             _ => Response::NotFound,
         }
@@ -78,7 +76,7 @@ struct ForsetiGroup;
 
 impl GroupHooks for ForsetiGroup {
     fn get_all_entries() -> Response<Vec<Group>> {
-        match query(&socket_path(), &ClientRequest::GroupAll, TIMEOUT) {
+        match query(SOCKET, &ClientRequest::GroupAll, TIMEOUT) {
             Some(ClientResponse::GroupList(v)) => {
                 Response::Success(v.into_iter().map(to_group).collect())
             }
@@ -87,14 +85,14 @@ impl GroupHooks for ForsetiGroup {
     }
 
     fn get_entry_by_gid(gid: libc::gid_t) -> Response<Group> {
-        match query(&socket_path(), &ClientRequest::GroupByGid(gid), TIMEOUT) {
+        match query(SOCKET, &ClientRequest::GroupByGid(gid), TIMEOUT) {
             Some(ClientResponse::Group(Some(e))) => Response::Success(to_group(e)),
             _ => Response::NotFound,
         }
     }
 
     fn get_entry_by_name(name: String) -> Response<Group> {
-        match query(&socket_path(), &ClientRequest::GroupByName(name), TIMEOUT) {
+        match query(SOCKET, &ClientRequest::GroupByName(name), TIMEOUT) {
             Some(ClientResponse::Group(Some(e))) => Response::Success(to_group(e)),
             _ => Response::NotFound,
         }
@@ -140,13 +138,5 @@ mod tests {
         assert_eq!(g.passwd, "x");
         assert_eq!(g.gid, 2000001);
         assert_eq!(g.members, vec!["alice".to_string(), "bob".to_string()]);
-    }
-
-    #[test]
-    fn socket_path_defaults() {
-        // Only assert the default when the override isn't set in the env.
-        if std::env::var_os("FORSETI_UNIXD_SOCKET").is_none() {
-            assert_eq!(socket_path(), DEFAULT_SOCKET);
-        }
     }
 }

@@ -441,9 +441,9 @@ pub async fn middleware(
     let peer_ip = req
         .extensions()
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-        .map(|ci| ci.0.ip().to_string());
-    let ip = extract_client_ip(&headers, state.cfg.proxy.trust_forwarded_for, peer_ip);
-    let ip_hash = ip.map(|ip| hash_ip(&ip, salt));
+        .map(|ci| ci.0.ip());
+    let ip = crate::client_ip::client_ip(&headers, &state.cfg.proxy, peer_ip);
+    let ip_hash = ip.map(|ip| hash_ip(&ip.to_string(), salt));
     let user_agent = headers
         .get("user-agent")
         .and_then(|v| v.to_str().ok())
@@ -488,36 +488,6 @@ fn hash_ip(ip: &str, salt: &str) -> String {
     h.update(b"::");
     h.update(ip.as_bytes());
     hex::encode(h.finalize())
-}
-
-/// Client IP discovery. When `trust_forwarded` is set, honour the
-/// canonical reverse-proxy headers (X-Forwarded-For first hop, then
-/// X-Real-IP). Otherwise fall back to the TCP peer address — a caller
-/// reaching the public listener directly can set those headers
-/// themselves, so trusting them unconditionally would let an attacker
-/// spoof the audited IP.
-fn extract_client_ip(
-    headers: &HeaderMap,
-    trust_forwarded: bool,
-    peer_ip: Option<String>,
-) -> Option<String> {
-    if trust_forwarded {
-        if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok())
-            && let Some(first) = xff.split(',').next()
-        {
-            let s = first.trim();
-            if !s.is_empty() {
-                return Some(s.to_string());
-            }
-        }
-        if let Some(xri) = headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
-            let s = xri.trim();
-            if !s.is_empty() {
-                return Some(s.to_string());
-            }
-        }
-    }
-    peer_ip
 }
 
 // --- builder -------------------------------------------------------------

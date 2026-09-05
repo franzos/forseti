@@ -2,6 +2,8 @@
 //! Two first-class backends, sqlite (zero-ops self-host default) and Postgres (multi-instance). Sync `diesel`
 //! runs on `deadpool-diesel`'s blocking worker so both backends share one query path.
 
+use std::time::Duration;
+
 use deadpool_diesel::{
     postgres::{Manager as PgManager, Pool as PgPool, Runtime as PgRuntime},
     sqlite::{
@@ -73,6 +75,8 @@ impl DbPool {
                 let manager = SqliteManager::new(path, SqliteRuntime::Tokio1);
                 let pool = SqlitePool::builder(manager)
                     .max_size(SQLITE_MAX_POOL)
+                    .runtime(SqliteRuntime::Tokio1)
+                    .wait_timeout(Some(Duration::from_secs(cfg.acquire_timeout_secs)))
                     .post_create(Hook::async_fn(|conn, _metrics| {
                         Box::pin(async move {
                             conn.interact(|c: &mut SqliteConnection| {
@@ -97,7 +101,13 @@ impl DbPool {
             }
             DatabaseBackend::Postgres => {
                 let manager = PgManager::new(cfg.url.clone(), PgRuntime::Tokio1);
-                let pool = PgPool::builder(manager).build()?;
+                let mut builder = PgPool::builder(manager)
+                    .runtime(PgRuntime::Tokio1)
+                    .wait_timeout(Some(Duration::from_secs(cfg.acquire_timeout_secs)));
+                if let Some(max) = cfg.max_connections {
+                    builder = builder.max_size(max.max(1));
+                }
+                let pool = builder.build()?;
                 Ok(DbPool::Postgres(pool))
             }
         }

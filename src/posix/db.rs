@@ -344,23 +344,83 @@ pub async fn team_by_gid_in_org(
     })?)
 }
 
-/// The team (within `org_id`) whose POSIX name matches, if any.
+/// The team (within `org_id`) whose POSIX name matches, if any. The name is
+/// either the slug or `team-<id>` (see `allocate::posix_group_name`), so the
+/// query narrows to those two candidates and the exact rule decides.
 pub async fn team_by_posix_name_in_org(
     db: &DbPool,
     org_id: &str,
     name: &str,
 ) -> anyhow::Result<Option<crate::orgs::teams::Team>> {
-    for t in crate::orgs::teams::list_teams(db, org_id).await? {
-        if crate::posix::allocate::posix_group_name(&t) == name {
-            return Ok(Some(t));
-        }
+    use crate::orgs::teams::Team;
+    use crate::posix::allocate::posix_group_name;
+    use crate::schema::org_teams;
+    let org = org_id.to_string();
+    let slug = name.to_string();
+    let id = name.strip_prefix("team-").unwrap_or("").to_string();
+    let candidates: Vec<Team> = db_interact!(db, |conn| {
+        org_teams::table
+            .filter(org_teams::org_id.eq(&org))
+            .filter(org_teams::slug.eq(&slug).or(org_teams::id.eq(&id)))
+            .select(Team::as_select())
+            .load(conn)
+    })?;
+    Ok(candidates.into_iter().find(|t| posix_group_name(t) == name))
+}
+
+/// Usernames of enabled provisioned members per team, for the teams given,
+/// all asserted to belong to `org_id`. One query for the whole set; the row
+/// cap scales with the number of teams so a large team isn't truncated by
+/// its neighbours. Enumeration only, never an auth decision.
+pub async fn usernames_by_team(
+    db: &DbPool,
+    org_id: &str,
+    team_ids: &[String],
+) -> anyhow::Result<std::collections::HashMap<String, Vec<String>>> {
+    use crate::schema::{org_team_members, org_teams, organization_members};
+    let mut out: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    if team_ids.is_empty() {
+        return Ok(out);
     }
-    Ok(None)
+    let (org, ids) = (org_id.to_string(), team_ids.to_vec());
+    let cap = MAX_ROWS_PER_LIST.saturating_mul(ids.len() as i64);
+    let rows: Vec<(String, String)> = db_interact!(db, |conn| {
+        posix_accounts::table
+            .inner_join(
+                org_team_members::table
+                    .on(org_team_members::identity_id.eq(posix_accounts::identity_id)),
+            )
+            .inner_join(
+                organization_members::table
+                    .on(organization_members::identity_id.eq(posix_accounts::identity_id)),
+            )
+            .filter(org_team_members::team_id.eq_any(&ids))
+            .filter(
+                org_team_members::team_id.eq_any(
+                    org_teams::table
+                        .filter(org_teams::org_id.eq(&org))
+                        .select(org_teams::id),
+                ),
+            )
+            .filter(organization_members::org_id.eq(&org))
+            .filter(posix_accounts::enabled.eq(1))
+            .order((
+                org_team_members::team_id.asc(),
+                posix_accounts::username.asc(),
+            ))
+            .limit(cap)
+            .select((org_team_members::team_id, posix_accounts::username))
+            .load(conn)
+    })?;
+    for (team_id, username) in rows {
+        out.entry(team_id).or_default().push(username);
+    }
+    Ok(out)
 }
 
 /// Enabled provisioned members of a team, intersected with current org
 /// membership. The team is asserted to belong to `org_id`. CAPPED: enumeration
-/// only, NEVER a single account's auth decision (use `is_team_member_provisioned`).
+/// only, NEVER a single account's auth decision (use `is_member_of_any_team_provisioned`).
 pub async fn accounts_in_team(
     db: &DbPool,
     org_id: &str,
@@ -494,18 +554,22 @@ pub async fn is_org_member_provisioned(
     Ok(found.is_some())
 }
 
-/// O(1) existence check for the TEAM auth decision (team asserted in `org_id`). NO cap.
-/// A 501st member must still log in.
-pub async fn is_team_member_provisioned(
+/// O(1) existence check for the TEAM auth decision: is the identity an enabled,
+/// provisioned member of at least one of `team_ids` (each asserted in `org_id`)?
+/// NO cap: a 501st member must still log in.
+pub async fn is_member_of_any_team_provisioned(
     db: &DbPool,
     org_id: &str,
-    team_id: &str,
+    team_ids: &[String],
     identity_id: &str,
 ) -> anyhow::Result<bool> {
     use crate::schema::{org_team_members, org_teams, organization_members};
-    let (org, tid, id) = (
+    if team_ids.is_empty() {
+        return Ok(false);
+    }
+    let (org, tids, id) = (
         org_id.to_string(),
-        team_id.to_string(),
+        team_ids.to_vec(),
         identity_id.to_string(),
     );
     let found: Option<i32> = db_interact!(db, |conn| {
@@ -518,7 +582,7 @@ pub async fn is_team_member_provisioned(
                 organization_members::table
                     .on(organization_members::identity_id.eq(posix_accounts::identity_id)),
             )
-            .filter(org_team_members::team_id.eq(&tid))
+            .filter(org_team_members::team_id.eq_any(&tids))
             .filter(
                 org_team_members::team_id.eq_any(
                     org_teams::table
@@ -1441,6 +1505,7 @@ mod tests {
         let db = DbPool::init(&DatabaseConfig {
             url: format!("sqlite://{}", path.display()),
             skip_migrations: true,
+            ..DatabaseConfig::default()
         })
         .expect("pool");
         db.run_migrations().await.expect("migrate");

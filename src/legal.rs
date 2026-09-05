@@ -170,7 +170,7 @@ pub(crate) fn router(proxy_cfg: &ProxyConfig) -> Router<AppState> {
         .route("/imprint", get(imprint));
     rate_limit::dual_window_with_global(
         r,
-        proxy_cfg.trust_forwarded_for,
+        proxy_cfg,
         IP_RATE_PER_MINUTE,
         IP_RATE_PER_HOUR,
         GLOBAL_RATE_PER_MINUTE,

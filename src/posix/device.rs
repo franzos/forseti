@@ -123,11 +123,11 @@ fn rate_limit_error(_err: tower_governor::GovernorError) -> Response {
     StatusCode::TOO_MANY_REQUESTS.into_response()
 }
 
-pub fn router(trust_xff: bool) -> Router<AppState> {
+pub fn router(proxy: &crate::config::ProxyConfig) -> Router<AppState> {
     let init = Router::new().route("/posix/v1/device/init", post(device_init));
     let init = rate_limit::single_window(
         init,
-        trust_xff,
+        proxy,
         60_000,
         DEVICE_INIT_RATE_PER_MINUTE,
         rate_limit_error,

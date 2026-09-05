@@ -57,7 +57,11 @@ impl WorkerHandle {
 /// rows stranded by a crash between outbox write and Kratos delete.
 /// Different responsibilities, different cadences, no shared state
 /// beyond the `DbPool` + `OryClients` handles.
-pub fn spawn_reconcile(db: DbPool, ory: Arc<OryClients>, shutdown: CancellationToken) {
+pub fn spawn_reconcile(
+    db: DbPool,
+    ory: Arc<OryClients>,
+    shutdown: CancellationToken,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         // First tick fires after the interval, not immediately —
         // startup reconciliation is already performed by `app::run`
@@ -78,7 +82,7 @@ pub fn spawn_reconcile(db: DbPool, ory: Arc<OryClients>, shutdown: CancellationT
                 }
             }
         }
-    });
+    })
 }
 
 /// Spawn the background outbox worker. Drains CONFIRMED rows, sends them,
@@ -87,38 +91,28 @@ pub fn spawn_reconcile(db: DbPool, ory: Arc<OryClients>, shutdown: CancellationT
 /// acceptable for postgres single-active-instance deploys.
 ///
 /// The returned [`WorkerHandle`] is stored in `AppState` so `/readyz` can
-/// detect a stalled worker. `drain_once` propagates errors via `anyhow`
+/// detect a stalled worker; the [`JoinHandle`](tokio::task::JoinHandle) is
+/// awaited by `app::run` after the listeners stop so an in-flight drain
+/// finishes its bookkeeping. `drain_once` propagates errors via `anyhow`
 /// and its callees never panic, so a failed tick is logged and the
 /// supervisor keeps looping.
 pub fn spawn_worker(
     db: DbPool,
     cfg: crate::config::WebhookConfig,
     shutdown: CancellationToken,
-) -> WorkerHandle {
-    let http = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        // Disable redirects: a 302 from a configured webhook URL to an
-        // internal address would otherwise bypass the SSRF guard at
-        // `validate_webhook_url`. The receiver gets one shot per
-        // delivery; misconfigured redirect chains surface as transport
-        // failures in the outbox row.
-        .redirect(reqwest::redirect::Policy::none())
-        // Connect-time SSRF guard: re-check every resolved address against
-        // the blocklist so a public hostname that rebinds to an internal IP
-        // can't slip past the save-time `validate_webhook_url` check.
-        .dns_resolver(super::validate::guarded_resolver())
-        .build()
-        .expect("reqwest client builds");
+) -> (WorkerHandle, tokio::task::JoinHandle<()>) {
+    // Shared guarded client: no redirects (a 302 to an internal address
+    // would bypass `validate_webhook_url`) and the DNS-rebinding resolver.
+    let http = crate::outbound::client(false).clone();
     let handle = WorkerHandle::new();
     let last_tick = handle.last_tick.clone();
     let tick = Duration::from_secs(cfg.tick_seconds);
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         loop {
-            // Check the shutdown token before kicking off another tick.
-            // A drain already in flight (HTTP `reqwest::send().await`)
-            // is *not* cancelled mid-flight — RFC 8417 receivers may have
-            // accepted the SET and we want the bookkeeping to land
-            // either way. Cancellation only prevents the *next* tick.
+            // Check the shutdown token before kicking off another tick. A
+            // drain already in flight runs to completion because `app::run`
+            // awaits this task: RFC 8417 receivers may have accepted the SET
+            // and the bookkeeping must land either way.
             if shutdown.is_cancelled() {
                 tracing::info!("webhook worker: shutdown received, exiting");
                 break;
@@ -148,8 +142,11 @@ pub fn spawn_worker(
             }
         }
     });
-    handle
+    (handle, task)
 }
+
+/// Whole-request budget for one delivery attempt.
+const DELIVERY_TIMEOUT: Duration = Duration::from_secs(10);
 
 const DRAIN_BATCH: usize = 32;
 
@@ -256,6 +253,7 @@ async fn deliver(
             // dedupe that hashed the body.
             let req = http
                 .post(&row.url)
+                .timeout(DELIVERY_TIMEOUT)
                 .header("Content-Type", "application/secevent+jwt")
                 .header("X-Forseti-Event", &row.event_id)
                 .body(row.payload.clone());

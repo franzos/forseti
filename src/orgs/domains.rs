@@ -339,18 +339,6 @@ pub enum VerifyError {
     BodyTooLarge,
 }
 
-fn http_verify_client(timeout: std::time::Duration) -> reqwest::Client {
-    reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(3))
-        .timeout(timeout)
-        // A redirect to a private address would otherwise bypass both the
-        // save-time and connect-time SSRF checks below.
-        .redirect(reqwest::redirect::Policy::none())
-        .dns_resolver(crate::webhook::guarded_resolver())
-        .build()
-        .expect("static reqwest client config")
-}
-
 /// `true` iff `body` contains `token` as a substring, decoded lossily as
 /// UTF-8. Split out from [`verify_http_file`] so the match logic is
 /// unit-testable without a live server.
@@ -364,33 +352,29 @@ fn body_contains_token(body: &[u8], token: &str) -> bool {
 /// SSRF-guarded the same way outbound webhook delivery is: `domain` is
 /// owner-submitted and attacker-influenceable, so this reuses (never
 /// reimplements) `webhook::validate_webhook_url` (https-only, blocks
-/// private/loopback/IMDS ranges at save-time) plus `webhook::guarded_resolver`
-/// (DNS-rebinding guard re-checked at connect time), and disables redirects.
+/// private/loopback/IMDS ranges at save-time) plus the shared guarded
+/// `outbound` client (DNS-rebinding guard at connect time, no redirects).
 pub async fn verify_http_file(
     domain: &str,
     expected_token: &str,
     timeout: std::time::Duration,
 ) -> Result<bool, VerifyError> {
+    use crate::outbound::FetchError;
     let url = format!("https://{domain}{HTTP_VERIFY_PATH}");
     crate::webhook::validate_webhook_url(&url).map_err(VerifyError::UnsafeTarget)?;
-    let resp = http_verify_client(timeout)
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| VerifyError::Transport(e.to_string()))?;
-    if !resp.status().is_success() {
-        return Ok(false);
-    }
-    use futures_util::StreamExt;
-    let mut stream = resp.bytes_stream();
-    let mut buf = Vec::new();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| VerifyError::Transport(e.to_string()))?;
-        buf.extend_from_slice(&chunk);
-        if buf.len() > MAX_VERIFY_BODY_BYTES {
-            return Err(VerifyError::BodyTooLarge);
-        }
-    }
+    let client = crate::outbound::client(false);
+    let resp = match crate::outbound::get_ok(client, &url, None, timeout).await {
+        Ok(r) => r,
+        Err(FetchError::Status(_)) => return Ok(false),
+        Err(FetchError::Transport(m)) => return Err(VerifyError::Transport(m)),
+        Err(FetchError::TooLarge) => return Err(VerifyError::BodyTooLarge),
+    };
+    let buf = match crate::outbound::read_capped(resp, MAX_VERIFY_BODY_BYTES).await {
+        Ok(b) => b,
+        Err(FetchError::TooLarge) => return Err(VerifyError::BodyTooLarge),
+        Err(FetchError::Transport(m)) => return Err(VerifyError::Transport(m)),
+        Err(FetchError::Status(s)) => return Err(VerifyError::Transport(format!("HTTP {s}"))),
+    };
     Ok(body_contains_token(&buf, expected_token))
 }
 

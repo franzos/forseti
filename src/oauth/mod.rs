@@ -156,9 +156,9 @@ fn device_router(oauth_cfg: &OAuthConfig, proxy_cfg: &ProxyConfig) -> Router<App
         .device_verify_ip_rate_per_hour
         .unwrap_or(DEFAULT_DEVICE_VERIFY_RATE_PER_HOUR);
 
-    rate_limit::dual_window(
+    rate_limit::dual_window_with_backstop(
         r,
-        proxy_cfg.trust_forwarded_for,
+        proxy_cfg,
         per_minute,
         per_hour,
         rate_limit::plain_text_error("device_verify"),

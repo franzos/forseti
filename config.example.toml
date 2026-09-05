@@ -206,6 +206,8 @@ support_email = "support@example.com"
 # url = "sqlite://./forseti.db"
 # url = "postgres://forseti:forseti@localhost:5432/forseti"
 # skip_migrations = false  # set true to gate schema changes through a pipeline
+# max_connections = 16     # Postgres pool ceiling; default twice the CPU count (sqlite: fixed at 8)
+# acquire_timeout_secs = 30  # wait for a free connection this long, then fail instead of hanging
 
 # Identity-management knobs. `unverified_ttl_days` is the window used by the
 # `forseti unverified-prune` CLI: a Kratos identity that still has an unverified
@@ -291,18 +293,20 @@ support_email = "support@example.com"
 # audit_retention_days = 90    # default for the `forseti audit-prune` CLI
 
 # Deployment-shape: is Forseti behind a trusted reverse proxy that
-# strips and re-adds `X-Forwarded-For` / `X-Real-IP` / `Forwarded`?
-# Flipping this on tells the audit middleware (audited client IP) and
-# the per-IP rate limiters (CIMD shim, handoff, claim-email) to honour
-# the forwarded-for chain. Default `false` — secure when Forseti's
+# appends the peer address to `X-Forwarded-For`? Flipping this on tells
+# the audit middleware (audited client IP) and every per-IP rate limiter
+# to read the client from the forwarded-for chain: the entry
+# `trusted_hops` from the RIGHT (one per proxy in front of Forseti).
+# Anything further left is caller-supplied and ignored, so a forged
+# header can't pick the key. Default `false` — secure when Forseti's
 # public listener is exposed directly. Set to `true` ONLY when the
-# upstream proxy is configured to STRIP client-sent forwarded-for
-# headers before re-adding its own; otherwise a direct caller can
-# forge the header and spoof their IP. See
-# `docs/operator-guide-proxy.md` for haproxy / nginx sketches that do
-# the strip correctly.
+# listener is reachable solely through that proxy; a direct caller
+# would otherwise be their own "proxy". `X-Real-IP` is honoured as a
+# fallback and must be overwritten (not passed through) by the proxy.
+# See `docs/operator-guide-proxy.md`.
 # [proxy]
 # trust_forwarded_for = false
+# trusted_hops = 1
 
 # Outbound webhook signing. Forseti signs every account-lifecycle
 # webhook (today: account-purged) as an RFC 8417 Security Event Token

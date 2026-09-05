@@ -33,10 +33,18 @@ impl Upstream {
         })
     }
 
-    async fn get(&self, path: &str) -> Result<reqwest::Response> {
-        let url = format!("{}{}", self.server_url, path);
+    /// GET `<server_url>/posix/v1/<segments...>`. Segments are pushed through
+    /// the URL parser one at a time so a caller-supplied name can never
+    /// introduce `/`, `?`, `#` or a `..` hop into the request path.
+    async fn get(&self, segments: &[&str]) -> Result<reqwest::Response> {
+        let mut url = reqwest::Url::parse(&self.server_url).context("parsing server_url")?;
+        url.path_segments_mut()
+            .map_err(|_| anyhow::anyhow!("server_url cannot be a base"))?
+            .pop_if_empty()
+            .extend(["posix", "v1"])
+            .extend(segments);
         self.client
-            .get(&url)
+            .get(url.clone())
             .header(reqwest::header::AUTHORIZATION, &self.auth_header)
             .send()
             .await
@@ -44,51 +52,58 @@ impl Upstream {
     }
 
     pub async fn passwd_by_name(&self, name: &str) -> Result<ClientResponse> {
-        let resp = self.get(&format!("/posix/v1/passwd/name/{name}")).await?;
+        if !is_valid_posix_name(name) {
+            return Ok(ClientResponse::Passwd(None));
+        }
+        let resp = self.get(&["passwd", "name", name]).await?;
         Ok(ClientResponse::Passwd(
             decode_single::<PasswdEntry>(resp).await?,
         ))
     }
 
     pub async fn passwd_by_uid(&self, uid: u32) -> Result<ClientResponse> {
-        let resp = self.get(&format!("/posix/v1/passwd/uid/{uid}")).await?;
+        let resp = self.get(&["passwd", "uid", &uid.to_string()]).await?;
         Ok(ClientResponse::Passwd(
             decode_single::<PasswdEntry>(resp).await?,
         ))
     }
 
     pub async fn passwd_all(&self) -> Result<ClientResponse> {
-        let resp = self.get("/posix/v1/passwd").await?;
+        let resp = self.get(&["passwd"]).await?;
         Ok(ClientResponse::PasswdList(
             decode_list::<PasswdEntry>(resp).await?,
         ))
     }
 
     pub async fn group_by_name(&self, name: &str) -> Result<ClientResponse> {
-        let resp = self.get(&format!("/posix/v1/group/name/{name}")).await?;
+        if !is_valid_posix_name(name) {
+            return Ok(ClientResponse::Group(None));
+        }
+        let resp = self.get(&["group", "name", name]).await?;
         Ok(ClientResponse::Group(
             decode_single::<GroupEntry>(resp).await?,
         ))
     }
 
     pub async fn group_by_gid(&self, gid: u32) -> Result<ClientResponse> {
-        let resp = self.get(&format!("/posix/v1/group/gid/{gid}")).await?;
+        let resp = self.get(&["group", "gid", &gid.to_string()]).await?;
         Ok(ClientResponse::Group(
             decode_single::<GroupEntry>(resp).await?,
         ))
     }
 
     pub async fn group_all(&self) -> Result<ClientResponse> {
-        let resp = self.get("/posix/v1/group").await?;
+        let resp = self.get(&["group"]).await?;
         Ok(ClientResponse::GroupList(
             decode_list::<GroupEntry>(resp).await?,
         ))
     }
 
     pub async fn ssh_keys(&self, name: &str) -> Result<ClientResponse> {
-        let resp = self
-            .get(&format!("/posix/v1/authorized_keys/{name}"))
-            .await?;
+        if !is_valid_posix_name(name) {
+            return Ok(ClientResponse::SshKeys(Vec::new()));
+        }
+        let resp = self.get(&["authorized_keys", name]).await?;
         match resp.status() {
             StatusCode::OK => {
                 let body = resp.text().await.context("reading authorized_keys body")?;
@@ -123,6 +138,24 @@ async fn decode_list<T: serde::de::DeserializeOwned>(resp: reqwest::Response) ->
     }
 }
 
+/// Same shape Forseti enforces when it provisions a POSIX account
+/// (`[a-z_][a-z0-9_-]*`, at most 32 bytes). Names arrive over the
+/// world-connectable socket, so anything else is answered "absent" locally
+/// and never reaches the upstream with the host credential.
+pub fn is_valid_posix_name(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    if bytes.is_empty() || bytes.len() > 32 {
+        return false;
+    }
+    let first = bytes[0];
+    if !(first.is_ascii_lowercase() || first == b'_') {
+        return false;
+    }
+    bytes
+        .iter()
+        .all(|&b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -131,6 +164,55 @@ mod tests {
 
     fn up(url: &str) -> Upstream {
         Upstream::new(url, "host", "secret", 3).unwrap()
+    }
+
+    #[test]
+    fn posix_name_shape() {
+        assert!(is_valid_posix_name("alice"));
+        assert!(is_valid_posix_name("_svc-1"));
+        assert!(!is_valid_posix_name(""));
+        assert!(!is_valid_posix_name("Alice"));
+        assert!(!is_valid_posix_name("1alice"));
+        assert!(!is_valid_posix_name("../offline_verifiers"));
+        assert!(!is_valid_posix_name("a?x=1"));
+        assert!(!is_valid_posix_name("a#f"));
+        assert!(!is_valid_posix_name(&"x".repeat(33)));
+    }
+
+    #[tokio::test]
+    async fn traversal_name_never_reaches_upstream() {
+        let server = MockServer::start().await;
+        // No mocks mounted: any request would 404 with a wiremock error body.
+        // The daemon must answer "absent" without issuing a request at all.
+        let u = up(&server.uri());
+        assert_eq!(
+            u.ssh_keys("../offline_verifiers").await.unwrap(),
+            ClientResponse::SshKeys(Vec::new())
+        );
+        assert_eq!(
+            u.passwd_by_name("../passwd").await.unwrap(),
+            ClientResponse::Passwd(None)
+        );
+        assert_eq!(
+            u.group_by_name("x/../../metrics").await.unwrap(),
+            ClientResponse::Group(None)
+        );
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn server_url_with_prefix_keeps_path() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/idp/posix/v1/passwd"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(&server)
+            .await;
+        let u = up(&format!("{}/idp/", server.uri()));
+        assert_eq!(
+            u.passwd_all().await.unwrap(),
+            ClientResponse::PasswdList(Vec::new())
+        );
     }
 
     #[tokio::test]

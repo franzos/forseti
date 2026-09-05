@@ -110,10 +110,115 @@ pub(crate) fn render_error_boundary(
     })
 }
 
+/// Gate for a client-supplied URL (`client_uri`, `logo_uri`) before it is
+/// rendered as an `href` or `<img src>` on an authenticated page. Dynamic
+/// and CIMD registration make these attacker-controllable, Askama escapes
+/// quotes but not schemes, and the CSP carries no `script-src`, so an
+/// unchecked value is a `javascript:` link or a tracking beacon. Requires
+/// https, no userinfo, and a public-looking DNS name: IP-literal hosts and
+/// obviously internal names are dropped. `allow_private` (the CIMD dev
+/// hatch) additionally admits http and any host. `None` on any failure.
+pub(crate) fn safe_external_uri(raw: &str, allow_private: bool) -> Option<String> {
+    let parsed = url::Url::parse(raw).ok()?;
+    match parsed.scheme() {
+        "https" => {}
+        "http" if allow_private => {}
+        _ => return None,
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return None;
+    }
+    let host = parsed.host()?;
+    if allow_private {
+        return Some(raw.to_string());
+    }
+    let host = match host {
+        url::Host::Domain(d) => d.trim_end_matches('.').to_ascii_lowercase(),
+        url::Host::Ipv4(_) | url::Host::Ipv6(_) => return None,
+    };
+    if host == "localhost"
+        || host.ends_with(".localhost")
+        || host.ends_with(".local")
+        || host.ends_with(".internal")
+        || !host.contains('.')
+    {
+        return None;
+    }
+    Some(raw.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::AppConfig;
+
+    fn safe(raw: &str) -> Option<String> {
+        safe_external_uri(raw, false)
+    }
+
+    #[test]
+    fn safe_external_uri_accepts_https_public_hosts() {
+        assert_eq!(
+            safe("https://cdn.bank.app/logo.png").as_deref(),
+            Some("https://cdn.bank.app/logo.png")
+        );
+        assert_eq!(
+            safe("https://bank.app:8443/logo.svg").as_deref(),
+            Some("https://bank.app:8443/logo.svg")
+        );
+    }
+
+    #[test]
+    fn safe_external_uri_rejects_non_https_and_malformed() {
+        assert!(safe("http://bank.app/logo.png").is_none());
+        assert!(safe("javascript:alert(1)").is_none());
+        assert!(safe("JavaScript:alert(1)").is_none());
+        assert!(safe("data:text/html,<script>alert(1)</script>").is_none());
+        assert!(safe("file:///etc/passwd").is_none());
+        assert!(safe("/relative/logo.png").is_none());
+        assert!(safe("").is_none());
+    }
+
+    #[test]
+    fn safe_external_uri_rejects_ip_literal_hosts() {
+        assert!(safe("https://127.0.0.1/logo.png").is_none());
+        assert!(safe("https://10.0.0.1/logo.png").is_none());
+        assert!(safe("https://169.254.169.254/latest/meta-data/").is_none());
+        assert!(safe("https://8.8.8.8/logo.png").is_none());
+        assert!(safe("https://[::1]/logo.png").is_none());
+        assert!(safe("https://[fe80::1]/logo.png").is_none());
+    }
+
+    #[test]
+    fn safe_external_uri_rejects_internal_names() {
+        assert!(safe("https://localhost/logo.png").is_none());
+        assert!(safe("https://LOCALHOST/logo.png").is_none());
+        assert!(safe("https://foo.localhost/logo.png").is_none());
+        assert!(safe("https://printer.local/logo.png").is_none());
+        assert!(safe("https://vault.internal/logo.png").is_none());
+        assert!(safe("https://intranet/logo.png").is_none());
+        assert!(safe("https://localhost./logo.png").is_none());
+    }
+
+    #[test]
+    fn safe_external_uri_rejects_userinfo() {
+        assert!(safe("https://user:pass@bank.app/logo.png").is_none());
+        assert!(safe("https://user@bank.app/logo.png").is_none());
+    }
+
+    #[test]
+    fn safe_external_uri_private_hatch_admits_http_loopback_only_for_real_urls() {
+        assert_eq!(
+            safe_external_uri("http://localhost:8080/app", true).as_deref(),
+            Some("http://localhost:8080/app")
+        );
+        assert_eq!(
+            safe_external_uri("http://127.0.0.1/app", true).as_deref(),
+            Some("http://127.0.0.1/app")
+        );
+        assert!(safe_external_uri("javascript:alert(1)", true).is_none());
+        assert!(safe_external_uri("http://user:pw@localhost/app", true).is_none());
+    }
 
     fn cfg_with_self_url(url: &str) -> AppConfig {
         let mut cfg = AppConfig::test_fixture();

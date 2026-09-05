@@ -83,7 +83,7 @@ pub fn router(state: AppState) -> Router<AppState> {
     // (src/admin/posix.rs), never reads.
     rate_limit::single_window(
         r,
-        state.cfg.proxy.trust_forwarded_for,
+        &state.cfg.proxy,
         60_000,
         RESOLVER_RATE_PER_MINUTE,
         rate_limit_error,
@@ -207,61 +207,38 @@ async fn serve_account_scoped(
     }
 }
 
+/// Every gid-bearing team the host may see, each with its members. One
+/// team-list query plus one member query for the whole set; UPG groups are
+/// NOT enumerated here, only single-lookup.
 async fn group_all(State(state): State<AppState>, host: RequirePosixHost) -> Response {
-    let (org, teams) = match resolve_scope(&state, &host).await {
-        Ok(HostScope::WholeOrg(org)) => match crate::orgs::teams::list_teams(&state.db, &org).await
-        {
-            Ok(ts) => (
-                org,
-                ts.into_iter()
-                    .filter(|t| t.gid.is_some())
-                    .map(|t| t.id)
-                    .collect::<Vec<_>>(),
-            ),
-            Err(e) => return db_error(e, "group_all team list failed"),
-        },
-        Ok(HostScope::Teams(org, teams)) => (org, teams),
+    use crate::posix::allocate::posix_group_name;
+    let (org, allowed) = match resolve_scope(&state, &host).await {
+        Ok(HostScope::WholeOrg(org)) => (org, None),
+        Ok(HostScope::Teams(org, teams)) => (org, Some(teams)),
         Err(r) => return r,
     };
-    let mut out = Vec::new();
-    for tid in teams {
-        match team_group_entry(&state, &org, &tid).await {
-            Ok(Some(g)) => out.push(g),
-            Ok(None) => {}
-            Err(e) => return db_error(e, "group_all entry failed"),
-        }
-    }
-    Json(out).into_response()
-}
-
-/// GroupEntry for a team (must have a gid + belong to org). UPG groups are NOT
-/// enumerated here, only single-lookup.
-async fn team_group_entry(
-    state: &AppState,
-    org: &str,
-    team_id: &str,
-) -> anyhow::Result<Option<GroupEntry>> {
-    use crate::posix::allocate::posix_group_name;
-    let Some(team) = crate::orgs::teams::list_teams(&state.db, org)
-        .await?
-        .into_iter()
-        .find(|t| t.id == team_id)
-    else {
-        return Ok(None);
+    let teams: Vec<_> = match crate::orgs::teams::list_teams(&state.db, &org).await {
+        Ok(ts) => ts
+            .into_iter()
+            .filter(|t| t.gid.is_some())
+            .filter(|t| allowed.as_ref().is_none_or(|ids| ids.contains(&t.id)))
+            .collect(),
+        Err(e) => return db_error(e, "group_all team list failed"),
     };
-    let Some(gid) = team.gid else {
-        return Ok(None);
+    let team_ids: Vec<String> = teams.iter().map(|t| t.id.clone()).collect();
+    let mut members = match db::usernames_by_team(&state.db, &org, &team_ids).await {
+        Ok(m) => m,
+        Err(e) => return db_error(e, "group_all members failed"),
     };
-    let members = db::accounts_in_team(&state.db, org, team_id)
-        .await?
-        .into_iter()
-        .map(|a| a.username)
+    let out: Vec<GroupEntry> = teams
+        .iter()
+        .map(|t| GroupEntry {
+            name: posix_group_name(t),
+            gid: t.gid.unwrap_or_default() as u32,
+            members: members.remove(&t.id).unwrap_or_default(),
+        })
         .collect();
-    Ok(Some(GroupEntry {
-        name: posix_group_name(&team),
-        gid: gid as u32,
-        members,
-    }))
+    Json(out).into_response()
 }
 
 async fn group_by_gid(

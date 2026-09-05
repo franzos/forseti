@@ -27,8 +27,8 @@ pub(crate) fn hash_token(raw_token: &str) -> String {
 /// license-gated: `Feature::LinuxAuth` only caps provisioning (see
 /// [`crate::admin::posix`]), never resolution or login.
 pub fn router(state: AppState) -> Router<AppState> {
-    let trust_xff = state.cfg.proxy.trust_forwarded_for;
-    resolver::router(state).merge(device::router(trust_xff))
+    let proxy = state.cfg.proxy.clone();
+    resolver::router(state).merge(device::router(&proxy))
 }
 
 use std::sync::Arc;
@@ -124,7 +124,11 @@ pub async fn reconcile_orphans(db: &DbPool, ory: &Arc<OryClients>) -> anyhow::Re
 }
 
 /// Hourly orphan-purge sweep. Mirrors `webhook::spawn_reconcile`.
-pub fn spawn_reconcile(db: DbPool, ory: Arc<OryClients>, shutdown: CancellationToken) {
+pub fn spawn_reconcile(
+    db: DbPool,
+    ory: Arc<OryClients>,
+    shutdown: CancellationToken,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_secs(60 * 60));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -142,5 +146,5 @@ pub fn spawn_reconcile(db: DbPool, ory: Arc<OryClients>, shutdown: CancellationT
                 }
             }
         }
-    });
+    })
 }

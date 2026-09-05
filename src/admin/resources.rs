@@ -18,7 +18,6 @@ use std::time::Duration;
 
 use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Redirect, Response};
-use futures_util::StreamExt;
 use serde::Deserialize;
 use url::Url;
 
@@ -641,8 +640,8 @@ struct ProtectedResourceMetadata {
 }
 
 /// SSRF-guarded GET of the metadata document: same composition as
-/// `oauth::cimd_fetch` (scheme policy, blocked-IP literals, DNS-rebinding
-/// guard via `webhook::guarded_resolver`, no redirects, 5 s / 64 KiB caps).
+/// `oauth::cimd_fetch` (scheme policy, blocked-IP literals, then the shared
+/// guarded `outbound` client with no redirects, 5 s / 64 KiB caps).
 async fn fetch_metadata(
     url: &Url,
     allow_private: bool,
@@ -667,40 +666,24 @@ async fn fetch_metadata(
         Some(_) => {}
     }
 
-    let mut builder = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(3))
-        .timeout(CORROBORATION_TIMEOUT)
-        .redirect(reqwest::redirect::Policy::none());
-    if !allow_private {
-        builder = builder.dns_resolver(crate::webhook::guarded_resolver());
-    }
-    let client = builder.build().expect("static reqwest client config");
-
-    let resp = client
-        .get(url.as_str())
-        .header(reqwest::header::ACCEPT, "application/json")
-        .send()
+    use crate::outbound::FetchError;
+    let describe = |e: FetchError| match e {
+        FetchError::Transport(m) => m,
+        FetchError::Status(s) => format!("HTTP {s}"),
+        FetchError::TooLarge => "document too large".to_string(),
+    };
+    let client = crate::outbound::client(allow_private);
+    let resp = crate::outbound::get_ok(
+        client,
+        url.as_str(),
+        Some("application/json"),
+        CORROBORATION_TIMEOUT,
+    )
+    .await
+    .map_err(describe)?;
+    let buf = crate::outbound::read_capped(resp, CORROBORATION_DOC_LIMIT_BYTES)
         .await
-        .map_err(|e| e.to_string())?;
-    if !resp.status().is_success() {
-        return Err(format!("HTTP {}", resp.status().as_u16()));
-    }
-    if resp
-        .content_length()
-        .is_some_and(|l| l > CORROBORATION_DOC_LIMIT_BYTES as u64)
-    {
-        return Err("document too large".to_string());
-    }
-    // Chunked bodies carry no Content-Length; enforce the cap while reading.
-    let mut stream = resp.bytes_stream();
-    let mut buf: Vec<u8> = Vec::new();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| e.to_string())?;
-        if buf.len() + chunk.len() > CORROBORATION_DOC_LIMIT_BYTES {
-            return Err("document too large".to_string());
-        }
-        buf.extend_from_slice(&chunk);
-    }
+        .map_err(describe)?;
     serde_json::from_slice(&buf).map_err(|e| format!("invalid document: {e}"))
 }
 

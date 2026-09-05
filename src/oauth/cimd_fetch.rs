@@ -8,7 +8,6 @@ use std::net::IpAddr;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
-use futures_util::StreamExt;
 use moka::Expiry;
 use moka::future::Cache;
 use sha2::Digest;
@@ -162,43 +161,36 @@ async fn fetch_once(
     timeout: Duration,
 ) -> Result<(Arc<CimdDocument>, Duration), CimdFetchError> {
     guard_url(url, allow_private)?;
-    let resp = doc_client(allow_private, timeout)
-        .get(url.as_str())
-        .header(reqwest::header::ACCEPT, "application/json")
-        .send()
+    let client = crate::outbound::client(allow_private);
+    let resp = crate::outbound::get_ok(client, url.as_str(), Some("application/json"), timeout)
         .await
-        .map_err(|e| CimdFetchError::Transport(e.to_string()))?;
-    if !resp.status().is_success() {
-        return Err(CimdFetchError::Status(resp.status().as_u16()));
-    }
+        .map_err(CimdFetchError::from)?;
     let ttl = ttl_from_cache_control(
         resp.headers()
             .get(reqwest::header::CACHE_CONTROL)
             .and_then(|v| v.to_str().ok()),
     );
-    if resp
-        .content_length()
-        .is_some_and(|l| l > DOC_LIMIT_BYTES as u64)
-    {
-        return Err(CimdFetchError::TooLarge);
-    }
-    // Chunked/streamed bodies carry no Content-Length; enforce the cap while reading.
-    let mut stream = resp.bytes_stream();
-    let mut buf: Vec<u8> = Vec::new();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| CimdFetchError::Transport(e.to_string()))?;
-        if buf.len() + chunk.len() > DOC_LIMIT_BYTES {
-            return Err(CimdFetchError::TooLarge);
-        }
-        buf.extend_from_slice(&chunk);
-    }
+    let buf = crate::outbound::read_capped(resp, DOC_LIMIT_BYTES)
+        .await
+        .map_err(CimdFetchError::from)?;
     let doc = parse_document(&buf)?;
     Ok((Arc::new(doc), ttl))
 }
 
+impl From<crate::outbound::FetchError> for CimdFetchError {
+    fn from(e: crate::outbound::FetchError) -> Self {
+        use crate::outbound::FetchError as F;
+        match e {
+            F::Transport(m) => Self::Transport(m),
+            F::Status(s) => Self::Status(s),
+            F::TooLarge => Self::TooLarge,
+        }
+    }
+}
+
 /// Pre-flight shape + SSRF check on the client_id URL. IP-literal hosts are
 /// checked here; domain hosts are re-checked at connect time by the
-/// `webhook::guarded_resolver` DNS-rebinding guard wired into [`doc_client`].
+/// DNS-rebinding guard inside the shared `outbound` client.
 fn guard_url(url: &Url, allow_private: bool) -> Result<(), CimdFetchError> {
     let reject = |m: &str| Err(CimdFetchError::UrlRejected(m.to_string()));
     if url.as_str().len() > MAX_URL_BYTES {
@@ -230,19 +222,6 @@ fn guard_url(url: &Url, allow_private: bool) -> Result<(), CimdFetchError> {
         Some(_) => {}
     }
     Ok(())
-}
-
-fn doc_client(allow_private: bool, timeout: Duration) -> reqwest::Client {
-    // Redirect policy NONE is stricter than the CIMD draft on purpose: the doc
-    // URL must answer directly, so a hop can never re-target a vetted address.
-    let mut builder = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(3))
-        .timeout(timeout)
-        .redirect(reqwest::redirect::Policy::none());
-    if !allow_private {
-        builder = builder.dns_resolver(crate::webhook::guarded_resolver());
-    }
-    builder.build().expect("static reqwest client config")
 }
 
 /// Freshness TTL from `Cache-Control: max-age`, clamped to [60 s, 24 h];

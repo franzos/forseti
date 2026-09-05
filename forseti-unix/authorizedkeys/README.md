@@ -10,8 +10,8 @@ them one per line on stdout.
 forseti_ssh_authorizedkeys <username>
 ```
 
-Socket path comes from `FORSETI_UNIXD_SOCKET`, defaulting to
-`/run/forseti/unixd.sock`.
+The daemon socket path is compiled in as `/run/forseti/unixd.sock`; it is not
+read from the environment.
 
 ## sshd configuration
 

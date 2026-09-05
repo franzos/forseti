@@ -51,6 +51,7 @@ mod tests {
         let db = DbPool::init(&DatabaseConfig {
             url: format!("sqlite://{}", path.display()),
             skip_migrations: true,
+            ..DatabaseConfig::default()
         })
         .expect("pool");
         db.run_migrations().await.expect("migrate");

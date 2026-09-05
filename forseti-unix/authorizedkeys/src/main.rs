@@ -27,7 +27,7 @@
 use forseti_unix_proto::{ClientRequest, ClientResponse};
 use std::time::Duration;
 
-const DEFAULT_SOCKET: &str = "/run/forseti/unixd.sock";
+const SOCKET: &str = "/run/forseti/unixd.sock";
 const TIMEOUT: Duration = Duration::from_secs(2);
 
 fn main() {
@@ -39,11 +39,8 @@ fn main() {
         }
     };
 
-    let socket =
-        std::env::var("FORSETI_UNIXD_SOCKET").unwrap_or_else(|_| DEFAULT_SOCKET.to_string());
-
     let req = ClientRequest::SshKeys(username);
-    match forseti_unix_client::query(&socket, &req, TIMEOUT) {
+    match forseti_unix_client::query(SOCKET, &req, TIMEOUT) {
         Some(ClientResponse::SshKeys(keys)) => {
             // print() not eprintln so each key lands on stdout for sshd.
             let mut out = String::new();

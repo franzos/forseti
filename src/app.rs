@@ -126,22 +126,39 @@ pub(crate) async fn run() -> anyhow::Result<()> {
     if let Err(e) = webhook::reconcile_pending(&db, &ory).await {
         tracing::warn!(error = %e, "webhook reconcile_pending failed at startup");
     }
-    let webhook_worker = webhook::spawn_worker(db.clone(), cfg.webhook.clone(), shutdown.clone());
+    // Every background task hands back its JoinHandle; `run` awaits them after
+    // the listeners stop so an in-flight tick (a webhook drain in particular)
+    // finishes its bookkeeping instead of being dropped with the runtime.
+    let mut background: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+    let (webhook_worker, worker_task) =
+        webhook::spawn_worker(db.clone(), cfg.webhook.clone(), shutdown.clone());
+    background.push(worker_task);
     // Periodic reconcile (every 60s, rows older than 5 minutes) so stuck PENDING rows don't wait for the next restart.
-    webhook::spawn_reconcile(db.clone(), ory.clone(), shutdown.clone());
+    background.push(webhook::spawn_reconcile(
+        db.clone(),
+        ory.clone(),
+        shutdown.clone(),
+    ));
 
     // `store::load` falls back to `Unlicensed` on missing row or verification failure, so OSS and stale-key deployments boot cleanly.
     let grace_days = commercial::GRACE_DAYS;
     let initial_status = commercial::store::load(&db, grace_days).await;
     let license = LicenseHandle::new(initial_status, grace_days);
     // Status is otherwise only recomputed at boot / activate, so a license that booted Active never crosses into grace.
-    commercial::spawn_reclassify(license.clone(), shutdown.clone());
+    background.push(commercial::spawn_reclassify(
+        license.clone(),
+        shutdown.clone(),
+    ));
 
     // Hourly POSIX reconcile for identities deleted out-of-band via the Kratos admin API; never purges on a Kratos lookup error.
-    crate::posix::spawn_reconcile(db.clone(), ory.clone(), shutdown.clone());
+    background.push(crate::posix::spawn_reconcile(
+        db.clone(),
+        ory.clone(),
+        shutdown.clone(),
+    ));
 
     // Sweeps stale per-IP entries out of every keyed rate limiter built below.
-    crate::rate_limit::spawn_retention(shutdown.clone());
+    background.push(crate::rate_limit::spawn_retention(shutdown.clone()));
 
     let cfg_public_bind = cfg.self_.bind.clone();
     let cfg_internal_bind = cfg.internal.bind.clone();
@@ -344,7 +361,7 @@ pub(crate) async fn run() -> anyhow::Result<()> {
     });
 
     // `into_make_service_with_connect_info` puts the TCP peer `SocketAddr` into request extensions so
-    // tower_governor's `PeerIpKeyExtractor` can see it when `proxy.trust_forwarded_for = false`.
+    // `client_ip` (audit + rate limiters) can fall back to it.
     let public_fut = axum::serve(
         public_listener,
         public_app.into_make_service_with_connect_info::<SocketAddr>(),
@@ -365,8 +382,31 @@ pub(crate) async fn run() -> anyhow::Result<()> {
 
     tokio::try_join!(public_fut, internal_fut)?;
 
+    // Listeners are down; give the background tasks a bounded window to
+    // finish their current tick before the runtime drops them.
+    shutdown.cancel();
+    let drained =
+        tokio::time::timeout(BACKGROUND_GRACE, futures_util::future::join_all(background)).await;
+    match drained {
+        Ok(results) => {
+            for r in results {
+                if let Err(e) = r {
+                    tracing::warn!(error = %e, "background task ended abnormally");
+                }
+            }
+        }
+        Err(_) => tracing::warn!(
+            grace_secs = BACKGROUND_GRACE.as_secs(),
+            "background tasks did not finish within the shutdown grace period"
+        ),
+    }
+
     Ok(())
 }
+
+/// Upper bound on the post-listener wait for background tasks. Covers one
+/// webhook delivery attempt plus its outbox write.
+const BACKGROUND_GRACE: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// Run embedded migrations on startup unless `[database].skip_migrations` opts out
 /// (for deploys that gate schema changes through a pipeline).

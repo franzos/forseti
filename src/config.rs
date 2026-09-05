@@ -160,13 +160,27 @@ fn default_true() -> bool {
     true
 }
 
-/// Deployment-shape proxy trust. Flip on only when the upstream
-/// reverse proxy strips client-sent forwarded-for headers before
-/// re-adding its own. See `docs/operator-guide-proxy.md`.
-#[derive(Debug, Clone, Default, Deserialize)]
+/// Deployment-shape proxy trust. Flip on only when Forseti's listener is
+/// reachable solely through a reverse proxy that appends the peer address
+/// to `X-Forwarded-For`. See `docs/operator-guide-proxy.md`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
 pub struct ProxyConfig {
-    #[serde(default)]
     pub trust_forwarded_for: bool,
+    /// Number of proxies between the client and Forseti, each appending one
+    /// `X-Forwarded-For` entry. The client is the entry this many from the
+    /// right; anything further left is caller-supplied and ignored. `0` is
+    /// treated as `1`.
+    pub trusted_hops: u8,
+}
+
+impl Default for ProxyConfig {
+    fn default() -> Self {
+        Self {
+            trust_forwarded_for: false,
+            trusted_hops: 1,
+        }
+    }
 }
 
 /// POSIX account materialisation knobs. Drives uid/gid allocation and
@@ -554,6 +568,14 @@ pub struct DatabaseConfig {
     /// through a deploy pipeline rather than the running binary.
     #[serde(default)]
     pub skip_migrations: bool,
+    /// Postgres pool ceiling. `None` leaves deadpool's default (twice the
+    /// CPU count). Ignored for sqlite, whose pool is fixed at 8.
+    #[serde(default)]
+    pub max_connections: Option<usize>,
+    /// How long a request waits for a free connection before failing with a
+    /// pool error instead of hanging. Applies to both backends.
+    #[serde(default = "default_acquire_timeout_secs")]
+    pub acquire_timeout_secs: u64,
 }
 
 impl Default for DatabaseConfig {
@@ -561,8 +583,14 @@ impl Default for DatabaseConfig {
         Self {
             url: default_database_url(),
             skip_migrations: false,
+            max_connections: None,
+            acquire_timeout_secs: default_acquire_timeout_secs(),
         }
     }
+}
+
+fn default_acquire_timeout_secs() -> u64 {
+    30
 }
 
 fn default_database_url() -> String {
@@ -1608,11 +1636,13 @@ mod tests {
         let cfg = DatabaseConfig {
             url: "postgres://u:p@host/db".into(),
             skip_migrations: false,
+            ..DatabaseConfig::default()
         };
         assert_eq!(cfg.backend(), DatabaseBackend::Postgres);
         let cfg2 = DatabaseConfig {
             url: "postgresql://u:p@host/db".into(),
             skip_migrations: false,
+            ..DatabaseConfig::default()
         };
         assert_eq!(cfg2.backend(), DatabaseBackend::Postgres);
     }
@@ -1622,11 +1652,13 @@ mod tests {
         let cfg = DatabaseConfig {
             url: "sqlite://./forseti.db".into(),
             skip_migrations: false,
+            ..DatabaseConfig::default()
         };
         assert_eq!(cfg.backend(), DatabaseBackend::Sqlite);
         let cfg2 = DatabaseConfig {
             url: "garbage".into(),
             skip_migrations: false,
+            ..DatabaseConfig::default()
         };
         assert_eq!(cfg2.backend(), DatabaseBackend::Sqlite);
     }

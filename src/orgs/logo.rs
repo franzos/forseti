@@ -230,7 +230,7 @@ pub(crate) fn router(orgs_cfg: &OrgsConfig, proxy_cfg: &ProxyConfig) -> Router<A
 
     rate_limit::dual_window(
         r,
-        proxy_cfg.trust_forwarded_for,
+        proxy_cfg,
         per_minute,
         per_hour,
         rate_limit::plain_text_error("logo"),

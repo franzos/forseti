@@ -53,9 +53,9 @@ pub(crate) fn router(proxy_cfg: &ProxyConfig, claim_cfg: &ClaimEmailConfig) -> R
         .route("/claim-email", get(claim_get).post(claim_post))
         .route("/claim-email/confirm", get(confirm_get).post(confirm_post));
 
-    rate_limit::dual_window(
+    rate_limit::dual_window_with_backstop(
         r,
-        proxy_cfg.trust_forwarded_for,
+        proxy_cfg,
         claim_cfg.rate_limit_per_minute,
         claim_cfg.rate_limit_per_hour,
         rate_limit::plain_text_error("claim-email"),

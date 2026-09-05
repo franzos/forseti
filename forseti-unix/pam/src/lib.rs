@@ -39,16 +39,15 @@ use crate::pam::constants::{PamFlag, PamMessageStyle, PamResultCode};
 use crate::pam::conv::PamConv;
 use crate::pam::module::{PamHandle, PamHooks};
 
-const DEFAULT_SOCKET: &str = "/run/forseti/unixd.sock";
+// Fixed, never read from the environment: sudo/su/login run this module with
+// the caller's environ, so an env override would let a local user substitute
+// their own socket and answer as the daemon.
+const SOCKET: &str = "/run/forseti/unixd.sock";
 
 /// Per-call socket timeout. Each request/response is a sub-ms local round-trip;
 /// the long inter-poll wait happens in `core::run_device_auth`, never here. Kept
 /// short so a wedged daemon can't pin the PAM stack.
 const CALL_TIMEOUT: Duration = Duration::from_secs(3);
-
-fn socket_path() -> String {
-    std::env::var("FORSETI_UNIXD_SOCKET").unwrap_or_else(|_| DEFAULT_SOCKET.to_string())
-}
 
 /// Real conversation seam over a `PamConv`.
 struct PamConvChannel<'a> {
@@ -95,7 +94,7 @@ impl PamHooks for PamForseti {
 
         let channel = PamConvChannel { conv };
         let daemon = SocketDaemon {
-            socket: socket_path(),
+            socket: SOCKET.to_string(),
         };
 
         crate::core::run_device_auth(
@@ -115,7 +114,7 @@ impl PamHooks for PamForseti {
         };
 
         let daemon = SocketDaemon {
-            socket: socket_path(),
+            socket: SOCKET.to_string(),
         };
         match daemon.query(&PamRequest::AccountAllowed {
             username: username.clone(),
