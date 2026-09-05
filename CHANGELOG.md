@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.2.4] - 2026-09-05
+
+### Fixed
+- The image's css stage ignored a failed Tailwind download
+- The NSS module pulled the unmaintained `paste` crate
+
 ## [0.2.3] - 2026-09-05
 
 ### Added
