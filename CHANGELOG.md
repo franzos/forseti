@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.2.3] - 2026-09-05
+
+### Added
+- `[proxy].trusted_hops` picks the client from the forwarded-for chain
+- `[database].max_connections` and `acquire_timeout_secs`
+
+### Changed
+- Licences signed by the shop's web key are accepted alongside the root key
+- The host client reads its daemon socket path from the binary, not the environment
+
+### Security
+- The host client rejected malformed POSIX names only at the server
+- Outbound fetches followed redirects and could buffer an uncapped body
+- Client-supplied `client_uri` and `logo_uri` were rendered unchecked
+
 ## [0.2.2] - 2026-08-09
 
 ### Fixed

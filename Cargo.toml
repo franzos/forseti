@@ -1,6 +1,6 @@
 [package]
 name = "forseti"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2024"
 description = "Self-service UI and Hydra login/consent bridge for Ory Kratos + Hydra"
 # Forseti is dual-licensed: everything outside `src/commercial/` is
@@ -13,6 +13,11 @@ description = "Self-service UI and Hydra login/consent bridge for Ory Kratos + H
 # crates.io; the commercial subdirectory is documented in README.md
 # and enforced at runtime by `LicenseHandle::feature`.
 license = "AGPL-3.0-or-later"
+
+[lints.clippy]
+# Handler helpers return `Result<_, Response>`; an axum Response is large by
+# construction, and boxing it would only move the allocation.
+result_large_err = "allow"
 
 [dependencies]
 axum = { version = "0.8", features = ["macros", "multipart"] }
