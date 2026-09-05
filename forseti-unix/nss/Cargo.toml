@@ -13,8 +13,7 @@ name = "nss_forseti"
 crate-type = ["cdylib"]
 
 [dependencies]
-# libnss 0.9 pulls the unmaintained `paste` (RUSTSEC-2024-0436), compile-time
-# only. Upstream swap to `pastey` proposed in csnewman/libnss-rs#26; bump once released.
+# Patched to the franzos fork (paste -> pastey, RUSTSEC-2024-0436); see the workspace Cargo.toml.
 libnss = "0.9"
 libc = "0.2"
 forseti-unix-proto = { path = "../proto" }

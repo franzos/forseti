@@ -1,3 +1,6 @@
 [workspace]
 resolver = "2"
 members = ["proto", "daemon", "client", "authorizedkeys", "nss", "pam"]
+
+[patch.crates-io]
+libnss = { git = "https://github.com/franzos/libnss-rs", rev = "34ceb19629be5d9b642848bc288a937baeeedfa5" }

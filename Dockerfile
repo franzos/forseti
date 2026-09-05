@@ -2,6 +2,7 @@
 
 # --- CSS stage: build static/styles.css with the Tailwind v4 standalone CLI.
 FROM debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2 AS css
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 WORKDIR /src
 ARG TAILWIND_VERSION=v4.1.16
 # Release assets are mutable; pin the binary by digest (bump together with the
