@@ -1681,13 +1681,13 @@ Place templates at `/etc/config/kratos/email-templates/<flow>/<template>.gotmpl`
 
 ## Member profiles
 
-Off by default. When `[profiles].enabled = true`:
+The **Username** form on `/settings/profile` is always available; it is the handle downstream apps read as `preferred_username` (see [Usernames](#usernames) below). Everything else is off by default. When `[profiles].enabled = true`:
 
-- `/settings/profile` grows a **Public profile** form (username, bio, location, pronouns, website, avatar URL, links).
+- `/settings/profile` grows a **Public profile** form (bio, location, pronouns, website, avatar URL, links).
 - `/users/{identity_id}` renders a profile view — only when the viewer shares at least one org with the target. Anonymous viewers and non-sharing viewers see a 404 (not 403; no "this page exists" leak).
 - The members roster on `/settings/organization/members` links each row with a non-empty profile to that view page.
 - Avatar: external `avatar_url` only — no upload pipeline. When unset, a deterministic SVG identicon (hash → 5-cell mirrored pattern) renders as fallback.
-- Audit: `profile.updated` event on each save, plus `profile.username_changed` (with the old and new handle) whenever the username field changes. No view-events.
+- Audit: `profile.updated` event on each public-profile save. `profile.username_changed` (with the old and new handle) is logged whenever the username changes, feature on or off. No view-events.
 
 ```toml
 [profiles]
@@ -1696,12 +1696,15 @@ enabled = true
 
 ### OIDC exposure
 
-The `profile` scope picks up additional standard OIDC claims when `[profiles].enabled` is on AND the user filled the fields:
+The `profile` scope always carries the handle when the user set one:
+
+- `preferred_username` — the handle the user chose, omitted when unset
+- `updated_at` — seconds since the epoch, last change to any portal-owned profile field
+
+With `[profiles].enabled` on it picks up two more standard claims when the user filled the fields:
 
 - `picture` — the `avatar_url` value
 - `website` — the `website` value
-- `preferred_username` — the handle the user chose, omitted when unset
-- `updated_at` — seconds since the epoch, last change to any portal-owned profile field
 
 #### Usernames
 

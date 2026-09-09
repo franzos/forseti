@@ -1,7 +1,9 @@
-//! Forseti-owned member profiles, gated by `[profiles].enabled`. Opt-in data
-//! keyed by Kratos identity_id, surfaced three ways: edit at
-//! `/settings/profile`, view at `/users/{identity_id}` (shared-org gated), and
-//! OIDC `profile` / `extended_profile` claims (see `src/oauth/consent.rs`).
+//! Forseti-owned member profiles. Opt-in data keyed by Kratos identity_id,
+//! surfaced three ways: edit at `/settings/profile`, view at
+//! `/users/{identity_id}` (shared-org gated), and OIDC `profile` /
+//! `extended_profile` claims (see `src/oauth/consent.rs`). The handle
+//! (`preferred_username`) is always available; everything else is gated by
+//! `[profiles].enabled`.
 
 use std::collections::HashMap;
 
@@ -168,8 +170,8 @@ struct UsernameTombstone {
 }
 
 /// Input bundle for [`upsert`]; blank fields collapse to NULL so callers can
-/// clear a field by sending it empty. `username` must already have passed
-/// [`username::validate`].
+/// clear a field by sending it empty. The handle is not part of it: see
+/// [`set_username`].
 pub struct ProfileInput<'a> {
     pub identity_id: &'a str,
     pub bio: &'a str,
@@ -178,7 +180,27 @@ pub struct ProfileInput<'a> {
     pub website: &'a str,
     pub avatar_url: &'a str,
     pub links: &'a [ProfileLink],
-    pub username: &'a str,
+}
+
+fn null_if_empty(s: &str) -> Option<String> {
+    let t = s.trim();
+    if t.is_empty() {
+        None
+    } else {
+        Some(t.to_string())
+    }
+}
+
+impl Profile {
+    /// The row reduced to what is served with `[profiles].enabled = false`:
+    /// the handle and its change timestamp.
+    pub fn handle_only(self) -> Profile {
+        Profile {
+            username: self.username,
+            updated_at: self.updated_at,
+            ..Default::default()
+        }
+    }
 }
 
 /// Minimum gap between two handle changes. Slows down an attacker cycling
@@ -213,24 +235,14 @@ impl From<diesel::result::Error> for TxError {
     }
 }
 
-/// Insert-or-update the profile for `identity_id`. Handle changes are settled
-/// in the same transaction as the rest of the profile, so a concurrent save
-/// can't slip between the availability check and the write.
-pub async fn upsert(db: &DbPool, input: ProfileInput<'_>) -> Result<(), SaveError> {
-    let null_if_empty = |s: &str| {
-        let t = s.trim();
-        if t.is_empty() {
-            None
-        } else {
-            Some(t.to_string())
-        }
-    };
+/// Insert-or-update the extended fields for `identity_id`. The handle is left
+/// as it is; [`set_username`] owns it.
+pub async fn upsert(db: &DbPool, input: ProfileInput<'_>) -> Result<()> {
     let links_json = if input.links.is_empty() {
         None
     } else {
-        Some(serde_json::to_string(input.links).map_err(|e| SaveError::Other(e.into()))?)
+        Some(serde_json::to_string(input.links)?)
     };
-    let username = null_if_empty(input.username);
     let row = ProfileUpsert {
         identity_id: input.identity_id.to_string(),
         bio: null_if_empty(input.bio),
@@ -239,6 +251,47 @@ pub async fn upsert(db: &DbPool, input: ProfileInput<'_>) -> Result<(), SaveErro
         website: null_if_empty(input.website),
         avatar_url: null_if_empty(input.avatar_url),
         links_json,
+        updated_at: Utc::now().to_rfc3339(),
+        username: None,
+        username_lc: None,
+    };
+    db_interact!(db, |conn| {
+        use diesel::upsert::excluded;
+        // ON CONFLICT DO UPDATE so two concurrent first-saves don't trip
+        // the PK constraint. Supported by both backends (sqlite >= 3.24).
+        diesel::insert_into(member_profiles::table)
+            .values(&row)
+            .on_conflict(member_profiles::identity_id)
+            .do_update()
+            .set((
+                member_profiles::bio.eq(excluded(member_profiles::bio)),
+                member_profiles::location.eq(excluded(member_profiles::location)),
+                member_profiles::pronouns.eq(excluded(member_profiles::pronouns)),
+                member_profiles::website.eq(excluded(member_profiles::website)),
+                member_profiles::avatar_url.eq(excluded(member_profiles::avatar_url)),
+                member_profiles::links_json.eq(excluded(member_profiles::links_json)),
+                member_profiles::updated_at.eq(excluded(member_profiles::updated_at)),
+            ))
+            .execute(conn)
+    })?;
+    Ok(())
+}
+
+/// Set (or clear, with an empty string) the handle for `identity_id`; the
+/// profile row is created if there is none. Availability, tombstone and
+/// cooldown checks are settled in the same transaction as the write, so a
+/// concurrent save can't slip between the check and the write. `username`
+/// must already have passed [`username::validate`].
+pub async fn set_username(db: &DbPool, identity_id: &str, username: &str) -> Result<(), SaveError> {
+    let username = null_if_empty(username);
+    let row = ProfileUpsert {
+        identity_id: identity_id.to_string(),
+        bio: None,
+        location: None,
+        pronouns: None,
+        website: None,
+        avatar_url: None,
+        links_json: None,
         updated_at: Utc::now().to_rfc3339(),
         username_lc: username.as_deref().map(username::fold),
         username,
@@ -308,19 +361,11 @@ pub async fn upsert(db: &DbPool, input: ProfileInput<'_>) -> Result<(), SaveErro
             }
         }
 
-        // ON CONFLICT DO UPDATE so two concurrent first-saves don't trip
-        // the PK constraint. Supported by both backends (sqlite >= 3.24).
         diesel::insert_into(member_profiles::table)
             .values(&row)
             .on_conflict(member_profiles::identity_id)
             .do_update()
             .set((
-                member_profiles::bio.eq(excluded(member_profiles::bio)),
-                member_profiles::location.eq(excluded(member_profiles::location)),
-                member_profiles::pronouns.eq(excluded(member_profiles::pronouns)),
-                member_profiles::website.eq(excluded(member_profiles::website)),
-                member_profiles::avatar_url.eq(excluded(member_profiles::avatar_url)),
-                member_profiles::links_json.eq(excluded(member_profiles::links_json)),
                 member_profiles::updated_at.eq(excluded(member_profiles::updated_at)),
                 member_profiles::username.eq(excluded(member_profiles::username)),
                 member_profiles::username_lc.eq(excluded(member_profiles::username_lc)),
@@ -346,7 +391,7 @@ mod tests {
     use super::*;
     use crate::orgs::db::test_pool;
 
-    fn input<'a>(identity_id: &'a str, username: &'a str) -> ProfileInput<'a> {
+    fn input(identity_id: &str) -> ProfileInput<'_> {
         ProfileInput {
             identity_id,
             bio: "",
@@ -355,12 +400,7 @@ mod tests {
             website: "",
             avatar_url: "",
             links: &[],
-            username,
         }
-    }
-
-    async fn set_username(db: &DbPool, id: &str, username: &str) -> Result<(), SaveError> {
-        upsert(db, input(id, username)).await
     }
 
     /// Backdate this identity's tombstones so the cooldown is out of the way.
@@ -473,7 +513,7 @@ mod tests {
             &db,
             ProfileInput {
                 bio: "hello",
-                ..input("a", "franz")
+                ..input("a")
             },
         )
         .await
@@ -481,5 +521,39 @@ mod tests {
         let p = fetch(&db, "a").await.unwrap();
         assert_eq!(p.bio.as_deref(), Some("hello"));
         assert_eq!(p.username.as_deref(), Some("franz"));
+    }
+
+    #[tokio::test]
+    async fn setting_a_handle_keeps_the_extended_fields() {
+        let db = test_pool().await;
+        upsert(
+            &db,
+            ProfileInput {
+                bio: "hello",
+                ..input("a")
+            },
+        )
+        .await
+        .unwrap();
+        set_username(&db, "a", "franz").await.unwrap();
+        let p = fetch(&db, "a").await.unwrap();
+        assert_eq!(p.bio.as_deref(), Some("hello"));
+        assert_eq!(p.username.as_deref(), Some("franz"));
+    }
+
+    #[test]
+    fn handle_only_drops_everything_but_the_handle() {
+        let p = Profile {
+            bio: Some("hello".into()),
+            website: Some("https://example.com".into()),
+            avatar_url: Some("https://example.com/me.png".into()),
+            username: Some("franz".into()),
+            updated_at: "2026-07-31T10:00:00+00:00".into(),
+            ..Default::default()
+        }
+        .handle_only();
+        assert_eq!(p.username.as_deref(), Some("franz"));
+        assert_eq!(p.updated_at, "2026-07-31T10:00:00+00:00");
+        assert!(p.bio.is_none() && p.website.is_none() && p.avatar_url.is_none());
     }
 }

@@ -1,6 +1,7 @@
 //! `/settings/profile` — edit display fields on the identity's traits
-//! (via Kratos) and the Forseti-owned extended profile (bio, website,
-//! pronouns, links) when `[profiles].enabled = true`.
+//! (via Kratos), the handle emitted as `preferred_username`, and the
+//! Forseti-owned extended profile (bio, website, pronouns, links) when
+//! `[profiles].enabled = true`.
 
 use crate::csrf::CsrfForm;
 use askama::Template;
@@ -37,6 +38,7 @@ pub(crate) struct SettingsProfileTemplate {
     /// One `label|url` per line, edited as a single textarea.
     pub(crate) links_text: String,
     pub(crate) extended_saved: bool,
+    pub(crate) username_saved: bool,
     /// `false` when the identity has any unverified `verifiable_address`;
     /// drives the "Not verified" hint.
     pub(crate) email_verified: bool,
@@ -64,6 +66,7 @@ pub(crate) async fn settings_profile(
         &sess,
         banner,
         saved.profile_saved.unwrap_or(false),
+        saved.username_saved.unwrap_or(false),
         locale,
     )
     .await
@@ -71,8 +74,6 @@ pub(crate) async fn settings_profile(
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct ExtendedProfileForm {
-    #[serde(default)]
-    pub(crate) username: String,
     #[serde(default)]
     pub(crate) bio: String,
     #[serde(default)]
@@ -133,6 +134,61 @@ pub(crate) async fn settings_profile_extended_save(
         }
     }
 
+    if let Err(err) = profiles::upsert(
+        &state.db,
+        profiles::ProfileInput {
+            identity_id: &sess.identity_id,
+            bio: form.bio.trim(),
+            location: form.location.trim(),
+            pronouns: form.pronouns.trim(),
+            website: form.website.trim(),
+            avatar_url: form.avatar_url.trim(),
+            links: &links,
+        },
+    )
+    .await
+    {
+        tracing::error!(error = ?err, "settings_profile_extended_save: upsert failed");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            crate::i18n::lookup(&locale, "settings-save-failed"),
+        )
+            .into_response();
+    }
+
+    let _ = audit::log(
+        &state.db,
+        AuditEvent::new(action::PROFILE_UPDATED)
+            .actor_user(&sess.identity_id, &sess.email)
+            .target(
+                crate::audit::target_kind::IDENTITY,
+                sess.identity_id.clone(),
+            )
+            .with_ctx(&actx)
+            .metadata(audit_metadata!(
+                "link_count" => links.len() as i64,
+            )),
+    )
+    .await;
+
+    Redirect::to("/settings/profile?profile_saved=1").into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct UsernameForm {
+    #[serde(default)]
+    pub(crate) username: String,
+}
+
+/// Save the handle. Not gated by `[profiles].enabled`: `preferred_username`
+/// is a standard `profile` claim and RPs provision local accounts from it.
+pub(crate) async fn settings_profile_username_save(
+    State(state): State<AppState>,
+    sess: crate::extractors::RequireSession,
+    actx: AuditCtx,
+    crate::page_chrome::ReqLocale(locale): crate::page_chrome::ReqLocale,
+    CsrfForm(form): CsrfForm<UsernameForm>,
+) -> Response {
     // Empty clears the handle; anything else must survive validation before it
     // can reach an RP as `preferred_username`.
     let username = if form.username.trim().is_empty() {
@@ -155,21 +211,7 @@ pub(crate) async fn settings_profile_extended_save(
         .ok()
         .and_then(|p| p.username);
 
-    if let Err(e) = profiles::upsert(
-        &state.db,
-        profiles::ProfileInput {
-            identity_id: &sess.identity_id,
-            bio: form.bio.trim(),
-            location: form.location.trim(),
-            pronouns: form.pronouns.trim(),
-            website: form.website.trim(),
-            avatar_url: form.avatar_url.trim(),
-            links: &links,
-            username: &username,
-        },
-    )
-    .await
-    {
+    if let Err(e) = profiles::set_username(&state.db, &sess.identity_id, &username).await {
         let (status, key) = match e {
             profiles::SaveError::UsernameTaken => {
                 (StatusCode::CONFLICT, "settings-profile-username-taken")
@@ -178,30 +220,15 @@ pub(crate) async fn settings_profile_extended_save(
                 (StatusCode::CONFLICT, "settings-profile-username-cooldown")
             }
             profiles::SaveError::Other(err) => {
-                tracing::error!(error = ?err, "settings_profile_extended_save: upsert failed");
+                tracing::error!(error = ?err, "settings_profile_username_save: save failed");
                 (StatusCode::INTERNAL_SERVER_ERROR, "settings-save-failed")
             }
         };
         return (status, crate::i18n::lookup(&locale, key)).into_response();
     }
 
-    let _ = audit::log(
-        &state.db,
-        AuditEvent::new(action::PROFILE_UPDATED)
-            .actor_user(&sess.identity_id, &sess.email)
-            .target(
-                crate::audit::target_kind::IDENTITY,
-                sess.identity_id.clone(),
-            )
-            .with_ctx(&actx)
-            .metadata(audit_metadata!(
-                "link_count" => links.len() as i64,
-            )),
-    )
-    .await;
-
-    // Separate row: an RP may have provisioned a local account from the old
-    // handle, so operators need the before/after without diffing profile saves.
+    // An RP may have provisioned a local account from the old handle, so
+    // operators need the before/after.
     let new_username = (!username.is_empty()).then_some(username.as_str());
     if previous.as_deref() != new_username {
         let _ = audit::log(
@@ -221,7 +248,7 @@ pub(crate) async fn settings_profile_extended_save(
         .await;
     }
 
-    Redirect::to("/settings/profile?profile_saved=1").into_response()
+    Redirect::to("/settings/profile?username_saved=1").into_response()
 }
 
 /// Parse one `label|url` per line; empty and malformed lines are dropped.

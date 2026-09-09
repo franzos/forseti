@@ -230,7 +230,7 @@ support_email = "support@example.com"
 # Forseti-owned per-identity profiles (bio, location, pronouns, website,
 # avatar URL, links). When `enabled = true`:
 #   * `/settings/profile` grows a "Public profile" form for the editable
-#     fields.
+#     fields. (The username / `preferred_username` form is always there.)
 #   * `/users/{identity_id}` renders a profile view to anyone sharing an
 #     org with the target.
 #   * The members roster on `/settings/organization/members` links each

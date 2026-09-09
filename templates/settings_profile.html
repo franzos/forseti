@@ -93,6 +93,42 @@
       </form>
     </div>
 
+    <div class="mt-stack-lg bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg">
+      <h2 class="font-headline-md text-headline-md text-on-surface mb-stack-sm">{{ chrome.t("settings-profile-username-heading") }}</h2>
+
+      {% if username_saved %}
+        <div class="mb-stack-md bg-tertiary-container/40 border border-outline-variant rounded-lg px-stack-md py-stack-sm font-body-sm text-body-sm text-on-tertiary-container">
+          {{ chrome.t("settings-profile-username-saved") }}
+        </div>
+      {% endif %}
+
+      <form method="POST"
+            action="/settings/profile/username"
+            class="flex flex-col gap-stack-md">
+        <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+        <div class="flex flex-col gap-stack-sm">
+          <label for="username" class="font-label-md text-label-md text-on-surface">{{ chrome.t("settings-profile-public-label-username") }}</label>
+          <input id="username"
+                 type="text"
+                 name="username"
+                 value="{{ username }}"
+                 maxlength="39"
+                 autocapitalize="none"
+                 autocomplete="username"
+                 spellcheck="false"
+                 placeholder="j.doe"
+                 class="w-full bg-surface-container-lowest border border-outline-variant text-on-surface font-mono text-body-md rounded-lg py-stack-md px-stack-md focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary">
+          <p class="font-body-sm text-body-sm text-on-surface-variant">{{ chrome.t("settings-profile-username-hint") }}</p>
+        </div>
+        <div>
+          <button type="submit"
+                  class="bg-primary text-on-primary rounded-lg px-stack-lg py-stack-md font-label-md text-label-md">
+            {{ chrome.t("settings-profile-username-save") }}
+          </button>
+        </div>
+      </form>
+    </div>
+
     {% if profiles_enabled %}
       <div class="mt-stack-lg bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg">
         <h2 class="font-headline-md text-headline-md text-on-surface mb-stack-sm">{{ chrome.t("settings-profile-public-heading") }}</h2>
@@ -110,20 +146,6 @@
               action="/settings/profile/extended"
               class="flex flex-col gap-stack-md">
           <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
-          <div class="flex flex-col gap-stack-sm">
-            <label for="username" class="font-label-md text-label-md text-on-surface">{{ chrome.t("settings-profile-public-label-username") }}</label>
-            <input id="username"
-                   type="text"
-                   name="username"
-                   value="{{ username }}"
-                   maxlength="39"
-                   autocapitalize="none"
-                   autocomplete="username"
-                   spellcheck="false"
-                   placeholder="j.doe"
-                   class="w-full bg-surface-container-lowest border border-outline-variant text-on-surface font-mono text-body-md rounded-lg py-stack-md px-stack-md focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary">
-            <p class="font-body-sm text-body-sm text-on-surface-variant">{{ chrome.t("settings-profile-username-hint") }}</p>
-          </div>
           <div class="flex flex-col gap-stack-sm">
             <label for="bio" class="font-label-md text-label-md text-on-surface">{{ chrome.t("settings-profile-public-label-bio") }}</label>
             <textarea id="bio"

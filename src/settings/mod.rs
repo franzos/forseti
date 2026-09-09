@@ -46,6 +46,10 @@ pub(crate) fn router() -> Router<AppState> {
             "/settings/profile/extended",
             post(profile::settings_profile_extended_save),
         )
+        .route(
+            "/settings/profile/username",
+            post(profile::settings_profile_username_save),
+        )
         .route("/settings/language", post(profile::settings_language_save))
         .route("/settings/password", get(password::settings_password))
         .route("/settings/2fa", get(two_factor::settings_2fa))
@@ -387,6 +391,8 @@ pub(crate) async fn fetch_settings_subpage(
 pub(crate) struct ProfileSavedQuery {
     #[serde(default, deserialize_with = "crate::web::deserialize_bool_str")]
     pub(crate) profile_saved: Option<bool>,
+    #[serde(default, deserialize_with = "crate::web::deserialize_bool_str")]
+    pub(crate) username_saved: Option<bool>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -399,6 +405,7 @@ pub(crate) async fn settings_subpage(
     sess: &crate::extractors::RequireSession,
     banner: crate::handoff::ReferrerBanner,
     profile_saved: bool,
+    username_saved: bool,
     locale: LanguageIdentifier,
 ) -> Response {
     let (session, flow) =
@@ -411,8 +418,9 @@ pub(crate) async fn settings_subpage(
         .await
         .unwrap_or_default();
     let is_profile = matches!(section, InlineRenderSection::Profile);
-    // Load the Forseti-owned extended fields only for the profile section.
-    let profile = if is_profile && state.cfg.profiles.enabled {
+    // Load the Forseti-owned fields only for the profile section. The handle
+    // is shown regardless of `[profiles].enabled`; the template hides the rest.
+    let profile = if is_profile {
         Some(
             crate::profiles::fetch(&state.db, &sess.identity_id)
                 .await
@@ -421,7 +429,6 @@ pub(crate) async fn settings_subpage(
     } else {
         None
     };
-    let extended_saved = is_profile && profile_saved;
     render_settings(
         state,
         headers,
@@ -431,7 +438,8 @@ pub(crate) async fn settings_subpage(
         &flow,
         section,
         profile,
-        extended_saved,
+        is_profile && profile_saved,
+        is_profile && username_saved,
         banner.0,
         locale,
     )
@@ -448,6 +456,7 @@ fn render_settings(
     section: InlineRenderSection,
     profile: Option<crate::profiles::Profile>,
     extended_saved: bool,
+    username_saved: bool,
     referrer_banner: Option<crate::handoff::ReferrerBannerView>,
     locale: LanguageIdentifier,
 ) -> Response {
@@ -493,6 +502,7 @@ fn render_settings(
                 avatar_url: p.avatar_url.unwrap_or_default(),
                 links_text,
                 extended_saved,
+                username_saved,
                 email_verified: !session_needs_verification(session),
                 referrer_banner,
             })

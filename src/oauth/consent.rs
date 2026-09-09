@@ -1043,18 +1043,18 @@ async fn finalize_consent(
         );
     }
 
-    // Pre-fetch the Forseti-owned profile only when the feature is on and a
-    // consuming scope is granted; skips the DB hit otherwise.
-    let profile_needed = state.cfg.profiles.enabled
-        && grant_scope
-            .iter()
-            .any(|s| s == "profile" || s == "extended_profile");
+    // Pre-fetch the Forseti-owned profile only when a consuming scope is
+    // granted; skips the DB hit otherwise. With the feature off, `profile`
+    // still carries the handle, and nothing else from the row.
+    let profiles_enabled = state.cfg.profiles.enabled;
+    let profile_needed = grant_scope
+        .iter()
+        .any(|s| s == "profile" || (profiles_enabled && s == "extended_profile"));
     let profile = if profile_needed {
-        Some(
-            crate::profiles::fetch(&state.db, subject)
-                .await
-                .unwrap_or_default(),
-        )
+        let p = crate::profiles::fetch(&state.db, subject)
+            .await
+            .unwrap_or_default();
+        Some(if profiles_enabled { p } else { p.handle_only() })
     } else {
         None
     };

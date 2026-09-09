@@ -76,6 +76,7 @@ pub(crate) async fn settings_password(
         &sess,
         banner,
         false,
+        false,
         locale,
     )
     .await
