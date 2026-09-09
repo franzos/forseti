@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.5] - 2026-09-09
+
+### Changed
+- The username form is always on `/settings/profile`, no longer behind `[profiles].enabled`
+- `preferred_username` ships with the `profile` scope regardless of that setting
+- Username and public profile save independently
+
 ## [0.2.4] - 2026-09-05
 
 ### Fixed
