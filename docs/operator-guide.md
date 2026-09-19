@@ -454,7 +454,7 @@ The picker at `/admin/clients/new` is always the source of truth, but the bundle
 | Files, media & knowledge | Nextcloud, Seafile, Immich, Jellyfin, Audiobookshelf, Paperless-ngx, Outline, BookStack, HedgeDoc |
 | Collaboration & productivity | Matrix Synapse, Discourse, Rocket.Chat, Mattermost\*, OpenProject\*, Plane\*, Vikunja, Mealie, Penpot, WordPress |
 | Data, monitoring & feeds | Grafana, Apache Superset, Matomo, Miniflux, Open WebUI, Parseable |
-| Other | Mastodon, Vaultwarden, Actual Budget, Atlassian Data Center\* |
+| Other | Mastodon, Vaultwarden, Actual Budget, Atlassian Data Center\*, [Tailscale](#logging-into-tailscale) |
 
 \* OIDC login requires that app's paid/enterprise tier — the template still works, but the form's guidance banner flags the licensing requirement.
 
@@ -468,6 +468,50 @@ Some templates carry a guidance banner on the form (e.g. PROVIDER_NAME notes, au
 The template choice doesn't change the client's type: the stored `client_type` records the base preset (e.g. `web_app`), so the list filter and detail-page badge are unaffected by which app you started from. The template slug itself is recorded Forseti-side (purely so the app's logo can appear next to the client on the list) — it carries no trust or behaviour, and only clients created from a template after this shipped will show a logo.
 
 After creating a client, its detail page (`/admin/clients/{id}`) shows a "Connection details" card with the issuer and OIDC endpoints (authorization, token, userinfo, JWKS, end-session) plus the client ID — everything you paste into the app's OIDC settings on the other end. The endpoints come from Hydra's discovery document; if Forseti can't reach Hydra at render time the card hides the endpoints and shows a note rather than guessing a (possibly wrong) issuer.
+
+### Logging into Tailscale
+
+Tailscale's [custom OIDC](https://tailscale.com/kb/1240/sso-custom-oidc) support takes any compliant provider, so a tailnet can sign in against your Forseti. Two of the requirements sit outside Forseti: the issuer has to be reachable from the public internet (Tailscale's servers fetch discovery and JWKS themselves, so a tailnet-only or LAN-only deployment won't do), and you have to prove control of your email domain with a WebFinger document. Tailscale reads both during tailnet creation; after that it behaves like any other provider.
+
+1. **Create the client.** Pick the Tailscale template at `/admin/clients/new`. The callback is Tailscale's own (`https://login.tailscale.com/a/oauth_response`) and needs no editing; scope is `openid profile email`, authentication is `client_secret_basic`. Copy the client ID and secret.
+2. **Publish WebFinger.** On the domain of your Tailscale admin's email address, serve `https://example.com/.well-known/webfinger` as `application/jrd+json`:
+
+   ```json
+   {
+     "subject": "acct:admin@example.com",
+     "links": [
+       {
+         "rel": "http://openid.net/specs/connect/1.0/issuer",
+         "href": "https://auth.example.com"
+       }
+     ]
+   }
+   ```
+
+   The `href` must be identical to the `issuer` in `https://auth.example.com/.well-known/openid-configuration` — that's Hydra's `urls.self.issuer`, trailing slash and all. A static file on the domain's web server is enough; Forseti doesn't serve this document, and it doesn't belong on the Forseti host unless Forseti is what answers for that domain.
+3. **Hand Tailscale the details.** Issuer URL, client ID, client secret. Leave the prompt at the default `consent`; `select_account` is accepted by Hydra but ignored ([ory/hydra#1943](https://github.com/ory/hydra/issues/1943)), so it won't do what the name suggests.
+
+What Tailscale reads from the id_token: `sub`, plus `email` and `email_verified` from the `email` scope and `name`/`preferred_username` from `profile`. Accounts are keyed on the email address. Hydra's default RS256 with a 2048-bit key satisfies Tailscale's "ES256 or RSA ≥ 2048" requirement.
+
+Three limits worth knowing before you commit to it:
+
+- **No provisioning.** Tailscale doesn't support user or group provisioning over custom OIDC, so Forseti's `groups`/`org`/`orgs` claims are ignored and ACL groups stay hand-maintained on the Tailscale side.
+- **The whole domain moves at once.** Every user on that email domain authenticates through the same provider.
+- **Logout isn't federated.** Signing out of Tailscale leaves the Forseti session standing, and vice versa.
+
+Custom OIDC is free for up to three users; past that Tailscale gates it behind a paid plan.
+
+#### Tailscale and organizations
+
+Tailscale keys everything on the user's email domain, so [organizations](#organizations) don't carry across. A single tailnet corresponds to one email domain, not to one Forseti org:
+
+- **One org, one email domain** (the default deployment): nothing to think about. One WebFinger document, one client, one tailnet.
+- **Several orgs sharing one email domain** (departments of the same company): still one tailnet, and the org boundary is invisible on the far side — Tailscale reads neither the `groups` claim nor `org`/`orgs`, so tailnet access and ACL groups are maintained by hand in Tailscale.
+- **Orgs on different email domains**: one tailnet per domain, each with its own WebFinger document on *that* domain — which means whoever controls that domain's web server has to publish it. The documents can all name the same Forseti issuer; give each tailnet its own client so secrets rotate independently. The tailnets themselves stay separate: separate ACLs, devices and billing.
+
+Note that the org stamped on a client is an admin-visibility scope, not an access rule: a client created inside org B is managed by that org's admins, but any Forseti identity can authenticate to it. Nothing in the authorization flow checks membership. Who ends up in the tailnet is decided on Tailscale's side, by email domain.
+
+One more thing to watch: the email address is the join key. A user who changes their email in account settings is a different user to Tailscale.
 
 ### Audit logging
 

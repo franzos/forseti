@@ -1088,6 +1088,34 @@ impl AppTemplate {
             logo: Some("atlassian.svg"),
             logo_dark: None,
         },
+        // --- Hosted SaaS with a fixed callback ---
+        AppTemplate {
+            slug: "tailscale",
+            label: "Tailscale",
+            base_preset: Preset::WebApp,
+            client_name: "Tailscale",
+            grant_types: &["authorization_code"],
+            redirect_uris: &["https://login.tailscale.com/a/oauth_response"],
+            post_logout_redirect_uris: &[],
+            backchannel_logout_uri: None,
+            scope: "openid profile email",
+            token_endpoint_auth_method: "client_secret_basic",
+            require_pkce: false,
+            audience_visible: false,
+            self_audience: false,
+            account_deletion_url: None,
+            note: Some(
+                "The callback is Tailscale's own and needs no editing. Forseti must be reachable from the public internet, and you must serve a WebFinger document on your email domain pointing at the issuer — see the operator guide. Free for up to three users; beyond that Tailscale gates custom OIDC behind a paid plan.",
+            ),
+            logout_note: Some(
+                "Tailscale doesn't receive OIDC logout notifications, and signing out of Tailscale doesn't end the Forseti session (or the reverse). Leave the fields below blank.",
+            ),
+            post_create_note: Some(
+                "Next: publish https://YOUR_EMAIL_DOMAIN/.well-known/webfinger with the issuer URL, then hand Tailscale the issuer, this client ID and the secret above.",
+            ),
+            logo: Some("tailscale.svg"),
+            logo_dark: Some("tailscale-light.svg"),
+        },
     ];
 }
 
