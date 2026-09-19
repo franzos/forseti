@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.2.6] - 2026-09-19
+
+### Added
+- Tailscale app template for the OAuth2 client picker
+- Operator guide covers Tailscale custom OIDC, including WebFinger
+
 ## [0.2.5] - 2026-09-09
 
 ### Changed
