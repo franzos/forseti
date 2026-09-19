@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.2.7] - 2026-09-19
+
+### Security
+- rustls accepted TLS 1.3 handshake messages at the wrong encryption level (RUSTSEC-2026-0285)
+
 ## [0.2.6] - 2026-09-19
 
 ### Added
