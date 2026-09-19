@@ -365,6 +365,12 @@ impl PageChrome {
     pub(crate) fn dir(&self) -> &'static str {
         dir_for(&self.locale)
     }
+
+    /// Year for the footer copyright notice. Read per render so it never goes stale.
+    pub(crate) fn year(&self) -> i32 {
+        use chrono::Datelike;
+        chrono::Utc::now().year()
+    }
 }
 
 /// One option in the language picker. Endonyms stay untranslated, so the label
