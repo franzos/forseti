@@ -173,6 +173,32 @@ strip = true
 lto = "thin"
 codegen-units = 1
 
+# `static/`, `locales/` and `migrations/` are compiled into the binary, so both
+# packages are the binary plus an example config. Runtime deps (libpq) are
+# resolved from the linked libraries by dpkg-shlibdeps and rpm's find-requires.
+[package.metadata.deb]
+maintainer = "Franz Geffke <mail@gofranz.com>"
+section = "net"
+# Without this cargo-deb pastes the whole README, badges and all, into the
+# package description.
+extended-description = """
+Forseti renders every Ory Kratos self-service flow - login, registration, \
+recovery, MFA - along with the Hydra OAuth2 consent screens and an admin \
+console, in one server-rendered binary.
+It needs a reachable Kratos and Hydra, and a config.toml."""
+assets = [
+    ["target/release/forseti", "usr/bin/", "755"],
+    ["config.example.toml", "usr/share/doc/forseti/", "644"],
+    ["README.md", "usr/share/doc/forseti/", "644"],
+]
+
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/forseti", dest = "/usr/bin/forseti", mode = "755" },
+    { source = "config.example.toml", dest = "/usr/share/doc/forseti/config.example.toml", mode = "644" },
+    { source = "README.md", dest = "/usr/share/doc/forseti/README.md", mode = "644" },
+]
+
 [dev-dependencies]
 # Integration test deps. `reqwest` and `tokio` are pulled from the main
 # dependency graph; the cookie store feature is enabled there. The integration

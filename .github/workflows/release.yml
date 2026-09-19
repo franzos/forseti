@@ -111,7 +111,6 @@ jobs:
           name="forseti-${{ matrix.target }}"
           mkdir -p "$name"
           cp "target/${{ matrix.target }}/release/forseti" "$name/"
-          cp -r static "$name/"
           cp config.example.toml "$name/"
           tar -czf "$name.tar.gz" "$name"
           sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
@@ -132,12 +131,78 @@ jobs:
           path: forseti-${{ matrix.target }}.tar.gz.sha256
           if-no-files-found: error
 
+  # Debian and RPM packages for x86_64. One binary build feeds both: cargo-deb
+  # runs with --no-build and cargo-generate-rpm reads target/release directly.
+  packages:
+    name: deb + rpm
+    runs-on: ubuntu-latest
+    needs: notes
+    permissions:
+      contents: write # upload assets to the release
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: packages
+
+      - name: System deps (libpq for diesel postgres)
+        run: sudo apt-get update && sudo apt-get install -y libpq-dev
+
+      - name: Build CSS (Tailwind)
+        run: |
+          mkdir -p .bin
+          curl -fsSL -o .bin/tailwindcss \
+            "https://github.com/tailwindlabs/tailwindcss/releases/download/${TAILWIND_VERSION}/tailwindcss-linux-x64"
+          echo "09e6876a63ceb09ccd7e5867e3dbb2b2dc65c3a2f2e2fe210d68ea3bc0432050  .bin/tailwindcss" | sha256sum -c -
+          chmod +x .bin/tailwindcss
+          make css
+
+      - name: Install packaging tools
+        uses: taiki-e/install-action@9114bf4d891761788c546334fd37538eae1bf8b3 # v2
+        with:
+          tool: cargo-deb@3.8.0,cargo-generate-rpm@0.21.0
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Build packages
+        run: |
+          cargo deb --no-build
+          cargo generate-rpm
+
+      - name: Checksum packages
+        run: |
+          mkdir -p packages
+          cp target/debian/*.deb target/generate-rpm/*.rpm packages/
+          cd packages
+          for f in *.deb *.rpm; do sha256sum "$f" > "$f.sha256"; done
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3
+        with:
+          files: |
+            packages/*.deb
+            packages/*.rpm
+            packages/*.sha256
+
+      - name: Upload hash for provenance
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: provenance-hash-packages
+          path: packages/*.sha256
+          if-no-files-found: error
+
   # Matrix jobs can't aggregate outputs, so each build leg uploads its sha256
   # line and this job concatenates them into the base64 subjects the generator
   # signs over.
   provenance-subjects:
     name: collect provenance subjects
-    needs: build
+    needs: [build, packages]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     outputs:
@@ -153,7 +218,7 @@ jobs:
         id: hashes
         run: echo "hashes=$(cat hashes/*.sha256 | base64 -w0)" >> "$GITHUB_OUTPUT"
 
-  # Keyless (Sigstore/OIDC) SLSA build provenance covering both tarballs, attached
+  # Keyless (Sigstore/OIDC) SLSA build provenance covering every artifact, attached
   # to the release. Referenced by TAG, not a SHA: the generator verifies its own
   # ref to establish the trusted-builder identity, so a pinned commit breaks it.
   provenance:

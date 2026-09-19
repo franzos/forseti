@@ -112,15 +112,25 @@ Legend: **✓** built-in · **◐** partial / via add-on / consumes-not-serves �
 
 ## Quickstart
 
-Prebuilt binaries for x86_64 and aarch64 Linux (glibc) are attached to every [release](https://github.com/franzos/forseti/releases/latest):
+Every [release](https://github.com/franzos/forseti/releases/latest) carries tarballs for x86_64 and aarch64 Linux (glibc), `.deb` and `.rpm` packages for x86_64, and a container image.
 
 ```bash
-# binary + the static/ assets it serves
 curl -L -o forseti.tar.gz https://github.com/franzos/forseti/releases/latest/download/forseti-x86_64-unknown-linux-gnu.tar.gz
 tar -xzf forseti.tar.gz
 cd forseti-x86_64-unknown-linux-gnu
 cp config.example.toml config.toml   # then edit it
 ./forseti
+```
+
+Debian, Ubuntu and the RPM distros install the same binary to `/usr/bin/forseti`, with the example config at `/usr/share/doc/forseti/config.example.toml`. Grab the file for the version you want from the release page, then:
+
+```bash
+sudo apt install ./forseti_0.2.7-1_amd64.deb      # Debian, Ubuntu
+sudo dnf install ./forseti-0.2.7-1.x86_64.rpm     # Fedora, RHEL, openSUSE
+
+sudo mkdir -p /etc/forseti
+sudo cp /usr/share/doc/forseti/config.example.toml /etc/forseti/config.toml   # then edit it
+FORSETI_CONFIG_PATH=/etc/forseti/config.toml forseti
 ```
 
 Or pull the [container image](https://github.com/franzos/forseti/pkgs/container/forseti) from the GitHub Container Registry:
@@ -132,13 +142,13 @@ podman run --rm -p 3000:3000 \
   ghcr.io/franzos/forseti:latest
 ```
 
-Both need a reachable Kratos and Hydra — see the [operator guide](docs/operator-guide.md). The binary reads `./config.toml` (override with `FORSETI_CONFIG_PATH`) and serves `./static` relative to its working directory.
+All of them need a reachable Kratos and Hydra — see the [operator guide](docs/operator-guide.md). The binary reads `./config.toml` (override with `FORSETI_CONFIG_PATH`); web assets, translations and database migrations are compiled into it, so there is nothing else to deploy alongside.
 
 > **Runtime note:** the binary links dynamically against `libpq` (the Postgres client). On a bare host install `libpq5` (Debian/Ubuntu) or `libpq` (most other distros); the container image already includes it. SQLite is bundled, so it needs nothing extra.
 
 ### Verify the download
 
-Every tarball ships a `.sha256` next to it, and each release carries SLSA build provenance (`multiple.intoto.jsonl`) signed keylessly through Sigstore. Download both alongside the tarball, then:
+Every tarball and package ships a `.sha256` next to it, and each release carries SLSA build provenance (`multiple.intoto.jsonl`) signed keylessly through Sigstore covering all of them. Download both alongside the artifact, then:
 
 ```bash
 sha256sum -c forseti-x86_64-unknown-linux-gnu.tar.gz.sha256
@@ -149,7 +159,7 @@ slsa-verifier verify-artifact forseti-x86_64-unknown-linux-gnu.tar.gz \
   --source-uri github.com/franzos/forseti
 ```
 
-That proves the tarball came out of this repository's release workflow at that tag, not off someone's laptop.
+That proves the artifact came out of this repository's release workflow at that tag, not off someone's laptop. The same command works on a `.deb` or `.rpm` — swap the filename.
 
 ## Status
 
