@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.2.8] - 2026-09-19
+
+### Fixed
+- Sign-in left the user on a blank page when an app redirected on past its own callback (Tailscale, and any app like it)
+
+### Changed
+- Consent and logout hand back to Hydra with a page instead of a redirect, so an app's own navigation is no longer the browser's business
+- OAuth apps no longer widen the sign-in page's `Content-Security-Policy`
+
 ## [0.2.7] - 2026-09-19
 
 ### Security
