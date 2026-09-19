@@ -14,3 +14,6 @@ referrer-aside-aria = 外部应用来源
 referrer-continuing-prefix = 来自
 referrer-return-prefix = 返回
 referrer-dismiss-aria = 关闭来源提示
+
+# OAuth flow continuation (templates/oauth/continue.html)
+oauth-continue-heading = 正在跳转…

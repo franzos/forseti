@@ -207,10 +207,10 @@ async fn auth_code_flow_with_reduced_scope_drops_email_from_token() {
     user.cleanup().await;
 }
 
-/// POST `/oauth/consent` carrying the given `grant_scope` set, then chase
-/// the resulting 303s manually until a `Location` pointing at the callback
-/// URI surfaces; return the `code` query parameter from that URL. Returns
-/// `None` if the chain ends somewhere unexpected (e.g. `/error`).
+/// POST `/oauth/consent` carrying the given `grant_scope` set, then walk the
+/// chain manually until a hop pointing at the callback URI surfaces; return
+/// the `code` query parameter from that URL. Returns `None` if the chain ends
+/// somewhere unexpected (e.g. `/error`).
 async fn post_consent_chase_code(
     client: &reqwest::Client,
     csrf: &str,
@@ -233,7 +233,7 @@ async fn post_consent_chase_code(
         .join("&");
 
     // `client` has redirects disabled — every hop is observable. Walk
-    // until we see a Location pointing at the unreachable callback
+    // until we see a hop pointing at the unreachable callback
     // (`http://127.0.0.1:5555/callback?code=...`) and extract `code` from it.
     let mut resp = client
         .post(format!("{PORTAL}/oauth/consent"))
@@ -243,22 +243,10 @@ async fn post_consent_chase_code(
         .await
         .ok()?;
     for _ in 0..20 {
-        if !resp.status().is_redirection() {
-            return None;
+        let next = next_hop(resp).await?;
+        if next.path().contains("/callback") {
+            return extract_query_param(next.as_str(), "code");
         }
-        let loc = resp
-            .headers()
-            .get(reqwest::header::LOCATION)
-            .and_then(|h| h.to_str().ok())?
-            .to_string();
-        if loc.contains("/callback") {
-            return extract_query_param(&loc, "code");
-        }
-        // Resolve relative redirects against the current response's URL.
-        let next = match reqwest::Url::parse(&loc) {
-            Ok(u) => u,
-            Err(_) => resp.url().join(&loc).ok()?,
-        };
         resp = client.get(next).send().await.ok()?;
     }
     None
@@ -460,28 +448,18 @@ async fn groups_present_on_skip_consent() {
         .expect("second auth pass");
     let code = 'walk: {
         for _ in 0..20 {
-            if resp.status().is_redirection() {
-                let loc = resp
-                    .headers()
-                    .get(reqwest::header::LOCATION)
-                    .and_then(|h| h.to_str().ok())
-                    .map(|s| s.to_string());
-                if let Some(loc) = loc {
-                    if loc.contains("/callback") {
-                        break 'walk extract_query_param(&loc, "code").expect("code in callback");
-                    }
-                    let next = reqwest::Url::parse(&loc)
-                        .unwrap_or_else(|_| resp.url().join(&loc).unwrap());
-                    resp = user
-                        .manual_client
-                        .get(next)
-                        .send()
-                        .await
-                        .expect("follow redirect");
-                    continue;
-                }
+            let Some(next) = next_hop(resp).await else {
+                panic!("auto-grant chain did not reach callback");
+            };
+            if next.path().contains("/callback") {
+                break 'walk extract_query_param(next.as_str(), "code").expect("code in callback");
             }
-            panic!("auto-grant chain did not reach callback");
+            resp = user
+                .manual_client
+                .get(next)
+                .send()
+                .await
+                .expect("follow hop");
         }
         panic!("too many redirects in auto-grant chain");
     };
@@ -536,6 +514,93 @@ async fn groups_empty_array_when_no_teams() {
         claims["groups"],
         serde_json::json!([]),
         "groups must be an empty array when user has no team memberships"
+    );
+
+    hydra_delete_client(&client_id).await;
+    user.cleanup().await;
+}
+
+/// The consent grant must terminate the form-submission navigation on
+/// Forseti's own origin instead of 303-ing into Hydra.
+///
+/// Chrome and Safari check `form-action` against every hop of a submission's
+/// redirect chain. A 303 here put the client's `redirect_uri` — and whatever
+/// the client bounces to next, which no metadata declares — inside that chain,
+/// so the browser dropped the navigation while the server logged a clean flow.
+/// The client origin must therefore also be gone from the consent page's CSP.
+#[tokio::test]
+async fn consent_grant_hands_off_with_a_document_not_a_redirect() {
+    assert!(portal_reachable().await);
+
+    let user = register_test_user("csp-handoff").await;
+    let (client_id, _client_secret, redirect_uri) =
+        hydra_create_test_client(&["openid", "email"]).await;
+    let auth_url = oauth_auth_url(&client_id, &redirect_uri, "openid email", "");
+
+    // Drive inline rather than via `drive_to_consent`: the CSP assertion needs
+    // this response's headers, and a second GET would rotate the CSRF token.
+    let res = user
+        .client
+        .get(&auth_url)
+        .send()
+        .await
+        .expect("follow auth chain to consent");
+    assert!(
+        res.url().as_str().contains("/oauth/consent"),
+        "expected the consent page; got {}",
+        res.url()
+    );
+    let csp = res
+        .headers()
+        .get("content-security-policy")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        csp.contains("form-action 'self'"),
+        "form-action still enforced: {csp}"
+    );
+    assert!(
+        !csp.contains("127.0.0.1:5555"),
+        "client redirect origin must no longer widen form-action: {csp}"
+    );
+
+    let body = res.text().await.expect("consent body");
+    let consent_challenge =
+        extract_input_value(&body, "consent_challenge").expect("consent_challenge hidden input");
+    let csrf = extract_input_value(&body, "_csrf").expect("_csrf hidden input");
+
+    let form = [
+        ("_csrf", csrf.as_str()),
+        ("consent_challenge", consent_challenge.as_str()),
+        ("decision", "accept"),
+        ("grant_scope", "openid"),
+        ("grant_scope", "email"),
+    ];
+    let body_str: String = form
+        .iter()
+        .map(|(k, v)| format!("{}={}", form_urlencode(k), form_urlencode(v)))
+        .collect::<Vec<_>>()
+        .join("&");
+
+    let resp = user
+        .manual_client
+        .post(format!("{PORTAL}/oauth/consent"))
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(body_str)
+        .send()
+        .await
+        .expect("consent accept");
+
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::OK,
+        "a 3xx would put the client hop back inside the form submission"
+    );
+    let target = next_hop(resp).await.expect("interstitial names a target");
+    assert!(
+        target.as_str().contains("/oauth2/auth"),
+        "handoff should continue at Hydra's authorize endpoint; got {target}"
     );
 
     hydra_delete_client(&client_id).await;

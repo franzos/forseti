@@ -350,12 +350,18 @@ Migrate to (2) only when there's a concrete need — different rate-limit tiers 
 Forseti sets its own `Content-Security-Policy` on every public response:
 `object-src`, `base-uri`, `frame-ancestors` (configurable via `[security]`),
 and `form-action` — the last one built from Kratos's public URL, Hydra's
-public URL, the issuer origin (`[hydra].issuer`), the consenting client's
-registered redirect URIs, and `[security].extra_form_action`. It deliberately
-omits `default-src` / `script-src` / `style-src` / `img-src`. A stale
-`[hydra].issuer` shows up as a consent screen whose Allow button "does
-nothing" — the browser blocks the 303 into Hydra while the server logs it
-cleanly; see the operator guide's
+public URL, the issuer origin (`[hydra].issuer`), the built-in social
+providers, and `[security].extra_form_action`. It deliberately omits
+`default-src` / `script-src` / `style-src` / `img-src`.
+
+Chrome and Safari check `form-action` against every hop of a form
+submission's redirect chain, Firefox against none. No OAuth client origin
+appears in the header: every handoff back to Hydra answers with a document
+carrying a declarative refresh, which ends the submission on Forseti's own
+origin, so nothing the client does afterwards is governed by the policy. A
+stale `[hydra].issuer` still shows up as a sign-in page that "does nothing" —
+the browser blocks the hop into Hydra while the server logs it cleanly; see
+the operator guide's
 [CSP `form-action` requirement](./operator-guide.md#fronting-the-issuer-front-proxy-vs-haproxy).
 
 If you layer additional directives at the proxy, they must allow Forseti's

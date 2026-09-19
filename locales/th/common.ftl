@@ -14,3 +14,6 @@ referrer-aside-aria = ผู้อ้างอิงจากแอปพลิ�
 referrer-continuing-prefix = ดำเนินการต่อจาก
 referrer-return-prefix = กลับไปยัง
 referrer-dismiss-aria = ปิดแบนเนอร์ผู้อ้างอิง
+
+# OAuth flow continuation (templates/oauth/continue.html)
+oauth-continue-heading = กำลังเปลี่ยนเส้นทาง…

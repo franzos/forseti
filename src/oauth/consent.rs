@@ -13,6 +13,7 @@ use crate::audit_metadata;
 use crate::csrf::CsrfForm;
 use crate::extractors::{Csrf, OptionalSession};
 use crate::locale::LanguageIdentifier;
+use crate::oauth::continue_nav;
 use crate::oauth_client_metadata;
 use crate::ory;
 use crate::page_chrome::PageChrome;
@@ -170,7 +171,7 @@ pub(crate) async fn oauth_consent(
     // shown on every consent (spec invariant D.5).
     if !is_pam_client && verified && !is_cimd && (hydra_skip || client_skip_consent) {
         if let Some(rejected) =
-            reject_unless_session_subject(&state, &challenge, &subject, &session).await
+            reject_unless_session_subject(&state, &challenge, &subject, &session, &locale).await
         {
             return rejected;
         }
@@ -309,7 +310,7 @@ pub(crate) async fn oauth_consent(
     )
     .await;
 
-    let mut resp = render(&ConsentTemplate {
+    render(&ConsentTemplate {
         chrome,
         consent_intro: state.cfg.brand.consent_intro.clone(),
         client_name,
@@ -322,15 +323,7 @@ pub(crate) async fn oauth_consent(
         known_accounts,
         cimd_host,
         cimd_client_name,
-    });
-    // Granting consent navigates portal -> Hydra -> this client's redirect_uri,
-    // and `form-action` is enforced across that whole chain. Hydra registered
-    // and validated these URIs; without them the browser blocks the last hop
-    // and the user is left on an apparently inert page.
-    if let Some(uris) = req.client.as_ref().and_then(|c| c.redirect_uris.as_ref()) {
-        crate::app::allow_form_action_to(&mut resp, uris);
-    }
-    resp
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -376,6 +369,7 @@ pub(crate) async fn oauth_consent_submit(
     headers: HeaderMap,
     session: OptionalSession,
     actx: AuditCtx,
+    crate::page_chrome::ReqLocale(req_locale): crate::page_chrome::ReqLocale,
     CsrfForm(form): CsrfForm<OAuthConsentForm>,
 ) -> Response {
     if form.decision == "switch_account" {
@@ -416,7 +410,7 @@ pub(crate) async fn oauth_consent_submit(
                     ev = ev.target(target_kind::OAUTH_CLIENT, client_id);
                 }
                 let _ = audit::log(&state.db, ev).await;
-                return Redirect::to(&redirect.redirect_to).into_response();
+                return continue_nav::continue_to(&redirect.redirect_to, &req_locale);
             }
             Err(e) => {
                 tracing::error!(error = ?e, "hydra reject_consent_request failed");
@@ -442,8 +436,14 @@ pub(crate) async fn oauth_consent_submit(
     };
 
     let subject = req.subject.clone().unwrap_or_default();
-    if let Some(rejected) =
-        reject_unless_session_subject(&state, &form.consent_challenge, &subject, &session).await
+    if let Some(rejected) = reject_unless_session_subject(
+        &state,
+        &form.consent_challenge,
+        &subject,
+        &session,
+        &req_locale,
+    )
+    .await
     {
         return rejected;
     }
@@ -569,6 +569,7 @@ async fn reject_unless_session_subject(
     challenge: &str,
     subject: &str,
     session: &OptionalSession,
+    locale: &LanguageIdentifier,
 ) -> Option<Response> {
     // InsufficientAal means a session exists we couldn't read here; treating
     // it as "no subject" keeps the mismatch check conservative.
@@ -589,7 +590,7 @@ async fn reject_unless_session_subject(
     )
     .await
     {
-        Ok(redirect) => Some(Redirect::to(&redirect.redirect_to).into_response()),
+        Ok(redirect) => Some(continue_nav::continue_to(&redirect.redirect_to, locale)),
         Err(e) => {
             tracing::error!(error = ?e, "hydra reject_consent_request (mismatch) failed");
             Some(Redirect::to("/error").into_response())
@@ -1112,7 +1113,7 @@ async fn finalize_consent(
     .await
     {
         Ok(redirect) => FinalizeOutcome::Granted {
-            redirect: Redirect::to(&redirect.redirect_to).into_response(),
+            redirect: continue_nav::continue_to(&redirect.redirect_to, &consent_locale),
             groups_count: group_slugs.len(),
             groups_truncated,
         },

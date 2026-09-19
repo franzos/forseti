@@ -76,16 +76,16 @@ test('account chooser: remember opt-in renders + switch restarts flow', async ({
   await expect(rememberA).toBeVisible();
   await rememberA.check();
 
-  // Capture the code off the navigation request to the unreachable callback
-  // (same trick as Scenario B). The browser then drifts to an error page for
-  // that host; the next portal navigation (logout) can race it, which the
-  // suite's `retries: 1` absorbs.
+  // Capture the code off the navigation request to the callback (same trick
+  // as Scenario B). `waitForRequest` fires when the request goes out, so also
+  // wait for it to land — otherwise the next portal navigation races it.
   const navPromiseA = page.waitForRequest((req) => req.url().startsWith(REDIRECT_URI));
   await page
     .locator('form[action="/oauth/consent"] button[name="decision"][value="accept"]')
     .click();
   const reqA = await navPromiseA;
   expect(new URL(reqA.url()).searchParams.get('code')).toBeTruthy();
+  await page.waitForURL((u) => u.href.startsWith(REDIRECT_URI), { timeout: 15_000 });
 
   // 3. The grant set the forseti_known_accounts cookie on the portal origin.
   const cookiesAfterA = await page.context().cookies();

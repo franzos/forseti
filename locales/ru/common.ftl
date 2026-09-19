@@ -17,3 +17,6 @@ referrer-aside-aria = Источник перехода из внешнего п
 referrer-continuing-prefix = Продолжение из
 referrer-return-prefix = Вернуться в
 referrer-dismiss-aria = Закрыть баннер источника перехода
+
+# OAuth flow continuation (templates/oauth/continue.html)
+oauth-continue-heading = Перенаправление…

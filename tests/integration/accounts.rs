@@ -202,10 +202,12 @@ async fn consent_remember_appends_known_account() {
         .await
         .expect("POST /oauth/consent (remember_account)");
 
-    // The handler redirects; the cookie must be on this first response.
-    assert!(
-        res.status().is_redirection(),
-        "consent submit should redirect; got {}",
+    // The handler answers with the handoff document (not a 303, so the
+    // browser's `form-action` check stops here); the cookie must be on it.
+    assert_eq!(
+        res.status(),
+        reqwest::StatusCode::OK,
+        "consent submit should answer with the handoff document; got {}",
         res.status()
     );
 

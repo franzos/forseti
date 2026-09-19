@@ -563,10 +563,14 @@ fn build_csp(frame_ancestors: &str, form_action: &str) -> String {
 /// Kratos, because the login, registration, recovery, verification and settings forms take their
 /// `action` verbatim from the Kratos flow JSON, which points at Kratos's own origin.
 ///
-/// Hydra, because `form-action` is enforced across redirects, not just on the form's `action`:
-/// consent, logout and device approval all POST to the portal and answer with a 303 into Hydra.
-/// Leave Hydra out and the browser silently blocks that navigation — the server logs a clean 303
-/// and the user sits on an unchanged page.
+/// Hydra, because `form-action` is enforced across redirects in Chrome and Safari, not just on the
+/// form's `action`: submitting the Kratos login form runs Kratos -> `/oauth/login` -> Hydra before
+/// the chain terminates on a Forseti page. Leave Hydra out and the browser silently blocks that
+/// navigation — the server logs a clean 303 and the user sits on an unchanged page.
+///
+/// No OAuth client origin appears here. Every Forseti handoff back to Hydra answers with a
+/// document instead of a 303 ([`crate::oauth::continue_nav`]), so no chain reaches a client's
+/// `redirect_uri` while it is still a form submission.
 ///
 /// Hydra's browser-facing origin is its `urls.self.issuer`, which can differ from
 /// `[hydra].public_url` (a container-reachable hostname vs `localhost`), so both are listed when
@@ -619,11 +623,10 @@ struct CspSources {
 /// Extra `form-action` origins for one response, attached by a handler that
 /// knows where its form is allowed to end up.
 ///
-/// An authorization server can't express this statically: after consent the
-/// browser has to reach the client's registered `redirect_uri`, which differs
-/// per client. Handlers that render such a form attach the origins Hydra
-/// already validated for that client, so the allowlist stays exact instead of
-/// being widened for everyone.
+/// One caller remains: the login, registration and linked-provider pages,
+/// whose "Continue with <IdP>" buttons submit to Kratos and are redirected on
+/// to the upstream provider. Kratos issues that hop, so Forseti can't
+/// interpose a document on it the way it does for its own Hydra handoffs.
 #[derive(Clone)]
 pub(crate) struct ExtraFormAction(pub(crate) Vec<String>);
 

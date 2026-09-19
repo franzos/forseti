@@ -1392,7 +1392,18 @@ async fn browser_approve(
         //    it and accept the openid grant.
         let after = res.url().to_string();
         let confirm_ok = res.status().is_success();
+        let base = res.url().clone();
         let body = res.text().await.unwrap_or_default();
+        // An auto-granted consent answers with the handoff document instead of
+        // continuing the chain itself; one more GET finishes the approval.
+        if let Some(target) = continue_target(&body, &base) {
+            return approver
+                .client
+                .get(target)
+                .send()
+                .await
+                .is_ok_and(|r| r.status().is_success());
+        }
         if after.contains("/oauth/consent") {
             let challenge = extract_input_value(&body, "consent_challenge").unwrap_or_default();
             let csrf = extract_input_value(&body, "_csrf").unwrap_or_default();
@@ -1408,7 +1419,21 @@ async fn browser_approve(
                 .send()
                 .await
                 .expect("POST /oauth/consent");
-            return res.status().is_success();
+            let ok = res.status().is_success();
+            let base = res.url().clone();
+            let body = res.text().await.unwrap_or_default();
+            // The grant hands back to Hydra with a document, not a 303, so the
+            // redirect-following client stops here; follow it or Hydra never
+            // sees the approval and the device stays pending.
+            return match continue_target(&body, &base) {
+                Some(target) => approver
+                    .client
+                    .get(target)
+                    .send()
+                    .await
+                    .is_ok_and(|r| r.status().is_success()),
+                None => ok,
+            };
         }
         // No consent leg surfaced (already granted) — treat the confirm as
         // done, unless the confirm itself rendered the refusal page. Both are

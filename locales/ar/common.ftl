@@ -19,3 +19,6 @@ referrer-aside-aria = جهة إحالة من تطبيق خارجي
 referrer-continuing-prefix = متابعة من
 referrer-return-prefix = العودة إلى
 referrer-dismiss-aria = إغلاق شريط جهة الإحالة
+
+# OAuth flow continuation (templates/oauth/continue.html)
+oauth-continue-heading = جارٍ إعادة التوجيه…

@@ -24,6 +24,18 @@ export default defineConfig({
     actionTimeout: 15_000,
     navigationTimeout: 30_000,
   },
+  // The OAuth scenarios point `redirect_uri` at localhost:9876 and read the
+  // `code` off the outgoing request. Left dead, that navigation ends in
+  // `chrome-error://chromewebdata/`, which commits asynchronously and races
+  // whatever portal navigation the spec does next — the flake the specs used
+  // to absorb with `retries: 1`. Answering the callback keeps
+  // `waitForRequest` working and leaves the browser on a real document.
+  webServer: {
+    command:
+      "node -e \"require('http').createServer((_,res)=>{res.writeHead(200,{'content-type':'text/html'});res.end('<!doctype html><title>callback</title>ok')}).listen(9876)\"",
+    port: 9876,
+    reuseExistingServer: true,
+  },
   // Three buckets keyed on the portal's license state. The Makefile picks
   // which project to run via `--project=<name>` and gates the non-default
   // buckets on a sqlite pre-check (see `make e2e-expired` / `make e2e-licensed`).

@@ -40,28 +40,15 @@ pub(crate) async fn oauth_logout(
 
     // Validate the challenge before rendering: there's no recovery from a
     // confirm-then-submit on a stale challenge.
-    let logout_req = match ory::hydra::get_logout_request(&state.ory, &challenge).await {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::error!(error = ?e, "hydra get_logout_request failed");
-            return Redirect::to("/error").into_response();
-        }
-    };
+    if let Err(e) = ory::hydra::get_logout_request(&state.ory, &challenge).await {
+        tracing::error!(error = ?e, "hydra get_logout_request failed");
+        return Redirect::to("/error").into_response();
+    }
 
-    let mut resp = render(&OAuthLogoutConfirmTemplate {
+    render(&OAuthLogoutConfirmTemplate {
         chrome,
         logout_challenge: challenge,
-    });
-    // Same redirect-chain rule as consent: confirming logout ends at the RP's
-    // registered `post_logout_redirect_uri`, so `form-action` has to allow it.
-    if let Some(uris) = logout_req
-        .client
-        .as_ref()
-        .and_then(|c| c.post_logout_redirect_uris.as_ref())
-    {
-        crate::app::allow_form_action_to(&mut resp, uris);
-    }
-    resp
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -74,6 +61,7 @@ pub(crate) struct OAuthLogoutForm {
 pub(crate) async fn oauth_logout_submit(
     State(state): State<AppState>,
     headers: HeaderMap,
+    crate::page_chrome::ReqLocale(locale): crate::page_chrome::ReqLocale,
     CsrfForm(form): CsrfForm<OAuthLogoutForm>,
 ) -> Response {
     let challenge = form.logout_challenge;
@@ -83,7 +71,7 @@ pub(crate) async fn oauth_logout_submit(
     ory::kratos::tear_down_session(&state.ory, &cookie).await;
 
     match ory::hydra::accept_logout_request(&state.ory, &challenge).await {
-        Ok(redirect) => Redirect::to(&redirect.redirect_to).into_response(),
+        Ok(redirect) => crate::oauth::continue_nav::continue_to(&redirect.redirect_to, &locale),
         Err(e) => {
             tracing::error!(error = ?e, "hydra accept_logout_request failed");
             Redirect::to("/error").into_response()

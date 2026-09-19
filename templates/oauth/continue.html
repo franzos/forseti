@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="{{ lang }}" dir="{{ dir }}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<meta http-equiv="refresh" content="0; url={{ target }}">
+<title>{{ heading }}</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 1rem;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-size: 0.875rem;
+    background: #fbfbfc;
+    color: #1b1b1f;
+  }
+  @media (prefers-color-scheme: dark) {
+    body { background: #131316; color: #e5e1e6; }
+  }
+</style>
+</head>
+<body>
+<p>{{ heading }}</p>
+<p><a href="{{ target }}">{{ continue_label }}</a></p>
+</body>
+</html>

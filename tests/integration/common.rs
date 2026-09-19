@@ -1812,10 +1812,48 @@ pub async fn consent_deny_chase_location(
     consent_submit_chase_callback(client, csrf, consent_challenge, "deny", &[], false).await
 }
 
+/// The next URL in a flow chain, from either a 3xx `Location` or the
+/// declarative refresh of an `oauth/continue.html` interstitial.
+///
+/// Forseti hands back to Hydra with a document rather than a 303 so the
+/// browser's `form-action` check stops at Forseti's own origin, so a walker
+/// that only follows `Location` stalls on the first handoff.
+pub async fn next_hop(resp: reqwest::Response) -> Option<reqwest::Url> {
+    let base = resp.url().clone();
+    if resp.status().is_redirection() {
+        let loc = resp
+            .headers()
+            .get(reqwest::header::LOCATION)?
+            .to_str()
+            .ok()?
+            .to_string();
+        return reqwest::Url::parse(&loc).or_else(|_| base.join(&loc)).ok();
+    }
+    continue_target(&resp.text().await.ok()?, &base)
+}
+
+/// The declarative-refresh target of an `oauth/continue.html` body, or `None`
+/// if this isn't a handoff document. For callers that already hold the body,
+/// or that drive a redirect-following client and only need the one extra hop.
+pub fn continue_target(body: &str, base: &reqwest::Url) -> Option<reqwest::Url> {
+    let raw = body
+        .split_once("http-equiv=\"refresh\"")?
+        .1
+        .split_once("url=")?
+        .1
+        .split_once('"')?
+        .0;
+    // askama escapes with numeric entities; only these two can appear in a URL.
+    let target = raw.replace("&#38;", "&").replace("&#34;", "\"");
+    reqwest::Url::parse(&target)
+        .or_else(|_| base.join(&target))
+        .ok()
+}
+
 /// Shared worker behind [`consent_accept_chase_code`] /
 /// [`consent_deny_chase_location`]. POSTs the consent form then walks each
-/// 303 hop (the `client` must have redirects disabled) until a `Location`
-/// pointing at `/callback` surfaces, returning that URL verbatim.
+/// hop (the `client` must have redirects disabled) until one pointing at
+/// `/callback` surfaces, returning that URL verbatim.
 async fn consent_submit_chase_callback(
     client: &Client,
     csrf: &str,
@@ -1849,21 +1887,10 @@ async fn consent_submit_chase_callback(
         .await
         .ok()?;
     for _ in 0..20 {
-        if !resp.status().is_redirection() {
-            return None;
+        let next = next_hop(resp).await?;
+        if next.path().contains("/callback") {
+            return Some(next.to_string());
         }
-        let loc = resp
-            .headers()
-            .get(reqwest::header::LOCATION)
-            .and_then(|h| h.to_str().ok())?
-            .to_string();
-        if loc.contains("/callback") {
-            return Some(loc);
-        }
-        let next = match reqwest::Url::parse(&loc) {
-            Ok(u) => u,
-            Err(_) => resp.url().join(&loc).ok()?,
-        };
         resp = client.get(next).send().await.ok()?;
     }
     None

@@ -15,3 +15,6 @@ referrer-aside-aria = Référent d'application externe
 referrer-continuing-prefix = En provenance de
 referrer-return-prefix = Retour à
 referrer-dismiss-aria = Fermer la bannière de référent
+
+# OAuth flow continuation (templates/oauth/continue.html)
+oauth-continue-heading = Redirection…
