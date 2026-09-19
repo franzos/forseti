@@ -136,6 +136,21 @@ Both need a reachable Kratos and Hydra — see the [operator guide](docs/operato
 
 > **Runtime note:** the binary links dynamically against `libpq` (the Postgres client). On a bare host install `libpq5` (Debian/Ubuntu) or `libpq` (most other distros); the container image already includes it. SQLite is bundled, so it needs nothing extra.
 
+### Verify the download
+
+Every tarball ships a `.sha256` next to it, and each release carries SLSA build provenance (`multiple.intoto.jsonl`) signed keylessly through Sigstore. Download both alongside the tarball, then:
+
+```bash
+sha256sum -c forseti-x86_64-unknown-linux-gnu.tar.gz.sha256
+
+# needs slsa-verifier: https://github.com/slsa-framework/slsa-verifier
+slsa-verifier verify-artifact forseti-x86_64-unknown-linux-gnu.tar.gz \
+  --provenance-path multiple.intoto.jsonl \
+  --source-uri github.com/franzos/forseti
+```
+
+That proves the tarball came out of this repository's release workflow at that tag, not off someone's laptop.
+
 ## Status
 
 **Pre-release / active development.** Core flows work end-to-end against the Ory playground; APIs, config, and schema are still moving. Pin a commit if you build on it.

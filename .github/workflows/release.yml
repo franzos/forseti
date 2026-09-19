@@ -13,11 +13,58 @@ env:
   TAILWIND_VERSION: v4.1.16
 
 jobs:
+  # Creates the release carrying this version's CHANGELOG section, before any
+  # asset lands. The build legs below upload without a body, which leaves these
+  # notes in place.
+  notes:
+    name: release notes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0 # the previous tag, for the compare link
+
+      - name: Build the release body
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          awk -v hdr="## [$v]" 'index($0, hdr) == 1 { f = 1; next } /^## \[/ { f = 0 } f' \
+            CHANGELOG.md > notes.md
+          prev=$(git tag --sort=-v:refname \
+            | awk -v t="$GITHUB_REF_NAME" 'p { print; exit } $0 == t { p = 1 }')
+          {
+            echo '---'
+            echo
+            echo "Container image: \`ghcr.io/${GITHUB_REPOSITORY}:$v\`"
+            echo
+            echo 'Verify a download:'
+            echo
+            echo '```bash'
+            echo 'sha256sum -c forseti-x86_64-unknown-linux-gnu.tar.gz.sha256'
+            echo "slsa-verifier verify-artifact forseti-x86_64-unknown-linux-gnu.tar.gz \\"
+            echo "  --provenance-path multiple.intoto.jsonl \\"
+            echo "  --source-uri github.com/${GITHUB_REPOSITORY} --source-tag ${GITHUB_REF_NAME}"
+            echo '```'
+            echo
+            echo "Install steps: [README quickstart](https://github.com/${GITHUB_REPOSITORY}#quickstart)"
+            if [ -n "$prev" ]; then
+              echo
+              echo "Changes since $prev: [compare](https://github.com/${GITHUB_REPOSITORY}/compare/$prev...${GITHUB_REF_NAME})"
+            fi
+          } >> notes.md
+
+      - name: Publish release notes
+        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3
+        with:
+          body_path: notes.md
+
   build:
     name: build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    needs: notes
     permissions:
-      contents: write # create the GitHub release and upload assets
+      contents: write # upload assets to the release
     strategy:
       fail-fast: false
       matrix:
