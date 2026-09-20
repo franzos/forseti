@@ -65,7 +65,7 @@ run: ## Run the portal (debug) against the local playground stack
 	cargo run
 
 test-integration: ## Rust integration suite (stack + Forseti must already be running)
-	cargo test --test integration -- --test-threads=1
+	COMPOSE="$(COMPOSE)" cargo test --test integration -- --test-threads=1
 
 # --- Playground stack lifecycle --------------------------------------------
 #
