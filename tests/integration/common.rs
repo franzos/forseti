@@ -1050,21 +1050,30 @@ pub async fn totp_step_up(client: &Client, totp_code: &str) {
 /// which one it is. Same shape as the seeded admin's.
 pub const TEST_TOTP_SECRET: &str = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP";
 
-/// The compose engine that actually exists here. `$COMPOSE` wins when set,
-/// but the Makefile doesn't export it into cargo's environment, so the
-/// fallback has to probe rather than assume: local dev is podman-compose and
-/// CI is `docker compose`, and picking the wrong one is a spawn failure
-/// rather than anything a test could recover from.
+/// The compose engine that actually works here: `$COMPOSE` is tried first but
+/// still has to run, then the known engines in turn. `$COMPOSE` carries the
+/// Makefile's *default* as readily as an operator's choice - CI overrides it
+/// per-target, so a plain `make test-integration` hands down `podman-compose`
+/// on a runner that only has `docker compose`. Trusting it unverified is what
+/// broke the v0.2.9 CI run.
 fn compose_engine() -> String {
+    let mut candidates: Vec<String> = Vec::new();
     if let Ok(explicit) = std::env::var("COMPOSE")
         && !explicit.trim().is_empty()
     {
-        return explicit;
+        candidates.push(explicit.trim().to_string());
     }
-    for candidate in ["docker compose", "podman-compose", "docker-compose"] {
+    for known in ["docker compose", "podman-compose", "docker-compose"] {
+        if !candidates.iter().any(|c| c == known) {
+            candidates.push(known.to_string());
+        }
+    }
+    for candidate in &candidates {
         let mut parts = candidate.split_whitespace();
-        let program = parts.next().expect("candidate names a program");
-        let ok = std::process::Command::new(program)
+        let Some(program) = parts.next() else {
+            continue;
+        };
+        let works = std::process::Command::new(program)
             .args(parts)
             .arg("version")
             .stdout(std::process::Stdio::null())
@@ -1072,11 +1081,11 @@ fn compose_engine() -> String {
             .status()
             .map(|s| s.success())
             .unwrap_or(false);
-        if ok {
-            return candidate.to_string();
+        if works {
+            return candidate.clone();
         }
     }
-    panic!("no compose engine found: set $COMPOSE, or install docker compose / podman-compose");
+    panic!("no working compose engine found (tried: {candidates:?})");
 }
 
 /// Plant a TOTP credential with a known base32 secret straight into Kratos's

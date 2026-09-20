@@ -90,7 +90,7 @@ jobs:
         run: FORSETI_CONFIG_PATH=config.ci.toml make seed-posix-client
 
       - name: Run integration tests
-        run: make test-integration
+        run: make test-integration COMPOSE="docker compose"
 
       - name: Forseti logs
         if: always()
