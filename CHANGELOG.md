@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.2.9] - 2026-09-20
+
+### Security
+- Org owners could mint recovery codes for co-members and take their accounts
+- Org owners could create OAuth clients that skip the consent screen
+- Team rename, delete and membership weren't bound to the org in the URL
+- Org overview and branding were readable by non-members
+- Handoff trusted any OAuth client, including self-registered ones
+- SAML login handed the browser a 15-minute recovery link
+- Invite and one-shot-reveal tokens were stored in plaintext
+- CIMD client registration had no ceiling
+- `X-Real-IP` was attacker-controlled on a short forwarded-for chain
+- The NSS resolver aborted sshd and sudo on an interior NUL
+- The Linux client pinned a vulnerable rustls (RUSTSEC-2026-0285)
+
+### Changed
+- Identity and session admin pages are operator-only; `?org=` no longer admits owners
+- Org-created OAuth clients are limited to their own org's registered audiences
+- New `[oauth.cimd].max_clients` and `max_clients_per_host`
+
 ## [0.2.8] - 2026-09-19
 
 ### Fixed
