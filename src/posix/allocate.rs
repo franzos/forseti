@@ -29,6 +29,22 @@ pub fn is_valid_username(s: &str) -> bool {
         .all(|&b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
 }
 
+/// A login shell fit to hand the NSS resolver: an absolute path, no control
+/// characters, no whitespace. The NUL is the pointed one - the shell is a
+/// field of every `passwd` entry, and a NUL in there is what makes the C-side
+/// buffer writer panic across the ABI into sshd or sudo. The resolver drops
+/// such an entry now, but nothing should be able to store one in the first
+/// place. Length matches the username cap's order of magnitude; real shells
+/// are far shorter.
+pub fn is_valid_shell(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 255
+        && s.starts_with('/')
+        && !s.contains("//")
+        && !s.ends_with('/')
+        && !s.chars().any(|c| c.is_control() || c.is_whitespace())
+}
+
 /// Next free id: `max(existing) + 1`, or `base` when none allocated at/above
 /// base. `existing` need not be sorted; ids below `base` are ignored.
 #[allow(dead_code)] // pure helper; DB allocation currently goes through sequences::next_in_band.
@@ -42,6 +58,26 @@ pub fn next_id(base: u32, existing: &[u32]) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn valid_shells_are_absolute_and_clean() {
+        assert!(is_valid_shell("/bin/bash"));
+        assert!(is_valid_shell("/usr/sbin/nologin"));
+        assert!(is_valid_shell("/bin/sh"));
+    }
+
+    #[test]
+    fn invalid_shells_are_refused() {
+        assert!(!is_valid_shell(""));
+        assert!(!is_valid_shell("bash"), "must be absolute");
+        assert!(!is_valid_shell("/bin/"), "trailing slash");
+        assert!(!is_valid_shell("/bin//bash"), "empty path segment");
+        assert!(!is_valid_shell("/bin/my shell"), "whitespace");
+        assert!(!is_valid_shell("/bin/sh\n/bin/evil"), "newline");
+        // The one that aborts sshd if it reaches the NSS buffer writer.
+        assert!(!is_valid_shell("/bin/sh\0/bin/evil"), "interior NUL");
+        assert!(!is_valid_shell(&format!("/bin/{}", "a".repeat(300))));
+    }
 
     #[test]
     fn valid_posix_names() {

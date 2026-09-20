@@ -24,7 +24,7 @@ use super::list::ListQuery;
 use crate::admin::clients::app_templates::AppTemplate;
 use crate::admin::clients::form::ClientForm;
 use crate::admin::clients::presets::{ClientTypeCard, Preset, picker_cards};
-use crate::admin::clients::scope::resolve_create_target_org;
+use crate::admin::clients::scope::{constrain_org_scoped_client, resolve_create_target_org};
 
 /// Step-1 picker shown by `GET /admin/clients/new` (no `?type=`). Five
 /// cards, each linking to `/admin/clients/new?type=<slug>`. No form on
@@ -326,7 +326,10 @@ pub async fn create(
 
     let client_name = form.name.clone();
     let client_type = form.client_type.clone();
-    let payload = form.to_oauth2_client(None);
+    let mut payload = form.to_oauth2_client(None);
+    if let Err(msg) = constrain_org_scoped_client(&state, &scope, &mut payload).await {
+        return rerender(msg);
+    }
     match ory::hydra::create_client(&state.ory, payload).await {
         Ok(mut new) => {
             let id = new.client_id.clone().unwrap_or_default();
@@ -356,14 +359,20 @@ pub async fn create(
                     }
                 }
             }
-            // Admin-created clients are implicitly verified (creating via the
+            // Form-created clients are implicitly verified (creating via the
             // form is the vouching); CIMD clients arrive `source = "cimd"` +
-            // `verification = "unverified"`. INSERT failure is logged but
-            // doesn't fail the create (Hydra already committed); the row is
-            // created lazily on first verify/unverify.
+            // `verification = "unverified"`. The source records who vouched,
+            // which is what the consent path reads for audience policy.
+            // INSERT failure is logged but doesn't fail the create (Hydra
+            // already committed); the row is created lazily on first
+            // verify/unverify.
             if !id.is_empty() {
                 let target_org = resolve_create_target_org(&state, &headers, &ctx, &scope).await;
-                if let Err(e) = oauth_client_metadata::insert_admin_verified(
+                let source = match scope {
+                    crate::orgs::AdminScope::Org { .. } => oauth_client_metadata::source::ORG,
+                    crate::orgs::AdminScope::Forseti => oauth_client_metadata::source::ADMIN,
+                };
+                if let Err(e) = oauth_client_metadata::insert_form_created(
                     &state.db,
                     &id,
                     &ctx.email,
@@ -371,6 +380,7 @@ pub async fn create(
                     // Persist the resolved compile-time slug, never the raw
                     // operator-supplied string — junk never reaches the column.
                     AppTemplate::from_slug(&form.template).map(|t| t.slug),
+                    source,
                     chrono::Utc::now(),
                 )
                 .await

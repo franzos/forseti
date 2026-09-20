@@ -207,6 +207,9 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "form", "rustls", "cookies"] }
 serde_json = "1"
 regex = "1"
+# `catch_unwind` around a future, so a license-gated test restores the
+# playground's license state even when an assertion fails.
+futures-util = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 # The Linux client's own wire types, so the POSIX device tests decode live
 # responses with exactly what the daemon parses them with instead of a
 # hand-kept copy that can drift. `forseti-unix` is a separate workspace; this

@@ -24,7 +24,7 @@ use crate::admin::clients::form::ClientForm;
 use crate::admin::clients::projection::{
     ClientRow, project_row, read_client_type, read_require_pkce,
 };
-use crate::admin::clients::scope::RequireClientInScope;
+use crate::admin::clients::scope::{RequireClientInScope, constrain_org_scoped_client};
 
 /// Provider-wide OIDC endpoints shown on the "Connection details" card.
 /// An empty doc (cold discovery failure) yields all-empty fields, which the
@@ -356,7 +356,10 @@ pub async fn update(
             );
         }
     };
-    let payload = form.to_oauth2_client(Some(existing));
+    let mut payload = form.to_oauth2_client(Some(existing));
+    if let Err(msg) = constrain_org_scoped_client(&state, &scope, &mut payload).await {
+        return render_admin_error(&state, "Client not saved", &msg);
+    }
 
     // Checked on the merged payload, not the raw form: an empty field means
     // "leave alone", so only the effective value says whether this edit

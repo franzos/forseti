@@ -22,8 +22,14 @@ use crate::schema::oauth_client_metadata as ocm;
 /// Source provenance values. Keep in sync with the column default in
 /// the migration.
 pub mod source {
-    /// Created through the admin UI. Implicitly verified at create time.
+    /// Created through the admin UI by a Forseti operator. Implicitly
+    /// verified at create time, and the only source whose registered
+    /// `audience` counts as operator policy at consent time.
     pub const ADMIN: &str = "admin";
+    /// Created through the admin UI by an org owner. Vouched for within
+    /// that org, but the owner isn't an operator, so the audience it
+    /// carries is not policy - see `consent::read_client_audience`.
+    pub const ORG: &str = "org";
     /// Self-registered via the retired RFC 7591 DCR proxy. Nothing creates
     /// new rows; existing ones stay (history + still-live refresh tokens).
     pub const DCR: &str = "dcr";
@@ -181,15 +187,17 @@ pub async fn set_cimd_doc_hash(db: &DbPool, client_id: &str, hash: &str) -> anyh
     Ok(())
 }
 
-/// INSERT a fresh row for an admin-created client. Implicitly verified
-/// — the act of an admin creating the client through the form is the
-/// vouching.
-pub async fn insert_admin_verified(
+/// INSERT a fresh row for a client created through the admin form.
+/// Implicitly verified - the act of creating the client through the form is
+/// the vouching. `source` says who did the vouching: [`source::ADMIN`] for a
+/// Forseti operator, [`source::ORG`] for an org owner.
+pub async fn insert_form_created(
     db: &DbPool,
     client_id: &str,
     admin_email: &str,
     org_id: &str,
     template_slug: Option<&str>,
+    source: &str,
     now: chrono::DateTime<Utc>,
 ) -> anyhow::Result<()> {
     let now_str = now.to_rfc3339();
@@ -197,6 +205,7 @@ pub async fn insert_admin_verified(
     let admin = admin_email.to_string();
     let org = org_id.to_string();
     let template = template_slug.map(str::to_string);
+    let src = source.to_string();
     db_interact!(db, |conn| {
         diesel::insert_into(ocm::table)
             .values(InsertRow {
@@ -204,7 +213,7 @@ pub async fn insert_admin_verified(
                 verification: verification::VERIFIED,
                 verified_by: Some(&admin),
                 verified_at: Some(now_str.clone()),
-                source: source::ADMIN,
+                source: &src,
                 dcr_iat_id: None,
                 dcr_registered_at: None,
                 created_at: now_str.clone(),
@@ -318,6 +327,29 @@ pub async fn mark_unverified(
         Ok(prior)
     })?;
     Ok(prior)
+}
+
+/// How many CIMD clients exist, and how many of those came from `origin`
+/// (a `scheme://host[:port]` prefix). One query, since the CIMD shim checks
+/// both ceilings together before registering a new client.
+///
+/// The `LIKE` pattern is built from a parsed `url::Url` origin, so it can't
+/// carry a `%` or `_` wildcard.
+pub async fn count_cimd(db: &DbPool, origin: &str) -> anyhow::Result<(u32, u32)> {
+    let prefix = format!("{origin}/%");
+    let (total, for_origin): (i64, i64) = db_interact!(db, |conn| {
+        let total: i64 = ocm::table
+            .filter(ocm::source.eq(source::CIMD))
+            .count()
+            .get_result(conn)?;
+        let for_origin: i64 = ocm::table
+            .filter(ocm::source.eq(source::CIMD))
+            .filter(ocm::client_id.like(&prefix))
+            .count()
+            .get_result(conn)?;
+        Ok::<_, diesel::result::Error>((total, for_origin))
+    })?;
+    Ok((total.max(0) as u32, for_origin.max(0) as u32))
 }
 
 /// Count rows belonging to `org_id`. The org-delete precondition: refuses to

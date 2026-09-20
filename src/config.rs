@@ -530,6 +530,19 @@ pub struct CimdConfig {
     /// Set to `0` to disable the bucket.
     #[serde(default)]
     pub global_rate_per_hour: Option<u32>,
+    /// Ceiling on how many CIMD clients may exist in total. Rate limits bound
+    /// the request rate but not the standing count: every distinct client_id
+    /// URL leaves a permanent Hydra client and metadata row behind, so without
+    /// a cap a patient unauthenticated caller still fills the tables. Refuses
+    /// only *new* registrations; existing clients keep working. `None` falls
+    /// back to 500. Set to `0` for no ceiling.
+    #[serde(default)]
+    pub max_clients: Option<u32>,
+    /// Ceiling on CIMD clients per client_id host, so one host can't consume
+    /// the global ceiling on its own. `None` falls back to 50. Set to `0` for
+    /// no per-host ceiling.
+    #[serde(default)]
+    pub max_clients_per_host: Option<u32>,
 }
 
 /// Admin-surface gating: emails allowed through `/admin/*`; everyone else gets 403 even with a valid session.

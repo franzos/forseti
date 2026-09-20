@@ -78,7 +78,7 @@ pub async fn store_secret_reveal(
         anyhow::anyhow!("serialise reveal payload: {e}")
     })?;
     let row = NewReveal {
-        token: token.clone(),
+        token: token_hash(&token),
         payload,
         created_at: Utc::now().to_rfc3339(),
     };
@@ -133,7 +133,7 @@ async fn peek_secret_reveal_inner(
     reveal_ttl_seconds: u64,
     token: &str,
 ) -> anyhow::Result<Option<(String, i32)>> {
-    let token = token.to_string();
+    let token = token_hash(token);
     let prune = prune_cutoff(reveal_ttl_seconds);
     let result: Option<(String, i32)> = db_interact!(db, |conn| {
         conn.transaction::<_, diesel::result::Error, _>(|c| {
@@ -159,7 +159,7 @@ pub async fn bump_secret_reveal_attempts(
     token: &str,
     max_attempts: i32,
 ) -> anyhow::Result<bool> {
-    let token = token.to_string();
+    let token = token_hash(token);
     let exhausted: bool = db_interact!(db, |conn| {
         conn.transaction::<bool, diesel::result::Error, _>(|c| {
             let updated =
@@ -217,7 +217,7 @@ async fn take_secret_reveal_inner(
     reveal_ttl_seconds: u64,
     token: &str,
 ) -> anyhow::Result<Option<String>> {
-    let token = token.to_string();
+    let token = token_hash(token);
     let prune = prune_cutoff(reveal_ttl_seconds);
     let payload: Option<String> = db_interact!(db, |conn| {
         conn.transaction::<_, diesel::result::Error, _>(|c| {
@@ -242,6 +242,15 @@ fn random_token() -> String {
     use rand::RngExt;
     let bytes: [u8; 16] = rand::rng().random();
     hex::encode(bytes)
+}
+
+/// What goes in the `token` column. The raw token is a bearer credential -
+/// whoever holds it gets the client secret or recovery code behind it - so it
+/// lives only in the redirect that carries it, never at rest. Same shape as
+/// the claim-email and DCR token columns.
+fn token_hash(raw: &str) -> String {
+    use sha2::Digest;
+    hex::encode(sha2::Sha256::digest(raw.as_bytes()))
 }
 
 // --- Flash cookie ---------------------------------------------------------

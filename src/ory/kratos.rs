@@ -383,26 +383,6 @@ pub async fn admin_list_identities_by_ids(
     admin_list_identities_by_ids_inner(clients, ids, None).await
 }
 
-/// Like [`admin_list_identities_by_ids`] but asks Kratos to include
-/// credential metadata in each row (mirrors [`admin_get_identity_full`]).
-pub async fn admin_list_identities_by_ids_full(
-    clients: &OryClients,
-    ids: Vec<String>,
-) -> Result<Vec<Identity>> {
-    admin_list_identities_by_ids_inner(
-        clients,
-        ids,
-        Some(vec![
-            "password".to_string(),
-            "totp".to_string(),
-            "webauthn".to_string(),
-            "lookup_secret".to_string(),
-            "oidc".to_string(),
-        ]),
-    )
-    .await
-}
-
 async fn admin_list_identities_by_ids_inner(
     clients: &OryClients,
     ids: Vec<String>,
@@ -639,19 +619,6 @@ pub async fn admin_revoke_session(clients: &OryClients, id: &str) -> Result<()> 
     identity_api::disable_session(&clients.kratos_admin, id)
         .await
         .map_err(|e| anyhow::anyhow!("kratos admin disable_session failed: {e}"))
-}
-
-/// Fetch a single session by ID via the admin API, with the owning
-/// identity expanded so callers can verify org-scope ownership before
-/// performing destructive actions on the session.
-pub async fn admin_get_session(clients: &OryClients, id: &str) -> Result<Session> {
-    identity_api::get_session(
-        &clients.kratos_admin,
-        id,
-        Some(vec!["identity".to_string()]),
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("kratos admin get_session failed: {e}"))
 }
 
 /// List courier messages. Used by the admin status page to surface

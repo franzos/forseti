@@ -409,6 +409,40 @@ pub async fn kratos_admin_create_identity(email: &str) -> String {
     v["id"].as_str().expect("identity id").to_string()
 }
 
+/// Like [`kratos_admin_create_password_identity`] but with the address
+/// pre-verified, the way `seed-admin.sh` does it. Flows that refuse to act on
+/// an unverified address (accepting an org invite, for one) need this.
+pub async fn kratos_admin_create_verified_password_identity(email: &str, password: &str) -> String {
+    let client = browser_client();
+    let body = serde_json::json!({
+        "schema_id": "default",
+        "traits": {
+            "email": email,
+            "name": { "first": "Verified", "last": "User" }
+        },
+        "verifiable_addresses": [{
+            "value": email, "verified": true, "via": "email", "status": "completed"
+        }],
+        "credentials": {
+            "password": { "config": { "password": password } }
+        },
+    });
+    let res = client
+        .post(format!("{KRATOS_ADMIN}/admin/identities"))
+        .json(&body)
+        .send()
+        .await
+        .expect("create verified identity transport");
+    assert!(
+        res.status().is_success(),
+        "create verified identity status {}: {}",
+        res.status(),
+        res.text().await.unwrap_or_default()
+    );
+    let v: Value = res.json().await.expect("create verified identity body");
+    v["id"].as_str().expect("identity id").to_string()
+}
+
 /// Create an identity *with* a password credential directly via the admin
 /// API (Kratos hashes the supplied plaintext). Unlike
 /// [`kratos_admin_create_identity`], the returned identity can password-login
@@ -791,8 +825,13 @@ pub async fn hydra_client_audience(client_id: &str) -> Vec<String> {
 /// Delete a Hydra client. Best-effort.
 pub async fn hydra_delete_client(client_id: &str) {
     let client = browser_client();
+    // CIMD client ids are whole URLs, so the path segment has to be encoded
+    // or the DELETE lands on a different path and the client stays put.
     let _ = client
-        .delete(format!("{HYDRA_ADMIN}/admin/clients/{client_id}"))
+        .delete(format!(
+            "{HYDRA_ADMIN}/admin/clients/{}",
+            form_urlencode(client_id)
+        ))
         .send()
         .await;
 }
@@ -831,6 +870,18 @@ pub async fn try_admin_signed_in_client() -> Option<Client> {
     password_login_aal1(&client, &creds.email, &creds.password).await;
     totp_step_up(&client, &creds.totp_code()).await;
     Some(client)
+}
+
+/// Signed-in admin as a pair of clients sharing one cookie jar: the browser
+/// one follows redirects, the manual one doesn't. Needed whenever a redirect
+/// is itself the thing under test - a `?reveal=` token, say, which the show
+/// page consumes the moment the browser client follows it.
+pub async fn try_admin_paired_clients() -> Option<(Client, Client)> {
+    let creds = admin_test_credentials()?;
+    let (browser, manual, _jar) = paired_clients();
+    password_login_aal1(&browser, &creds.email, &creds.password).await;
+    totp_step_up(&browser, &creds.totp_code()).await;
+    Some((browser, manual))
 }
 
 /// AAL1-only sibling of [`try_admin_signed_in_client`]: signs the seeded
@@ -993,6 +1044,87 @@ pub async fn totp_step_up(client: &Client, totp_code: &str) {
          — TOTP rejected; secret may be wrong or clock-skewed",
         body.chars().take(400).collect::<String>()
     );
+}
+
+/// Base32 TOTP secret used by [`plant_totp`] when the caller doesn't care
+/// which one it is. Same shape as the seeded admin's.
+pub const TEST_TOTP_SECRET: &str = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP";
+
+/// Plant a TOTP credential with a known base32 secret straight into Kratos's
+/// Postgres, the way `infra/seed-admin.sh` does. Kratos's import API can't
+/// carry TOTP and self-service enrolment isn't reliable from a test, so this
+/// is the only way to get a *second* AAL2-capable identity - one that isn't
+/// on `[admin].allowed_emails` - for the admin-tier tests.
+///
+/// Goes through `$COMPOSE exec postgres`, so it works under podman-compose
+/// and `docker compose` alike.
+pub fn plant_totp(identity_id: &str, secret_b32: &str) {
+    const SQL: &str = "\
+WITH t AS (SELECT id FROM identity_credential_types WHERE name = 'totp'),
+     n AS (SELECT nid FROM identities WHERE id = :'iid'),
+     ins AS (
+       INSERT INTO identity_credentials
+         (id, config, identity_credential_type_id, identity_id, created_at, updated_at, nid, version)
+       SELECT gen_random_uuid(),
+              jsonb_build_object('totp_url',
+                'otpauth://totp/forseti:' || :'iid' ||
+                '?algorithm=SHA1&digits=6&issuer=forseti&period=30&secret=' || :'secret'),
+              t.id, :'iid', now(), now(), n.nid, 0
+       FROM t, n
+       RETURNING id, identity_credential_type_id, nid
+     )
+INSERT INTO identity_credential_identifiers
+  (id, identifier, identity_credential_id, created_at, updated_at, nid, identity_credential_type_id, identity_id)
+SELECT gen_random_uuid(), :'iid', ins.id, now(), now(), ins.nid, ins.identity_credential_type_id, :'iid'
+FROM ins;";
+
+    let compose = std::env::var("COMPOSE").unwrap_or_else(|_| "podman-compose".to_string());
+    let compose_file =
+        std::env::var("COMPOSE_FILE").unwrap_or_else(|_| "infra/docker-compose.yml".to_string());
+    let mut parts = compose.split_whitespace();
+    let program = parts.next().expect("COMPOSE must name a program");
+    let mut cmd = std::process::Command::new(program);
+    cmd.args(parts)
+        .args(["-f", &compose_file])
+        .args([
+            "exec", "-T", "postgres", "psql", "-U", "kratos", "-d", "kratos",
+        ])
+        .args(["-v", "ON_ERROR_STOP=1"])
+        .arg("-v")
+        .arg(format!("iid={identity_id}"))
+        .arg("-v")
+        .arg(format!("secret={secret_b32}"))
+        // psql only interpolates `:'var'` for input it reads as a script, not
+        // for `-c`, so the statement goes in on stdin.
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = cmd
+        .spawn()
+        .unwrap_or_else(|e| panic!("plant_totp: spawn `{compose}`: {e}"));
+    {
+        use std::io::Write;
+        let stdin = child.stdin.as_mut().expect("psql stdin");
+        stdin
+            .write_all(SQL.as_bytes())
+            .unwrap_or_else(|e| panic!("plant_totp: write sql: {e}"));
+    }
+    let out = child
+        .wait_with_output()
+        .unwrap_or_else(|e| panic!("plant_totp: wait: {e}"));
+    assert!(
+        out.status.success(),
+        "plant_totp: psql failed ({}): {}{}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+}
+
+/// Public form of [`compute_totp_now`] for tests driving an identity whose
+/// secret didn't come from `FORSETI_ADMIN_TEST_TOTP_SECRET`.
+pub fn totp_code_for(secret_b32: &str) -> String {
+    compute_totp_now(secret_b32)
 }
 
 /// Derive the current RFC 6238 TOTP code (SHA1, 30 s period, 6 digits)
@@ -1186,6 +1318,108 @@ pub fn remove_team_member(team_id: &str, identity_id: &str) {
         params![team_id, identity_id],
     )
     .unwrap_or_else(|e| panic!("delete org_team_members: {e}"));
+}
+
+/// Run `body` with an active Orgs license, then put the playground back the
+/// way it was. Teams and named orgs are license-gated everywhere, so a test
+/// that drives them has nothing to exercise without one.
+///
+/// The license is process-wide state the rest of the suite reads, so the
+/// restore has to survive a failing assertion - hence the `catch_unwind` and
+/// the re-panic afterwards. Returns `false` (having run nothing) when the
+/// admin fixture or the license blob isn't available, so the caller can skip.
+pub async fn with_orgs_license<F, Fut>(body: F) -> bool
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    let Some(admin) = try_admin_signed_in_client().await else {
+        return false;
+    };
+    let Ok(blob) = std::fs::read_to_string("tests/fixtures/license/active.blob") else {
+        return false;
+    };
+    let was_licensed = license_is_active();
+    if !was_licensed {
+        post_license(&admin, "activate", Some(blob.trim())).await;
+        assert!(
+            license_is_active(),
+            "activating tests/fixtures/license/active.blob did not take; \
+             re-mint it against the current pubkey (see brain tests/licensing.md)"
+        );
+    }
+
+    let outcome = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(body())).await;
+
+    if !was_licensed {
+        post_license(&admin, "deactivate", None).await;
+    }
+    if let Err(p) = outcome {
+        std::panic::resume_unwind(p);
+    }
+    true
+}
+
+fn license_is_active() -> bool {
+    let conn = forseti_db_conn();
+    conn.query_row("SELECT COUNT(*) FROM forseti_license", [], |r| {
+        r.get::<_, i64>(0)
+    })
+    .unwrap_or(0)
+        > 0
+}
+
+async fn post_license(admin: &Client, action: &str, blob: Option<&str>) {
+    let body = admin
+        .get(format!("{PORTAL}/admin/license"))
+        .send()
+        .await
+        .expect("GET /admin/license")
+        .text()
+        .await
+        .expect("license page body");
+    let re = regex::Regex::new(r#"name="_csrf"\s+value="([^"]+)""#).expect("csrf regex");
+    let csrf = re
+        .captures(&body)
+        .map(|c| c[1].to_string())
+        .expect("_csrf on /admin/license");
+    let mut form = vec![("_csrf", csrf.as_str())];
+    if let Some(b) = blob {
+        form.push(("blob", b));
+    }
+    let res = admin
+        .post(format!("{PORTAL}/admin/license/{action}"))
+        .form(&form)
+        .send()
+        .await
+        .unwrap_or_else(|e| panic!("POST /admin/license/{action}: {e}"));
+    assert!(
+        res.status().is_success(),
+        "POST /admin/license/{action}: status {}",
+        res.status()
+    );
+}
+
+/// A team's current name and its roster, for asserting a refused mutation
+/// changed nothing. `None` name means the team row is gone.
+pub fn read_team_state(team_id: &str) -> (Option<String>, Vec<String>) {
+    let conn = forseti_db_conn();
+    let name = conn
+        .query_row(
+            "SELECT name FROM org_teams WHERE id = ?1",
+            params![team_id],
+            |r| r.get::<_, String>(0),
+        )
+        .ok();
+    let mut stmt = conn
+        .prepare("SELECT identity_id FROM org_team_members WHERE team_id = ?1 ORDER BY identity_id")
+        .unwrap_or_else(|e| panic!("prepare org_team_members select: {e}"));
+    let members = stmt
+        .query_map(params![team_id], |r| r.get::<_, String>(0))
+        .unwrap_or_else(|e| panic!("query org_team_members: {e}"))
+        .filter_map(Result::ok)
+        .collect();
+    (name, members)
 }
 
 /// Delete an `organization_members` row (test cleanup / member removal).
@@ -1568,6 +1802,55 @@ pub fn delete_posix_account(identity_id: &str) {
 /// UPSERT `oauth_client_metadata` so the row records `verification =
 /// 'verified'`, `source = 'admin'`, `verified_by = 'test-fixture'`. Works
 /// whether or not a row already exists.
+/// How many Hydra clients carry `client_name`. Lets a test assert that a
+/// rejected create left nothing behind.
+pub async fn hydra_client_count_by_name(client_name: &str) -> usize {
+    let client = browser_client();
+    let Ok(res) = client
+        .get(format!("{HYDRA_ADMIN}/admin/clients?page_size=500"))
+        .send()
+        .await
+    else {
+        return 0;
+    };
+    let v: Value = res.json().await.unwrap_or(Value::Null);
+    v.as_array()
+        .map(|a| {
+            a.iter()
+                .filter(|c| c["client_name"].as_str() == Some(client_name))
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+/// Read `oauth_client_metadata.source` for a client. `None` when there's no
+/// row - the legacy "treat as admin-created" case.
+pub fn client_metadata_source(client_id: &str) -> Option<String> {
+    let conn = forseti_db_conn();
+    conn.query_row(
+        "SELECT source FROM oauth_client_metadata WHERE client_id = ?1",
+        params![client_id],
+        |r| r.get::<_, String>(0),
+    )
+    .ok()
+}
+
+/// Read a single field off a Hydra client via the admin API. `None` when the
+/// client is gone or the field isn't present.
+pub async fn hydra_client_field(client_id: &str, field: &str) -> Option<Value> {
+    let client = browser_client();
+    let res = client
+        .get(format!(
+            "{HYDRA_ADMIN}/admin/clients/{}",
+            form_urlencode(client_id)
+        ))
+        .send()
+        .await
+        .ok()?;
+    let v: Value = res.json().await.ok()?;
+    v.get(field).cloned()
+}
+
 pub fn mark_client_verified(client_id: &str) {
     let now = chrono::Utc::now().to_rfc3339();
     let conn = forseti_db_conn();
@@ -1650,6 +1933,59 @@ pub fn read_client_provenance(client_id: &str) -> Option<(Option<String>, Option
         },
     )
     .ok()
+}
+
+/// SHA-256 hex of `s`, for asserting what a token column actually holds.
+pub fn sha256_hex(s: &str) -> String {
+    let mut h = Sha256::new();
+    h.update(s.as_bytes());
+    hex::encode(h.finalize())
+}
+
+/// How many `organization_invites` rows carry exactly this token value.
+pub fn count_invites_with_token(token: &str) -> i64 {
+    let conn = forseti_db_conn();
+    conn.query_row(
+        "SELECT COUNT(*) FROM organization_invites WHERE token = ?1",
+        params![token],
+        |r| r.get(0),
+    )
+    .unwrap_or_else(|e| panic!("count organization_invites: {e}"))
+}
+
+/// Drop every invite row for an email (test cleanup).
+pub fn delete_invites_for_email(email: &str) {
+    let conn = forseti_db_conn();
+    conn.execute(
+        "DELETE FROM organization_invites WHERE email = ?1",
+        params![email],
+    )
+    .unwrap_or_else(|e| panic!("delete organization_invites: {e}"));
+}
+
+/// INSERT a bare `source = 'cimd'` metadata row, standing in for a client the
+/// shim registered earlier. Used to fill the CIMD client ceiling without
+/// driving hundreds of real authorize flows.
+pub fn seed_cimd_metadata_row(client_id: &str) {
+    let now = chrono::Utc::now().to_rfc3339();
+    let conn = forseti_db_conn();
+    conn.execute(
+        "INSERT OR IGNORE INTO oauth_client_metadata \
+         (client_id, verification, source, created_at, org_id) \
+         VALUES (?1, 'unverified', 'cimd', ?2, 'default')",
+        params![client_id, now],
+    )
+    .unwrap_or_else(|e| panic!("insert cimd oauth_client_metadata: {e}"));
+}
+
+/// Drop an `oauth_client_metadata` row (cleanup for the seeders above).
+pub fn delete_client_metadata(client_id: &str) {
+    let conn = forseti_db_conn();
+    conn.execute(
+        "DELETE FROM oauth_client_metadata WHERE client_id = ?1",
+        params![client_id],
+    )
+    .unwrap_or_else(|e| panic!("delete oauth_client_metadata: {e}"));
 }
 
 /// Read the full `oauth_client_metadata` row for the given `client_id` —
@@ -2205,4 +2541,26 @@ pub fn extract_csrf_form_token(html: &str) -> Option<String> {
     let after = &rest[val_idx + "value=\"".len()..];
     let end = after.find('"')?;
     Some(after[..end].to_string())
+}
+
+/// Has the invite with this stored token value been accepted?
+pub fn invite_is_accepted(stored_token: &str) -> bool {
+    let conn = forseti_db_conn();
+    conn.query_row(
+        "SELECT accepted_at IS NOT NULL FROM organization_invites WHERE token = ?1",
+        params![stored_token],
+        |r| r.get::<_, bool>(0),
+    )
+    .unwrap_or(false)
+}
+
+/// How many `secret_reveals` rows carry exactly this token value.
+pub fn count_reveals_with_token(token: &str) -> i64 {
+    let conn = forseti_db_conn();
+    conn.query_row(
+        "SELECT COUNT(*) FROM secret_reveals WHERE token = ?1",
+        params![token],
+        |r| r.get(0),
+    )
+    .unwrap_or_else(|e| panic!("count secret_reveals: {e}"))
 }

@@ -154,7 +154,11 @@ Reached by appending `?org=<slug>` to an admin URL. The `RequireAdminScoped` ext
 - **`AdminScope::Forseti`** — no `?org` param. The full operator surface, gated by the email allowlist + AAL2, exactly as before.
 - **`AdminScope::Org { id, slug }`** — `?org=<slug>` resolved to an org the caller *owns*. Every query is then filtered to that org's rows. Unknown slug → `UnknownOrg`; not an owner → `NotOwner`.
 
-Surfaces that honour the org scope (each filters its listing to the scoped org): clients (`src/admin/clients/`), identities, sessions, audit, and webhooks.
+Surfaces that honour the org scope (each filters its listing to the scoped org): clients (`src/admin/clients/`), resources (`src/admin/resources.rs`), audit, and webhooks. Everything else under `/admin/*` takes `RequireAdmin` and ignores `?org=`.
+
+Identities and sessions are deliberately **not** on that list. A Kratos identity is global — one identity spans every org, and Forseti's membership table is a join on top of it — so anything reached through `/admin/identities/*` or `/admin/sessions/*` operates on the member's whole account, not on their membership. Scope those routes by `?org=` and an org owner can mint a Kratos recovery code for any co-member and take the account outright, across every org and connected app. So they take `RequireAdmin` (`src/admin/identities.rs`, `src/admin/sessions.rs`); the org-owner member view is `/settings/organization/members`.
+
+Client creation under `AdminScope::Org` is constrained rather than merely filtered (`constrain_org_scoped_client`, `src/admin/clients/scope.rs`): `skip_consent` is forced off, each `audience` entry must be an enabled `resource_registry` row belonging to that org, and the metadata row is stamped `source = org` (`src/oauth_client_metadata.rs`). That last one matters at consent time: `read_client_audience` (`src/oauth/consent.rs`) treats a client's registered audience as operator policy only for `source = admin`.
 
 ## OIDC claim construction
 

@@ -251,6 +251,8 @@ Settings for the CIMD authorization shim at `GET /oauth2/authorize` (see [CIMD](
 | `ip_rate_per_hour`         | u32      | `100`            | Per-IP rate limit — max requests per hour. Enforced in parallel with the per-minute bucket. `0` disables.                                                  |
 | `global_rate_per_minute`   | u32      | `40`             | Global (all-callers-share-one-bucket) rate limit, requests per minute. Bounds total traffic even when a spoofed `X-Forwarded-For` defeats the per-IP bucket. `0` disables. |
 | `global_rate_per_hour`     | u32      | `400`            | Global rate limit, requests per hour, in parallel with the per-minute global bucket. `0` disables.                                                        |
+| `max_clients`              | u32      | `500`            | Ceiling on how many CIMD clients may exist in total. The rate keys above bound how fast clients are registered; this bounds the standing count, since every distinct client_id URL leaves a permanent Hydra client and metadata row behind. Only a *new* client_id is refused — everything already registered keeps working. `0` lifts the ceiling. |
+| `max_clients_per_host`     | u32      | `50`             | Same ceiling, per client_id host, so one host can't consume the global allowance on its own. `0` lifts it.                                                |
 
 #### RFC 8707 `resource` → access-token audience
 
@@ -398,7 +400,7 @@ There are **two tiers** of admin access. Same `/admin/*` URL prefix, different g
 
 The order matters: a non-allowlisted user with a valid AAL2 session still gets a 403. An allowlisted user with an AAL1 session is bounced to step-up before being told they're allowed in.
 
-**Tier 2 — Org-scoped admin (org owner).** Reached by hitting `/admin/...?org=<slug>`. This is the surface an org owner uses to manage *their own* org — members, branding, invites, the org-scoped audit feed. Gated by:
+**Tier 2 — Org-scoped admin (org owner).** Reached by hitting `/admin/...?org=<slug>`, and only on the surfaces listed below. This is what an org owner uses to manage *their own* org. Gated by:
 
 1. **Active Kratos session** — same as Tier 1.
 2. **Org ownership.** The caller must be an `owner` of the org named by `<slug>` (i.e. an `organization_members` row with `role = 'owner'`). Non-owners — including members with the `member` role and Forseti-wide admins who aren't members of that specific org — get a 403.
@@ -407,10 +409,31 @@ The order matters: a non-allowlisted user with a valid AAL2 session still gets a
 
 **`[admin].allowed_emails` is not checked on Tier 2.** This is deliberate: org owners need to manage their own org without the operator having to add every customer's email to the allowlist. The trust boundary on Tier 2 is "you own this org", not "the operator vouches for you".
 
+**Which surface is which.** Only four of the admin surfaces accept `?org=`; the rest are Tier 1 whatever you append to the URL.
+
+| Surface                                | Tier                  | Notes                                                                                     |
+|----------------------------------------|-----------------------|-------------------------------------------------------------------------------------------|
+| `/admin/status`, `/admin/configuration`| Tier 1 only           | Deployment-wide health and live Ory config.                                                 |
+| `/admin/identities/*`, `/admin/identity-picker` | Tier 1 only  | A Kratos identity is global — one identity spans every org — so an org-scoped view of it would hand an org owner the member's whole account, recovery codes included. Org owners get their member view at `/settings/organization/members`. |
+| `/admin/sessions/*`                    | Tier 1 only           | Sessions belong to those same global identities.                                            |
+| `/admin/hosts/*`, `/admin/posix/*`     | Tier 1 only           | Linux host enrollment and POSIX provisioning are deployment infrastructure.                 |
+| `/admin/saml/*`, `/admin/license`      | Tier 1 only           | SSO connections and the installation's licence.                                             |
+| `/admin/clients/*`                     | Tier 1 or Tier 2      | Org owners get OAuth client self-service for their own org, with the constraints below.     |
+| `/admin/resources/*`                   | Tier 1 or Tier 2      | An org owner may only register resources on a **verified domain** of their org.             |
+| `/admin/audit`, `/admin/webhooks`      | Tier 1 or Tier 2      | Scoped to the org's own rows.                                                               |
+
+**What an org owner's OAuth client can't be.** A client created under `?org=<slug>` is held to what an org owner may vouch for, not what an operator may:
+
+- `skip_consent` is forced off. An org owner can't mint a client that issues tokens to anyone who follows an authorize link without a consent screen.
+- Every `audience` entry must be an enabled resource registered to that same org, so a client can't be pointed at another tenant's resource server.
+- The metadata row is stamped `source = org` rather than `source = admin`. The consent path treats a registered audience as operator policy only for `source = admin`, so an org owner's declared audience is a request, not a policy statement.
+
+A Forseti-wide admin creating the same client keeps all three capabilities.
+
 What this means in practice:
 
-- A Forseti-wide admin (allowlisted email) who is *not* a member of `acme-corp` gets 403 on `/admin/identities?org=acme-corp`. The operator allowlist doesn't grant org-owner privileges; it grants global-operator privileges, which are a different thing.
-- An org owner who is *not* on `[admin].allowed_emails` can manage their own org but cannot access `/admin/identities` (no `?org=`), `/admin/clients`, `/admin/license`, etc. They see a 403 on the global surfaces.
+- An allowlisted operator reaches every surface, `?org=` or not — on the Tier-2 surfaces the parameter narrows the view to one org rather than granting anything.
+- An org owner who is *not* on `[admin].allowed_emails` manages clients, resources, audit and webhooks for their own org and gets a 403 everywhere else under `/admin/*` — including `/admin/identities` and `/admin/sessions` with or without `?org=`.
 - If you want to restrict who can own an org — e.g. only allow paying customers — gate org creation, not the admin path. Org creation today goes through `/orgs/new` and is itself gated by the Orgs license; layer additional checks at the creation handler or via your billing flow.
 
 The two-tier code lives at `src/admin/mod.rs::require_admin` (Tier 1) and `src/admin/mod.rs::require_admin_with_scope` (Tier 1 + Tier 2 routed by `?org=`).
@@ -1526,6 +1549,8 @@ Documents are cached in-process (1024 entries, TTL from `Cache-Control: max-age`
 **Consent display.** For a CIMD client, the consent screen shows the client_id URL's **host** (e.g. `claude.ai`) as the primary identity with the document's self-asserted `client_name` demoted to a secondary line — names inside the document are self-asserted; the host is what the operator of that URL provably controls. No verification badge is ever rendered for CIMD clients.
 
 **Host policy and rate limits.** `[oauth.cimd].allowed_client_hosts` closes the fleet to named client vendors (exact host match); empty means open, consent-gated. The shim carries the same dual per-IP + global rate-limit shape as the other public endpoints (see the [`[oauth.cimd]`](#oauthcimd--cimd-shim-knobs) table).
+
+**Client ceilings.** Rate limits bound how fast an unauthenticated caller can register clients, not how many end up existing — each distinct client_id URL leaves a permanent Hydra client and `oauth_client_metadata` row behind, so a patient caller still fills the tables. `max_clients` (500) and `max_clients_per_host` (50) bound the standing count. Only a client_id Forseti has never seen is refused, with `oauth.client.cimd_rejected` naming which ceiling was hit; everything already registered keeps authorizing. A deployment that legitimately needs more should raise the numbers rather than set them to `0`.
 
 **Auditing.** Every completed shim pass emits `oauth.client.cimd_seen` (target = the client_id URL); every rejection emits `oauth.client.cimd_rejected` at WARNING with the reason.
 

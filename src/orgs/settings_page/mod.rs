@@ -287,6 +287,29 @@ pub(crate) async fn resolve_org_or_404(
     }
 }
 
+/// Verify the caller may read `org_id`'s settings pages: any member, or a
+/// Tier-1 admin at AAL2. Non-members get the same not-found `resolve_org_or_404`
+/// gives an unknown slug, so the two can't be told apart.
+pub(super) async fn require_org_read_access(
+    state: &AppState,
+    sess: &RequireSession,
+    ctx: &SettingsCtx,
+    org_id: &str,
+) -> Result<(), Response> {
+    if orgs::org_role(&state.db, &ctx.identity_id, org_id)
+        .await
+        .is_some()
+    {
+        return Ok(());
+    }
+    let admin_aal2 = state.cfg.admin.is_admin(&ctx.user_email)
+        && crate::ory::kratos::session_satisfies_aal2(&sess.session);
+    if admin_aal2 {
+        return Ok(());
+    }
+    Err((StatusCode::NOT_FOUND, "unknown organization").into_response())
+}
+
 /// Verify the caller is an owner of `org_id` (otherwise 403).
 pub(super) async fn require_org_owner(
     state: &AppState,

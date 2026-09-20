@@ -42,6 +42,9 @@ mod account_delete;
 #[path = "integration/admin.rs"]
 mod admin;
 
+#[path = "integration/admin_tiers.rs"]
+mod admin_tiers;
+
 #[path = "integration/bug_regressions.rs"]
 mod bug_regressions;
 
@@ -62,6 +65,9 @@ mod member_visibility;
 
 #[path = "integration/oauth.rs"]
 mod oauth;
+
+#[path = "integration/org_isolation.rs"]
+mod org_isolation;
 
 #[path = "integration/oidc_contracts.rs"]
 mod oidc_contracts;

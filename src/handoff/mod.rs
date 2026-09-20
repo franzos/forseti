@@ -175,6 +175,23 @@ pub(crate) async fn handoff_enter(
         }
     };
 
+    if !referrer_is_vouched(&state, referrer_id).await {
+        tracing::warn!(
+            referrer = referrer_id,
+            "handoff: referrer client is not admin- or org-vouched",
+        );
+        let _ = audit::log(
+            &state.db,
+            AuditEvent::new(action::APP_REFERRER_ENTERED)
+                .target(target_kind::OAUTH_CLIENT, referrer_id.to_string())
+                .with_ctx(&actx)
+                .severity(audit::severity::WARNING)
+                .failed("client_not_vouched"),
+        )
+        .await;
+        return invalid_referrer();
+    }
+
     if !client_origin_matches(&client, referrer_uri) {
         tracing::warn!(
             referrer = referrer_id,
@@ -246,15 +263,19 @@ pub(crate) async fn handoff_return(
         state.cfg.handoff.referrer_cookie_ttl_seconds,
     );
 
-    // Re-validate against the client's current Hydra config: the ~1h cookie
-    // TTL leaves a window where URIs could be narrowed. Fall back to `/` if it
-    // no longer origin-matches.
+    // Re-validate against the client's current Hydra config and its current
+    // trust state: the ~1h cookie TTL leaves a window where URIs could be
+    // narrowed or the verification badge pulled. Fall back to `/` either way.
     let target = match &payload {
-        Some(p) => match ory::hydra::get_client(&state.ory, &p.client_id).await {
-            Ok(client) if client_origin_matches(&client, &p.referrer_uri) => p.referrer_uri.clone(),
-            _ => "/".to_string(),
-        },
-        None => "/".to_string(),
+        Some(p) if referrer_is_vouched(&state, &p.client_id).await => {
+            match ory::hydra::get_client(&state.ory, &p.client_id).await {
+                Ok(client) if client_origin_matches(&client, &p.referrer_uri) => {
+                    p.referrer_uri.clone()
+                }
+                _ => "/".to_string(),
+            }
+        }
+        _ => "/".to_string(),
     };
 
     let secure = state.cfg.self_.is_https();
@@ -315,6 +336,30 @@ fn action_target(action: Option<&str>) -> &'static str {
         "linked_providers" | "linked-providers" => "/settings/linked-providers",
         "authorized_apps" | "authorized-apps" => "/settings/authorized-apps",
         _ => "/settings",
+    }
+}
+
+/// True when somebody with authority vouched for this client through the
+/// admin form: a Forseti operator (`source = admin`) or the owning org
+/// (`source = org`), and the verification badge is still on.
+///
+/// A client with no metadata row is refused, unlike everywhere else in the
+/// codebase where a missing row reads as legacy-and-verified. Handoff renders
+/// the client's own `client_name` and `logo_uri` on Forseti's settings pages
+/// and then redirects back to its origin, and Hydra's `/oauth2/register` is
+/// publicly routed in this deployment - so "no row" includes "registered
+/// itself a minute ago", which is exactly what must not be trusted here.
+async fn referrer_is_vouched(state: &AppState, client_id: &str) -> bool {
+    use crate::oauth_client_metadata::source;
+    match crate::oauth_client_metadata::get(&state.db, client_id).await {
+        Ok(Some(row)) => {
+            row.is_verified() && matches!(row.source.as_str(), source::ADMIN | source::ORG)
+        }
+        Ok(None) => false,
+        Err(e) => {
+            tracing::error!(error = ?e, client_id, "handoff: client metadata lookup failed");
+            false
+        }
     }
 }
 

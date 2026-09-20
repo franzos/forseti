@@ -295,6 +295,31 @@ async fn handoff_validates_client_and_origin_matches_referrer() {
         hydra_create_test_client(&["openid", "offline"]).await;
     let client = manual_redirect_client();
 
+    // A client nobody vouched for - registered straight at Hydra, no Forseti
+    // metadata row - is refused before the origin check even runs.
+    let res = client
+        .get(format!(
+            "{PORTAL}/handoff?referrer={client_id}&referrer_uri=http://127.0.0.1:5555/back&action=password"
+        ))
+        .send()
+        .await
+        .expect("GET /handoff (unvouched)");
+    assert_eq!(
+        res.status().as_u16(),
+        400,
+        "an unvouched referrer client must be rejected"
+    );
+    assert!(
+        !res.headers()
+            .get_all("set-cookie")
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .any(|c| c.contains("forseti_app_referrer")),
+        "a rejected handoff must not set the app-referrer cookie"
+    );
+
+    mark_client_verified(&client_id);
+
     // Matching origin → cookie set, 30x to the per-action target.
     let res = client
         .get(format!(

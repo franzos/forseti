@@ -14,6 +14,7 @@ use crate::admin::{AdminCtx, render_admin_error};
 use crate::extractors::RequireAdminScoped;
 use crate::oauth_client_metadata;
 use crate::orgs::AdminScope;
+use crate::ory;
 use crate::state::AppState;
 
 /// Enforce that `client_id` belongs to the org named by `scope`. Forseti
@@ -86,6 +87,55 @@ where
         ensure_client_in_scope(&app_state, &scope, &id).await?;
         Ok(RequireClientInScope { id, ctx, scope })
     }
+}
+
+/// Constrain a client payload to what an org owner may ask for; Forseti-wide
+/// scope is a no-op. An org owner is not an operator, so two things are theirs
+/// to keep and Forseti's to refuse:
+///
+///   * `skip_consent` - a silent-grant client would issue tokens for any user
+///     who follows an authorize link, without a consent screen.
+///   * `audience` - an entry is only allowed when it is an enabled resource
+///     registered to this same org, so a client can't be pointed at another
+///     tenant's resource server.
+///
+/// The Err variant is the message to show on the re-rendered form.
+pub(super) async fn constrain_org_scoped_client(
+    state: &AppState,
+    scope: &AdminScope,
+    payload: &mut ory::OAuth2Client,
+) -> Result<(), String> {
+    let AdminScope::Org { id: org_id, .. } = scope else {
+        return Ok(());
+    };
+    payload.skip_consent = Some(false);
+
+    for raw in payload.audience.as_deref().unwrap_or_default() {
+        let entry = raw.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        let canonical =
+            crate::oauth::canonical_resource(entry).unwrap_or_else(|| entry.to_string());
+        let row = crate::resource_registry::find_by_resource(&state.db, &canonical)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = ?e, resource = %canonical, "admin/clients: audience lookup failed");
+                "We couldn't check the audience against the resource registry. \
+                 Please try again in a moment."
+                    .to_string()
+            })?;
+        match row {
+            Some(r) if r.enabled && r.org_id == *org_id => {}
+            _ => {
+                return Err(format!(
+                    "\"{entry}\" is not an enabled resource of your organization. \
+                     Register it under Resources first."
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Pick the `org_id` to stamp on a newly-created client's Forseti

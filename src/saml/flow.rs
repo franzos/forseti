@@ -328,15 +328,18 @@ pub async fn callback(
         }
     }
 
-    let link = match kratos::admin_create_recovery_link(&state.ory, &identity_id, "15m", Some("/"))
-        .await
-    {
-        Ok(l) => l,
-        Err(e) => {
-            tracing::error!(error = ?e, "saml callback: recovery link mint failed");
-            return fail_upstream(&state, &actx, &org_id, "recovery_link", clear).await;
-        }
-    };
+    // The link is a bearer credential that lands in the browser's URL bar and
+    // history, and redeeming it opens Kratos' password-change window. One
+    // minute is the shortest Kratos honours exactly; it's consumed on the next
+    // hop, so there's nothing to gain from a longer window.
+    let link =
+        match kratos::admin_create_recovery_link(&state.ory, &identity_id, "1m", Some("/")).await {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::error!(error = ?e, "saml callback: recovery link mint failed");
+                return fail_upstream(&state, &actx, &org_id, "recovery_link", clear).await;
+            }
+        };
     let _ = audit::log(
         &state.db,
         AuditEvent::new(action::SAML_LOGIN_SUCCEEDED)

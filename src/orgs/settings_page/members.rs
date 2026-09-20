@@ -56,7 +56,6 @@ struct MemberView {
 
 #[derive(Serialize, Clone)]
 struct InviteView {
-    token: String,
     email: String,
     role: String,
     expires_at: String,
@@ -193,7 +192,6 @@ async fn render_members(
             .unwrap_or_default()
             .into_iter()
             .map(|i| InviteView {
-                token: i.token,
                 email: i.email,
                 role: i.role,
                 expires_at: crate::format::humanise_timestamp(&ctx.locale, &i.expires_at),

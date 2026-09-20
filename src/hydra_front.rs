@@ -8,7 +8,7 @@
 
 use axum::Router;
 use axum::body::Bytes;
-use axum::extract::{DefaultBodyLimit, Path, RawQuery, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Path, RawQuery, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -62,6 +62,7 @@ async fn passthrough(
     Path(rest): Path<String>,
     method: Method,
     RawQuery(query): RawQuery,
+    ConnectInfo(peer_addr): ConnectInfo<std::net::SocketAddr>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
@@ -108,13 +109,22 @@ async fn passthrough(
             req = req.header(name.as_str(), s);
         }
     }
-    for (name, v) in headers.iter() {
-        if name.as_str().starts_with("x-forwarded-")
-            && let Ok(s) = v.to_str()
-        {
-            req = req.header(name.as_str(), s);
-        }
+    // The caller's own `x-forwarded-*` are dropped rather than passed on.
+    // Forseti is the hop Hydra sees, so it states what it actually resolved;
+    // relaying the inbound copies would let any caller tell Hydra whatever
+    // client address and scheme it liked.
+    if let Some(ip) = crate::client_ip::client_ip(&headers, &state.cfg.proxy, Some(peer_addr.ip()))
+    {
+        req = req.header("x-forwarded-for", ip.to_string());
     }
+    req = req.header(
+        "x-forwarded-proto",
+        if state.cfg.self_.is_https() {
+            "https"
+        } else {
+            "http"
+        },
+    );
     if !body.is_empty() {
         req = req.body(body.to_vec());
     }

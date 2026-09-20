@@ -36,6 +36,13 @@ const DEFAULT_CIMD_IP_RATE_PER_HOUR: u32 = 100;
 const DEFAULT_CIMD_GLOBAL_RATE_PER_MINUTE: u32 = 40;
 const DEFAULT_CIMD_GLOBAL_RATE_PER_HOUR: u32 = 400;
 
+/// Standing-count ceilings, applied only when a brand-new client_id turns up.
+/// The rate limits bound how fast clients can be registered; these bound how
+/// many can exist, which is the part an unauthenticated caller with time on
+/// their hands would otherwise run away with.
+const DEFAULT_CIMD_MAX_CLIENTS: u32 = 500;
+const DEFAULT_CIMD_MAX_CLIENTS_PER_HOST: u32 = 50;
+
 pub(crate) fn router(oauth_cfg: &OAuthConfig, proxy_cfg: &ProxyConfig) -> Router<AppState> {
     let r = Router::new().route("/oauth2/authorize", get(authorize));
     let cimd = &oauth_cfg.cimd;
@@ -173,6 +180,14 @@ async fn authorize(
             &requested_scope,
         );
 
+    // A row already present means this client_id is registered; only a first
+    // sighting adds to the standing count, so only that is capped.
+    if meta_row.is_none()
+        && let Some(reason) = over_client_ceiling(&state, &doc_url).await
+    {
+        return reject(&state, &actx, &client_id, &reason).await;
+    }
+
     if !warm {
         if let Err(reason) = upsert_hydra_client(
             &state,
@@ -218,6 +233,47 @@ async fn authorize(
     let _ = audit::log(&state.db, ev).await;
 
     redirect_to_hydra(&state.cfg.hydra, &raw_query)
+}
+
+/// The reason a new CIMD client can't be registered right now, or `None` when
+/// both ceilings still have room. A count failure refuses: the point of the
+/// ceiling is that an unauthenticated caller can't grow the tables, and a DB
+/// blip would otherwise be the way around it.
+async fn over_client_ceiling(state: &AppState, doc_url: &url::Url) -> Option<String> {
+    let cfg = &state.cfg.oauth.cimd;
+    let max_total = cfg.max_clients.unwrap_or(DEFAULT_CIMD_MAX_CLIENTS);
+    let max_host = cfg
+        .max_clients_per_host
+        .unwrap_or(DEFAULT_CIMD_MAX_CLIENTS_PER_HOST);
+    if max_total == 0 && max_host == 0 {
+        return None;
+    }
+    let origin = doc_url.origin().ascii_serialization();
+    let (total, for_host) = match oauth_client_metadata::count_cimd(&state.db, &origin).await {
+        Ok(counts) => counts,
+        Err(e) => {
+            tracing::error!(error = ?e, "cimd: client count failed");
+            return Some("client registration is temporarily unavailable".to_string());
+        }
+    };
+    if max_total > 0 && total >= max_total {
+        tracing::warn!(
+            total,
+            max_total,
+            "cimd: refusing a new client, global ceiling reached"
+        );
+        return Some("the CIMD client ceiling for this deployment has been reached".to_string());
+    }
+    if max_host > 0 && for_host >= max_host {
+        tracing::warn!(
+            %origin,
+            for_host,
+            max_host,
+            "cimd: refusing a new client, per-host ceiling reached"
+        );
+        return Some("the CIMD client ceiling for this host has been reached".to_string());
+    }
+    None
 }
 
 /// 302 into Hydra's authorize endpoint with the query string byte-identical.

@@ -1532,7 +1532,9 @@ mod tests {
         let t2 = teams::create_team(&db, "orgA", "Security", None)
             .await
             .unwrap();
-        teams::add_member(&db, &t1.id, "alice").await.unwrap();
+        teams::add_member(&db, &t1.org_id, &t1.id, "alice")
+            .await
+            .unwrap();
 
         insert_host(&db, "h-whole", "whole.example", "x", "orgA", false, None)
             .await

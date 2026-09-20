@@ -977,3 +977,98 @@ async fn front_proxy_forwards_cookies_and_does_not_follow_redirects() {
 
     hydra_delete_client(&client_id).await;
 }
+
+/// Serve two CIMD documents from one loopback listener, so both share an
+/// origin - which is what the per-host ceiling keys off. Returns the two doc
+/// URLs, each self-referencing.
+async fn serve_two_cimd_docs() -> (String, String) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind fixture listener");
+    let addr = listener.local_addr().expect("fixture addr");
+    let (first, second) = (format!("http://{addr}/doc"), format!("http://{addr}/doc2"));
+
+    let doc = |url: &str| {
+        serde_json::json!({
+            "client_id": url,
+            "client_name": "integration-test-cimd-ceiling",
+            "redirect_uris": ["http://127.0.0.1/callback", "http://localhost/callback"],
+            "grant_types": ["authorization_code", "refresh_token"],
+            "response_types": ["code"],
+            "token_endpoint_auth_method": "none",
+        })
+        .to_string()
+    };
+    let (b1, b2) = (doc(&first), doc(&second));
+    let serve = |body: String| {
+        move || {
+            let body = body.clone();
+            async move {
+                (
+                    [(axum::http::header::CONTENT_TYPE, "application/json")],
+                    body,
+                )
+            }
+        }
+    };
+    let app = axum::Router::new()
+        .route("/doc", axum::routing::get(serve(b1)))
+        .route("/doc2", axum::routing::get(serve(b2)));
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve fixture");
+    });
+    (first, second)
+}
+
+/// The standing-count ceiling: once a host has used up its allowance, a
+/// client_id the shim has never seen is refused, while one already registered
+/// keeps authorizing. Rate limits bound the rate; this bounds the total, which
+/// is what an unauthenticated caller with time would otherwise run away with.
+#[tokio::test]
+async fn cimd_refuses_a_new_client_past_the_per_host_ceiling() {
+    assert!(portal_reachable().await);
+
+    let (known, fresh) = serve_two_cimd_docs().await;
+    let origin = known.trim_end_matches("/doc").to_string();
+
+    // Register the first one for real, so it has both a Hydra client and a row.
+    let (status, location, body) = shim_authorize(&known, "http://127.0.0.1/callback").await;
+    assert!(
+        status.is_redirection(),
+        "first registration should pass: {status} {location} {body}"
+    );
+
+    // Fill the host's allowance (default 50) with rows on the same origin.
+    let filler: Vec<String> = (0..50).map(|i| format!("{origin}/filler-{i}")).collect();
+    for id in &filler {
+        seed_cimd_metadata_row(id);
+    }
+
+    let (status, _, body) = shim_authorize(&fresh, "http://127.0.0.1/callback").await;
+    assert_eq!(
+        status.as_u16(),
+        400,
+        "a new client_id past the ceiling must be refused; body: {body}"
+    );
+    assert!(
+        read_client_metadata_row(&fresh).is_none(),
+        "a refused registration must not leave a metadata row"
+    );
+    assert!(
+        hydra_client_field(&fresh, "client_id").await.is_none(),
+        "a refused registration must not leave a Hydra client"
+    );
+
+    // The already-registered client is unaffected by the ceiling.
+    let (status, location, body) = shim_authorize(&known, "http://127.0.0.1/callback").await;
+    assert!(
+        status.is_redirection(),
+        "an already-registered client must keep working: {status} {location} {body}"
+    );
+
+    for id in &filler {
+        delete_client_metadata(id);
+    }
+    delete_client_metadata(&known);
+    hydra_delete_client(&known).await;
+}

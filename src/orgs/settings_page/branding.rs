@@ -19,7 +19,7 @@ use crate::theming::{self, TokenOverrides, color::parse_color, derive};
 
 use super::{
     OrgSlug, SettingsCtx, build_nav, require_org_license, require_org_owner_with_license,
-    resolve_org_or_404, settings_ctx,
+    require_org_read_access, resolve_org_or_404, settings_ctx,
 };
 
 #[derive(Template)]
@@ -115,6 +115,10 @@ pub(super) async fn branding(
         Ok(t) => t,
         Err(r) => return r,
     };
+    // Ahead of the license gate, for the same reason as `overview_info`.
+    if let Err(r) = require_org_read_access(&state, &sess, &ctx, &target.org.id).await {
+        return r;
+    }
     if let Err(r) = require_org_license(&state, &ctx.csrf_token, &ctx.user_email, &target.org.id) {
         return r;
     }

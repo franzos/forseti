@@ -2772,3 +2772,59 @@ async fn multi_org_user_sees_only_host_org_team() {
     delete_org_membership(&org_a2, &eve_id);
     eve.cleanup().await;
 }
+
+/// The login shell reaches every `passwd` entry the NSS resolver hands to
+/// sshd and sudo, so a shell carrying a NUL or a newline is refused at the
+/// form rather than stored and dealt with downstream.
+#[tokio::test]
+async fn provision_rejects_a_malformed_shell() {
+    if !portal_reachable().await {
+        eprintln!("portal not reachable; skipping");
+        return;
+    }
+    let Some(client) = admin_client_or_skip().await else {
+        return;
+    };
+
+    let email = unique_email("badshell");
+    let id = kratos_admin_create_identity(&email).await;
+    let username = format!("badshell{}", chrono::Utc::now().timestamp_millis() % 50_000);
+
+    let body = client
+        .get(format!("{PORTAL}/admin/posix/new?identity_id={id}"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let csrf = extract_form_csrf(&body).expect("_csrf on step 2");
+
+    for shell in ["/bin/sh\0/bin/evil", "relative/sh", "/bin/my shell"] {
+        let res = client
+            .post(format!("{PORTAL}/admin/posix/new"))
+            .form(&[
+                ("_csrf", csrf.as_str()),
+                ("identity_id", email.as_str()),
+                ("username", username.as_str()),
+                ("shell", shell),
+            ])
+            .send()
+            .await
+            .unwrap();
+        let landed = res.url().to_string();
+        let body = res.text().await.unwrap_or_default();
+        assert!(
+            body.contains("Login shell must be an absolute path"),
+            "shell {shell:?} should be refused on the form; landed at {landed}"
+        );
+    }
+    assert_eq!(
+        count_posix_rows(&id, 0),
+        0,
+        "a refused provision must not create a POSIX account"
+    );
+
+    delete_posix_account(&id);
+    delete_test_identity(&id).await.ok();
+}

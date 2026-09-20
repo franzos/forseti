@@ -35,26 +35,21 @@ pub(crate) fn forwarded_client_ip(headers: &HeaderMap, trusted_hops: u8) -> Opti
     hops[hops.len() - hops_back].parse().ok()
 }
 
-/// `X-Real-IP` as written by a proxy that overwrites (never appends) it.
-fn real_ip(headers: &HeaderMap) -> Option<IpAddr> {
-    headers
-        .get("x-real-ip")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.trim().parse().ok())
-}
-
 /// Resolve the client address for this request under the operator's proxy
-/// trust settings: forwarded chain, then `X-Real-IP`, then the TCP peer.
-/// With trust off only the peer counts.
+/// trust settings: the forwarded chain, else the TCP peer. With trust off
+/// only the peer counts.
+///
+/// There is deliberately no `X-Real-IP` fallback. A single-entry `X-Forwarded-For`
+/// is what a request that reached Forseti directly looks like, and on that path
+/// any caller can also set `X-Real-IP` - so falling back to it hands the caller
+/// their own rate-limit key and their own audit trail.
 pub(crate) fn client_ip(
     headers: &HeaderMap,
     proxy: &ProxyConfig,
     peer: Option<IpAddr>,
 ) -> Option<IpAddr> {
     if proxy.trust_forwarded_for {
-        forwarded_client_ip(headers, proxy.trusted_hops)
-            .or_else(|| real_ip(headers))
-            .or(peer)
+        forwarded_client_ip(headers, proxy.trusted_hops).or(peer)
     } else {
         peer
     }
@@ -172,11 +167,18 @@ mod tests {
     }
 
     #[test]
-    fn trusted_proxy_falls_back_real_ip_then_peer() {
+    fn trusted_proxy_falls_back_to_the_peer_not_a_header() {
+        // A spoofable `X-Real-IP` must lose to the peer, with or without a
+        // forwarded chain too short to satisfy `trusted_hops`.
         let h = headers(&[], Some("2.2.2.2"));
         assert_eq!(
             client_ip(&h, &proxy(true, 1), Some(ip("203.0.113.9"))),
-            Some(ip("2.2.2.2"))
+            Some(ip("203.0.113.9"))
+        );
+        let h = headers(&["1.1.1.1"], Some("2.2.2.2"));
+        assert_eq!(
+            client_ip(&h, &proxy(true, 2), Some(ip("203.0.113.9"))),
+            Some(ip("203.0.113.9"))
         );
         assert_eq!(
             client_ip(&HeaderMap::new(), &proxy(true, 1), Some(ip("203.0.113.9"))),

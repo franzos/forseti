@@ -19,9 +19,6 @@
           action="/admin/identity-picker"
           class="mb-stack-md flex items-center gap-stack-sm">
       <input type="hidden" name="return_to" value="{{ return_to }}">
-      {% if !org_slug.is_empty() %}
-        <input type="hidden" name="org" value="{{ org_slug }}">
-      {% endif %}
       <input type="text"
              name="q"
              value="{{ filter_q }}"

@@ -23,6 +23,12 @@ use crate::state::AppState;
 
 use super::{OrgSlug, SettingsCtx, build_nav, require_org_owner, resolve_org_or_404, settings_ctx};
 
+/// A `team_id` from the path that isn't in the resolved org. Not-found rather
+/// than forbidden, so it says nothing about whether the team exists elsewhere.
+fn team_not_found() -> Response {
+    (StatusCode::NOT_FOUND, "unknown team").into_response()
+}
+
 #[derive(Serialize, Clone)]
 struct TeamRowView {
     id: String,
@@ -279,12 +285,16 @@ pub(super) async fn teams_rename(
         return r;
     }
     let name = form.name.trim();
-    if let Err(e) = teams::rename_team(&state.db, &team_id, name).await {
-        return (
-            StatusCode::BAD_REQUEST,
-            format!("could not rename team: {e}"),
-        )
-            .into_response();
+    match teams::rename_team(&state.db, org_id, &team_id, name).await {
+        Ok(true) => {}
+        Ok(false) => return team_not_found(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("could not rename team: {e}"),
+            )
+                .into_response();
+        }
     }
     let _ = audit::log(
         &state.db,
@@ -319,9 +329,13 @@ pub(super) async fn teams_delete(
     if let Err(r) = require_team_admin(&state, &csrf.0, actor, actor_email, org_id).await {
         return r;
     }
-    if let Err(e) = teams::delete_team(&state.db, &team_id).await {
-        tracing::error!(error = ?e, "teams_delete: delete_team failed");
-        return (StatusCode::INTERNAL_SERVER_ERROR, "delete failed").into_response();
+    match teams::delete_team(&state.db, org_id, &team_id).await {
+        Ok(true) => {}
+        Ok(false) => return team_not_found(),
+        Err(e) => {
+            tracing::error!(error = ?e, "teams_delete: delete_team failed");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "delete failed").into_response();
+        }
     }
     let _ = audit::log(
         &state.db,
@@ -368,9 +382,13 @@ pub(super) async fn teams_member_add(
     {
         return (StatusCode::BAD_REQUEST, "not a member of this organization").into_response();
     }
-    if let Err(e) = teams::add_member(&state.db, &team_id, new_member).await {
-        tracing::error!(error = ?e, "teams_member_add: add_member failed");
-        return (StatusCode::INTERNAL_SERVER_ERROR, "add failed").into_response();
+    match teams::add_member(&state.db, org_id, &team_id, new_member).await {
+        Ok(true) => {}
+        Ok(false) => return team_not_found(),
+        Err(e) => {
+            tracing::error!(error = ?e, "teams_member_add: add_member failed");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "add failed").into_response();
+        }
     }
     let _ = audit::log(
         &state.db,
@@ -409,9 +427,13 @@ pub(super) async fn teams_member_remove(
     if let Err(r) = require_team_admin(&state, &csrf.0, actor, actor_email, org_id).await {
         return r;
     }
-    if let Err(e) = teams::remove_member(&state.db, &team_id, &identity_id).await {
-        tracing::error!(error = ?e, "teams_member_remove: remove_member failed");
-        return (StatusCode::INTERNAL_SERVER_ERROR, "remove failed").into_response();
+    match teams::remove_member(&state.db, org_id, &team_id, &identity_id).await {
+        Ok(true) => {}
+        Ok(false) => return team_not_found(),
+        Err(e) => {
+            tracing::error!(error = ?e, "teams_member_remove: remove_member failed");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "remove failed").into_response();
+        }
     }
     let _ = audit::log(
         &state.db,

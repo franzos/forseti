@@ -151,6 +151,12 @@ support_email = "support@example.com"
 # `global_rate_per_minute` / `global_rate_per_hour` bound the same route
 # across ALL callers in one shared bucket (defaults 40/min and 400/hour).
 # Same clamping and `0`-disables semantics as the other rate keys above.
+#
+# `max_clients` / `max_clients_per_host` cap how many CIMD clients may exist
+# (defaults 500 and 50). The rate keys bound how fast clients are registered;
+# these bound the standing count, since every distinct client_id URL leaves a
+# permanent Hydra client and metadata row behind. Only a first sighting is
+# refused - clients already registered keep working. `0` lifts a ceiling.
 # [oauth.cimd]
 # allow_private_targets = false
 # client_scope_extra = []
@@ -159,6 +165,8 @@ support_email = "support@example.com"
 # ip_rate_per_hour   = 100
 # global_rate_per_minute = 40
 # global_rate_per_hour   = 400
+# max_clients          = 500
+# max_clients_per_host = 50
 
 # Human-readable descriptions for OAuth2 scopes surfaced on the consent screen.
 # Unknown scopes fall back to the raw scope name (the admin client show page

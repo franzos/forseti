@@ -1,5 +1,10 @@
 //! `/admin/identities/*`: Kratos identity browser.
 //!
+//! Tier-1 only. A Kratos identity is global - one identity spans every org -
+//! so an org-scoped view of it would hand an org owner control over the
+//! member's whole account. Org owners get their member view from
+//! `/settings/organization/members` instead.
+//!
 //! The typed `Identity` model doesn't suffer from the `ui.nodes` bug, so the
 //! SDK types are usable directly here (unlike the raw-JSON Kratos flows).
 
@@ -10,10 +15,10 @@ use axum::{
 };
 use serde::Deserialize;
 
-use crate::admin::{AdminSection, ConfirmForm, ConfirmTemplate, render_admin_error, with_org};
+use crate::admin::{AdminSection, ConfirmForm, ConfirmTemplate, render_admin_error};
 use crate::audit::{self, AuditCtx, action, target_kind};
 use crate::csrf::CsrfForm;
-use crate::extractors::{Csrf, RequireAdminScoped};
+use crate::extractors::{Csrf, RequireAdmin};
 use crate::flash::{self, SecretReveal, attach_set_cookie as attach_cookie_if_some};
 use crate::format::{humanise_timestamp, looks_like_uuid};
 use crate::ory;
@@ -125,65 +130,18 @@ pub(crate) struct IdentitySearch {
     pub has_prev: bool,
 }
 
-/// Scope-aware identity search + pagination shared by the list page and the
-/// picker. `filter_q` must already be trimmed. The Err variant carries a
+/// Identity search + pagination shared by the list page and the picker.
+/// `filter_q` must already be trimmed. The Err variant carries a
 /// ready-to-send admin-error Response (DB / Kratos failures).
 pub(crate) async fn search_identities(
     state: &AppState,
     locale: &crate::locale::LanguageIdentifier,
-    scope: &crate::orgs::AdminScope,
     filter_q: &str,
     page_token: Option<&str>,
 ) -> Result<IdentitySearch, axum::response::Response> {
-    // Org-scoped: page the membership join in the DB first (so large orgs
-    // don't issue one massive `?ids=...` to Kratos) then bulk-fetch the page.
-    // `page_token` is a numeric offset here, not Kratos's opaque token. The
-    // email filter runs after pagination, so a filtered page can be smaller
-    // than `IDENTITIES_PAGE_SIZE`; SQL-side filtering would need the Kratos
-    // identity store, which isn't visible from here.
-    let scoped_offset: i64 = page_token
-        .and_then(|t| t.parse::<i64>().ok())
-        .filter(|n| *n >= 0)
-        .unwrap_or(0);
-    let scoped_member_ids: Option<Vec<String>> = match scope.org_id() {
-        Some(org_id) => match crate::orgs::list_members_paged(
-            &state.db,
-            org_id,
-            IDENTITIES_PAGE_SIZE,
-            scoped_offset,
-        )
-        .await
-        {
-            Ok(rows) => Some(rows.into_iter().map(|m| m.identity_id).collect()),
-            Err(e) => {
-                tracing::error!(error = ?e, "admin: org-scoped list_members_paged failed");
-                return Err(render_admin_error(
-                    state,
-                    "Identities unavailable",
-                    "We couldn't list org members. Please try again in a moment.",
-                ));
-            }
-        },
-        None => None,
-    };
-
     // UUID-shaped query: single-identity admin GET, because Kratos's
     // `credentials_identifier` filter is name/email-only and won't match IDs.
     let identities = if looks_like_uuid(filter_q) {
-        // Org-scoped admins must not resolve identities outside their org;
-        // a non-member ID is an empty result, same as a lookup miss.
-        let in_scope = match scope.org_id() {
-            Some(org_id) => crate::orgs::is_member(&state.db, filter_q, org_id).await,
-            None => true,
-        };
-        if !in_scope {
-            tracing::info!("admin: org-scoped identity ID lookup outside scope");
-            return Ok(IdentitySearch {
-                rows: Vec::new(),
-                next_page_token: String::new(),
-                has_prev: page_token.is_some(),
-            });
-        }
         match ory::kratos::admin_get_identity_full(&state.ory, filter_q).await {
             Ok(id) => vec![id],
             // A 404 here is just an empty result, not a render error.
@@ -192,31 +150,6 @@ pub(crate) async fn search_identities(
                 Vec::new()
             }
         }
-    } else if let Some(ref member_ids) = scoped_member_ids {
-        // Org-scoped: bulk-load members via Kratos's `ids` filter in one
-        // round-trip; email substring filter applied after the fact.
-        let mut out =
-            match ory::kratos::admin_list_identities_by_ids_full(&state.ory, member_ids.clone())
-                .await
-            {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::warn!(error = ?e, "admin: org-scoped bulk fetch failed");
-                    Vec::new()
-                }
-            };
-        if !filter_q.is_empty() {
-            let needle = filter_q.to_lowercase();
-            out.retain(|id| {
-                id.traits
-                    .as_ref()
-                    .and_then(|t| t.get("email"))
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_lowercase().contains(&needle))
-                    .unwrap_or(false)
-            });
-        }
-        out
     } else {
         let email_filter = if filter_q.is_empty() {
             None
@@ -248,18 +181,10 @@ pub(crate) async fn search_identities(
         .map(|id| project_row(locale, id))
         .collect();
     // Next-page heuristic: a full page implies more. The typed SDK doesn't
-    // surface the Link header, so the unscoped path uses the last row's ID as
-    // the opaque token; the scoped path threads a numeric DB offset. The
-    // scoped check keys off the pre-filter member-id count (filter runs
-    // post-DB, so the filtered row count can't be trusted).
+    // surface the Link header, so the last row's ID doubles as the opaque
+    // token Kratos expects back.
     let next_page_token = if looks_like_uuid(filter_q) {
         String::new()
-    } else if let Some(ref member_ids) = scoped_member_ids {
-        if member_ids.len() == IDENTITIES_PAGE_SIZE as usize {
-            (scoped_offset + IDENTITIES_PAGE_SIZE).to_string()
-        } else {
-            String::new()
-        }
     } else if rows.len() == IDENTITIES_PAGE_SIZE as usize {
         rows.last().map(|r| r.id.clone()).unwrap_or_default()
     } else {
@@ -277,10 +202,10 @@ pub(crate) async fn search_identities(
 pub async fn list(
     State(state): State<AppState>,
     Query(query): Query<ListQuery>,
-    admin: RequireAdminScoped,
+    admin: RequireAdmin,
     csrf: Csrf,
 ) -> Response {
-    let RequireAdminScoped { ctx, scope } = admin;
+    let RequireAdmin { ctx } = admin;
 
     let filter_q = query
         .q
@@ -290,7 +215,7 @@ pub async fn list(
         .unwrap_or_default();
     let page_token = query.page_token.as_deref().filter(|s| !s.is_empty());
 
-    let search = match search_identities(&state, &ctx.locale, &scope, &filter_q, page_token).await {
+    let search = match search_identities(&state, &ctx.locale, &filter_q, page_token).await {
         Ok(s) => s,
         Err(resp) => return resp,
     };
@@ -345,7 +270,6 @@ struct IdentityPickerTemplate {
     rows: Vec<PickerRow>,
     filter_q: String,
     return_to: String,
-    org_slug: String,
     next_page_url: String,
     prev_url: String,
     invalid_return: bool,
@@ -359,10 +283,10 @@ fn append_query(url: &str, key: &str, value: &str) -> String {
 pub async fn pick(
     State(state): State<AppState>,
     Query(query): Query<PickQuery>,
-    admin: RequireAdminScoped,
+    admin: RequireAdmin,
     csrf: Csrf,
 ) -> Response {
-    let RequireAdminScoped { ctx, scope } = admin;
+    let RequireAdmin { ctx } = admin;
     let raw_rt = query.return_to.as_deref().unwrap_or("").trim().to_string();
     let chrome = ctx.chrome(&csrf);
 
@@ -377,7 +301,6 @@ pub async fn pick(
             rows: Vec::new(),
             filter_q: String::new(),
             return_to: String::new(),
-            org_slug: scope.slug().unwrap_or("").to_string(),
             next_page_url: String::new(),
             prev_url: String::new(),
             invalid_return: true,
@@ -387,7 +310,7 @@ pub async fn pick(
 
     let filter_q = query.q.as_deref().unwrap_or("").trim().to_string();
     let page_token = query.page_token.as_deref().filter(|s| !s.is_empty());
-    let search = match search_identities(&state, &ctx.locale, &scope, &filter_q, page_token).await {
+    let search = match search_identities(&state, &ctx.locale, &filter_q, page_token).await {
         Ok(s) => s,
         Err(resp) => return resp,
     };
@@ -412,10 +335,10 @@ pub async fn pick(
         })
         .collect();
 
-    let base = with_org("/admin/identity-picker", &scope);
+    let base = "/admin/identity-picker";
     let mut next_page_url = String::new();
     if !search.next_page_token.is_empty() {
-        let mut u = append_query(&base, "return_to", &return_to);
+        let mut u = append_query(base, "return_to", &return_to);
         u = append_query(&u, "page_token", &search.next_page_token);
         if !filter_q.is_empty() {
             u = append_query(&u, "q", &filter_q);
@@ -423,7 +346,7 @@ pub async fn pick(
         next_page_url = u;
     }
     let prev_url = if search.has_prev {
-        let mut u = append_query(&base, "return_to", &return_to);
+        let mut u = append_query(base, "return_to", &return_to);
         if !filter_q.is_empty() {
             u = append_query(&u, "q", &filter_q);
         }
@@ -438,7 +361,6 @@ pub async fn pick(
         rows,
         filter_q,
         return_to,
-        org_slug: scope.slug().unwrap_or("").to_string(),
         next_page_url,
         prev_url,
         invalid_return: false,
@@ -452,40 +374,15 @@ pub struct ShowQuery {
     reveal: Option<String>,
 }
 
-/// Reject unless `identity_id` is a member of `scope`'s org (Forseti-wide
-/// scope is a no-op). Renders "not found" not "forbidden" so org-scoped
-/// admins can't probe for identities outside their scope.
-async fn require_identity_in_scope(
-    state: &AppState,
-    identity_id: &str,
-    scope: &crate::orgs::AdminScope,
-) -> Result<(), Response> {
-    let Some(org_id) = scope.org_id() else {
-        return Ok(());
-    };
-    if crate::orgs::is_member(&state.db, identity_id, org_id).await {
-        Ok(())
-    } else {
-        Err(render_admin_error(
-            state,
-            "Identity not found",
-            "We couldn't find an identity with that ID in this organization.",
-        ))
-    }
-}
-
 pub async fn show(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Query(query): Query<ShowQuery>,
     headers: HeaderMap,
-    admin: RequireAdminScoped,
+    admin: RequireAdmin,
     csrf: Csrf,
 ) -> Response {
-    let RequireAdminScoped { ctx, scope } = admin;
-    if let Err(resp) = require_identity_in_scope(&state, &id, &scope).await {
-        return resp;
-    }
+    let RequireAdmin { ctx } = admin;
 
     let identity = match ory::kratos::admin_get_identity_full(&state.ory, &id).await {
         Ok(i) => i,
@@ -591,13 +488,10 @@ pub async fn recovery(
     State(state): State<AppState>,
     Path(id): Path<String>,
     actx: AuditCtx,
-    admin: RequireAdminScoped,
+    admin: RequireAdmin,
     _: CsrfForm<crate::csrf::NoPayload>,
 ) -> Response {
-    let RequireAdminScoped { ctx, scope } = admin;
-    if let Err(resp) = require_identity_in_scope(&state, &id, &scope).await {
-        return resp;
-    }
+    let RequireAdmin { ctx } = admin;
     match ory::kratos::admin_create_recovery_code(&state.ory, &id).await {
         Ok(code) => {
             let _ = audit::log(
@@ -628,19 +522,13 @@ pub async fn recovery(
                     );
                 }
             };
-            // Reveal token + org slug ride the redirect so the show page lands
-            // back inside the same org-scoped view.
-            let base = format!(
+            // Only the opaque reveal token goes in the URL; the code itself
+            // stays in the DB behind it.
+            let url = format!(
                 "/admin/identities/{}?reveal={}",
                 ory_client::apis::urlencode(&id),
                 ory_client::apis::urlencode(&token),
             );
-            let url = match scope.slug() {
-                Some(slug) if !slug.is_empty() => {
-                    format!("{}&org={}", base, ory_client::apis::urlencode(slug))
-                }
-                _ => base,
-            };
             Redirect::to(&url).into_response()
         }
         Err(e) => {
@@ -654,27 +542,13 @@ pub async fn recovery(
     }
 }
 
-pub async fn disable_confirm(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    admin: RequireAdminScoped,
-    csrf: Csrf,
-) -> Response {
-    let RequireAdminScoped { ctx, scope } = admin;
-    if let Err(resp) = require_identity_in_scope(&state, &id, &scope).await {
-        return resp;
-    }
-    let action_url = with_org(
-        &format!(
-            "/admin/identities/{}/disable",
-            ory_client::apis::urlencode(&id)
-        ),
-        &scope,
+pub async fn disable_confirm(Path(id): Path<String>, admin: RequireAdmin, csrf: Csrf) -> Response {
+    let RequireAdmin { ctx } = admin;
+    let action_url = format!(
+        "/admin/identities/{}/disable",
+        ory_client::apis::urlencode(&id)
     );
-    let cancel_url = with_org(
-        &format!("/admin/identities/{}", ory_client::apis::urlencode(&id)),
-        &scope,
-    );
+    let cancel_url = format!("/admin/identities/{}", ory_client::apis::urlencode(&id));
     let chrome = ctx.chrome(&csrf);
     render(&ConfirmTemplate {
         chrome,
@@ -691,17 +565,11 @@ pub async fn disable(
     State(state): State<AppState>,
     Path(id): Path<String>,
     actx: AuditCtx,
-    admin: RequireAdminScoped,
+    admin: RequireAdmin,
     CsrfForm(form): CsrfForm<ConfirmForm>,
 ) -> Response {
-    let RequireAdminScoped { ctx, scope } = admin;
-    if let Err(resp) = require_identity_in_scope(&state, &id, &scope).await {
-        return resp;
-    }
-    let target = with_org(
-        &format!("/admin/identities/{}", ory_client::apis::urlencode(&id)),
-        &scope,
-    );
+    let RequireAdmin { ctx } = admin;
+    let target = format!("/admin/identities/{}", ory_client::apis::urlencode(&id));
     if let Some(r) = form.bounce_unless_confirmed(&target) {
         return r;
     }
@@ -739,17 +607,11 @@ pub async fn enable(
     State(state): State<AppState>,
     Path(id): Path<String>,
     actx: AuditCtx,
-    admin: RequireAdminScoped,
+    admin: RequireAdmin,
     _: CsrfForm<crate::csrf::NoPayload>,
 ) -> Response {
-    let RequireAdminScoped { ctx, scope } = admin;
-    if let Err(resp) = require_identity_in_scope(&state, &id, &scope).await {
-        return resp;
-    }
-    let target = with_org(
-        &format!("/admin/identities/{}", ory_client::apis::urlencode(&id)),
-        &scope,
-    );
+    let RequireAdmin { ctx } = admin;
+    let target = format!("/admin/identities/{}", ory_client::apis::urlencode(&id));
     match ory::kratos::admin_update_identity_state(
         &state.ory,
         &id,
@@ -780,27 +642,13 @@ pub async fn enable(
     }
 }
 
-pub async fn delete_confirm(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    admin: RequireAdminScoped,
-    csrf: Csrf,
-) -> Response {
-    let RequireAdminScoped { ctx, scope } = admin;
-    if let Err(resp) = require_identity_in_scope(&state, &id, &scope).await {
-        return resp;
-    }
-    let action_url = with_org(
-        &format!(
-            "/admin/identities/{}/delete",
-            ory_client::apis::urlencode(&id)
-        ),
-        &scope,
+pub async fn delete_confirm(Path(id): Path<String>, admin: RequireAdmin, csrf: Csrf) -> Response {
+    let RequireAdmin { ctx } = admin;
+    let action_url = format!(
+        "/admin/identities/{}/delete",
+        ory_client::apis::urlencode(&id)
     );
-    let cancel_url = with_org(
-        &format!("/admin/identities/{}", ory_client::apis::urlencode(&id)),
-        &scope,
-    );
+    let cancel_url = format!("/admin/identities/{}", ory_client::apis::urlencode(&id));
     let chrome = ctx.chrome(&csrf);
     render(&ConfirmTemplate {
         chrome,
@@ -817,21 +665,15 @@ pub async fn delete(
     State(state): State<AppState>,
     Path(id): Path<String>,
     actx: AuditCtx,
-    admin: RequireAdminScoped,
+    admin: RequireAdmin,
     CsrfForm(form): CsrfForm<ConfirmForm>,
 ) -> Response {
-    let RequireAdminScoped { ctx, scope } = admin;
-    if let Err(resp) = require_identity_in_scope(&state, &id, &scope).await {
-        return resp;
-    }
-    let show_target = with_org(
-        &format!("/admin/identities/{}", ory_client::apis::urlencode(&id)),
-        &scope,
-    );
+    let RequireAdmin { ctx } = admin;
+    let show_target = format!("/admin/identities/{}", ory_client::apis::urlencode(&id));
     if let Some(r) = form.bounce_unless_confirmed(&show_target) {
         return r;
     }
-    let list_target = with_org("/admin/identities", &scope);
+    let list_target = "/admin/identities";
     match crate::admin::actions::delete_identity_audited(
         &state,
         &id,
@@ -845,7 +687,7 @@ pub async fn delete(
     )
     .await
     {
-        Ok(()) => Redirect::to(&list_target).into_response(),
+        Ok(()) => Redirect::to(list_target).into_response(),
         Err(e) => {
             tracing::error!(error = ?e, id, "admin: delete failed");
             render_admin_error(

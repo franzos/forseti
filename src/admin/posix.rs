@@ -27,7 +27,7 @@ use crate::extractors::{Csrf, RequireAdmin};
 use crate::format::humanise_timestamp;
 use crate::ory;
 use crate::page_chrome::PageChrome;
-use crate::posix::allocate::is_valid_username;
+use crate::posix::allocate::{is_valid_shell, is_valid_username};
 use crate::posix::db as posix_db;
 use crate::render::render;
 use crate::state::AppState;
@@ -289,6 +289,13 @@ pub async fn provision(
         return rerender(
             "Username must be 1–32 chars, start with a lowercase letter or underscore, and \
              contain only lowercase letters, digits, '_' or '-'."
+                .to_string(),
+        );
+    }
+    if !is_valid_shell(&shell) {
+        return rerender(
+            "Login shell must be an absolute path with no spaces or control characters, \
+             e.g. /bin/bash."
                 .to_string(),
         );
     }

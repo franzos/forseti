@@ -1394,7 +1394,7 @@ The allowlist is config-driven (not a role on the identity) — admin
 membership is declared in `config.toml` and reviewable on disk. Trade-off
 is a reload to change the set.
 
-**Org-scoped admin surface.** Most admin handlers honour `?org=<slug>`
+**Org-scoped admin surface.** The clients, resources, audit and webhooks handlers honour `?org=<slug>`
 to scope their view + writes to a single org, with a 404-shape probe-
 defence policy to prevent cross-org enumeration. See
 [Org-scoped admin](#org-scoped-admin) under the Organizations section
@@ -1564,9 +1564,9 @@ enabled.") scoped to the identity's show path.
 
 #### Identity picker (`/admin/identity-picker`)
 
-A reusable, org-scoped identity chooser — `pick`
-(`src/admin/identities.rs:378`), gated by `RequireAdminScoped` so it
-honours `?org=<slug>` like the rest of the admin surface. It backs the
+A reusable identity chooser — `pick` (`src/admin/identities.rs`), gated by
+`RequireAdmin`: it lists Kratos identities deployment-wide, so it's
+Forseti-tier like the rest of `/admin/identities/*`. It backs the
 POSIX provisioning "Select user" step (see [POSIX accounts](#posix-accounts)),
 and any future caller that needs to hand the operator a search-and-pick
 list of identities rather than ask for a raw UUID.
@@ -2030,8 +2030,8 @@ The gate runs via the `RequireAdminScoped` extractor (`src/extractors.rs:145`), 
 | Surface | `?org=` honoured | Scope predicate | Notes |
 |---|---|---|---|
 | `/admin/clients/*` | yes | `ensure_client_in_scope` (`src/admin/clients/scope.rs:34`) — joins Hydra client → `oauth_client_metadata.org_id` | Orphan rows (no metadata) default to Default and are invisible to org-scoped views. Create POST stamps the new client's `org_id` to the scoped org; Forseti-scope reads the admin's active-org cookie via `crate::orgs::active_org` and falls back to Default. |
-| `/admin/identities/*` | yes | `require_identity_in_scope` (`src/admin/identities.rs`) — `crate::orgs::is_member(identity_id, scope_org)` | List page paginates org members via `list_members_paged` (25/page) then bulk-fetches the matching Kratos identities. Detail/recovery/disable/enable/delete all gated. |
-| `/admin/sessions/*` | yes | `require_session_in_scope` (`src/admin/sessions.rs`) — fetches session via `admin_get_session`, checks `is_member` on its owning identity | List paginates **by org members**, not by sessions — see "Per-member session fanout" below. Revoke verifies scope ownership before calling `admin_revoke_session`. |
+| `/admin/identities/*`, `/admin/identity-picker` | no (Forseti-tier-only) | — | A Kratos identity is global; Forseti's membership table is a join on top of it. Scoping these routes meant an org owner could mint a recovery code for a co-member and take the whole account — see "Why identities and sessions aren't scoped" below. |
+| `/admin/sessions/*` | no (Forseti-tier-only) | — | Sessions belong to those same global identities. |
 | `/admin/webhooks/*` | yes | `webhook_row_in_scope` (`src/admin/webhooks.rs`) — joins outbox row → `oauth_client_metadata.org_id` of the row's `client_id` | Dead-letter list filtered server-side after the SELECT. `show_one` / `requeue` / `discard` all re-check. |
 | `/admin/audit/{event_id}` | yes | direct compare against the row's `org_id` column | Row tagged via `.org(...)` on the originating `AuditEvent`. Untagged rows are invisible to org-scoped views by design (the gap noted in the audit log section). |
 | `/admin/audit` (list) | yes | filter pushed into SQL via `AuditFilter.org_id` | Each row's `org_id` matched at query time. |
@@ -2044,26 +2044,20 @@ Every scope predicate renders a 404-shape error ("not found in this organization
 
 New admin handlers MUST follow this policy. If you find yourself rendering a friendlier 403, you're leaking.
 
-#### Per-member session fanout
+#### Why identities and sessions aren't scoped
 
-`/admin/sessions?org=acme` doesn't use Kratos's opaque `page_token` — Kratos has no per-org filter on the session list. Instead the handler pages through org members via `list_members_paged(SESSIONS_ORG_PAGE_SIZE = 25, offset)` then sequentially calls `kratos::list_identity_sessions(identity_id)` for each, flattening the results. Pagination is a numeric member offset, not a session token. Trade-offs:
+Every other scoped surface owns rows that belong to an org: a client, a resource, a webhook, an audit event. An identity doesn't. Kratos holds one identity per person across the whole deployment, and org membership is a Forseti-side join — so a handler reached through `/admin/identities/*` acts on the person's entire account, not on their membership in the org named by `?org=`.
 
-- **Bounded**: at most 25 admin API calls per page request — proportional to member count, independent of session-per-member fanout.
-- **Sequential**: not concurrent. p95 page render scales with the slowest of those 25 Kratos round-trips. Acceptable for an admin surface; a follow-up could switch to `JoinSet` for parity with `admin/webhooks.rs::resolve_client_names`.
-- **No active-only filter at the source**: `active_only=1` is applied in-memory after the fanout, not pushed down. Kratos's `list_identity_sessions` doesn't expose the `active` filter the global `list_sessions` does.
+Scope them by `?org=` and "owner of my org" becomes control over any co-member's global account: `POST /admin/identities/{id}/recovery?org=<slug>` mints a Kratos recovery code and link for that member, redeemable into a live session and into Kratos' password-change window, across every org and every connected app. Disable, delete and the session-revoke routes reach just as far.
 
-Forseti-tier (`?org=` absent) still uses `admin_list_all_sessions` with Kratos's native pagination.
+So both surfaces take `RequireAdmin` — allowlist plus AAL2, `?org=` ignored — and `/admin/sessions` uses Kratos's native `admin_list_all_sessions` pagination. Org owners see their members at `/settings/organization/members`, which is a view of the membership rather than of the identity.
 
 #### Redirect threading
 
 Org-scoped handlers MUST thread `?org=<slug>` through every redirect they emit, otherwise the user bounces to a Forseti-tier view they can't access and lands back at the org-tier 403 / login screen. Helpers exist:
 
-- `src/admin/sessions.rs::with_org(base, org)`
-- `src/admin/identities.rs::with_org(base, org)`
-- `src/admin/webhooks.rs::with_org(base, scope)`
+- `src/admin/mod.rs::with_org(base, scope)`
 - `src/admin/clients/scope.rs::with_org_param(base, scope)`
-
-These are deliberately duplicated rather than centralised — each surface has slightly different scope-extraction shapes (`Option<&str>` vs `&AdminScope`) and centralising would force a single signature on all four. Worth revisiting if a fifth surface appears.
 
 #### Hydra clients per-org
 

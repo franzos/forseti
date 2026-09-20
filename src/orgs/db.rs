@@ -954,6 +954,14 @@ struct NewInvite<'a> {
     expires_at: String,
 }
 
+/// What goes in the `token` column. The raw token is the whole credential the
+/// emailed accept-link carries, so it stays in the mail and never at rest.
+/// Same shape as the claim-email and DCR token columns.
+pub fn invite_token_hash(raw: &str) -> String {
+    use sha2::Digest;
+    hex::encode(sha2::Sha256::digest(raw.as_bytes()))
+}
+
 pub async fn insert_invite(
     db: &DbPool,
     token: &str,
@@ -963,7 +971,7 @@ pub async fn insert_invite(
     invited_by: Option<&str>,
     ttl_days: i64,
 ) -> anyhow::Result<()> {
-    let token = token.to_string();
+    let token = invite_token_hash(token);
     let org = org_id.to_string();
     let email = email.to_string();
     let role_s = role.as_str();
@@ -989,7 +997,7 @@ pub async fn insert_invite(
 }
 
 pub async fn fetch_invite(db: &DbPool, token: &str) -> anyhow::Result<Option<OrgInvite>> {
-    let t = token.to_string();
+    let t = invite_token_hash(token);
     let row: Option<OrgInvite> = db_interact!(db, |conn| {
         organization_invites::table
             .filter(organization_invites::token.eq(&t))
@@ -1030,15 +1038,19 @@ pub enum InviteFinalizeOutcome {
 /// The `UPDATE ... WHERE accepted_at IS NULL` pattern is the concurrency
 /// guard: zero rows affected means a concurrent caller already accepted. The
 /// membership insert's unique `(org_id, identity_id)` swallows the duplicate.
+///
+/// `stored_token` is the value already in the row (a hash, see
+/// [`invite_token_hash`]), not the raw token from the accept link - callers
+/// reach this after `fetch_invite` has resolved the row.
 pub async fn finalize_invite_txn(
     db: &DbPool,
-    token: &str,
+    stored_token: &str,
     org_id: &str,
     identity_id: &str,
     role: super::Role,
     drop_default: bool,
 ) -> anyhow::Result<InviteFinalizeOutcome> {
-    let token = token.to_string();
+    let token = stored_token.to_string();
     let org = org_id.to_string();
     let ident = identity_id.to_string();
     let role_s = role.as_str();
@@ -1722,7 +1734,8 @@ mod tests {
         insert_invite(&db, "tok", "acme-id", "u@acme.com", Role::Member, None, 7)
             .await
             .unwrap();
-        let outcome = finalize_invite_txn(&db, "tok", "acme-id", "ident-1", Role::Member, true)
+        let stored = invite_token_hash("tok");
+        let outcome = finalize_invite_txn(&db, &stored, "acme-id", "ident-1", Role::Member, true)
             .await
             .unwrap();
         assert_eq!(outcome, InviteFinalizeOutcome::Accepted);
@@ -1753,7 +1766,8 @@ mod tests {
         )
         .await
         .unwrap();
-        finalize_invite_txn(&db, "tok", "acme-id", "ident-1", Role::Member, false)
+        let stored = invite_token_hash("tok");
+        finalize_invite_txn(&db, &stored, "acme-id", "ident-1", Role::Member, false)
             .await
             .unwrap();
         assert_eq!(

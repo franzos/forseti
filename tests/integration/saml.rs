@@ -16,9 +16,11 @@ async fn mint_recovery_link(identity_id: &str, return_to: Option<&str>) -> Strin
     }
     let resp = api
         .post(&url)
+        // Same TTL the SSO callback mints with, so this keeps proving the
+        // mechanism the callback actually uses.
         .json(&serde_json::json!({
             "identity_id": identity_id,
-            "expires_in": "15m"
+            "expires_in": "1m"
         }))
         .send()
         .await

@@ -1,5 +1,10 @@
 //! Org-domain teams: the canonical, single-copy team model. The POSIX resolver
 //! reads `org_team_members` at request time; nothing is mirrored or synced.
+//!
+//! Every mutation takes the `org_id` the caller resolved and scopes itself to
+//! it. `team_id` arrives from a URL path, so without that a caller could name
+//! any tenant's team. `Ok(false)` means the team isn't in that org; callers
+//! turn it into a 404.
 #![allow(dead_code)] // wired incrementally by the settings surface / resolver.
 
 use chrono::Utc;
@@ -12,6 +17,21 @@ use crate::db_interact;
 use crate::schema::{org_team_members, org_teams};
 
 pub const MAX_ROWS_PER_LIST: i64 = 500;
+
+/// Inside an open transaction (`$c`): does `$team` belong to `$org`?
+///
+/// A macro, not a function: `db_interact!` monomorphizes the body for both
+/// connection types, and a shared helper would need full dual-backend bounds.
+macro_rules! team_in_org {
+    ($c:expr_2021, $team:expr_2021, $org:expr_2021) => {{
+        let owner: Option<String> = org_teams::table
+            .filter(org_teams::id.eq($team))
+            .select(org_teams::org_id)
+            .first($c)
+            .optional()?;
+        owner.as_deref() == Some($org)
+    }};
+}
 
 /// Max team slugs emitted in the OIDC `groups` claim. A token-size safety
 /// bound; real orgs stay well under it. Exceeding it sets `groups_truncated`.
@@ -99,8 +119,18 @@ pub async fn create_team(
     Ok(team)
 }
 
-pub async fn rename_team(db: &DbPool, team_id: &str, name: &str) -> anyhow::Result<()> {
-    let (id, nm, sl) = (team_id.to_string(), name.to_string(), slugify(name));
+pub async fn rename_team(
+    db: &DbPool,
+    org_id: &str,
+    team_id: &str,
+    name: &str,
+) -> anyhow::Result<bool> {
+    let (org, id, nm, sl) = (
+        org_id.to_string(),
+        team_id.to_string(),
+        name.to_string(),
+        slugify(name),
+    );
     anyhow::ensure!(
         !sl.is_empty(),
         "team name must contain at least one alphanumeric"
@@ -108,13 +138,12 @@ pub async fn rename_team(db: &DbPool, team_id: &str, name: &str) -> anyhow::Resu
     // slug is immutable; DB UNIQUE no longer fires on rename, so guard the
     // collision here. The guard reads before it writes, so the write lock has
     // to be claimed up front or a concurrent write fails the whole rename.
-    crate::serialized_txn!(db, (), anyhow::Error, |c| {
-        let org_id: String = org_teams::table
-            .filter(org_teams::id.eq(&id))
-            .select(org_teams::org_id)
-            .first(c)?;
+    let renamed = crate::serialized_txn!(db, bool, anyhow::Error, |c| {
+        if !team_in_org!(c, &id, org.as_str()) {
+            return Ok(false);
+        }
         let clash: i64 = org_teams::table
-            .filter(org_teams::org_id.eq(&org_id))
+            .filter(org_teams::org_id.eq(&org))
             .filter(org_teams::slug.eq(&sl))
             .filter(org_teams::id.ne(&id))
             .count()
@@ -126,27 +155,30 @@ pub async fn rename_team(db: &DbPool, team_id: &str, name: &str) -> anyhow::Resu
         diesel::update(org_teams::table.filter(org_teams::id.eq(&id)))
             .set(org_teams::name.eq(&nm))
             .execute(c)?;
-        Ok(())
+        Ok(true)
     })?;
-    Ok(())
+    Ok(renamed)
 }
 
 /// Delete a team + its members + any host scopes referencing it (by uuid, so
 /// no gid-reuse hazard), in one transaction.
-pub async fn delete_team(db: &DbPool, team_id: &str) -> anyhow::Result<()> {
+pub async fn delete_team(db: &DbPool, org_id: &str, team_id: &str) -> anyhow::Result<bool> {
     use crate::schema::host_allowed_groups;
-    let id = team_id.to_string();
-    db_interact!(db, |conn| {
-        conn.transaction::<_, diesel::result::Error, _>(|c| {
+    let (org, id) = (org_id.to_string(), team_id.to_string());
+    let deleted = db_interact!(db, |conn| {
+        conn.transaction::<bool, diesel::result::Error, _>(|c| {
+            if !team_in_org!(c, &id, org.as_str()) {
+                return Ok(false);
+            }
             diesel::delete(host_allowed_groups::table.filter(host_allowed_groups::team_id.eq(&id)))
                 .execute(c)?;
             diesel::delete(org_team_members::table.filter(org_team_members::team_id.eq(&id)))
                 .execute(c)?;
             diesel::delete(org_teams::table.filter(org_teams::id.eq(&id))).execute(c)?;
-            Ok(())
+            Ok(true)
         })
     })?;
-    Ok(())
+    Ok(deleted)
 }
 
 pub async fn list_teams(db: &DbPool, org_id: &str) -> anyhow::Result<Vec<Team>> {
@@ -250,40 +282,65 @@ pub async fn group_slugs_for_identity(
     })?)
 }
 
-pub async fn add_member(db: &DbPool, team_id: &str, identity_id: &str) -> anyhow::Result<()> {
-    let (tid, id, now) = (
+pub async fn add_member(
+    db: &DbPool,
+    org_id: &str,
+    team_id: &str,
+    identity_id: &str,
+) -> anyhow::Result<bool> {
+    let (org, tid, id, now) = (
+        org_id.to_string(),
         team_id.to_string(),
         identity_id.to_string(),
         Utc::now().to_rfc3339(),
     );
-    db_interact!(db, |conn| {
-        diesel::insert_into(org_team_members::table)
-            .values((
-                org_team_members::team_id.eq(&tid),
-                org_team_members::identity_id.eq(&id),
-                org_team_members::source.eq("manual"),
-                org_team_members::added_at.eq(&now),
-            ))
-            .on_conflict((org_team_members::team_id, org_team_members::identity_id))
-            .do_nothing()
-            .execute(conn)
-            .map(|_| ())
+    let added = db_interact!(db, |conn| {
+        conn.transaction::<bool, diesel::result::Error, _>(|c| {
+            if !team_in_org!(c, &tid, org.as_str()) {
+                return Ok(false);
+            }
+            diesel::insert_into(org_team_members::table)
+                .values((
+                    org_team_members::team_id.eq(&tid),
+                    org_team_members::identity_id.eq(&id),
+                    org_team_members::source.eq("manual"),
+                    org_team_members::added_at.eq(&now),
+                ))
+                .on_conflict((org_team_members::team_id, org_team_members::identity_id))
+                .do_nothing()
+                .execute(c)?;
+            Ok(true)
+        })
     })?;
-    Ok(())
+    Ok(added)
 }
 
-pub async fn remove_member(db: &DbPool, team_id: &str, identity_id: &str) -> anyhow::Result<()> {
-    let (tid, id) = (team_id.to_string(), identity_id.to_string());
-    db_interact!(db, |conn| {
-        diesel::delete(
-            org_team_members::table
-                .filter(org_team_members::team_id.eq(&tid))
-                .filter(org_team_members::identity_id.eq(&id)),
-        )
-        .execute(conn)
-        .map(|_| ())
+pub async fn remove_member(
+    db: &DbPool,
+    org_id: &str,
+    team_id: &str,
+    identity_id: &str,
+) -> anyhow::Result<bool> {
+    let (org, tid, id) = (
+        org_id.to_string(),
+        team_id.to_string(),
+        identity_id.to_string(),
+    );
+    let removed = db_interact!(db, |conn| {
+        conn.transaction::<bool, diesel::result::Error, _>(|c| {
+            if !team_in_org!(c, &tid, org.as_str()) {
+                return Ok(false);
+            }
+            diesel::delete(
+                org_team_members::table
+                    .filter(org_team_members::team_id.eq(&tid))
+                    .filter(org_team_members::identity_id.eq(&id)),
+            )
+            .execute(c)?;
+            Ok(true)
+        })
     })?;
-    Ok(())
+    Ok(removed)
 }
 
 /// True iff `a` and `b` share at least one team in `org_id`.
@@ -398,10 +455,10 @@ mod tests {
     async fn create_add_share_roundtrip() {
         let db = temp_pool().await;
         let t = create_team(&db, "org1", "Platform", None).await.unwrap();
-        add_member(&db, &t.id, "alice").await.unwrap();
-        add_member(&db, &t.id, "bob").await.unwrap();
+        add_member(&db, "org1", &t.id, "alice").await.unwrap();
+        add_member(&db, "org1", &t.id, "bob").await.unwrap();
         assert!(shared_team(&db, "org1", "alice", "bob").await.unwrap());
-        remove_member(&db, &t.id, "bob").await.unwrap();
+        remove_member(&db, "org1", &t.id, "bob").await.unwrap();
         assert!(!shared_team(&db, "org1", "alice", "bob").await.unwrap());
         let mine = teams_for_identity(&db, "org1", "alice").await.unwrap();
         assert_eq!(mine.len(), 1);
@@ -413,8 +470,8 @@ mod tests {
         let db = temp_pool().await;
         let alpha = create_team(&db, "org1", "Alpha", None).await.unwrap();
         let _beta = create_team(&db, "org1", "Beta", None).await.unwrap();
-        add_member(&db, &alpha.id, "alice").await.unwrap();
-        add_member(&db, &alpha.id, "bob").await.unwrap();
+        add_member(&db, "org1", &alpha.id, "alice").await.unwrap();
+        add_member(&db, "org1", &alpha.id, "bob").await.unwrap();
 
         let counts = list_teams_with_counts(&db, "org1").await.unwrap();
         assert_eq!(counts.len(), 2);
@@ -426,6 +483,32 @@ mod tests {
         let mut ids = team_member_ids(&db, &alpha.id).await.unwrap();
         ids.sort();
         assert_eq!(ids, vec!["alice".to_string(), "bob".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn mutations_refuse_a_team_from_another_org() {
+        let db = temp_pool().await;
+        let theirs = create_team(&db, "org2", "Theirs", None).await.unwrap();
+        add_member(&db, "org2", &theirs.id, "victim").await.unwrap();
+
+        assert!(!rename_team(&db, "org1", &theirs.id, "Mine").await.unwrap());
+        assert!(
+            !add_member(&db, "org1", &theirs.id, "attacker")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !remove_member(&db, "org1", &theirs.id, "victim")
+                .await
+                .unwrap()
+        );
+        assert!(!delete_team(&db, "org1", &theirs.id).await.unwrap());
+
+        let still = list_teams(&db, "org2").await.unwrap();
+        assert_eq!(still.len(), 1);
+        assert_eq!(still[0].name, "Theirs");
+        let members = team_member_ids(&db, &theirs.id).await.unwrap();
+        assert_eq!(members, vec!["victim".to_string()]);
     }
 
     #[tokio::test]
@@ -441,7 +524,9 @@ mod tests {
         let db = temp_pool().await;
         let t = create_team(&db, "org1", "Platform", None).await.unwrap();
         assert_eq!(t.slug, "platform");
-        rename_team(&db, &t.id, "Platform Team").await.unwrap();
+        rename_team(&db, "org1", &t.id, "Platform Team")
+            .await
+            .unwrap();
         let teams = list_teams(&db, "org1").await.unwrap();
         let renamed = teams.iter().find(|x| x.id == t.id).unwrap();
         assert_eq!(renamed.name, "Platform Team");
@@ -454,14 +539,14 @@ mod tests {
         let _a = create_team(&db, "org1", "Platform", None).await.unwrap(); // slug "platform"
         let b = create_team(&db, "org1", "SRE", None).await.unwrap(); // slug "sre"
         // Renaming B to a name that slugifies to "platform" must be rejected.
-        assert!(rename_team(&db, &b.id, "platform").await.is_err());
+        assert!(rename_team(&db, "org1", &b.id, "platform").await.is_err());
     }
 
     #[tokio::test]
     async fn rename_still_rejects_empty_slug_name() {
         let db = temp_pool().await;
         let t = create_team(&db, "org1", "Platform", None).await.unwrap();
-        assert!(rename_team(&db, &t.id, "!!!").await.is_err());
+        assert!(rename_team(&db, "org1", &t.id, "!!!").await.is_err());
     }
 
     #[tokio::test]
@@ -470,9 +555,9 @@ mod tests {
         let plat = create_team(&db, "org1", "Platform", None).await.unwrap();
         let sre = create_team(&db, "org1", "SRE", None).await.unwrap();
         let other = create_team(&db, "org2", "Other", None).await.unwrap();
-        add_member(&db, &plat.id, "alice").await.unwrap();
-        add_member(&db, &sre.id, "alice").await.unwrap();
-        add_member(&db, &other.id, "alice").await.unwrap();
+        add_member(&db, "org1", &plat.id, "alice").await.unwrap();
+        add_member(&db, "org1", &sre.id, "alice").await.unwrap();
+        add_member(&db, "org2", &other.id, "alice").await.unwrap();
 
         let slugs = group_slugs_for_identity(&db, "org1", "alice")
             .await

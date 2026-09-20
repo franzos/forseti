@@ -18,7 +18,7 @@ use crate::state::AppState;
 
 use super::{
     OrgSlug, SettingsCtx, build_nav, require_external_mode_writable, require_org_license,
-    require_org_owner_with_license, resolve_org_or_404, settings_ctx,
+    require_org_owner_with_license, require_org_read_access, resolve_org_or_404, settings_ctx,
 };
 
 #[derive(Template)]
@@ -113,6 +113,12 @@ pub(super) async fn overview_info(
         Ok(t) => t,
         Err(r) => return r,
     };
+    // Ahead of the license gate, so an unlicensed instance answers a real
+    // slug and an unknown one identically instead of showing the upsell page
+    // only for orgs that exist.
+    if let Err(r) = require_org_read_access(&state, &sess, &ctx, &target.org.id).await {
+        return r;
+    }
     if let Err(r) = require_org_license(&state, &ctx.csrf_token, &ctx.user_email, &target.org.id) {
         return r;
     }

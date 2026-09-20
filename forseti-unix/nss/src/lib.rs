@@ -23,8 +23,21 @@ use std::time::Duration;
 const SOCKET: &str = "/run/forseti/unixd.sock";
 const TIMEOUT: Duration = Duration::from_secs(2);
 
-fn to_passwd(e: proto::PasswdEntry) -> Passwd {
-    Passwd {
+/// An entry field carrying an interior NUL can't be written to the C buffer:
+/// `libnss`'s writer builds a `CString` and unwraps, so it panics, and a panic
+/// crossing the C ABI aborts whatever dlopened us - sshd, sudo, `getent`. The
+/// module is a normal crates.io dependency, not vendored here, so the check
+/// belongs on this side of the call. A field like that can only come from a
+/// corrupt or hostile record, so dropping the entry loses nothing real.
+fn has_nul(fields: &[&str]) -> bool {
+    fields.iter().any(|f| f.contains('\0'))
+}
+
+fn to_passwd(e: proto::PasswdEntry) -> Option<Passwd> {
+    if has_nul(&[&e.name, &e.gecos, &e.dir, &e.shell]) {
+        return None;
+    }
+    Some(Passwd {
         name: e.name,
         passwd: "x".to_string(),
         uid: e.uid,
@@ -32,16 +45,19 @@ fn to_passwd(e: proto::PasswdEntry) -> Passwd {
         gecos: e.gecos,
         dir: e.dir,
         shell: e.shell,
-    }
+    })
 }
 
-fn to_group(e: proto::GroupEntry) -> Group {
-    Group {
+fn to_group(e: proto::GroupEntry) -> Option<Group> {
+    if has_nul(&[&e.name]) || e.members.iter().any(|m| m.contains('\0')) {
+        return None;
+    }
+    Some(Group {
         name: e.name,
         passwd: "x".to_string(),
         gid: e.gid,
         members: e.members,
-    }
+    })
 }
 
 struct ForsetiPasswd;
@@ -50,7 +66,7 @@ impl PasswdHooks for ForsetiPasswd {
     fn get_all_entries() -> Response<Vec<Passwd>> {
         match query(SOCKET, &ClientRequest::PasswdAll, TIMEOUT) {
             Some(ClientResponse::PasswdList(v)) => {
-                Response::Success(v.into_iter().map(to_passwd).collect())
+                Response::Success(v.into_iter().filter_map(to_passwd).collect())
             }
             // Empty authoritative answer: getent cleanly falls through to `files`.
             _ => Response::Success(vec![]),
@@ -59,14 +75,20 @@ impl PasswdHooks for ForsetiPasswd {
 
     fn get_entry_by_uid(uid: libc::uid_t) -> Response<Passwd> {
         match query(SOCKET, &ClientRequest::PasswdByUid(uid), TIMEOUT) {
-            Some(ClientResponse::Passwd(Some(e))) => Response::Success(to_passwd(e)),
+            Some(ClientResponse::Passwd(Some(e))) => match to_passwd(e) {
+                Some(p) => Response::Success(p),
+                None => Response::NotFound,
+            },
             _ => Response::NotFound,
         }
     }
 
     fn get_entry_by_name(name: String) -> Response<Passwd> {
         match query(SOCKET, &ClientRequest::PasswdByName(name), TIMEOUT) {
-            Some(ClientResponse::Passwd(Some(e))) => Response::Success(to_passwd(e)),
+            Some(ClientResponse::Passwd(Some(e))) => match to_passwd(e) {
+                Some(p) => Response::Success(p),
+                None => Response::NotFound,
+            },
             _ => Response::NotFound,
         }
     }
@@ -78,7 +100,7 @@ impl GroupHooks for ForsetiGroup {
     fn get_all_entries() -> Response<Vec<Group>> {
         match query(SOCKET, &ClientRequest::GroupAll, TIMEOUT) {
             Some(ClientResponse::GroupList(v)) => {
-                Response::Success(v.into_iter().map(to_group).collect())
+                Response::Success(v.into_iter().filter_map(to_group).collect())
             }
             _ => Response::Success(vec![]),
         }
@@ -86,14 +108,20 @@ impl GroupHooks for ForsetiGroup {
 
     fn get_entry_by_gid(gid: libc::gid_t) -> Response<Group> {
         match query(SOCKET, &ClientRequest::GroupByGid(gid), TIMEOUT) {
-            Some(ClientResponse::Group(Some(e))) => Response::Success(to_group(e)),
+            Some(ClientResponse::Group(Some(e))) => match to_group(e) {
+                Some(g) => Response::Success(g),
+                None => Response::NotFound,
+            },
             _ => Response::NotFound,
         }
     }
 
     fn get_entry_by_name(name: String) -> Response<Group> {
         match query(SOCKET, &ClientRequest::GroupByName(name), TIMEOUT) {
-            Some(ClientResponse::Group(Some(e))) => Response::Success(to_group(e)),
+            Some(ClientResponse::Group(Some(e))) => match to_group(e) {
+                Some(g) => Response::Success(g),
+                None => Response::NotFound,
+            },
             _ => Response::NotFound,
         }
     }
@@ -116,7 +144,7 @@ mod tests {
             dir: "/home/alice".into(),
             shell: "/bin/sh".into(),
         };
-        let p = to_passwd(e);
+        let p = to_passwd(e).expect("clean entry converts");
         assert_eq!(p.name, "alice");
         assert_eq!(p.passwd, "x");
         assert_eq!(p.uid, 1000001);
@@ -133,10 +161,54 @@ mod tests {
             gid: 2000001,
             members: vec!["alice".into(), "bob".into()],
         };
-        let g = to_group(e);
+        let g = to_group(e).expect("clean entry converts");
         assert_eq!(g.name, "staff");
         assert_eq!(g.passwd, "x");
         assert_eq!(g.gid, 2000001);
         assert_eq!(g.members, vec!["alice".to_string(), "bob".to_string()]);
+    }
+
+    #[test]
+    fn passwd_entry_with_interior_nul_is_dropped() {
+        for e in [
+            proto::PasswdEntry {
+                name: "ali\0ce".into(),
+                uid: 1000001,
+                gid: 2000001,
+                gecos: String::new(),
+                dir: "/home/alice".into(),
+                shell: "/bin/sh".into(),
+            },
+            proto::PasswdEntry {
+                name: "alice".into(),
+                uid: 1000001,
+                gid: 2000001,
+                gecos: String::new(),
+                dir: "/home/alice".into(),
+                shell: "/bin/sh\0/bin/evil".into(),
+            },
+        ] {
+            assert!(
+                to_passwd(e).is_none(),
+                "a NUL-bearing field must drop the entry"
+            );
+        }
+    }
+
+    #[test]
+    fn group_entry_with_interior_nul_is_dropped() {
+        let named = proto::GroupEntry {
+            name: "sta\0ff".into(),
+            gid: 2000001,
+            members: vec!["alice".into()],
+        };
+        assert!(to_group(named).is_none());
+
+        let membered = proto::GroupEntry {
+            name: "staff".into(),
+            gid: 2000001,
+            members: vec!["alice".into(), "bo\0b".into()],
+        };
+        assert!(to_group(membered).is_none());
     }
 }
