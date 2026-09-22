@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.2.10] - 2026-09-22
+
+### Security
+- Anyone could register an unverified allowlisted address and become an operator
+- `prompt=login` and `max_age` never re-authenticated anyone
+- Linux `force_mfa` hosts were unlocked by a days-old second factor
+- A tenant's SAML identity provider could take over an existing member's account
+- The administrator-reviewed badge showed for clients nobody had reviewed
+- Apps could quietly widen the audiences they may request
+- Invite, claim and SSO tokens were written to the log stream
+- Setting an offline passphrase was an unbounded Argon2id call
+- The SSRF guard missed several reserved ranges and honoured `HTTP_PROXY`
+- Organization-set logout URIs were never SSRF-checked
+- Invites and claim emails could be sent to one address without limit
+- A crafted app link could repin a user's organization for a month
+- A CIMD document could overwrite an OAuth client Forseti did not track
+- A panic in a handler dropped the connection instead of erroring
+
+### Changed
+- Admin access requires a *verified* allowlisted address; an unclaimed entry grants nothing
+- `prompt=login` and `max_age` are honoured, so apps sending them will see a login screen
+- Linux `force_mfa` measures freshness from the second factor, not the token
+- SAML confirms a matching existing account with the user's own credential first
+- SAML provisions new users only on an organization's verified domain
+- Only operator-created OAuth clients auto-approve or carry the administrator badge
+- **Before upgrading, run `forseti reconcile-client-metadata`** to stamp existing operator clients
+- `config check` fails on a missing Kratos verified-address hook, Hydra DCR, and placeholder secrets
+- New limits on offline-passphrase saves, invites and claim emails
+
 ## [0.2.9] - 2026-09-20
 
 ### Security

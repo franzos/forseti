@@ -1,6 +1,6 @@
 [package]
 name = "forseti"
-version = "0.2.9"
+version = "0.2.10"
 edition = "2024"
 description = "Self-service UI and Hydra login/consent bridge for Ory Kratos + Hydra"
 # Forseti is dual-licensed: everything outside `src/commercial/` is
@@ -28,7 +28,7 @@ tokio-util = { version = "0.7", default-features = false }
 # (`webhook/worker.rs`). Already in the tree transitively; declared directly
 # with a trimmed feature set so the combinator is a supported API.
 futures-util = { version = "0.3", default-features = false, features = ["std", "async-await"] }
-tower-http = { version = "0.7", features = ["trace", "set-header"] }
+tower-http = { version = "0.7", features = ["trace", "set-header", "catch-panic"] }
 # Per-IP rate limiting on the DCR proxy. `default-features = false` then
 # `features = ["axum"]` drops the `tonic` dep we don't need.
 tower_governor = { version = "0.8", default-features = false, features = ["axum"] }
