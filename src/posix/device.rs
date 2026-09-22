@@ -26,10 +26,18 @@ use crate::posix::scope;
 use crate::rate_limit;
 use crate::state::AppState;
 
-/// Second-factor `amr` methods that satisfy a `force_mfa` host (R11). `pwd` is
+/// Second-factor `amr` values that satisfy a `force_mfa` host (R11). `pwd` is
 /// deliberately absent: a password alone is never a second factor. A const
 /// allowlist (not `len(amr) > 1`) so a future Kratos method can't silently count.
-const SECOND_FACTOR_AMR: &[&str] = &[
+///
+/// `mfa` is the RFC 8176 value Forseti now stamps for a genuine step-up (see
+/// `oauth::login::amr_values`). The Kratos method names below it are what
+/// Forseti stamped before that mapping landed; they stay so an id_token minted
+/// by the previous build is still honoured during a rolling upgrade, and
+/// because `newest_second_factor_at` matches Kratos session methods by these
+/// same names.
+pub(crate) const SECOND_FACTOR_AMR: &[&str] = &[
+    "mfa",
     "totp",
     "webauthn",
     "lookup_secret",
@@ -389,6 +397,23 @@ async fn handle_token(
             return json_error(StatusCode::INTERNAL_SERVER_ERROR);
         }
     };
+    // Freshness comes from Kratos, not the id_token: this path has no Kratos
+    // session cookie (a host-authenticated CLI poller on the internal
+    // listener), and Hydra stamps `auth_time` when Forseti accepts the login,
+    // so a days-old AAL2 session would clear the window. Only `force_mfa`
+    // hosts pay the extra admin-API call; a lookup failure denies.
+    let second_factor_at = if host.force_mfa {
+        match crate::ory::kratos::list_identity_sessions(&state.ory, &claims.sub).await {
+            Ok(sessions) => newest_second_factor_at(&sessions),
+            Err(e) => {
+                tracing::warn!(error = ?e, "device_poll: session lookup for force_mfa failed");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let now = Utc::now().timestamp();
     let decision = evaluate_binding(
         &BindingInputs {
@@ -399,7 +424,7 @@ async fn handle_token(
             host_force_mfa: host.force_mfa,
             acr: claims.acr.as_deref(),
             amr: &claims.amr,
-            auth_time: claims.auth_time,
+            second_factor_at,
         },
         now,
         cfg.mfa_auth_time_window_secs as i64,
@@ -485,7 +510,53 @@ struct BindingInputs<'a> {
     host_force_mfa: bool,
     acr: Option<&'a str>,
     amr: &'a [String],
-    auth_time: Option<i64>,
+    /// Unix seconds at which the approver last completed a SECOND factor,
+    /// read off their Kratos sessions — not the id_token's `auth_time`, which
+    /// Hydra stamps at accept time and which a days-old AAL2 session would
+    /// therefore make look fresh. `None` denies a `force_mfa` host.
+    second_factor_at: Option<i64>,
+}
+
+/// When the approver last completed a second factor, in Unix seconds.
+///
+/// Reads the identity's Kratos sessions: take the newest `authenticated_at`
+/// among the ACTIVE AAL2 ones, then the newest second-factor `completed_at`
+/// on that session. Picking a single session rather than scanning all of them
+/// means a stale session's old step-up can't vouch for a fresh one, and vice
+/// versa — the answer describes one coherent authentication.
+fn newest_second_factor_at(sessions: &[crate::ory::Session]) -> Option<i64> {
+    let newest_aal2 = sessions
+        .iter()
+        .filter(|s| s.active == Some(true))
+        .filter(|s| {
+            matches!(
+                s.authenticator_assurance_level,
+                Some(crate::ory::AuthenticatorAssuranceLevel::Aal2)
+            )
+        })
+        .max_by_key(|s| {
+            s.authenticated_at
+                .as_deref()
+                .and_then(crate::oauth::reauth::parse_rfc3339)
+        })?;
+    newest_aal2
+        .authentication_methods
+        .as_ref()?
+        .iter()
+        .filter(|m| {
+            m.method
+                .as_ref()
+                .and_then(|x| serde_json::to_value(x).ok())
+                .and_then(|v: serde_json::Value| v.as_str().map(str::to_string))
+                .is_some_and(|name| SECOND_FACTOR_AMR.contains(&name.as_str()))
+        })
+        .filter_map(|m| {
+            m.completed_at
+                .as_deref()
+                .and_then(crate::oauth::reauth::parse_rfc3339)
+        })
+        .max()
+        .map(|t| t.timestamp())
 }
 
 /// The binding (R4 + R11). Returns `Ok(())` to approve or `Err(reason)` with a
@@ -494,7 +565,8 @@ struct BindingInputs<'a> {
 /// 2. The account is `enabled`.
 /// 3. The account is visible on the host (LIVE scope re-check).
 /// 4. For `force_mfa` hosts: `acr == "aal2"`, `amr` contains a pinned
-///    second factor, and `auth_time` is within the freshness window.
+///    second factor, and the approver's second factor was completed within
+///    the freshness window.
 fn evaluate_binding(
     inputs: &BindingInputs<'_>,
     now: i64,
@@ -521,7 +593,7 @@ fn evaluate_binding(
         if !has_second_factor {
             return Err("mfa_required");
         }
-        match inputs.auth_time {
+        match inputs.second_factor_at {
             Some(t) if now - t <= mfa_auth_time_window_secs && t <= now + 60 => {}
             _ => return Err("mfa_required"),
         }
@@ -560,8 +632,159 @@ mod tests {
             host_force_mfa: false,
             acr: Some(AAL2),
             amr,
-            auth_time: None,
+            second_factor_at: None,
         }
+    }
+
+    /// One Kratos session, as `list_identity_sessions` returns it.
+    fn session(
+        id: &str,
+        active: bool,
+        aal2: bool,
+        authenticated_at: &str,
+        methods: &[(&str, &str)],
+    ) -> crate::ory::Session {
+        let mut s = crate::ory::Session::new(id.to_string());
+        s.active = Some(active);
+        s.authenticator_assurance_level = Some(if aal2 {
+            crate::ory::AuthenticatorAssuranceLevel::Aal2
+        } else {
+            crate::ory::AuthenticatorAssuranceLevel::Aal1
+        });
+        s.authenticated_at = Some(authenticated_at.to_string());
+        s.authentication_methods = Some(
+            methods
+                .iter()
+                .map(|(method, completed_at)| {
+                    let mut m = crate::ory::SessionAuthenticationMethod::new();
+                    m.method = serde_json::from_value(serde_json::json!(method)).ok();
+                    m.completed_at = Some((*completed_at).to_string());
+                    m
+                })
+                .collect(),
+        );
+        s
+    }
+
+    fn unix(s: &str) -> i64 {
+        crate::oauth::reauth::parse_rfc3339(s)
+            .expect("test timestamp parses")
+            .timestamp()
+    }
+
+    #[test]
+    fn second_factor_at_reads_the_totp_completion_not_the_password() {
+        let sessions = [session(
+            "s1",
+            true,
+            true,
+            "2026-01-01T10:00:00Z",
+            &[
+                ("password", "2026-01-01T09:00:00Z"),
+                ("totp", "2026-01-01T10:00:00Z"),
+            ],
+        )];
+        assert_eq!(
+            newest_second_factor_at(&sessions),
+            Some(unix("2026-01-01T10:00:00Z"))
+        );
+    }
+
+    #[test]
+    fn second_factor_at_picks_the_newest_active_aal2_session() {
+        // The exact multi-session case: one stale AAL2 session and one fresh
+        // one for the same identity. The fresh one must win.
+        let sessions = [
+            session(
+                "stale",
+                true,
+                true,
+                "2026-01-01T00:00:00Z",
+                &[("totp", "2026-01-01T00:00:00Z")],
+            ),
+            session(
+                "fresh",
+                true,
+                true,
+                "2026-01-05T12:00:00Z",
+                &[("totp", "2026-01-05T12:00:00Z")],
+            ),
+        ];
+        assert_eq!(
+            newest_second_factor_at(&sessions),
+            Some(unix("2026-01-05T12:00:00Z"))
+        );
+    }
+
+    #[test]
+    fn second_factor_at_ignores_inactive_and_aal1_sessions() {
+        let sessions = [
+            // Newest, but revoked.
+            session(
+                "revoked",
+                false,
+                true,
+                "2026-01-09T12:00:00Z",
+                &[("totp", "2026-01-09T12:00:00Z")],
+            ),
+            // Newest live one, but only AAL1.
+            session(
+                "aal1",
+                true,
+                false,
+                "2026-01-08T12:00:00Z",
+                &[("password", "2026-01-08T12:00:00Z")],
+            ),
+            session(
+                "live-aal2",
+                true,
+                true,
+                "2026-01-05T12:00:00Z",
+                &[("totp", "2026-01-05T12:00:00Z")],
+            ),
+        ];
+        assert_eq!(
+            newest_second_factor_at(&sessions),
+            Some(unix("2026-01-05T12:00:00Z"))
+        );
+    }
+
+    #[test]
+    fn second_factor_at_is_none_without_a_usable_session() {
+        assert_eq!(newest_second_factor_at(&[]), None);
+        // AAL2 claimed but no second-factor method on the session.
+        let sessions = [session(
+            "s1",
+            true,
+            true,
+            "2026-01-01T10:00:00Z",
+            &[("password", "2026-01-01T10:00:00Z")],
+        )];
+        assert_eq!(newest_second_factor_at(&sessions), None);
+    }
+
+    #[test]
+    fn force_mfa_denies_when_the_second_factor_is_stale() {
+        // Finding 2B: a days-old AAL2 session used to clear the window because
+        // the freshness check read Hydra's `auth_time`.
+        let amr = vec!["pwd".to_string(), "totp".to_string()];
+        let mut inputs = base_inputs("alice", "alice", &amr);
+        inputs.host_force_mfa = true;
+        inputs.second_factor_at = Some(1000);
+        assert_eq!(
+            evaluate_binding(&inputs, 1000 + 86_400, 300),
+            Err("mfa_required")
+        );
+    }
+
+    #[test]
+    fn force_mfa_denies_when_the_session_lookup_yielded_nothing() {
+        // `None` is also what a failed Kratos lookup produces: fail closed.
+        let amr = vec!["pwd".to_string(), "totp".to_string()];
+        let mut inputs = base_inputs("alice", "alice", &amr);
+        inputs.host_force_mfa = true;
+        inputs.second_factor_at = None;
+        assert_eq!(evaluate_binding(&inputs, 1000, 300), Err("mfa_required"));
     }
 
     #[test]
@@ -601,7 +824,7 @@ mod tests {
         let mut inputs = base_inputs("alice", "alice", &amr);
         inputs.host_force_mfa = true;
         inputs.acr = Some("aal1");
-        inputs.auth_time = Some(1000);
+        inputs.second_factor_at = Some(1000);
         assert_eq!(evaluate_binding(&inputs, 1000, 300), Err("mfa_required"));
     }
 
@@ -611,7 +834,7 @@ mod tests {
         let amr = vec!["pwd".to_string()];
         let mut inputs = base_inputs("alice", "alice", &amr);
         inputs.host_force_mfa = true;
-        inputs.auth_time = Some(1000);
+        inputs.second_factor_at = Some(1000);
         assert_eq!(evaluate_binding(&inputs, 1000, 300), Err("mfa_required"));
     }
 
@@ -620,7 +843,7 @@ mod tests {
         let amr = vec!["pwd".to_string(), "totp".to_string()];
         let mut inputs = base_inputs("alice", "alice", &amr);
         inputs.host_force_mfa = true;
-        inputs.auth_time = Some(1000);
+        inputs.second_factor_at = Some(1000);
         assert!(evaluate_binding(&inputs, 1100, 300).is_ok());
     }
 
@@ -629,7 +852,7 @@ mod tests {
         let amr = vec!["webauthn".to_string()];
         let mut inputs = base_inputs("alice", "alice", &amr);
         inputs.host_force_mfa = true;
-        inputs.auth_time = Some(1000);
+        inputs.second_factor_at = Some(1000);
         assert!(evaluate_binding(&inputs, 1000, 300).is_ok());
     }
 
@@ -639,7 +862,7 @@ mod tests {
         let amr = vec!["totp".to_string()];
         let mut inputs = base_inputs("alice", "alice", &amr);
         inputs.host_force_mfa = true;
-        inputs.auth_time = Some(1000);
+        inputs.second_factor_at = Some(1000);
         assert_eq!(
             evaluate_binding(&inputs, 1000 + 3600, 300),
             Err("mfa_required")
@@ -651,7 +874,7 @@ mod tests {
         let amr = vec!["totp".to_string()];
         let mut inputs = base_inputs("alice", "alice", &amr);
         inputs.host_force_mfa = true;
-        inputs.auth_time = None;
+        inputs.second_factor_at = None;
         assert_eq!(evaluate_binding(&inputs, 1000, 300), Err("mfa_required"));
     }
 
@@ -674,7 +897,7 @@ mod tests {
         let amr: Vec<String> = vec![];
         let mut inputs = base_inputs("alice", "alice", &amr);
         inputs.acr = None;
-        inputs.auth_time = None;
+        inputs.second_factor_at = None;
         assert!(evaluate_binding(&inputs, 1000, 300).is_ok());
     }
 

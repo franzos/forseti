@@ -410,11 +410,18 @@ async fn groups_present_on_skip_consent() {
     let user = register_test_user("grp-skip").await;
     let (client_id, client_secret, redirect_uri) =
         hydra_create_test_client(&["openid", "groups"]).await;
+    // A client Forseti has no trust row for is not auto-grant eligible, so
+    // stamp it the way the admin create path does. `hydra_create_test_client`
+    // talks to Hydra directly and writes no Forseti row.
+    mark_client_verified(&client_id);
 
     // Pin a resolvable default-org membership so active-org resolution sees the
     // user as a member regardless of auto-join timing (INSERT OR IGNORE).
     seed_org_membership("default", &user.identity_id, "member");
 
+    // A previous run that panicked before its teardown leaves the slug behind,
+    // and `org_teams(org_id, slug)` is unique.
+    delete_team_by_slug("default", "ops");
     let team_id = uuid::Uuid::new_v4().to_string();
     seed_team(&team_id, "default", "Ops", "ops", None);
     add_team_member(&team_id, &user.identity_id);
@@ -604,5 +611,358 @@ async fn consent_grant_hands_off_with_a_document_not_a_redirect() {
     );
 
     hydra_delete_client(&client_id).await;
+    user.cleanup().await;
+}
+
+// --- RP-driven re-authentication (prompt=login / max_age) ------------------
+
+/// Where an `/oauth2/auth` chain ended up, as a string, without asserting
+/// anything about it. `prompt=login` must land the user back on a Kratos login
+/// screen rather than sailing through to consent.
+async fn chase_auth_url(client: &reqwest::Client, auth_url: &str) -> String {
+    client
+        .get(auth_url)
+        .send()
+        .await
+        .expect("follow auth chain")
+        .url()
+        .to_string()
+}
+
+/// True when the chain ended on the interactive consent FORM rather than
+/// sailing past it. The URL alone can't tell them apart: an auto-grant renders
+/// a continuation document from the same `/oauth/consent` path (see
+/// `consent_grant_hands_off_with_a_document_not_a_redirect`), so the
+/// discriminator is the form's hidden `consent_challenge` input.
+async fn lands_on_the_consent_form(client: &reqwest::Client, auth_url: &str) -> bool {
+    let body = client
+        .get(auth_url)
+        .send()
+        .await
+        .expect("follow auth chain")
+        .text()
+        .await
+        .unwrap_or_default();
+    body.contains(r#"name="consent_challenge""#)
+}
+
+/// Finding 2A (round-2 review): `oauth_login` read only `acr_values` and
+/// accepted the login the instant any Kratos session existed. Hydra then
+/// stamped `auth_time = now`, so an RP asking for re-authentication got a
+/// "fresh" token without the user touching a credential.
+#[tokio::test]
+async fn prompt_login_forces_reauthentication() {
+    assert!(portal_reachable().await);
+
+    let user = register_test_user("oauth-prompt-login").await;
+    let (client_id, _secret, redirect_uri) = hydra_create_test_client(&["openid"]).await;
+    mark_client_verified(&client_id);
+
+    // Control: without `prompt`, a live session SSOs straight through to the
+    // portal's own consent page.
+    let plain = oauth_auth_url(&client_id, &redirect_uri, "openid", "");
+    let landed = chase_auth_url(&user.client, &plain).await;
+    assert!(
+        landed.contains("/oauth/consent"),
+        "a normal authorize must still SSO through; landed on {landed}"
+    );
+
+    // With `prompt=login`, the same live session must be sent to authenticate.
+    let prompted = oauth_auth_url(&client_id, &redirect_uri, "openid", "&prompt=login");
+    let landed = chase_auth_url(&user.client, &prompted).await;
+    assert!(
+        landed.contains("/login"),
+        "prompt=login must bounce to a login screen, not straight to consent; landed on {landed}"
+    );
+    assert!(
+        !landed.contains("/oauth/consent"),
+        "prompt=login must not reach consent without re-authentication; landed on {landed}"
+    );
+
+    hydra_delete_client(&client_id).await;
+    delete_client_metadata(&client_id);
+    user.cleanup().await;
+}
+
+/// `max_age=0` can never be satisfied by an existing session, so it is the
+/// deterministic form of "the session is older than the RP allows". A large
+/// `max_age` must still SSO through.
+#[tokio::test]
+async fn max_age_bounces_a_session_older_than_the_window() {
+    assert!(portal_reachable().await);
+
+    let user = register_test_user("oauth-max-age").await;
+    let (client_id, _secret, redirect_uri) = hydra_create_test_client(&["openid"]).await;
+    mark_client_verified(&client_id);
+
+    // A generous window: the session was authenticated seconds ago.
+    let fresh = oauth_auth_url(&client_id, &redirect_uri, "openid", "&max_age=3600");
+    let landed = chase_auth_url(&user.client, &fresh).await;
+    assert!(
+        landed.contains("/oauth/consent"),
+        "a session inside max_age must SSO through; landed on {landed}"
+    );
+
+    // A window nothing can satisfy.
+    let stale = oauth_auth_url(&client_id, &redirect_uri, "openid", "&max_age=0");
+    let landed = chase_auth_url(&user.client, &stale).await;
+    assert!(
+        landed.contains("/login"),
+        "max_age=0 must bounce to a login screen; landed on {landed}"
+    );
+
+    hydra_delete_client(&client_id).await;
+    delete_client_metadata(&client_id);
+    user.cleanup().await;
+}
+
+/// The bounce has to terminate: once the user actually re-authenticates,
+/// `prompt=login` must be satisfied and the flow must reach consent rather
+/// than looping back to the login screen. The signed mark is what ends it.
+#[tokio::test]
+async fn prompt_login_completes_after_the_user_reauthenticates() {
+    assert!(portal_reachable().await);
+
+    let user = register_test_user("oauth-prompt-loop").await;
+    // Re-authenticating means a fresh password login, which Kratos's
+    // `require_verified_address` hook gates.
+    mark_identity_verified(&user.identity_id).await;
+    let (client_id, _secret, redirect_uri) = hydra_create_test_client(&["openid"]).await;
+    mark_client_verified(&client_id);
+
+    let prompted = oauth_auth_url(&client_id, &redirect_uri, "openid", "&prompt=login");
+    let landed = chase_auth_url(&user.client, &prompted).await;
+    assert!(
+        landed.contains("/login"),
+        "prompt=login must bounce first; landed on {landed}"
+    );
+    let flow_id = extract_flow_id_from_url(&landed).expect("a Kratos login flow on the bounce");
+
+    // Submit the password against the flow Forseti bounced us to. Kratos
+    // finishes by redirecting to the flow's `return_to`, which is
+    // /oauth/login?login_challenge=... — the second pass through the gate.
+    let flow = fetch_flow(&user.client, "login", &flow_id).await;
+    let action = flow["ui"]["action"]
+        .as_str()
+        .expect("ui.action")
+        .to_string();
+    let csrf = flow_csrf_token(&flow).expect("csrf_token on the login flow");
+    let res = user
+        .client
+        .post(&action)
+        .form(&[
+            ("identifier", user.email.as_str()),
+            ("password", user.password.as_str()),
+            ("method", "password"),
+            ("csrf_token", csrf.as_str()),
+        ])
+        .send()
+        .await
+        .expect("submit the re-authentication password");
+    let landed = res.url().to_string();
+    assert!(
+        landed.contains("/oauth/consent"),
+        "after re-authenticating, prompt=login must be satisfied and the flow \
+         must continue to consent instead of bouncing again; landed on {landed}"
+    );
+
+    hydra_delete_client(&client_id).await;
+    delete_client_metadata(&client_id);
+    user.cleanup().await;
+}
+
+// --- Consent trust signals (finding 4) ------------------------------------
+
+/// Finding 4 (round-2 review): the "Reviewed by your administrator" badge
+/// rendered for any verified client, and a client Forseti had no metadata row
+/// for defaulted to verified. An org owner can create a client in their own
+/// org, and Hydra's `/oauth2/register` is publicly routed — so neither was an
+/// operator review.
+#[tokio::test]
+async fn only_an_operator_client_wears_the_admin_badge() {
+    assert!(portal_reachable().await);
+
+    let user = register_test_user("consent-badge").await;
+    let (client_id, _secret, redirect_uri) = hydra_create_test_client(&["openid"]).await;
+
+    // 1. No metadata row at all: Forseti must not vouch for it.
+    let auth_url = oauth_auth_url(&client_id, &redirect_uri, "openid", "");
+    let (_challenge, _csrf, body) = drive_to_consent(&user.client, &auth_url).await;
+    assert!(
+        !body.contains("Reviewed by your administrator"),
+        "a client with no metadata row must not wear the admin badge"
+    );
+
+    // 2. Org-vouched: a distinct, weaker label, never the admin checkmark.
+    mark_client_org_verified(&client_id);
+    let (_challenge, _csrf, body) = drive_to_consent(&user.client, &auth_url).await;
+    assert!(
+        !body.contains("Reviewed by your administrator"),
+        "an org-created client must not wear the admin badge"
+    );
+    assert!(
+        body.contains("Added by your organization"),
+        "an org-created client should carry its own, weaker label"
+    );
+
+    // 3. Operator-created: the badge is back.
+    mark_client_verified(&client_id);
+    let (_challenge, _csrf, body) = drive_to_consent(&user.client, &auth_url).await;
+    assert!(
+        body.contains("Reviewed by your administrator"),
+        "an operator-created client must still wear the admin badge"
+    );
+
+    hydra_delete_client(&client_id).await;
+    delete_client_metadata(&client_id);
+    user.cleanup().await;
+}
+
+/// An org-vouched client is not auto-grant eligible: `skip_consent` must not
+/// bypass the consent screen for it, only for an operator-reviewed client.
+#[tokio::test]
+async fn an_org_vouched_client_does_not_auto_grant() {
+    assert!(portal_reachable().await);
+
+    let user = register_test_user("consent-autogrant").await;
+    let (client_id, _secret, redirect_uri) = hydra_create_test_client(&["openid"]).await;
+    hydra_set_client_skip_consent(&client_id, true).await;
+
+    mark_client_org_verified(&client_id);
+    let auth_url = oauth_auth_url(&client_id, &redirect_uri, "openid", "");
+    assert!(
+        lands_on_the_consent_form(&user.client, &auth_url).await,
+        "an org-vouched skip_consent client must still show the consent form"
+    );
+
+    // The operator-reviewed case is what skip_consent is for.
+    mark_client_verified(&client_id);
+    assert!(
+        !lands_on_the_consent_form(&user.client, &auth_url).await,
+        "an operator-reviewed skip_consent client should auto-grant"
+    );
+
+    hydra_delete_client(&client_id).await;
+    delete_client_metadata(&client_id);
+    user.cleanup().await;
+}
+
+// --- RFC 8707 consent audience (finding 5) --------------------------------
+
+/// Finding 5 (round-2 review): a `resource=` that passed only on the enabled
+/// resource registry was healed onto the client's Hydra `audience` record.
+/// For an operator-created client that record IS policy on the next consent,
+/// so one silently auto-granted request permanently widened what the client
+/// could ask for.
+///
+/// The split is the user: on the interactive path they are shown the resolved
+/// audience and approve it, and the heal records that decision (the refresh
+/// grant needs it on the record). On the auto-grant path nobody sees anything,
+/// so the audience is honoured for that token only.
+#[tokio::test]
+async fn an_auto_granted_registry_resource_is_not_healed_onto_the_client() {
+    assert!(portal_reachable().await);
+
+    let resource = "https://registry-only.example.com/mcp";
+    seed_registry_resource(resource);
+    set_registry_resource_enabled(resource, true);
+
+    let user = register_test_user("consent-aud-heal").await;
+    let (client_id, _secret, redirect_uri) = hydra_create_test_client(&["openid", "offline"]).await;
+    mark_client_verified(&client_id);
+    assert!(
+        hydra_client_audience(&client_id).await.is_empty(),
+        "fixture precondition: the client starts with no registered audience"
+    );
+
+    let auth_url = oauth_auth_url(
+        &client_id,
+        &redirect_uri,
+        "openid offline",
+        &format!("&resource={}", form_urlencode(resource)),
+    );
+
+    // Interactive first: the user must be told what the token will address.
+    let (_challenge, _csrf, body) = drive_to_consent(&user.client, &auth_url).await;
+    assert!(
+        body.contains(resource),
+        "the consent page must name the audience being requested"
+    );
+
+    // Now the silent path: skip_consent means no human sees that page at all.
+    hydra_set_client_skip_consent(&client_id, true).await;
+    assert!(
+        !lands_on_the_consent_form(&user.client, &auth_url).await,
+        "fixture precondition: the client should now auto-grant"
+    );
+    assert!(
+        hydra_client_audience(&client_id).await.is_empty(),
+        "an auto-granted registry-only resource must not be written onto the client, \
+         where it would become policy for every later consent"
+    );
+
+    hydra_delete_client(&client_id).await;
+    delete_client_metadata(&client_id);
+    delete_registry_resource(resource);
+    user.cleanup().await;
+}
+
+/// The other half: when the user actually approves the consent, the audience
+/// IS registered — a refresh grant fails without it. This is the behaviour
+/// `cimd::cimd_golden_path_end_to_end` depends on, pinned here too so the
+/// auto-grant restriction above can't be widened into it by accident.
+#[tokio::test]
+async fn an_approved_registry_resource_is_registered_for_the_refresh_grant() {
+    assert!(portal_reachable().await);
+
+    let resource = "https://approved-resource.example.com/mcp";
+    seed_registry_resource(resource);
+    set_registry_resource_enabled(resource, true);
+
+    let user = register_test_user("consent-aud-approve").await;
+    let (client_id, client_secret, redirect_uri) =
+        hydra_create_test_client(&["openid", "offline"]).await;
+    mark_client_verified(&client_id);
+
+    let auth_url = oauth_auth_url(
+        &client_id,
+        &redirect_uri,
+        "openid offline",
+        &format!("&resource={}", form_urlencode(resource)),
+    );
+    let (consent_challenge, csrf, _body) = drive_to_consent(&user.client, &auth_url).await;
+    let code = consent_accept_chase_code(
+        &user.manual_client,
+        &csrf,
+        &consent_challenge,
+        &["openid", "offline"],
+        false,
+    )
+    .await
+    .expect("authorization code on callback URL");
+
+    let tokens = exchange_code_for_tokens(&client_id, &client_secret, &redirect_uri, &code).await;
+    let access_token = tokens["access_token"].as_str().expect("access_token");
+    let introspected = hydra_introspect(access_token).await;
+    let aud: Vec<String> = introspected["aud"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect();
+    assert!(
+        aud.iter().any(|a| a == resource),
+        "an approved registry resource must be granted on the token; got {introspected}"
+    );
+    assert_eq!(
+        hydra_client_audience(&client_id).await,
+        vec![resource.to_string()],
+        "an approved audience must be registered, or the refresh grant fails"
+    );
+
+    hydra_delete_client(&client_id).await;
+    delete_client_metadata(&client_id);
+    delete_registry_resource(resource);
     user.cleanup().await;
 }

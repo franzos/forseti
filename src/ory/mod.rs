@@ -17,13 +17,46 @@ pub use ory_client::models::{
     CreateRecoveryCodeForIdentityBody, CreateRecoveryLinkForIdentityBody, Identity, LoginFlow,
     Message, OAuth2Client, OAuth2ConsentRequest, OAuth2ConsentSession, OAuth2LoginRequest,
     OAuth2LogoutRequest, OAuth2RedirectTo, RecoveryCodeForIdentity, RecoveryFlow, RegistrationFlow,
-    RejectOAuth2Request, Session, SettingsFlow, UpdateIdentityBody, VerifiableIdentityAddress,
-    VerificationFlow,
+    RejectOAuth2Request, Session, SessionAuthenticationMethod, SettingsFlow, UpdateIdentityBody,
+    VerifiableIdentityAddress, VerificationFlow,
 };
 
 pub mod discovery;
 pub mod hydra;
 pub mod kratos;
+
+/// True iff `email` matches a `verified` entry of `addrs` (ASCII
+/// case-insensitive). `None`/empty addresses are never verified.
+pub(crate) fn address_is_verified(
+    addrs: Option<&[VerifiableIdentityAddress]>,
+    email: &str,
+) -> bool {
+    if email.is_empty() {
+        return false;
+    }
+    addrs
+        .map(|addrs| {
+            addrs
+                .iter()
+                .any(|a| a.value.eq_ignore_ascii_case(email) && a.verified)
+        })
+        .unwrap_or(false)
+}
+
+/// The session identity's verifiable addresses, for [`address_is_verified`].
+pub(crate) fn session_addresses(session: &Session) -> Option<&[VerifiableIdentityAddress]> {
+    session
+        .identity
+        .as_ref()
+        .and_then(|i| i.verifiable_addresses.as_deref())
+}
+
+/// The identity's verifiable addresses, for call sites holding an admin-API
+/// [`Identity`] rather than a [`Session`] (the SAML callback mints the session
+/// only after the linking decision).
+pub(crate) fn identity_addresses(identity: &Identity) -> Option<&[VerifiableIdentityAddress]> {
+    identity.verifiable_addresses.as_deref()
+}
 
 /// Shared HTTP/SDK clients pinned at startup, held behind `Arc` so `State<AppState>` clones cheaply.
 pub struct OryClients {

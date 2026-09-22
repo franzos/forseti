@@ -90,6 +90,24 @@ impl Row {
     pub fn is_self_registered(&self) -> bool {
         self.source == source::DCR || self.source == source::CIMD
     }
+
+    /// True only when a Forseti OPERATOR vouched for this client and the
+    /// verification is still on. This — not [`Self::is_verified`] — is what
+    /// the "Reviewed by your administrator" badge, the auto-grant gate and the
+    /// handoff banner key on.
+    ///
+    /// An org owner (`source = org`) is not an operator: they can create a
+    /// client in their own org, so treating their word as an operator review
+    /// would let any org owner mint a client wearing the admin checkmark.
+    pub fn is_admin_vouched(&self) -> bool {
+        self.source == source::ADMIN && self.is_verified()
+    }
+
+    /// True when the owning org vouched for the client. Renders a distinct,
+    /// weaker label; never the admin checkmark, never auto-grant.
+    pub fn is_org_vouched(&self) -> bool {
+        self.source == source::ORG && self.is_verified()
+    }
 }
 
 #[derive(Insertable)]
@@ -226,6 +244,49 @@ pub async fn insert_form_created(
             .map(|_| ())
     })?;
     Ok(())
+}
+
+/// One-shot backfill for a client Hydra knows but Forseti has no row for:
+/// insert `source = admin, verification = verified`. Returns `true` when a row
+/// was written, `false` when one already existed.
+///
+/// This exists because the consent badge, the auto-grant gate and the handoff
+/// banner treat a missing row as UNVERIFIED. Before that inversion shipped a
+/// missing row read as verified, so every operator client predating this table
+/// has to be stamped or it would silently lose its badge. Forseti's database
+/// and Hydra's are separate servers, so this cannot be a SQL migration — it is
+/// a deploy step (`forseti reconcile-client-metadata`).
+pub async fn backfill_legacy_admin(db: &DbPool, client_id: &str) -> anyhow::Result<bool> {
+    let now_str = Utc::now().to_rfc3339();
+    let id = client_id.to_string();
+    let wrote: bool = db_interact!(db, |conn| {
+        let existing: Option<Row> = ocm::table
+            .filter(ocm::client_id.eq(&id))
+            .select(Row::as_select())
+            .first(conn)
+            .optional()?;
+        if existing.is_some() {
+            return Ok(false);
+        }
+        diesel::insert_into(ocm::table)
+            .values(InsertRow {
+                client_id: &id,
+                verification: verification::VERIFIED,
+                verified_by: Some("reconcile-client-metadata"),
+                verified_at: Some(now_str.clone()),
+                source: source::ADMIN,
+                dcr_iat_id: None,
+                dcr_registered_at: None,
+                created_at: now_str.clone(),
+                audience: None,
+                resource_url: None,
+                org_id: crate::orgs::DEFAULT_ORG_ID,
+                template_slug: None,
+            })
+            .execute(conn)
+            .map(|_| true)
+    })?;
+    Ok(wrote)
 }
 
 /// Inside an open transaction (`$c`): return the prior verification state for

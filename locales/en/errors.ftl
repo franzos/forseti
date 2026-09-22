@@ -78,4 +78,7 @@ error-saml-unverified-prefix = An account for
 error-saml-unverified-suffix = already exists but its email address hasn't been verified, so single sign-on can't safely attach to it. Verify the address from your original sign-up email, or ask your administrator for help.
 error-saml-cross-org-not-member = Your account isn't a member of this organization yet. Ask your administrator to add you, then try again.
 error-saml-conflict = We couldn't sign you in. Please contact your administrator.
+error-saml-admin-allowlisted = This address is an operator account and can't be signed in through your organization's identity provider. Sign in directly instead.
+error-saml-unproven-domain = Your organization hasn't verified this email domain yet. Ask your administrator to verify it, then try again.
+error-saml-confirm-failed = To link this account to your organization's identity provider, sign in with the account that owns this address.
 error-saml-blocked-cta = Go to sign in

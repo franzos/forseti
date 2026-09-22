@@ -18,7 +18,12 @@ static UNGUARDED: LazyLock<reqwest::Client> = LazyLock::new(|| build(false));
 fn build(guarded: bool) -> reqwest::Client {
     let mut builder = reqwest::Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
-        .redirect(reqwest::redirect::Policy::none());
+        .redirect(reqwest::redirect::Policy::none())
+        // No environment proxy. `HTTP_PROXY`/`ALL_PROXY` would route every
+        // attacker-influenceable fetch through a third party, and the
+        // connect-time SSRF guard would then be checking the proxy's address
+        // rather than the target's — the guard silently stops guarding.
+        .no_proxy();
     if guarded {
         // Connect-time SSRF guard: re-checks every resolved address so a
         // public hostname that rebinds to an internal IP can't slip past

@@ -339,22 +339,20 @@ fn action_target(action: Option<&str>) -> &'static str {
     }
 }
 
-/// True when somebody with authority vouched for this client through the
-/// admin form: a Forseti operator (`source = admin`) or the owning org
-/// (`source = org`), and the verification badge is still on.
+/// True when a Forseti OPERATOR vouched for this client (`source = admin`)
+/// and the verification badge is still on.
 ///
-/// A client with no metadata row is refused, unlike everywhere else in the
-/// codebase where a missing row reads as legacy-and-verified. Handoff renders
-/// the client's own `client_name` and `logo_uri` on Forseti's settings pages
-/// and then redirects back to its origin, and Hydra's `/oauth2/register` is
-/// publicly routed in this deployment - so "no row" includes "registered
-/// itself a minute ago", which is exactly what must not be trusted here.
+/// An org owner is deliberately not enough. Handoff renders the client's own
+/// `client_name` and `logo_uri` on Forseti's settings pages and then redirects
+/// back to its origin, so the banner is a statement Forseti makes about a
+/// third party — and any org owner can create a client in their own org.
+///
+/// A client with no metadata row is refused: Hydra's `/oauth2/register` is
+/// publicly routed in this deployment, so "no row" includes "registered itself
+/// a minute ago".
 async fn referrer_is_vouched(state: &AppState, client_id: &str) -> bool {
-    use crate::oauth_client_metadata::source;
     match crate::oauth_client_metadata::get(&state.db, client_id).await {
-        Ok(Some(row)) => {
-            row.is_verified() && matches!(row.source.as_str(), source::ADMIN | source::ORG)
-        }
+        Ok(Some(row)) => row.is_admin_vouched(),
         Ok(None) => false,
         Err(e) => {
             tracing::error!(error = ?e, client_id, "handoff: client metadata lookup failed");

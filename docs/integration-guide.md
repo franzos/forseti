@@ -139,9 +139,11 @@ https://hydra.example.com/oauth2/auth
 
 - `state` is mandatory and must be cryptographically random per attempt. Store it in your app's pre-session (server-side or signed cookie) and compare on callback. Defends against CSRF on the redirect.
 - `nonce` is optional but recommended; binds the id_token to this specific flow. Store and compare on callback.
-- `prompt=login` forces re-authentication even if the user has an active Forseti session.
+- `prompt=login` forces re-authentication even if the user has an active Forseti session. Forseti sends the user through a Kratos login with `refresh=true` and only continues once they have actually presented a credential; it does not treat an existing session as sufficient.
 - `acr_values=aal2` requests a second-factor step-up (see [AAL step-up](#aal-step-up)).
-- `max_age=<seconds>` requires the user to have authenticated within the window; otherwise re-prompts.
+- `max_age=<seconds>` requires the user to have authenticated within the window; otherwise Forseti re-prompts. The window is measured against the Kratos session's own authentication time, not against when the token happens to be issued — so a long-lived session does not satisfy a short `max_age`. `max_age=0` always re-authenticates.
+
+Both are enforced by Forseti rather than by Hydra. Hydra stamps `auth_time` at the moment the login is accepted, so an authorization server that simply forwarded these parameters would hand you a token claiming a fresh authentication that never happened. If your app relies on `auth_time` for a step-up decision, that is the behaviour you want.
 
 ### 2. Handle the callback
 

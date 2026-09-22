@@ -23,6 +23,9 @@ pub enum Cmd {
     PosixReconcile,
     /// Create the Hydra OAuth2 client the POSIX/PAM device flow logs in with
     PosixInitClient,
+    /// Stamp every Hydra client Forseti has no trust row for as operator-created.
+    /// Run this ONCE before upgrading, while a missing row still reads as verified.
+    ReconcileClientMetadata,
     /// Inspect and edit the Kratos, Hydra and Forseti config files
     Config(ConfigArgs),
     #[command(name = "config-check", hide = true)]

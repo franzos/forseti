@@ -102,7 +102,7 @@ pub(crate) fn render_error_boundary(
     cta_label: impl Into<String>,
 ) -> Response {
     render(&ErrorBoundaryTemplate {
-        chrome: PageChrome::from_parts(state, String::new(), String::new(), locale.clone()),
+        chrome: PageChrome::from_parts(state, String::new(), None, String::new(), locale.clone()),
         error_title: title.to_string(),
         error_body: body.to_string(),
         cta_href: cta_href.into(),

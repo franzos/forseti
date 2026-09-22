@@ -90,26 +90,48 @@ fn is_blocked_v4(v4: Ipv4Addr) -> bool {
         // CGNAT
         || (o[0] == 100 && (64..=127).contains(&o[1]))
         // 169.254/16 — link-local + IMDS
-        || o[0] == 169 && o[1] == 254
+        || (o[0] == 169 && o[1] == 254)
+        // 0.0.0.0/8 "this network" — on Linux 0.x.y.z reaches loopback
+        || o[0] == 0
+        // 192.0.0.0/24 IETF protocol assignments (incl. 192.0.0.192 NAT64 discovery)
+        || (o[0] == 192 && o[1] == 0 && o[2] == 0)
+        // 198.18.0.0/15 benchmarking
+        || (o[0] == 198 && (o[1] == 18 || o[1] == 19))
+        // 240.0.0.0/4 reserved, and 255.255.255.255 is caught by is_broadcast
+        || o[0] >= 240
 }
 
 fn is_blocked_v6(v6: Ipv6Addr) -> bool {
     if let Some(embedded) = embedded_ipv4(v6) {
         return is_blocked_v4(embedded);
     }
+    let s = v6.segments();
     v6.is_loopback()
         || v6.is_unspecified()
         || v6.is_multicast()
         || v6.is_unique_local()
         || v6.is_unicast_link_local()
+        // 2001::/32 Teredo — tunnels to an arbitrary v4 endpoint
+        || (s[0] == 0x2001 && s[1] == 0)
+        // fec0::/10 deprecated site-local, still routed by some stacks
+        || (s[0] & 0xffc0) == 0xfec0
+        // 64:ff9b:1::/48 local-use NAT64, the sibling of the well-known prefix
+        || (s[0] == 0x64 && s[1] == 0xff9b && s[2] == 1)
 }
 
-/// IPv4-mapped (`::ffff:0:0/96`), NAT64 (`64:ff9b::/96`), and 6to4
-/// (`2002::/16`) addresses classify by their embedded IPv4 address, so a
-/// NAT64/6to4-capable egress can't smuggle a blocked v4 target through v6.
+/// IPv4-mapped (`::ffff:0:0/96`), IPv4-compatible (`::a.b.c.d`), NAT64
+/// (`64:ff9b::/96`), and 6to4 (`2002::/16`) addresses classify by their
+/// embedded IPv4 address, so a NAT64/6to4-capable egress can't smuggle a
+/// blocked v4 target through v6.
 fn embedded_ipv4(v6: Ipv6Addr) -> Option<Ipv4Addr> {
     if let Some(mapped) = v6.to_ipv4_mapped() {
         return Some(mapped);
+    }
+    // IPv4-compatible (`::a.b.c.d`): deprecated, but still parsed and routed.
+    // `to_ipv4` covers it and the mapped form; the mapped case already
+    // returned above.
+    if let Some(compat) = v6.to_ipv4() {
+        return Some(compat);
     }
     let s = v6.segments();
     let o = v6.octets();
@@ -258,5 +280,77 @@ mod tests {
         ] {
             assert!(!is_blocked_ip(ip.parse().unwrap()), "should allow: {ip}");
         }
+    }
+}
+
+#[cfg(test)]
+mod range_gap_tests {
+    use super::is_blocked_ip;
+    use std::net::IpAddr;
+
+    fn blocked(addr: &str) -> bool {
+        is_blocked_ip(addr.parse::<IpAddr>().expect("test address parses"))
+    }
+
+    #[test]
+    fn this_network_reaches_loopback_on_linux() {
+        assert!(blocked("0.0.0.0"));
+        assert!(blocked("0.1.2.3"));
+    }
+
+    #[test]
+    fn ietf_protocol_assignments_are_blocked() {
+        // 192.0.0.192 is the NAT64 discovery address.
+        assert!(blocked("192.0.0.1"));
+        assert!(blocked("192.0.0.192"));
+        // 192.0.2.0/24 (TEST-NET-1) is a different block and not part of this.
+        assert!(!blocked("192.0.2.1"));
+    }
+
+    #[test]
+    fn benchmarking_range_is_blocked() {
+        assert!(blocked("198.18.0.1"));
+        assert!(blocked("198.19.255.255"));
+        assert!(!blocked("198.20.0.1"));
+    }
+
+    #[test]
+    fn reserved_class_e_is_blocked() {
+        assert!(blocked("240.0.0.1"));
+        assert!(blocked("255.255.255.254"));
+        // 239/8 is multicast, caught by a different arm — 239.x is not 240/4.
+        assert!(blocked("239.255.255.255"));
+    }
+
+    #[test]
+    fn ipv4_compatible_v6_classifies_by_its_embedded_address() {
+        // `::127.0.0.1` is loopback wearing a v6 hat.
+        assert!(blocked("::127.0.0.1"));
+        assert!(blocked("::10.0.0.1"));
+    }
+
+    #[test]
+    fn local_use_nat64_is_blocked() {
+        assert!(blocked("64:ff9b:1::1"));
+    }
+
+    #[test]
+    fn teredo_is_blocked() {
+        assert!(blocked("2001:0:4136:e378:8000:63bf:3fff:fdd2"));
+        // 2001:db8::/32 (documentation) is a different prefix; 2001::/32 is
+        // specifically `s[1] == 0`.
+        assert!(!blocked("2001:db8::1"));
+    }
+
+    #[test]
+    fn deprecated_site_local_is_blocked() {
+        assert!(blocked("fec0::1"));
+        assert!(blocked("feff::1"));
+    }
+
+    #[test]
+    fn ordinary_public_addresses_still_pass() {
+        assert!(!blocked("93.184.216.34"));
+        assert!(!blocked("2606:2800:220:1:248:1893:25c8:1946"));
     }
 }

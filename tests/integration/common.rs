@@ -207,8 +207,15 @@ pub async fn register_test_user_with_client(
 /// The user is signed in immediately after step 2 (session hook in
 /// `kratos.yml`'s `selfservice.flows.registration.after.password.hooks`).
 pub async fn register_test_user(prefix: &str) -> RegisteredUser {
+    register_test_user_with_email(&unique_email(prefix)).await
+}
+
+/// [`register_test_user`] at a caller-chosen address, for tests that need a
+/// specific email (e.g. one the running Forseti has in `[admin].allowed_emails`).
+/// The address must not already be a Kratos identifier.
+pub async fn register_test_user_with_email(email: &str) -> RegisteredUser {
     let (client, manual_client, _jar) = paired_clients();
-    let email = unique_email(prefix);
+    let email = email.to_string();
     let password = "Sup3rSecret-Test-Password!";
 
     // 1. Init flow via the portal. Kratos sets its CSRF cookie + the flow
@@ -441,6 +448,117 @@ pub async fn kratos_admin_create_verified_password_identity(email: &str, passwor
     );
     let v: Value = res.json().await.expect("create verified identity body");
     v["id"].as_str().expect("identity id").to_string()
+}
+
+/// Backdate every second-factor `completed_at` on an identity's Kratos
+/// sessions by `secs`, straight in Kratos's Postgres (the admin API exposes no
+/// writer for it). Returns how many session rows were rewritten.
+///
+/// This is how the PAM `force_mfa` freshness window gets exercised without
+/// waiting it out: the window reads the second factor's `completed_at` off
+/// Kratos, so ageing that value is the whole test.
+pub fn backdate_second_factor(identity_id: &str, secs: i64) -> u64 {
+    let sql = format!(
+        "UPDATE sessions SET authentication_methods = ( \
+           SELECT jsonb_agg( \
+             CASE WHEN m->>'method' IN ('totp','webauthn','lookup_secret') \
+                  THEN jsonb_set(m, '{{completed_at}}', \
+                       to_jsonb(to_char((m->>'completed_at')::timestamptz - interval '{secs} seconds', \
+                                        'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'))) \
+                  ELSE m END) \
+           FROM jsonb_array_elements(authentication_methods) m) \
+         WHERE identity_id = '{identity_id}'::uuid \
+           AND authentication_methods @> '[{{\"method\":\"totp\"}}]'"
+    );
+    kratos_psql(&sql)
+}
+
+/// Run `sql` against Kratos's Postgres through the compose container, the way
+/// `infra/seed-admin.sh` does. Returns the row count reported by psql.
+pub fn kratos_psql(sql: &str) -> u64 {
+    let out = std::process::Command::new("podman")
+        .args([
+            "exec",
+            "infra_postgres_1",
+            "psql",
+            "-U",
+            "kratos",
+            "-d",
+            "kratos",
+            "-t",
+            "-A",
+            "-c",
+            sql,
+        ])
+        .output()
+        .expect("psql against the Kratos database");
+    assert!(
+        out.status.success(),
+        "psql failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find_map(|l| {
+            l.strip_prefix("UPDATE ")
+                .and_then(|n| n.trim().parse().ok())
+        })
+        .unwrap_or(0)
+}
+
+/// Mark every verifiable address on an existing identity verified, via the
+/// Kratos admin PATCH API. Fixtures that register through the self-service
+/// flow start unverified; the login flow's `require_verified_address` hook
+/// refuses to re-authenticate them, so tests that sign the same identity in a
+/// second time call this first.
+pub async fn mark_identity_verified(identity_id: &str) {
+    let client = browser_client();
+    let res = client
+        .get(format!("{KRATOS_ADMIN}/admin/identities/{identity_id}"))
+        .send()
+        .await
+        .expect("fetch identity for verification patch");
+    assert!(
+        res.status().is_success(),
+        "fetch identity {identity_id}: {}",
+        res.status()
+    );
+    let identity: Value = res.json().await.expect("identity body");
+    let count = identity["verifiable_addresses"]
+        .as_array()
+        .map(|a| a.len())
+        .unwrap_or(0);
+    if count == 0 {
+        return;
+    }
+    let patch: Vec<Value> = (0..count)
+        .flat_map(|i| {
+            [
+                serde_json::json!({
+                    "op": "replace",
+                    "path": format!("/verifiable_addresses/{i}/verified"),
+                    "value": true,
+                }),
+                serde_json::json!({
+                    "op": "replace",
+                    "path": format!("/verifiable_addresses/{i}/status"),
+                    "value": "completed",
+                }),
+            ]
+        })
+        .collect();
+    let res = client
+        .patch(format!("{KRATOS_ADMIN}/admin/identities/{identity_id}"))
+        .json(&patch)
+        .send()
+        .await
+        .expect("patch identity verification");
+    assert!(
+        res.status().is_success(),
+        "patch identity {identity_id} verified: {} {}",
+        res.status(),
+        res.text().await.unwrap_or_default()
+    );
 }
 
 /// Create an identity *with* a password credential directly via the admin
@@ -1532,6 +1650,18 @@ pub fn set_org_member_role(org_id: &str, identity_id: &str, role: &str) {
     .unwrap_or_else(|e| panic!("set organization_members.role: {e}"));
 }
 
+/// Read `organization_members.role` for `(org_id, identity_id)`; `None` when
+/// there is no membership row.
+pub fn org_member_role(org_id: &str, identity_id: &str) -> Option<String> {
+    let conn = forseti_db_conn();
+    conn.query_row(
+        "SELECT role FROM organization_members WHERE org_id = ?1 AND identity_id = ?2",
+        params![org_id, identity_id],
+        |r| r.get::<_, String>(0),
+    )
+    .ok()
+}
+
 /// Read `organization_members.hidden_from_directory` for `(org_id, identity_id)`.
 /// `None` when no such membership row. Used to assert the opt-out toggle routes
 /// actually flipped the flag.
@@ -1544,6 +1674,22 @@ pub fn member_hidden_flag(org_id: &str, identity_id: &str) -> Option<i64> {
         |r| r.get(0),
     )
     .ok()
+}
+
+/// Delete whatever team holds `(org_id, slug)`, if any. For fixtures that
+/// seed a fixed slug and must survive a previous run's missed teardown.
+pub fn delete_team_by_slug(org_id: &str, slug: &str) {
+    let conn = forseti_db_conn();
+    let existing: Option<String> = conn
+        .query_row(
+            "SELECT id FROM org_teams WHERE org_id = ?1 AND slug = ?2",
+            params![org_id, slug],
+            |r| r.get(0),
+        )
+        .ok();
+    if let Some(id) = existing {
+        delete_team(&id);
+    }
 }
 
 /// Delete a team plus its members and any host scopes referencing it (test
@@ -1899,7 +2045,7 @@ pub fn mark_client_verified(client_id: &str) {
                 verification = 'verified', \
                 verified_by = 'test-fixture', \
                 verified_at = ?1, \
-                source = COALESCE(source, 'admin'), \
+                source = 'admin', \
                 verification_revoked_by = NULL, \
                 verification_revoked_at = NULL \
              WHERE client_id = ?2",
@@ -1914,6 +2060,54 @@ pub fn mark_client_verified(client_id: &str) {
             params![client_id, now],
         )
         .unwrap_or_else(|e| panic!("insert oauth_client_metadata: {e}"));
+    }
+}
+
+/// Flip a Hydra client's `skip_consent` via the admin API, for tests that need
+/// to prove the auto-grant gate actually gates.
+pub async fn hydra_set_client_skip_consent(client_id: &str, skip: bool) {
+    let client = browser_client();
+    let patch = serde_json::json!([
+        { "op": "replace", "path": "/skip_consent", "value": skip }
+    ]);
+    let res = client
+        .patch(format!("{HYDRA_ADMIN}/admin/clients/{client_id}"))
+        .json(&patch)
+        .send()
+        .await
+        .expect("patch hydra client skip_consent");
+    assert!(
+        res.status().is_success(),
+        "patch skip_consent: {} {}",
+        res.status(),
+        res.text().await.unwrap_or_default()
+    );
+}
+
+/// UPSERT `oauth_client_metadata` as an ORG-created client: verified, but
+/// `source = 'org'`, so the consent badge, auto-grant and handoff banner must
+/// all treat it as vouched-by-the-org rather than reviewed-by-an-operator.
+pub fn mark_client_org_verified(client_id: &str) {
+    let now = chrono::Utc::now().to_rfc3339();
+    let conn = forseti_db_conn();
+    let updated = conn
+        .execute(
+            "UPDATE oauth_client_metadata SET \
+                verification = 'verified', source = 'org', \
+                verified_by = 'test-fixture', verified_at = ?1, \
+                verification_revoked_by = NULL, verification_revoked_at = NULL \
+             WHERE client_id = ?2",
+            params![now, client_id],
+        )
+        .unwrap_or_else(|e| panic!("update oauth_client_metadata (org): {e}"));
+    if updated == 0 {
+        conn.execute(
+            "INSERT INTO oauth_client_metadata (\
+                client_id, verification, verified_by, verified_at, source, created_at\
+             ) VALUES (?1, 'verified', 'test-fixture', ?2, 'org', ?2)",
+            params![client_id, now],
+        )
+        .unwrap_or_else(|e| panic!("insert oauth_client_metadata (org): {e}"));
     }
 }
 

@@ -177,6 +177,12 @@ impl OptionalSession {
             _ => None,
         }
     }
+
+    /// The session identity's verifiable addresses, for
+    /// [`crate::config::AdminConfig::is_admin_actor`].
+    pub(crate) fn addresses(&self) -> Option<&[ory::VerifiableIdentityAddress]> {
+        self.ok().and_then(ory::session_addresses)
+    }
 }
 
 /// Project a [`ory::kratos::WhoamiOutcome`] into [`OptionalSession`], pre-extracting identity fields on `Ok`.

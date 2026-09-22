@@ -17,6 +17,7 @@ pub(crate) mod device;
 pub(crate) mod device_verify;
 pub(crate) mod login;
 pub(crate) mod logout;
+pub(crate) mod reauth;
 
 /// Consent-screen descriptions for built-in scopes (standard OIDC plus
 /// Forseti's `groups`), used when the operator hasn't supplied one in

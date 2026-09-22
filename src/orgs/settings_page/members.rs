@@ -96,8 +96,10 @@ pub(super) async fn members(
         return r;
     }
     let role = orgs::org_role(&state.db, &ctx.identity_id, &target.org.id).await;
-    let admin_aal2 = state.cfg.admin.is_admin(&ctx.user_email)
-        && crate::ory::kratos::session_satisfies_aal2(&sess.session);
+    let admin_aal2 = state.cfg.admin.is_admin_actor(
+        &ctx.user_email,
+        crate::ory::session_addresses(&sess.session),
+    ) && crate::ory::kratos::session_satisfies_aal2(&sess.session);
     if role.is_none() && !admin_aal2 {
         return (StatusCode::NOT_FOUND, "unknown organization").into_response();
     }

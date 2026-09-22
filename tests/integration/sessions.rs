@@ -18,6 +18,10 @@ async fn revoke_others_kills_second_session_keeps_current() {
     // Session A: the registered user's authenticated client.
     let user = register_test_user("sess-revoke-others").await;
     // Session B: a second password login on a fresh jar for the same identity.
+    // Kratos's login-flow `require_verified_address` hook refuses to
+    // re-authenticate an unverified identity, and registration leaves the
+    // address unverified.
+    mark_identity_verified(&user.identity_id).await;
     let client_b = browser_client();
     password_login_aal1(&client_b, &user.email, &user.password).await;
 
@@ -72,6 +76,7 @@ async fn revoke_single_session_by_id() {
     assert!(portal_reachable().await);
 
     let user = register_test_user("sess-revoke-one").await;
+    mark_identity_verified(&user.identity_id).await;
     let client_b = browser_client();
     password_login_aal1(&client_b, &user.email, &user.password).await;
 

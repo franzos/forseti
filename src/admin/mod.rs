@@ -281,7 +281,11 @@ pub async fn require_admin_with_scope(
     let scope = crate::orgs::resolve_admin_scope(&state.db, &identity_id, org_slug).await;
     let scope = match scope {
         AdminScopeOutcome::Resolved(AdminScope::Forseti) => {
-            if !state.cfg.admin.is_admin(&email) {
+            if !state
+                .cfg
+                .admin
+                .is_admin_actor(&email, ory::session_addresses(&session))
+            {
                 let locale = admin_gate_locale(&parts.headers);
                 return Err(render_forbidden(
                     state,
@@ -336,10 +340,15 @@ pub async fn require_admin(
 ) -> Result<AdminCtx, Response> {
     let (session, identity_id, email) = gate_admin_prefix(state, parts, path).await?;
 
-    if !state.cfg.admin.is_admin(&email) {
+    if !state
+        .cfg
+        .admin
+        .is_admin_actor(&email, ory::session_addresses(&session))
+    {
         tracing::warn!(
             actor = %email,
             path,
+            allowlisted = state.cfg.admin.is_admin(&email),
             "admin gate: rejected non-admin"
         );
         let locale = admin_gate_locale(&parts.headers);
@@ -402,7 +411,7 @@ fn render_forbidden(
     body: &str,
 ) -> Response {
     let tpl = AdminForbiddenTemplate {
-        chrome: PageChrome::from_parts(state, String::new(), String::new(), locale.clone()),
+        chrome: PageChrome::from_parts(state, String::new(), None, String::new(), locale.clone()),
         title: title.to_string(),
         body: body.to_string(),
     };
@@ -500,6 +509,7 @@ pub fn render_admin_error(state: &AppState, title: &str, body: &str) -> Response
         chrome: PageChrome::from_parts(
             state,
             String::new(),
+            None,
             String::new(),
             crate::locale::default_locale(),
         ),

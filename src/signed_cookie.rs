@@ -33,12 +33,24 @@ impl<'a> SignedCookie<'a> {
         key
     }
 
+    /// The MAC input: the wire value, prefixed with the cookie's own name and
+    /// path.
+    ///
+    /// Binding those in means a value minted for one cookie cannot be replayed
+    /// as another even if the two ever shared a key, and a flash cookie scoped
+    /// to one path cannot be lifted to a different one. The per-cookie HKDF
+    /// salt already separates the keys; this makes the guarantee a property of
+    /// the signature rather than of remembering to pick a distinct salt.
+    fn mac_input(&self, now_secs: u64, payload_hex: &str) -> String {
+        format!("{}|{}|{now_secs}.{payload_hex}", self.name, self.path)
+    }
+
     /// Build the `<ts>.<hex_payload>.<hex_mac>` value (no cookie attributes; see [`Self::set_header`]).
     pub(crate) fn encode(&self, secret: &[u8], payload: &[u8], now_secs: u64) -> String {
         let key = self.derive_key(secret);
         let payload_hex = hex::encode(payload);
         let mut mac = HmacSha256::new_from_slice(&key).expect("HMAC-SHA256 accepts any key length");
-        mac.update(format!("{now_secs}.{payload_hex}").as_bytes());
+        mac.update(self.mac_input(now_secs, &payload_hex).as_bytes());
         let tag = mac.finalize().into_bytes();
         format!("{now_secs}.{payload_hex}.{}", hex::encode(tag))
     }
@@ -50,6 +62,18 @@ impl<'a> SignedCookie<'a> {
         headers: &HeaderMap,
         now_secs: u64,
     ) -> Option<Vec<u8>> {
+        self.decode_with_issued_at(secret, headers, now_secs)
+            .map(|(_, payload)| payload)
+    }
+
+    /// [`Self::decode`] plus the second the value was minted, for callers that
+    /// enforce a shorter window than the cookie's own TTL on some payloads.
+    pub(crate) fn decode_with_issued_at(
+        &self,
+        secret: &[u8],
+        headers: &HeaderMap,
+        now_secs: u64,
+    ) -> Option<(u64, Vec<u8>)> {
         let raw = read_cookie(headers, self.name)?;
         let parts: Vec<&str> = raw.splitn(3, '.').collect();
         if parts.len() != 3 {
@@ -63,9 +87,9 @@ impl<'a> SignedCookie<'a> {
         }
         let key = self.derive_key(secret);
         let mut mac = HmacSha256::new_from_slice(&key).expect("HMAC-SHA256 accepts any key length");
-        mac.update(format!("{}.{}", parts[0], parts[1]).as_bytes());
+        mac.update(self.mac_input(ts, parts[1]).as_bytes());
         mac.verify_slice(&tag).ok()?;
-        Some(payload)
+        Some((ts, payload))
     }
 
     /// Full `Set-Cookie` value carrying `encoded` (typically from [`Self::encode`]).
@@ -162,6 +186,64 @@ mod tests {
         let encoded = codec.encode(b"secret-a", b"hello", 1_700_000_000);
         let headers = headers_with("test_cookie", &encoded);
         assert!(codec.decode(b"secret-b", &headers, 1_700_000_000).is_none());
+    }
+
+    #[test]
+    fn a_value_does_not_verify_under_a_different_cookie_name() {
+        let secret = b"operator-secret-32-bytes-of-key!";
+        let now = 1_700_000_000;
+        let a = SignedCookie {
+            name: "flash_a",
+            salt: b"shared",
+            ttl_secs: 60,
+            secure: false,
+            path: "/",
+        };
+        let b = SignedCookie {
+            name: "flash_b",
+            salt: b"shared",
+            ttl_secs: 60,
+            secure: false,
+            path: "/",
+        };
+        // Same salt, so the same key — the NAME is what has to stop this.
+        let encoded = a.encode(secret, b"payload", now);
+        let headers = headers_with("flash_b", &encoded);
+        assert!(
+            b.decode(secret, &headers, now).is_none(),
+            "a value minted as flash_a must not verify as flash_b"
+        );
+    }
+
+    #[test]
+    fn a_value_does_not_verify_under_a_different_path() {
+        let secret = b"operator-secret-32-bytes-of-key!";
+        let now = 1_700_000_000;
+        let root = SignedCookie {
+            name: "flash",
+            salt: b"shared",
+            ttl_secs: 60,
+            secure: false,
+            path: "/",
+        };
+        let scoped = SignedCookie {
+            name: "flash",
+            salt: b"shared",
+            ttl_secs: 60,
+            secure: false,
+            path: "/settings",
+        };
+        let encoded = root.encode(secret, b"payload", now);
+        let headers = headers_with("flash", &encoded);
+        assert!(
+            scoped.decode(secret, &headers, now).is_none(),
+            "a value minted for / must not verify for /settings"
+        );
+        // ...and the matching pair still round-trips.
+        assert_eq!(
+            root.decode(secret, &headers, now).as_deref(),
+            Some(b"payload".as_slice())
+        );
     }
 
     #[test]

@@ -2828,3 +2828,72 @@ async fn provision_rejects_a_malformed_shell() {
     delete_posix_account(&id);
     delete_test_identity(&id).await.ok();
 }
+
+/// Finding 2B (round-2 review): the `force_mfa` freshness window used to be
+/// computed from the id_token's `auth_time`, which Hydra stamps when Forseti
+/// accepts the login — so a days-old AAL2 session cleared it every time. The
+/// window now reads the second factor's `completed_at` off Kratos.
+///
+/// Drives both halves against the live stack: the same AAL2 approver is
+/// approved with a fresh second factor, then denied once that second factor is
+/// aged past the 300s window.
+#[tokio::test]
+async fn device_auth_force_mfa_stale_second_factor_denied() {
+    if !device_stack_ready().await {
+        return;
+    }
+    let approver = register_test_user("dev-mfa-stale").await;
+    let seed = chrono::Utc::now().timestamp_millis() % 50_000;
+    let uid = 76_000 + seed;
+    let username = format!("devmfastale{seed}");
+    let org_id = format!("dev-org-mfa-stale-{seed}");
+    seed_posix_account(&approver.identity_id, &username, uid, uid);
+    seed_org_membership(&org_id, &approver.identity_id, "member");
+
+    let host_id = format!("dev-host-mfa-stale-{seed}");
+    let secret = "s3cret-mfa-stale";
+    seed_host_enrollment_mfa(&host_id, "mfastale.example", secret, &org_id);
+
+    // Bring the approver to AAL2 with a second factor they just completed.
+    plant_totp(&approver.identity_id, TEST_TOTP_SECRET);
+    totp_step_up(&approver.client, &totp_code_for(TEST_TOTP_SECRET)).await;
+
+    // Half one: fresh second factor, approved.
+    let (status, body) = device_init(&host_id, secret, &username).await;
+    assert_eq!(status, StatusCode::OK);
+    let user_code = body["user_code"].as_str().unwrap().to_string();
+    let verification_uri = body["verification_uri"].as_str().unwrap().to_string();
+    let device_code = body["device_code"].as_str().unwrap().to_string();
+    browser_approve(&approver, &verification_uri, &user_code).await;
+    let outcome = poll_until_terminal(&host_id, secret, &device_code, 10).await;
+    assert_eq!(
+        outcome, "approved",
+        "a force_mfa host must approve an AAL2 approver whose second factor is fresh"
+    );
+
+    // Half two: age the second factor past the 300s window. Nothing else about
+    // the session changes — it stays active and AAL2, which is exactly the
+    // state that used to sail through on Hydra's `auth_time`.
+    let rewritten = backdate_second_factor(&approver.identity_id, 86_400);
+    assert!(
+        rewritten > 0,
+        "the approver should have at least one AAL2 session to backdate"
+    );
+
+    let (status, body) = device_init(&host_id, secret, &username).await;
+    assert_eq!(status, StatusCode::OK);
+    let user_code = body["user_code"].as_str().unwrap().to_string();
+    let verification_uri = body["verification_uri"].as_str().unwrap().to_string();
+    let device_code = body["device_code"].as_str().unwrap().to_string();
+    browser_approve(&approver, &verification_uri, &user_code).await;
+    let outcome = poll_until_terminal(&host_id, secret, &device_code, 10).await;
+    assert_eq!(
+        outcome, "denied",
+        "a day-old second factor must not clear the force_mfa freshness window"
+    );
+
+    delete_device_sessions_for_host(&host_id);
+    delete_host_enrollment(&host_id);
+    delete_org_membership(&org_id, &approver.identity_id);
+    approver.cleanup().await;
+}

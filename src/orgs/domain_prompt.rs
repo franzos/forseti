@@ -30,22 +30,6 @@ pub(crate) fn router() -> Router<AppState> {
     Router::new().route("/orgs/domain-join", post(domain_join_post))
 }
 
-/// True iff a verifiable address whose value equals `email` (ASCII
-/// case-insensitive) is verified on the live session, mirroring the invite
-/// flow's gate (`src/orgs/invite.rs`).
-fn session_address_verified(session: &ory::Session, email: &str) -> bool {
-    session
-        .identity
-        .as_ref()
-        .and_then(|i| i.verifiable_addresses.as_ref())
-        .map(|addrs| {
-            addrs
-                .iter()
-                .any(|a| a.value.eq_ignore_ascii_case(email) && a.verified)
-        })
-        .unwrap_or(false)
-}
-
 /// Resolve the domain-join prompt for a live session: the proven `auto_join`
 /// org the identity may join, when a VERIFIED session address's domain matches
 /// and the identity isn't already a member. `None` when no prompt should show.
@@ -56,7 +40,10 @@ pub(crate) async fn resolve_prompt(
     identity_id: &str,
     email: &str,
 ) -> Option<ProvenJoin> {
-    if identity_id.is_empty() || email.is_empty() || !session_address_verified(session, email) {
+    if identity_id.is_empty()
+        || email.is_empty()
+        || !ory::address_is_verified(ory::session_addresses(session), email)
+    {
         return None;
     }
     let org = orgs::lookup_proven_org_for_email(db, email)
@@ -103,7 +90,10 @@ async fn domain_join_post(
     {
         return (StatusCode::BAD_REQUEST, "org mismatch").into_response();
     }
-    let drop_default = !state.cfg.admin.is_admin(&email);
+    let drop_default = !state
+        .cfg
+        .admin
+        .is_admin_actor(&email, ory::session_addresses(&session));
     if let Err(e) = orgs::db::join_org_race_safe(
         &state.db,
         &identity_id,

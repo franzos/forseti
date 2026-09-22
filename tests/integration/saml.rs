@@ -390,3 +390,28 @@ async fn cross_org_non_member_is_the_block_discriminator() {
 
     let _ = common::delete_test_identity(&identity_id).await;
 }
+
+/// `/sso/confirm` is the return leg of the credential-confirmation bounce. A
+/// direct visit carries no pending-link cookie, so it must render the same
+/// neutral page every other "no SSO here" cause does — never a link, never a
+/// hint that the route means anything.
+#[tokio::test]
+async fn sso_confirm_without_a_pending_link_is_neutral() {
+    assert!(common::portal_reachable().await);
+    let client = common::browser_client();
+    let res = client
+        .get(format!("{}/sso/confirm", common::PORTAL))
+        .send()
+        .await
+        .expect("GET /sso/confirm");
+    assert!(
+        res.status().is_success(),
+        "neutral page, not an error status; got {}",
+        res.status()
+    );
+    let body: String = res.text().await.unwrap_or_default();
+    assert!(
+        !body.contains("linked"),
+        "a bare /sso/confirm must not report a link"
+    );
+}

@@ -255,3 +255,98 @@ mod tests {
         assert_eq!(after, before + 4);
     }
 }
+
+/// A process-local "at most `limit` per `window` per key" counter, for
+/// throttles that key on something the governor layer can't see — a recipient
+/// address, an org id — rather than on the client IP.
+///
+/// Process-local on purpose, matching `orgs::domains`'s challenge cooldown: a
+/// multi-instance deployment multiplies the effective rate by the instance
+/// count, and the audit trail (every mint is logged with its actor) stays the
+/// real backstop. A shared counter would need a round-trip on a path that is
+/// otherwise a single insert.
+pub(crate) struct KeyedQuota {
+    window: std::time::Duration,
+    limit: usize,
+    hits: std::sync::Mutex<std::collections::HashMap<String, Vec<std::time::Instant>>>,
+}
+
+impl KeyedQuota {
+    pub(crate) fn new(window: std::time::Duration, limit: usize) -> Self {
+        Self {
+            window,
+            limit,
+            hits: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// Record an attempt against `key`. `false` means the caller is over the
+    /// limit and should refuse; the attempt is not recorded in that case, so a
+    /// refused caller doesn't extend their own lockout.
+    pub(crate) fn admit(&self, key: &str) -> bool {
+        if self.limit == 0 {
+            return true;
+        }
+        let now = std::time::Instant::now();
+        let mut map = self
+            .hits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        map.retain(|_, times| {
+            times.retain(|t| now.duration_since(*t) < self.window);
+            !times.is_empty()
+        });
+        let entry = map.entry(key.to_string()).or_default();
+        if entry.len() >= self.limit {
+            return false;
+        }
+        entry.push(now);
+        true
+    }
+}
+
+#[cfg(test)]
+mod keyed_quota_tests {
+    use super::KeyedQuota;
+    use std::time::Duration;
+
+    #[test]
+    fn the_first_n_are_admitted_and_the_next_is_not() {
+        let q = KeyedQuota::new(Duration::from_secs(3600), 3);
+        assert!(q.admit("a@example.com"));
+        assert!(q.admit("a@example.com"));
+        assert!(q.admit("a@example.com"));
+        assert!(!q.admit("a@example.com"), "the fourth is over the limit");
+    }
+
+    #[test]
+    fn keys_are_independent() {
+        let q = KeyedQuota::new(Duration::from_secs(3600), 1);
+        assert!(q.admit("a@example.com"));
+        assert!(!q.admit("a@example.com"));
+        assert!(
+            q.admit("b@example.com"),
+            "a different recipient is unaffected"
+        );
+    }
+
+    #[test]
+    fn a_refused_attempt_does_not_extend_the_lockout() {
+        let q = KeyedQuota::new(Duration::from_millis(80), 1);
+        assert!(q.admit("a@example.com"));
+        assert!(!q.admit("a@example.com"));
+        std::thread::sleep(Duration::from_millis(120));
+        assert!(
+            q.admit("a@example.com"),
+            "the window is measured from the admitted attempt, not the refused one"
+        );
+    }
+
+    #[test]
+    fn a_zero_limit_disables_the_quota() {
+        let q = KeyedQuota::new(Duration::from_secs(3600), 0);
+        for _ in 0..100 {
+            assert!(q.admit("a@example.com"));
+        }
+    }
+}

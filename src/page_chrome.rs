@@ -170,19 +170,41 @@ impl PageChrome {
     /// Build from pre-extracted parts. `user_email` is the empty string
     /// for anonymous / error pages; `csrf_token` is the empty string
     /// outside CSRF middleware. `is_admin` is derived from the operator
-    /// allowlist, so anonymous pages (empty email) never get the flag.
+    /// allowlist *and* the address being verified on `addrs`, matching the
+    /// admin gate, so the nav never offers a link the gate would refuse.
+    /// Anonymous pages pass `None` and never get the flag.
     pub(crate) fn from_parts(
         state: &AppState,
         user_email: String,
+        addrs: Option<&[crate::ory::VerifiableIdentityAddress]>,
         csrf_token: String,
         locale: LanguageIdentifier,
     ) -> Self {
-        let is_admin = state.cfg.admin.is_admin(&user_email);
+        let is_admin = state.cfg.admin.is_admin_actor(&user_email, addrs);
         Self::from_brand_with_admin(
             state.cfg.brand.clone(),
             user_email,
             csrf_token,
             is_admin,
+            locale,
+        )
+        .with_license_watermark(state)
+    }
+
+    /// Like [`Self::from_parts`] for a caller that already holds an
+    /// [`crate::admin::AdminCtx`]: the admin gate has run, so the flag is the
+    /// gate's verdict rather than a second allowlist lookup.
+    pub(crate) fn from_parts_admin(
+        state: &AppState,
+        user_email: String,
+        csrf_token: String,
+        locale: LanguageIdentifier,
+    ) -> Self {
+        Self::from_brand_with_admin(
+            state.cfg.brand.clone(),
+            user_email,
+            csrf_token,
+            true,
             locale,
         )
         .with_license_watermark(state)
@@ -196,10 +218,11 @@ impl PageChrome {
         memberships: &[crate::orgs::Membership],
         headers: &axum::http::HeaderMap,
         user_email: String,
+        addrs: Option<&[crate::ory::VerifiableIdentityAddress]>,
         csrf_token: String,
         locale: LanguageIdentifier,
     ) -> Self {
-        let chrome = Self::from_parts(state, user_email, csrf_token, locale);
+        let chrome = Self::from_parts(state, user_email, addrs, csrf_token, locale);
         crate::theming::apply_active_org_theme(
             chrome,
             &state.cfg.brand,
@@ -405,7 +428,8 @@ where
             .await
             .expect("Csrf extractor is infallible");
         let locale = resolve_locale(parts, &session);
-        let mut chrome = PageChrome::from_parts(&app_state, user_email, csrf.0, locale);
+        let mut chrome =
+            PageChrome::from_parts(&app_state, user_email, session.addresses(), csrf.0, locale);
         chrome.theme_pref = crate::theme::read_theme_cookie(&parts.headers);
         Ok(Chrome(chrome))
     }
@@ -450,6 +474,7 @@ where
             &memberships,
             &parts.headers,
             user_email,
+            session.addresses(),
             csrf.0,
             locale,
         );

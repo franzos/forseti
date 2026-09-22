@@ -51,6 +51,10 @@ pub fn render_upsell(
         chrome: PageChrome::from_parts(
             state,
             user_email.to_string(),
+            // Dead-end upsell page: the caller (`gate_orgs_feature_or_upsell`)
+            // has only the email, so the nav's Admin link is suppressed here
+            // rather than rendered off an unverified allowlist match.
+            None,
             csrf_token.to_string(),
             locale,
         ),

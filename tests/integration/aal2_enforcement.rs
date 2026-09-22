@@ -121,7 +121,9 @@ async fn aal1_session_without_second_factor_reaches_dashboard() {
     }
     let email = unique_email("aal2-no-mfa");
     let password = "Sup3rSecret-NoMfa-Password!";
-    let identity_id = kratos_admin_create_password_identity(&email, password).await;
+    // Verified: the login flow's `require_verified_address` hook refuses to
+    // authenticate an unverified identity, which is not what this test is about.
+    let identity_id = kratos_admin_create_verified_password_identity(&email, password).await;
 
     let client = browser_client();
     password_login_aal1(&client, &email, password).await;

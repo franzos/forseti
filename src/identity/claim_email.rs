@@ -80,7 +80,7 @@ async fn claim_get(
     crate::page_chrome::ReqLocale(locale): crate::page_chrome::ReqLocale,
 ) -> Response {
     render(&ClaimEmailTemplate {
-        chrome: PageChrome::from_parts(&state, String::new(), csrf.0, locale),
+        chrome: PageChrome::from_parts(&state, String::new(), None, csrf.0, locale),
         error: None,
         info: None,
     })
@@ -138,6 +138,22 @@ async fn claim_post(
     });
 
     let token = match unverified {
+        // Over the per-recipient quota: fall through to the decoy branch
+        // rather than answering differently. The whole point of this flow is
+        // that every branch looks alike, so a throttle that announced itself
+        // would hand an attacker the enumeration oracle the decoys exist to
+        // deny. The mail simply doesn't go out.
+        Some(target)
+            if !state.cfg.admin.is_admin(&email)
+                && !claim_recipient_quota(&state).admit(&email) =>
+        {
+            tracing::warn!(
+                email = %email,
+                target_identity = %target.id,
+                "claim-email: per-recipient quota exhausted; serving decoy without sending",
+            );
+            decoy_token_with_write(&state).await
+        }
         Some(target) if !state.cfg.admin.is_admin(&email) => {
             let code = mint_six_digit_code();
             let reveal = SecretReveal::ClaimEmailCode {
@@ -229,7 +245,7 @@ fn render_claim_error(
     msg: &str,
 ) -> Response {
     render(&ClaimEmailTemplate {
-        chrome: PageChrome::from_parts(state, String::new(), csrf_token.to_string(), locale),
+        chrome: PageChrome::from_parts(state, String::new(), None, csrf_token.to_string(), locale),
         error: Some(msg.to_string()),
         info: None,
     })
@@ -258,7 +274,7 @@ async fn confirm_get(
         return Redirect::to("/claim-email").into_response();
     };
     render(&ClaimConfirmTemplate {
-        chrome: PageChrome::from_parts(&state, String::new(), csrf.0, locale),
+        chrome: PageChrome::from_parts(&state, String::new(), None, csrf.0, locale),
         token,
         error: None,
     })
@@ -468,7 +484,7 @@ fn render_claim_confirm_error(
     msg: &str,
 ) -> Response {
     render(&ClaimConfirmTemplate {
-        chrome: PageChrome::from_parts(state, String::new(), csrf_token.to_string(), locale),
+        chrome: PageChrome::from_parts(state, String::new(), None, csrf_token.to_string(), locale),
         token: token.to_string(),
         error: Some(msg.to_string()),
     })
@@ -494,4 +510,18 @@ pub async fn send_claim_email_code(
         "Hello,\n\nSomeone is trying to register an account on {brand_name} using this email address. The existing account that owns this address hasn't completed verification yet.\n\nIf this was you, enter the following code to claim the email:\n\n  {code}\n\nThe code expires in 15 minutes. If you didn't request this, ignore this email — the existing unverified account will remain in place.\n",
     );
     crate::mailer::send_text(cfg.email.as_ref(), &cfg.self_, recipient, &subject, &body).await
+}
+
+/// Per-recipient claim-email quota, sized from
+/// `[claim_email].sends_per_recipient_per_hour`. The route already carries a
+/// per-IP governor; this bounds what one *address* can be sent, which no
+/// IP-keyed limit can do.
+fn claim_recipient_quota(state: &AppState) -> &'static crate::rate_limit::KeyedQuota {
+    static Q: std::sync::OnceLock<crate::rate_limit::KeyedQuota> = std::sync::OnceLock::new();
+    Q.get_or_init(|| {
+        crate::rate_limit::KeyedQuota::new(
+            std::time::Duration::from_secs(3600),
+            state.cfg.claim_email.sends_per_recipient_per_hour,
+        )
+    })
 }

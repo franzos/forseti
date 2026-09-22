@@ -37,13 +37,12 @@ pub async fn auto_join_default_org(
                 if let ory::kratos::WhoamiOutcome::Ok(session) = &outcome {
                     let (identity_id, email) = crate::flow_view::session_principal(session);
                     if !identity_id.is_empty() && !is_join_confirm_path(req.uri().path()) {
-                        // The floor is verification-independent; email is used
-                        // only for the operator allowlist check.
                         super::ensure_default_floor(
                             &state.db,
                             &state.cfg.admin,
                             &identity_id,
                             &email,
+                            ory::session_addresses(session),
                         )
                         .await;
                     }

@@ -86,7 +86,10 @@ pub(crate) async fn show_profile(
         .filter(|m| viewer_orgs.contains(m.org_id.as_str()))
         .collect();
 
-    let admin_aal2 = state.cfg.admin.is_admin(&sess.email)
+    let admin_aal2 = state
+        .cfg
+        .admin
+        .is_admin_actor(&sess.email, crate::ory::session_addresses(&sess.session))
         && crate::ory::kratos::session_satisfies_aal2(&sess.session);
 
     // Chips derive from the visible-to-viewer subset, never the raw
@@ -216,7 +219,8 @@ pub(crate) async fn show_profile(
         &state,
         &viewer_memberships,
         &headers,
-        sess.email,
+        sess.email.clone(),
+        crate::ory::session_addresses(&sess.session),
         token,
         locale,
     );

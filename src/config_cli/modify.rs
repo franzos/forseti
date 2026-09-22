@@ -3705,6 +3705,14 @@ selfservice:
                     in: header
     recovery:
       enabled: true
+    login:
+      after:
+        password:
+          hooks:
+            - hook: require_verified_address
+        passkey:
+          hooks:
+            - hook: require_verified_address
   methods:
     lookup_secret:
       enabled: true
@@ -4250,6 +4258,14 @@ selfservice:
       required_aal: highest_available
     recovery:
       enabled: true
+    login:
+      after:
+        password:
+          hooks:
+            - hook: require_verified_address
+        passkey:
+          hooks:
+            - hook: require_verified_address
   methods:
     lookup_secret:
       enabled: true

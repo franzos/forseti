@@ -82,7 +82,17 @@ pub(crate) async fn settings_authorized_apps(
         }
     };
 
-    let apps = collapse_sessions_to_apps(&state, &locale, sessions);
+    let mut apps = collapse_sessions_to_apps(&state, &locale, sessions);
+    // Trust comes from Forseti's own metadata table, never from Hydra's
+    // `metadata`: RFC 7592's PUT lets the registration-access-token holder
+    // rewrite that, so a client could stamp itself verified. Only an operator
+    // (`source = admin`) counts.
+    for app in &mut apps {
+        app.verified = matches!(
+            crate::oauth_client_metadata::get(&state.db, &app.client_id).await,
+            Ok(Some(ref row)) if row.is_admin_vouched()
+        );
+    }
 
     let (flash_msg, clear_flash) = state.take_flash(&headers, "/settings/authorized-apps");
     let body = render(&SettingsAuthorizedAppsTemplate {
@@ -134,7 +144,9 @@ fn collapse_sessions_to_apps(
             .as_deref()
             .and_then(|u| crate::web::safe_external_uri(u, allow_private))
             .unwrap_or_default();
-        let verified = client_metadata_verified(client);
+        // Placeholder; the caller replaces it from Forseti's metadata table,
+        // which is the only trustworthy source (see `authorized_apps_show`).
+        let verified = false;
 
         let granted_at = s.handled_at.clone().unwrap_or_default();
         let granted_scopes = s.grant_scope.clone().unwrap_or_default();
@@ -173,17 +185,6 @@ fn collapse_sessions_to_apps(
     }
 
     by_client.into_values().collect()
-}
-
-/// Hydra's stored `metadata.verified` flag; mirrors the consent page's badge
-/// heuristic.
-fn client_metadata_verified(client: &ory_client::models::OAuth2Client) -> bool {
-    client
-        .metadata
-        .as_ref()
-        .and_then(|m| m.get("verified"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
 }
 
 pub(crate) async fn settings_authorized_apps_revoke(

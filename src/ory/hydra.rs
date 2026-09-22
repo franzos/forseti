@@ -319,6 +319,11 @@ mod device_grant {
         pub sub: String,
         pub acr: Option<String>,
         pub amr: Vec<String>,
+        /// Hydra stamps this when Forseti accepts the login request, so it is
+        /// not a freshness signal for the PAM `force_mfa` window — that reads
+        /// the second factor's `completed_at` off Kratos instead
+        /// (`posix::device::newest_second_factor_at`).
+        #[allow(dead_code)]
         pub auth_time: Option<i64>,
     }
 

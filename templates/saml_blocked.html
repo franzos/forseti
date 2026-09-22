@@ -30,6 +30,12 @@
   {{ chrome.t("error-saml-cross-org-not-member") }}
   {% when BlockedReason::Conflict %}
   {{ chrome.t("error-saml-conflict") }}
+  {% when BlockedReason::AdminAllowlisted %}
+  {{ chrome.t("error-saml-admin-allowlisted") }}
+  {% when BlockedReason::UnprovenDomain %}
+  {{ chrome.t("error-saml-unproven-domain") }}
+  {% when BlockedReason::ConfirmFailed %}
+  {{ chrome.t("error-saml-confirm-failed") }}
 {% endmatch %}
 {% endblock %}
 

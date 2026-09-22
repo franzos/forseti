@@ -344,9 +344,16 @@ support_email = "support@example.com"
 # code-side defaults — uncomment and dial up only if your deployment
 # has a legitimate-traffic source that trips them. Values are clamped
 # at load time to 1_000/min and 10_000/hour (sanity ceiling).
+#
+# `sends_per_recipient_per_hour` is a second, independent cap: how many
+# claim codes may be MAILED to one address per hour, whatever IP asks.
+# The per-IP buckets above cannot bound that. Over the cap the flow still
+# answers identically — it just doesn't send — because every branch of
+# this flow is deliberately indistinguishable. Set 0 to disable.
 # [claim_email]
 # rate_limit_per_minute = 5
 # rate_limit_per_hour = 30
+# sends_per_recipient_per_hour = 3
 
 # Per-IP rate limits on the RP-initiated handoff entry endpoint
 # (`/handoff`). The handler hits Hydra's admin API on every entry, so
@@ -380,9 +387,18 @@ support_email = "support@example.com"
 # `logo_ip_rate_per_minute` / `logo_ip_rate_per_hour` cap requests to
 # `GET /branding/{slug}/logo` from a single IP. Defaults are 60/min and
 # 600/hour. Set to 0 to disable that bucket.
+#
+# `invites_per_recipient_per_hour` stops one address being buried under
+# invite mail from several orgs; `invites_per_org_per_hour` bounds a
+# compromised owner account using the org as a mail cannon. Both are
+# process-local (a multi-instance deployment multiplies them by the
+# instance count); the audit log, which records every mint with its
+# actor, stays the real backstop. Set either to 0 to disable.
 # [orgs]
 # active_org_cookie_ttl_seconds = 2592000   # 30 days
 # invite_ttl_days = 7
+# invites_per_recipient_per_hour = 5
+# invites_per_org_per_hour = 100
 # reserved_names = ["admin", "forseti", "portal", "system", "root"]
 # logo_ip_rate_per_minute = 60
 # logo_ip_rate_per_hour = 600
@@ -462,6 +478,10 @@ offline_auth_enabled = true       # master switch for offline auth
 offline_ttl_hours = 24            # TTL on each provisioned verifier; bounds the offline window since last poll
 offline_max_lifetime_hours = 168  # hard cap (from last successful online auth) regardless of TTL refreshes
 offline_min_len = 8               # passphrase length floor (never below the hard wall of 8)
+# Setting an offline passphrase runs Argon2id at m=64MiB/t=3, so the endpoint is
+# a memory-and-CPU amplifier if it is callable in a loop. Two independent caps:
+offline_saves_per_hour = 10       # per-client saves per hour (0 disables)
+offline_hash_concurrency = 2      # hashes in flight process-wide; each reserves ~64 MiB. Saturation returns 503
 
 # Prometheus scrape gate for `/metrics` (internal listener only; requires a
 # license with the `observability` feature). Leave unset to keep the endpoint

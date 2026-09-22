@@ -128,6 +128,23 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
+        Some(Cmd::ReconcileClientMetadata) => {
+            let cfg = config::AppConfig::load()?;
+            let ory = ory::OryClients::from_config(&cfg);
+            let db = bootstrap_db(&cfg).await?;
+            match reconcile_client_metadata(&db, &ory).await {
+                Ok((stamped, seen)) => {
+                    println!(
+                        "reconcile-client-metadata: stamped {stamped} of {seen} Hydra client(s) as source=admin, verification=verified"
+                    );
+                    std::process::exit(0);
+                }
+                Err(e) => {
+                    eprintln!("reconcile-client-metadata: {e:?}");
+                    std::process::exit(1);
+                }
+            }
+        }
         // Pure file operations: Forseti can't read Kratos's live config via API, so these lint/generate the files.
         Some(Cmd::ConfigCheckAlias(args)) => std::process::exit(config_cli::check(&args)),
         Some(Cmd::ConfigInitAlias(args)) => std::process::exit(config_cli::init(&args)),
@@ -214,4 +231,43 @@ async fn bootstrap_db(cfg: &config::AppConfig) -> anyhow::Result<db::DbPool> {
         db.run_migrations().await?;
     }
     Ok(db)
+}
+
+/// Back the consent badge's rowless-is-unverified inversion: walk the clients
+/// Hydra knows and write an `oauth_client_metadata` row for the ones Forseti
+/// has none for, marking them operator-created and verified.
+///
+/// A deploy step, not a boot task. Forseti's database and Hydra's are separate
+/// servers, so no migration can enumerate Hydra's clients; and a half-finished
+/// best-effort run at boot would transiently render legacy operator clients
+/// unverified on the consent screen. Returns `(stamped, seen)`.
+///
+/// One page, deliberately. The SDK drops Hydra's `Link: rel="next"` header, so
+/// there is no honest way to follow the cursor from here — a full page means
+/// the caller is told to re-run rather than being handed a silently short
+/// answer.
+async fn reconcile_client_metadata(
+    db: &db::DbPool,
+    ory: &ory::OryClients,
+) -> anyhow::Result<(usize, usize)> {
+    const PAGE: i64 = 500;
+    let clients = ory::hydra::list_clients(ory, PAGE, None, None).await?;
+    if clients.len() as i64 >= PAGE {
+        eprintln!(
+            "reconcile-client-metadata: WARNING — Hydra returned a full page of {PAGE} clients, \
+             so there may be more. Re-run after confirming; clients already stamped are skipped."
+        );
+    }
+    let (mut stamped, mut seen) = (0usize, 0usize);
+    for client in &clients {
+        let Some(client_id) = client.client_id.as_deref().filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        seen += 1;
+        if oauth_client_metadata::backfill_legacy_admin(db, client_id).await? {
+            stamped += 1;
+            println!("  stamped {client_id}");
+        }
+    }
+    Ok((stamped, seen))
 }

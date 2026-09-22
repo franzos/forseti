@@ -38,7 +38,7 @@ pub(crate) mod two_factor;
 use password::{SettingsPasswordHandoffTemplate, SettingsPasswordTemplate};
 use profile::SettingsProfileTemplate;
 
-pub(crate) fn router() -> Router<AppState> {
+pub(crate) fn router(cfg: &crate::config::AppConfig) -> Router<AppState> {
     Router::new()
         .route("/settings", get(settings_hub))
         .route("/settings/profile", get(profile::settings_profile))
@@ -75,11 +75,6 @@ pub(crate) fn router() -> Router<AppState> {
             post(authorized_apps::settings_authorized_apps_revoke),
         )
         .route(
-            "/settings/offline-access",
-            get(offline_access::settings_offline_access)
-                .post(offline_access::settings_offline_access_save),
-        )
-        .route(
             "/settings/offline-access/clear",
             post(offline_access::settings_offline_access_clear),
         )
@@ -88,6 +83,26 @@ pub(crate) fn router() -> Router<AppState> {
             "/settings/account/delete",
             get(account::settings_account_delete).post(account::settings_account_delete_submit),
         )
+        .merge(offline_access_router(cfg))
+}
+
+/// The offline-passphrase surface on its own sub-router so its rate limit
+/// applies to nothing else. Each save runs Argon2id at m=64MiB/t=3, which is
+/// deliberately expensive and therefore a denial-of-service amplifier if
+/// anyone can call it in a loop.
+fn offline_access_router(cfg: &crate::config::AppConfig) -> Router<AppState> {
+    let r = Router::new().route(
+        "/settings/offline-access",
+        get(offline_access::settings_offline_access)
+            .post(offline_access::settings_offline_access_save),
+    );
+    crate::rate_limit::single_window(
+        r,
+        &cfg.proxy,
+        3_600_000,
+        cfg.posix.offline_saves_per_hour,
+        crate::rate_limit::plain_text_error("settings.offline_access"),
+    )
 }
 
 #[derive(Template)]
@@ -486,6 +501,7 @@ fn render_settings(
                     memberships,
                     headers,
                     session_email(session),
+                    crate::ory::session_addresses(session),
                     token,
                     locale,
                 ),
@@ -521,6 +537,7 @@ fn render_settings(
                         memberships,
                         headers,
                         String::new(),
+                        None,
                         token,
                         locale,
                     ),
@@ -537,6 +554,7 @@ fn render_settings(
                         memberships,
                         headers,
                         session_email(session),
+                        crate::ory::session_addresses(session),
                         token,
                         locale,
                     ),

@@ -886,9 +886,22 @@ Two paths through this handler:
 
 **Auto-grant**: Hydra's `skip == true` (it remembers a previous consent
 decision for this user × client × scope tuple) OR the client carries
-`skip_consent == true` — but only when the client is `verified`
-(`oauth_client_metadata` lookup, fail-closed on DB error), which excludes
-every CIMD/DCR row, and never for the PAM device client. Before
+`skip_consent == true` — but only when a Forseti **operator** vouched for
+the client (`oauth_client_metadata.source = 'admin'` and verification on;
+`Row::is_admin_vouched`, fail-closed on DB error), and never for the PAM
+device client. This excludes every CIMD/DCR row, every org-created client
+(`source = 'org'` — an org owner can create a client in their own org, so
+their word is not an operator review), and any client Forseti has **no
+metadata row for at all**: Hydra's `/oauth2/register` is publicly routed
+in some deployments, so "no row" includes "registered itself a minute ago".
+
+The same `is_admin_vouched` read drives the "Reviewed by your administrator"
+badge, `/settings/authorized-apps`, and the handoff "Return to <app>"
+banner. An `source = 'org'` client renders a distinct, weaker label instead.
+Operator clients that predate the metadata table are stamped by the one-shot
+`forseti reconcile-client-metadata` verb, which is a **deploy step**, not a
+boot task — Forseti's database and Hydra's are separate servers, so no
+migration can enumerate Hydra's clients. Before
 auto-granting, the handler verifies the Kratos session subject matches
 Hydra's claimed subject — without this check a crafted consent link bound
 to identity A could be auto-granted while identity B is signed in.
@@ -1273,20 +1286,37 @@ the only entry point (SP-initiated only — no IdP-initiated flow in v1).
    `jackson_internal_url` when set).
 3. Email normalised (trim, lowercase) and bounded (≤ 254 octets, RFC
    5321); missing/oversized → error page + audit.
-4. Identity resolution (`resolve_identity`, `src/saml/flow.rs:369`), a
-   three-step decision tree:
-   - `saml_links` row for (org, email) → re-validated against Kratos
-     (stale rows pruned), use the linked identity.
-   - Verified-email match via `admin_find_identity_by_email`
-     (`src/ory/kratos.rs:553`) → link on first login + audit
-     `saml.identity.linked`. An **unverified** match fails closed to the
-     blocked page (`templates/saml_blocked.html`) + audit
-     `saml.login.blocked_unverified`.
-   - No match → JIT create via `admin_create_identity_verified`
-     (`src/ory/kratos.rs:520`, email pre-verified) + audit
-     `saml.identity.jit_created`. A 409 conflict (the verified-lookup
-     missed a passwordless/imported identity) also fails closed to the
-     blocked page.
+4. Identity resolution (`resolve_identity`, `src/saml/flow.rs`):
+   - **Operator refusal first**, before any lookup: an asserted address in
+     `[admin].allowed_emails` is refused outright. A tenant's IdP is never
+     a route to an operator account, and checking this ahead of the link
+     lookups means it holds for every login, not just the first.
+   - `saml_links` row for (org, subject) or (org, email) → re-validated
+     against Kratos (stale rows pruned), use the linked identity. A row
+     only exists because an earlier login proved control of that identity,
+     and the table is keyed by org, so one tenant's IdP can never ride
+     another tenant's link.
+   - Otherwise the facts go to `saml_link_decision`, a pure function
+     (`Refuse` / `ConfirmCredential` / `JitCreate` / `LinkExisting`):
+     - A match on an existing identity → **`ConfirmCredential`**. The IdP
+       saying "this is alice@corp" is a claim, not proof that the person
+       in front of it controls Forseti's alice@corp (RFC 9700 §4.16), so
+       nothing is written and no session is minted. Forseti stashes the
+       pending link in a signed cookie and bounces the user through a
+       Kratos login with `refresh=true`, returning to `/sso/confirm`.
+     - An **unverified** match, or a verified one that is not a member of
+       this org, fails closed to the blocked page
+       (`templates/saml_blocked.html`).
+     - No match, and the asserted address's domain is a **verified domain
+       of the org** → JIT create via `admin_create_identity_verified` +
+       audit `saml.identity.jit_created`. A 409 conflict also fails closed.
+     - No match and an unproven domain → refused, so a tenant IdP cannot
+       provision an arbitrary address it does not own.
+
+   `GET /sso/confirm` is the return leg. It links **only** when the live
+   Kratos session's identity id equals the one in the pending cookie —
+   that check is what makes the assertion unable to impersonate. It mints
+   no session of its own: the login the user just completed is the session.
 5. Org membership ensured (`member` role; best-effort — a DB blip must
    not abort an otherwise valid login).
 6. Session establishment: `admin_create_recovery_link`

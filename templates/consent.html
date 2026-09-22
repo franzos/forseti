@@ -94,6 +94,26 @@
       </svg>
       {{ chrome.t("consent-verified-by-admin") }}
     </p>
+  {% else if org_vouched && cimd_host.is_empty() %}
+    <p class="flex items-center gap-1 font-label-sm text-label-sm text-on-surface-variant"
+       title="{{ chrome.t("consent-vouched-by-org") }}">
+      <svg xmlns="http://www.w3.org/2000/svg"
+           width="16"
+           height="16"
+           viewBox="0 0 24 24"
+           fill="none"
+           stroke="currentColor"
+           stroke-width="2.5"
+           stroke-linecap="round"
+           stroke-linejoin="round"
+           class="w-4 h-4 shrink-0 text-on-surface-variant"
+           aria-hidden="true">
+        <path d="M3 21h18" />
+        <path d="M5 21V7l7-4 7 4v14" />
+        <path d="M10 21v-6h4v6" />
+      </svg>
+      {{ chrome.t("consent-vouched-by-org") }}
+    </p>
   {% else %}
     <div class="bg-error-container border border-error rounded-lg p-3 flex items-start gap-stack-sm">
       <svg xmlns="http://www.w3.org/2000/svg"
@@ -122,6 +142,19 @@
         class="flex flex-col gap-stack-md">
     <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
     <input type="hidden" name="consent_challenge" value="{{ challenge }}">
+
+    {% if !granted_audience.is_empty() %}
+      <div class="bg-surface-container-low border border-outline-variant rounded-lg p-stack-md flex flex-col gap-stack-sm">
+        <p class="font-label-sm text-label-sm text-on-surface uppercase tracking-wider">{{ chrome.t("consent-audience-heading") }}</p>
+        <ul class="flex flex-col gap-stack-xs">
+          {% for aud in granted_audience %}
+            <li class="font-body-sm text-body-sm text-on-surface-variant break-all">
+              <bdi>{{ aud }}</bdi>
+            </li>
+          {% endfor %}
+        </ul>
+      </div>
+    {% endif %}
 
     <div class="bg-surface-container-low border border-outline-variant rounded-lg p-stack-md flex flex-col gap-stack-sm">
       <p class="font-label-sm text-label-sm text-on-surface uppercase tracking-wider">{{ chrome.t("consent-requesting-heading") }}</p>

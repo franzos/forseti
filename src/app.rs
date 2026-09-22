@@ -51,12 +51,35 @@ fn worker_stale_threshold_secs(tick_seconds: u64) -> i64 {
     i64::try_from(tick_seconds.saturating_mul(4).max(20)).unwrap_or(i64::MAX)
 }
 
+/// Request span that records the path ONLY, never the query string.
+///
+/// Tower-http's `DefaultMakeSpan` records the whole URI, which puts every
+/// invite token, claim/reveal token, SAML `code`/`state` and Hydra challenge
+/// into the log stream — durable, shipped off-box, and readable by anyone with
+/// log access. The path is what the operator actually needs.
+#[derive(Clone, Copy)]
+struct PathOnlyMakeSpan;
+
+impl<B> tower_http::trace::MakeSpan<B> for PathOnlyMakeSpan {
+    fn make_span(&mut self, request: &axum::http::Request<B>) -> tracing::Span {
+        tracing::info_span!(
+            "request",
+            method = %request.method(),
+            path = %request.uri().path(),
+            version = ?request.version(),
+        )
+    }
+}
+
 pub(crate) async fn run() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .json()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,tower_http=debug".into()),
+                // No `tower_http=debug`: its request/response events carry the
+                // full URI, which is the very thing `PathOnlyMakeSpan` keeps out
+                // of the log stream.
+                .unwrap_or_else(|_| "info".into()),
         )
         .init();
 
@@ -186,7 +209,7 @@ pub(crate) async fn run() -> anyhow::Result<()> {
     let csrf_routes = Router::new()
         .route("/", get(dashboard::root))
         .merge(auth::router(&state.cfg.proxy, &state.cfg.auth))
-        .merge(settings::router())
+        .merge(settings::router(&state.cfg))
         .merge(orgs::settings_page::router())
         .merge(orgs::invite::router())
         .merge(orgs::join::router())
@@ -314,7 +337,12 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         form_action,
     };
     let public_app = public_app
-        .layer(TraceLayer::new_for_http())
+        // Outermost: a panic in any handler becomes a 500 instead of a dropped
+        // connection. A reset mid-response looks like a network fault to the
+        // caller and tells an attacker probing for one exactly which input
+        // crashed the worker.
+        .layer(tower_http::catch_panic::CatchPanicLayer::new())
+        .layer(TraceLayer::new_for_http().make_span_with(PathOnlyMakeSpan))
         .layer(axum::middleware::from_fn_with_state(
             csp_sources,
             strict_frame_for_sensitive,
@@ -333,7 +361,8 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         .layer(axum::middleware::from_fn(
             crate::metrics::track_http_metrics,
         ))
-        .layer(TraceLayer::new_for_http())
+        .layer(TraceLayer::new_for_http().make_span_with(PathOnlyMakeSpan))
+        .layer(tower_http::catch_panic::CatchPanicLayer::new())
         .route(
             "/metrics",
             axum::routing::get(crate::metrics::metrics_handler),
@@ -921,5 +950,115 @@ mod tests {
         let mut resp = axum::response::IntoResponse::into_response("ok");
         allow_form_action_to(&mut resp, &["not a url".to_string()]);
         assert!(resp.extensions().get::<ExtraFormAction>().is_none());
+    }
+}
+
+#[cfg(test)]
+mod span_tests {
+    use super::PathOnlyMakeSpan;
+    use std::sync::{Arc, Mutex};
+    use tower_http::trace::MakeSpan;
+
+    /// Shared buffer so the fmt subscriber's output can be asserted on. A span
+    /// with no subscriber renders as `disabled` with no fields at all, which
+    /// would make every "the secret isn't there" assertion pass vacuously.
+    #[derive(Clone, Default)]
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Capture {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("capture buffer")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Capture {
+        type Writer = Capture;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// Emit one event inside the span `PathOnlyMakeSpan` builds for `uri`, and
+    /// return everything the subscriber wrote.
+    fn logged_for(uri: &str) -> String {
+        let capture = Capture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(capture.clone())
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            let req = axum::http::Request::builder()
+                .method("GET")
+                .uri(uri)
+                .body(())
+                .expect("build request");
+            let span = PathOnlyMakeSpan.make_span(&req);
+            let _entered = span.enter();
+            tracing::info!("handled");
+        });
+        let bytes = capture.0.lock().expect("capture buffer").clone();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    /// The finding: request URIs were logged whole, so invite/claim/reveal
+    /// tokens, SAML `code`/`state` and Hydra challenges landed in the log
+    /// stream. The span carries the path and nothing after the `?`.
+    #[test]
+    fn a_token_bearing_query_string_never_reaches_the_log() {
+        let logged = logged_for("/invite/accept?token=super-secret-invite-token");
+        assert!(
+            logged.contains("/invite/accept"),
+            "the path is still recorded: {logged}"
+        );
+        assert!(
+            !logged.contains("super-secret-invite-token"),
+            "the token must not be logged: {logged}"
+        );
+        assert!(
+            !logged.contains("token="),
+            "no query string at all: {logged}"
+        );
+    }
+
+    #[test]
+    fn the_saml_callback_query_never_reaches_the_log() {
+        let logged = logged_for("/sso/callback?code=authz-code-value&state=nonce-value");
+        assert!(logged.contains("/sso/callback"), "{logged}");
+        assert!(!logged.contains("authz-code-value"), "{logged}");
+        assert!(!logged.contains("nonce-value"), "{logged}");
+    }
+
+    #[test]
+    fn the_hydra_challenge_never_reaches_the_log() {
+        let logged = logged_for("/oauth/consent?consent_challenge=long-opaque-challenge-value");
+        assert!(logged.contains("/oauth/consent"), "{logged}");
+        assert!(!logged.contains("long-opaque-challenge-value"), "{logged}");
+    }
+
+    /// The span's own field set, so a future edit can't reintroduce a `uri`
+    /// field and have the value assertions above still pass.
+    #[test]
+    fn the_span_declares_no_uri_field() {
+        let req = axum::http::Request::builder()
+            .uri("/x?y=z")
+            .body(())
+            .expect("build request");
+        let span = PathOnlyMakeSpan.make_span(&req);
+        let names: Vec<&str> = span
+            .metadata()
+            .expect("span metadata")
+            .fields()
+            .iter()
+            .map(|f| f.name())
+            .collect();
+        assert!(names.contains(&"path"), "{names:?}");
+        assert!(!names.contains(&"uri"), "{names:?}");
     }
 }

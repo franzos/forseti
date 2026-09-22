@@ -148,3 +148,10 @@ pub fn spawn_reconcile(
         }
     })
 }
+
+/// The `force_mfa` second-factor `amr` allowlist, for the `oauth::login` test
+/// that pins the RFC 8176 mapping and this allowlist together.
+#[cfg(test)]
+pub(crate) fn device_second_factor_amr() -> &'static [&'static str] {
+    device::SECOND_FACTOR_AMR
+}

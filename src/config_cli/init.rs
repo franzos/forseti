@@ -264,6 +264,13 @@ selfservice:
     login:
       ui_url: {forseti_login}
       lifespan: 10m
+      after:
+        password:
+          hooks:
+            - hook: require_verified_address
+        passkey:
+          hooks:
+            - hook: require_verified_address
 
     registration:
       lifespan: 10m
@@ -272,6 +279,7 @@ selfservice:
         password:
           hooks:
             - hook: session
+            - hook: show_verification_ui
 
 log:
   level: info

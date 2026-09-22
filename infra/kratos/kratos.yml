@@ -221,6 +221,20 @@ selfservice:
       ui_url: http://localhost:3000/login
       lifespan: 10m
       after:
+        # `require_verified_address` sits on the PRIMARY credentials only.
+        # It refuses to re-authenticate an identity whose address is not
+        # verified, which is the backstop for an allowlisted admin address
+        # somebody registered but never proved control of. The AAL2 step-up
+        # methods below (totp / lookup_secret / webauthn) deliberately skip
+        # it: they elevate an existing session rather than authenticate, and
+        # the hook there would strand a user mid-step-up.
+        #
+        # It does NOT close the register-to-verify window — Kratos issues a
+        # session at registration (the `session` hook under `registration`),
+        # and that session never passes through here. Forseti's admin gate
+        # requiring a *verified* allowlisted address is the real guard; this
+        # is depth.
+        #
         # `auth.login` is emitted after successful authentication on a
         # primary credential (password or passkey). AAL2 step-up methods
         # (totp / lookup_secret / webauthn) intentionally don't fire this
@@ -231,6 +245,7 @@ selfservice:
         # and wire it up here.
         password:
           hooks:
+            - hook: require_verified_address
             - hook: web_hook
               config:
                 url: http://host.docker.internal:8081/internal/audit/kratos?action=auth.login
@@ -246,6 +261,7 @@ selfservice:
                     in: header
         passkey:
           hooks:
+            - hook: require_verified_address
             - hook: web_hook
               config:
                 url: http://host.docker.internal:8081/internal/audit/kratos?action=auth.login
@@ -266,11 +282,12 @@ selfservice:
       after:
         # `session` auto-logs the new user in so they land on the dashboard
         # rather than getting bounced to /login with a credential they just
-        # created. Email verification is NOT enforced here — the dashboard
-        # surfaces an "unverified" banner that prompts the user to verify
-        # at their leisure. Operators wanting stricter onboarding (banks,
-        # healthcare, etc.) can add `{ hook: show_verification_ui }` to
-        # each method to force verification before dashboard access.
+        # created, and `show_verification_ui` puts the verification screen
+        # straight in front of them. Neither is a gate: the session is live
+        # either way, so it is Forseti's admin gate — which requires a
+        # *verified* allowlisted address — that stops a freshly-registered
+        # allowlisted address from acting as an operator. The dashboard keeps
+        # the "unverified" banner for anyone who skips past the screen.
         #
         # The `web_hook` on each method fires the portal's
         # /internal/audit/kratos receiver on the internal listener
@@ -283,6 +300,7 @@ selfservice:
         password:
           hooks:
             - hook: session
+            - hook: show_verification_ui
             - hook: web_hook
               config:
                 url: http://host.docker.internal:8081/internal/audit/kratos?action=identity.created
@@ -299,6 +317,7 @@ selfservice:
         passkey:
           hooks:
             - hook: session
+            - hook: show_verification_ui
             - hook: web_hook
               config:
                 url: http://host.docker.internal:8081/internal/audit/kratos?action=identity.created
@@ -315,6 +334,7 @@ selfservice:
         webauthn:
           hooks:
             - hook: session
+            - hook: show_verification_ui
             - hook: web_hook
               config:
                 url: http://host.docker.internal:8081/internal/audit/kratos?action=identity.created
@@ -331,6 +351,7 @@ selfservice:
         code:
           hooks:
             - hook: session
+            - hook: show_verification_ui
             - hook: web_hook
               config:
                 url: http://host.docker.internal:8081/internal/audit/kratos?action=identity.created

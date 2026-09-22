@@ -410,3 +410,106 @@ async fn reveal_token_is_hashed_at_rest() {
     hydra_delete_client(&client_id).await;
     delete_client_metadata(&client_id);
 }
+
+/// The email `[admin].allowed_emails` carries in both `config.toml` and
+/// `config.ci.toml` but which is deliberately *not* a registered identity.
+/// The whole point of the fixture is to register it fresh.
+const UNREGISTERED_ALLOWLISTED_EMAIL: &str = "admin@example.com";
+
+/// Finding 1 (round-2 review): registering as an allowlisted address that
+/// nobody has proven control of used to hand out Tier-1 admin. Kratos issues a
+/// session at registration, so the attacker reached AAL2 with their own TOTP
+/// and then minted a recovery link for the real operator.
+///
+/// The gate now requires the allowlisted address to be `verified` on the
+/// session identity, so the same sequence must 403 and must not reach the
+/// Default-org owner floor.
+#[tokio::test]
+async fn unverified_allowlisted_email_is_not_an_admin() {
+    assert!(portal_reachable().await);
+
+    // A previous run (or a real operator) may hold the address; the fixture
+    // needs to register it itself.
+    if let Some(existing) = identity_id_by_email(UNREGISTERED_ALLOWLISTED_EMAIL).await {
+        let _ = delete_test_identity(&existing).await;
+    }
+
+    let user = register_test_user_with_email(UNREGISTERED_ALLOWLISTED_EMAIL).await;
+    // First authenticated request writes the Default floor row.
+    let _ = user.client.get(PORTAL).send().await;
+
+    // Step up to AAL2 with a TOTP the attacker enrolls themselves.
+    plant_totp(&user.identity_id, TEST_TOTP_SECRET);
+    totp_step_up(&user.client, &totp_code_for(TEST_TOTP_SECRET)).await;
+
+    let res = user
+        .client
+        .get(format!("{PORTAL}/admin/status"))
+        .send()
+        .await
+        .expect("GET /admin/status as unverified allowlisted identity");
+    assert_eq!(
+        res.status(),
+        reqwest::StatusCode::FORBIDDEN,
+        "an unverified allowlisted address must not pass the admin gate"
+    );
+
+    // The takeover primitive itself: minting a Kratos recovery link for the
+    // real operator. It must be refused even with the allowlist match.
+    let body = user
+        .client
+        .get(format!("{PORTAL}/settings"))
+        .send()
+        .await
+        .expect("GET /settings")
+        .text()
+        .await
+        .expect("settings body");
+    let csrf = extract_form_csrf(&body).expect("_csrf on /settings");
+    let res = user
+        .client
+        .post(format!(
+            "{PORTAL}/admin/identities/{}/recovery",
+            user.identity_id
+        ))
+        .form(&[("_csrf", csrf.as_str())])
+        .send()
+        .await
+        .expect("POST /admin/identities/{id}/recovery");
+    assert_eq!(
+        res.status(),
+        reqwest::StatusCode::FORBIDDEN,
+        "recovery-link minting must stay behind the verified admin gate"
+    );
+
+    // The Default-org owner floor shares the root cause: member, not owner.
+    assert_eq!(
+        org_member_role("default", &user.identity_id).as_deref(),
+        Some("member"),
+        "an unverified allowlisted address must not reach the Default owner floor"
+    );
+
+    user.cleanup().await;
+}
+
+/// The control: a *verified* allowlisted operator still gets through, so the
+/// fix didn't just close the door on everyone. Skips without
+/// `FORSETI_ADMIN_TEST_*`.
+#[tokio::test]
+async fn verified_allowlisted_admin_still_passes_the_gate() {
+    assert!(portal_reachable().await);
+    let Some(admin) = try_admin_signed_in_client().await else {
+        eprintln!("skipping: FORSETI_ADMIN_TEST_* not configured");
+        return;
+    };
+    let res = admin
+        .get(format!("{PORTAL}/admin/status"))
+        .send()
+        .await
+        .expect("GET /admin/status as the seeded admin");
+    assert!(
+        res.status().is_success(),
+        "the seeded (verified) admin must still reach /admin/status, got {}",
+        res.status()
+    );
+}

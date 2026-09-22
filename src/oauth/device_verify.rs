@@ -268,7 +268,7 @@ async fn load_target(state: &AppState, user_code: &str) -> Option<VerifyTarget> 
 /// Anonymous chrome for the POST error path (the `Chrome` extractor isn't
 /// available once the request body is consumed).
 fn anon_chrome(state: &AppState, locale: crate::locale::LanguageIdentifier) -> PageChrome {
-    PageChrome::from_parts(state, String::new(), String::new(), locale)
+    PageChrome::from_parts(state, String::new(), None, String::new(), locale)
 }
 
 /// Resolve the approver's POSIX account and require it to BE the account the

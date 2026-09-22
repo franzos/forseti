@@ -395,10 +395,21 @@ There are **two tiers** of admin access. Same `/admin/*` URL prefix, different g
 **Tier 1 — Forseti-wide admin (operator).** Reached by hitting `/admin/...` with no `?org=<slug>` query parameter. This is the surface that touches every identity, every Hydra client, every session, every audit row across the deployment. Gated by:
 
 1. **Active Kratos session.** Anonymous requests are 303-redirected to `/login?return_to=...` so the user lands back on the admin page after signing in.
-2. **Email allowlist.** The session's `traits.email` must appear in `[admin].allowed_emails`. Non-allowlisted users get a 403 page (rendered inside the admin shell so the rejection is unambiguous).
+2. **Email allowlist, verified.** The session's `traits.email` must appear in `[admin].allowed_emails` **and** be a verified address on the signed-in identity. Non-allowlisted users, and allowlisted users who have not verified that address, get a 403 page (rendered inside the admin shell so the rejection is unambiguous).
 3. **AAL2.** Single-factor sessions are 303-redirected to `/login?aal=aal2&return_to=...`, forcing Kratos to demand a second factor before granting access.
 
 The order matters: a non-allowlisted user with a valid AAL2 session still gets a 403. An allowlisted user with an AAL1 session is bounced to step-up before being told they're allowed in.
+
+**Why "verified" is part of the gate.** Kratos issues a session at registration, before the address is verified. Without the verification requirement, anyone who signed up as an allowlisted address that was not yet a registered identity would land as a Tier-1 admin as soon as they enrolled their own second factor — an address on the allowlist that nobody has claimed yet is an open door, not a reservation. The same rule governs the Default-org owner floor: an unverified allowlisted address joins Default as a `member`, never an `owner`.
+
+The practical consequence: **putting an address on the allowlist does nothing until somebody registers it and verifies it.** That is the intended behaviour. Adding a placeholder or a not-yet-hired colleague to `[admin].allowed_emails` is harmless.
+
+Two Kratos hooks back this up (both written by `forseti config init`, both linted by `forseti config check`):
+
+- `require_verified_address` on `selfservice.flows.login.after.password` and `.passkey` — refuses to re-authenticate an identity whose address is unverified. It is deliberately **not** on the AAL2 step-up methods, which elevate an existing session rather than authenticate; the hook there would strand a user mid-step-up.
+- `show_verification_ui` on the registration flow — puts the verification screen in front of a new user immediately.
+
+Neither closes the register-to-verify window on its own, because the registration-issued session never passes through the login flow. The admin gate above is the actual guard; these make the hole harder to leave open by accident.
 
 **Tier 2 — Org-scoped admin (org owner).** Reached by hitting `/admin/...?org=<slug>`, and only on the surfaces listed below. This is what an org owner uses to manage *their own* org. Gated by:
 

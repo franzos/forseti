@@ -220,7 +220,7 @@ pub async fn is_member(db: &crate::db::DbPool, identity_id: &str, org_id: &str) 
 /// Extract the lowercase domain from an email's local@domain shape. `None`
 /// for a malformed trait email (should be impossible past Kratos's schema
 /// validation, but never let a malformed value crash the auto-join path).
-fn email_domain(email: &str) -> Option<String> {
+pub(crate) fn email_domain(email: &str) -> Option<String> {
     email.rsplit_once('@').map(|(_, d)| d.to_lowercase())
 }
 
@@ -278,14 +278,16 @@ pub(crate) fn decide_membership_action(
 }
 
 /// Maintain the Default-org floor for the caller, lazily on each authenticated
-/// request from [`crate::orgs::middleware::auto_join_default_org`]. Two rules,
-/// both verification-independent (`email` is used only for the allowlist check):
-/// - **Allowlisted (operator):** always a member of Default as `Owner`, kept
+/// request from [`crate::orgs::middleware::auto_join_default_org`]. Two rules:
+/// - **Allowlisted operator:** always a member of Default as `Owner`, kept
 ///   alongside tenant orgs (exempt from the count and from the join-side drop).
-/// - **Non-allowlisted:** a member of Default as `Member` iff they hold zero
+///   The allowlisted address must be *verified* on the identity — `addrs` is
+///   the identity's verifiable addresses — or the caller falls through to the
+///   member rule below.
+/// - **Everyone else:** a member of Default as `Member` iff they hold zero
 ///   non-default memberships. The count-and-insert is atomic (H4).
 ///
-/// Never promotes a non-allowlisted identity to `Owner` (H3). Errors are
+/// Never promotes a non-operator identity to `Owner` (H3). Errors are
 /// swallowed (logged at `warn!`) so a transient DB hiccup never breaks the
 /// request; the next request retries.
 pub async fn ensure_default_floor(
@@ -293,6 +295,7 @@ pub async fn ensure_default_floor(
     admin_cfg: &crate::config::AdminConfig,
     identity_id: &str,
     email: &str,
+    addrs: Option<&[crate::ory::VerifiableIdentityAddress]>,
 ) {
     let (default_present, non_default_count) =
         match db::floor_membership_facts(db, identity_id).await {
@@ -306,7 +309,7 @@ pub async fn ensure_default_floor(
                 return;
             }
         };
-    if admin_cfg.is_admin(email) {
+    if admin_cfg.is_admin_actor(email, addrs) {
         if !default_present
             && let Err(e) =
                 db::add_member_race_safe(db, identity_id, DEFAULT_ORG_ID, Role::Owner).await
@@ -382,6 +385,21 @@ mod tests {
         AdminConfig {
             allowed_emails: emails.iter().map(|s| s.to_string()).collect(),
         }
+    }
+
+    /// One verifiable address for `email`, verified or not, as the identity's
+    /// address list would carry it.
+    fn addrs(email: &str, verified: bool) -> Vec<crate::ory::VerifiableIdentityAddress> {
+        vec![crate::ory::VerifiableIdentityAddress {
+            id: Some("addr-1".to_string()),
+            value: email.to_string(),
+            verified,
+            via: ory_client::models::verifiable_identity_address::ViaEnum::Email,
+            status: "completed".to_string(),
+            verified_at: None,
+            created_at: None,
+            updated_at: None,
+        }]
     }
 
     #[test]
@@ -644,7 +662,8 @@ mod tests {
     async fn ensure_default_floor_member_less_non_allowlisted_gets_default_member() {
         let db = db::test_pool().await;
         let cfg = admin_cfg(&[]);
-        ensure_default_floor(&db, &cfg, "ident-1", "user@example.com").await;
+        let a = addrs("user@example.com", true);
+        ensure_default_floor(&db, &cfg, "ident-1", "user@example.com", Some(&a)).await;
         assert_eq!(
             org_role(&db, "ident-1", DEFAULT_ORG_ID).await,
             Some(Role::Member)
@@ -657,7 +676,8 @@ mod tests {
         // the owner-on-emptiness bootstrap is gone.
         let db = db::test_pool().await;
         let cfg = admin_cfg(&[]);
-        ensure_default_floor(&db, &cfg, "ident-1", "user@example.com").await;
+        let a = addrs("user@example.com", true);
+        ensure_default_floor(&db, &cfg, "ident-1", "user@example.com", Some(&a)).await;
         assert_eq!(
             org_role(&db, "ident-1", DEFAULT_ORG_ID).await,
             Some(Role::Member)
@@ -674,7 +694,8 @@ mod tests {
             .await
             .unwrap();
         let cfg = admin_cfg(&[]);
-        ensure_default_floor(&db, &cfg, "ident-1", "user@example.com").await;
+        let a = addrs("user@example.com", true);
+        ensure_default_floor(&db, &cfg, "ident-1", "user@example.com", Some(&a)).await;
         assert_eq!(org_role(&db, "ident-1", DEFAULT_ORG_ID).await, None);
     }
 
@@ -689,7 +710,8 @@ mod tests {
             .unwrap();
         let cfg = admin_cfg(&["boss@example.com"]);
         // Operator is added to Default as Owner despite holding a tenant org.
-        ensure_default_floor(&db, &cfg, "ident-1", "boss@example.com").await;
+        let a = addrs("boss@example.com", true);
+        ensure_default_floor(&db, &cfg, "ident-1", "boss@example.com", Some(&a)).await;
         assert_eq!(
             org_role(&db, "ident-1", DEFAULT_ORG_ID).await,
             Some(Role::Owner)
@@ -698,11 +720,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ensure_default_floor_allowlisted_but_unverified_gets_member_not_owner() {
+        // Finding 1: Kratos mints a session at registration, so an allowlisted
+        // address nobody has proven control of must not reach the owner floor.
+        let db = db::test_pool().await;
+        let cfg = admin_cfg(&["boss@example.com"]);
+        let a = addrs("boss@example.com", false);
+        ensure_default_floor(&db, &cfg, "ident-1", "boss@example.com", Some(&a)).await;
+        assert_eq!(
+            org_role(&db, "ident-1", DEFAULT_ORG_ID).await,
+            Some(Role::Member)
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_default_floor_allowlisted_without_addresses_gets_member_not_owner() {
+        let db = db::test_pool().await;
+        let cfg = admin_cfg(&["boss@example.com"]);
+        ensure_default_floor(&db, &cfg, "ident-1", "boss@example.com", None).await;
+        assert_eq!(
+            org_role(&db, "ident-1", DEFAULT_ORG_ID).await,
+            Some(Role::Member)
+        );
+    }
+
+    #[tokio::test]
     async fn ensure_default_floor_is_idempotent() {
         let db = db::test_pool().await;
         let cfg = admin_cfg(&[]);
-        ensure_default_floor(&db, &cfg, "ident-1", "user@example.com").await;
-        ensure_default_floor(&db, &cfg, "ident-1", "user@example.com").await;
+        let a = addrs("user@example.com", true);
+        ensure_default_floor(&db, &cfg, "ident-1", "user@example.com", Some(&a)).await;
+        ensure_default_floor(&db, &cfg, "ident-1", "user@example.com", Some(&a)).await;
         assert_eq!(
             org_role(&db, "ident-1", DEFAULT_ORG_ID).await,
             Some(Role::Member)

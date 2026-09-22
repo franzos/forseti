@@ -150,6 +150,7 @@ fn render_2fa(
             memberships,
             headers,
             session_email(session),
+            crate::ory::session_addresses(session),
             csrf_token.to_string(),
             locale,
         ),

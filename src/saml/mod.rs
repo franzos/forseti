@@ -20,6 +20,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/sso/{slug}", get(flow::start))
         .route("/sso/callback", get(flow::callback))
+        .route("/sso/confirm", get(flow::confirm))
 }
 
 /// CSRF/replay binding for the authorize round-trip. 10 minutes is
@@ -31,5 +32,23 @@ pub(crate) fn state_cookie(secure: bool) -> SignedCookie<'static> {
         ttl_secs: 600,
         secure,
         path: "/sso",
+    }
+}
+
+/// Carries a pending link across the credential-confirmation bounce: the
+/// assertion has been validated and resolved to an existing identity, but
+/// nothing is written until the user proves they hold that identity. Same 10
+/// minutes as the authorize round-trip, for the same reason (the user may be
+/// walking through a password plus a second factor).
+///
+/// Path is `/` rather than `/sso`, because the bounce goes out to `/login` and
+/// Kratos, and the cookie has to survive the round trip.
+pub(crate) fn pending_link_cookie(secure: bool) -> SignedCookie<'static> {
+    SignedCookie {
+        name: "forseti_saml_pending",
+        salt: b"forseti::saml_pending::v1",
+        ttl_secs: 600,
+        secure,
+        path: "/",
     }
 }

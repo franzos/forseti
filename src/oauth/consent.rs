@@ -48,10 +48,16 @@ struct ConsentTemplate {
     subject_email: String,
     challenge: String,
     scopes: Vec<ConsentScopeView>,
-    /// True when an admin verified the client, or no `oauth_client_metadata`
-    /// row exists (legacy clients default to verified). Drives the consent
-    /// badge: verified shows a checkmark, unverified a caution banner.
+    /// True only when a Forseti OPERATOR vouched for the client
+    /// (`source = admin`, verification on). Drives the "Reviewed by your
+    /// administrator" checkmark. A missing metadata row is not trusted.
     verified: bool,
+    /// The owning org vouched for it, but no operator did. Renders a distinct,
+    /// weaker label instead of the admin checkmark, and never auto-grants.
+    org_vouched: bool,
+    /// The audiences the access token will carry, resolved by the same
+    /// function the grant uses. Empty for the common no-audience consent.
+    granted_audience: Vec<String>,
     /// Client id, for the logo URL. Empty when Hydra didn't give us one,
     /// which also forces `has_logo` false.
     client_id: String,
@@ -123,23 +129,29 @@ pub(crate) async fn oauth_consent(
 
     // Verification lookup must run before the auto-grant decision: an
     // unverified client shows the caution banner on every consent, so neither
-    // Hydra `skip` nor client-side `skip_consent` may bypass it. Missing row
-    // defaults to verified (legacy / admin-created); DCR clients always carry
-    // an "unverified" row.
+    // Hydra `skip` nor client-side `skip_consent` may bypass it. Only an
+    // operator's word (`source = admin`) counts as verified; an org owner's
+    // gets a weaker label, and a missing row is not trusted at all.
     let client_id_lookup = req
         .client
         .as_ref()
         .and_then(|c| c.client_id.as_deref())
         .unwrap_or_default();
-    let (verified, is_cimd) = if client_id_lookup.is_empty() {
-        (true, false)
+    let (verified, org_vouched, is_cimd) = if client_id_lookup.is_empty() {
+        (false, false, false)
     } else {
         match oauth_client_metadata::get(&state.db, client_id_lookup).await {
             Ok(Some(row)) => (
-                row.is_verified(),
+                row.is_admin_vouched(),
+                row.is_org_vouched(),
                 row.source == oauth_client_metadata::source::CIMD,
             ),
-            Ok(None) => (true, false),
+            // A client Hydra knows but Forseti has no row for is NOT trusted.
+            // Hydra's `/oauth2/register` is publicly routed in this
+            // deployment, so "no row" includes "registered itself a minute
+            // ago". Existing operator clients are stamped by the one-shot
+            // `reconcile-client-metadata` verb before this ships.
+            Ok(None) => (false, false, false),
             Err(e) => {
                 // Fail closed: a DB blip must not silently auto-grant a
                 // DCR-registered client that hasn't been admin-reviewed.
@@ -154,7 +166,7 @@ pub(crate) async fn oauth_consent(
                     .severity(severity::WARNING)
                     .failed(e.to_string());
                 let _ = audit::log(&state.db, ev).await;
-                (false, false)
+                (false, false, false)
             }
         }
     };
@@ -186,6 +198,7 @@ pub(crate) async fn oauth_consent(
             requested_scope,
             requested_audience,
             request_url,
+            false,
             false,
             &headers,
             requested_org_id.as_deref(),
@@ -250,16 +263,18 @@ pub(crate) async fn oauth_consent(
     // Subject email for the "Signed in as ..." line. Via the admin API
     // because the Kratos session cookie isn't guaranteed in scope here, and
     // we already trust `subject` from Hydra.
-    let subject_email = match ory::kratos::admin_get_identity(&state.ory, &subject).await {
-        Ok(id) => id
-            .traits
-            .and_then(|t| t.get("email").and_then(|v| v.as_str()).map(str::to_string))
-            .unwrap_or_default(),
+    let subject_identity = match ory::kratos::admin_get_identity(&state.ory, &subject).await {
+        Ok(id) => Some(id),
         Err(e) => {
             tracing::warn!(error = ?e, subject, "failed to fetch identity for consent display");
-            String::new()
+            None
         }
     };
+    let subject_email = subject_identity
+        .as_ref()
+        .and_then(|id| id.traits.as_ref())
+        .and_then(|t| t.get("email").and_then(|v| v.as_str()).map(str::to_string))
+        .unwrap_or_default();
 
     // Operator-uploaded, so it's safe to show before the user has decided;
     // a probe failure just falls back to the generic icon.
@@ -305,19 +320,38 @@ pub(crate) async fn oauth_consent(
     let chrome = crate::theming::theme_chrome_for_org_id(
         &state.db,
         &state.cfg.brand,
-        PageChrome::from_parts(&state, subject_email.clone(), csrf.0, locale),
+        PageChrome::from_parts(
+            &state,
+            subject_email.clone(),
+            subject_identity.as_ref().and_then(ory::identity_addresses),
+            csrf.0,
+            locale,
+        ),
         active_org_id.as_deref(),
+    )
+    .await;
+
+    // Show what the token will actually be addressed to. An RP can request an
+    // audience the user never sees otherwise, and "approve" should not mean
+    // approving an unnamed third party.
+    let granted_audience = resolve_consent_audience(
+        &state,
+        client_id_lookup,
+        &requested_audience,
+        req.request_url.as_deref().unwrap_or_default(),
     )
     .await;
 
     render(&ConsentTemplate {
         chrome,
+        granted_audience,
         consent_intro: state.cfg.brand.consent_intro.clone(),
         client_name,
         subject_email,
         challenge,
         scopes,
         verified,
+        org_vouched,
         client_id: client_id_lookup.to_string(),
         has_logo,
         known_accounts,
@@ -493,6 +527,7 @@ pub(crate) async fn oauth_consent_submit(
         requested_audience,
         &request_url,
         remember,
+        true,
         &headers,
         requested_org_id.as_deref(),
         consent_locale,
@@ -749,6 +784,81 @@ fn resolve_granted_audience(
     granted
 }
 
+/// Resolve the audiences this consent would grant, for both the interactive
+/// page and the grant itself, so the two cannot disagree about what the user
+/// is being asked to approve. Costs nothing when no audience was requested.
+async fn resolve_consent_audience(
+    state: &AppState,
+    client_id: &str,
+    requested_audience: &[String],
+    request_url: &str,
+) -> Vec<String> {
+    if requested_audience.is_empty() && resource_params(request_url).is_empty() {
+        return Vec::new();
+    }
+    let client_audience = if client_id.is_empty() {
+        ClientAudience::default()
+    } else {
+        read_client_audience(state, client_id).await
+    };
+    // Fail closed: an unreadable registry denies every requested audience.
+    let allowed = crate::resource_registry::list_enabled(&state.db)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::error!(
+                error = ?e,
+                client_id,
+                "consent: resource registry read failed; denying all requested audiences",
+            );
+            Vec::new()
+        });
+    resolve_granted_audience(
+        client_id,
+        requested_audience,
+        request_url,
+        &allowed,
+        &client_audience.policy,
+    )
+}
+
+/// Of the audiences this consent granted, the ones it is allowed to write
+/// back onto the client's Hydra record.
+///
+/// The write-back exists so a later refresh grant still carries the audience.
+/// But healing a value the client never registered turns an allow-list hit
+/// into a permanent property of the client — and for an operator-created
+/// client that record IS policy on the next consent
+/// ([`ClientAudience::policy`]), so a single `resource=` would quietly widen
+/// what the client may ask for forever.
+///
+/// So: only what the client already carries in its registered audience, or
+/// asked for through Hydra's own `audience=` carrier, is healed. A value that
+/// arrived solely as an RFC 8707 `resource=` and passed only on the registry
+/// is granted for this token and not written down.
+fn heal_eligible_audience(
+    granted: &[String],
+    requested_audience: &[String],
+    registered_policy: &[String],
+) -> Vec<String> {
+    // Verbatim first: an audience is an opaque identifier and need not be a
+    // URI. Canonical comparison is the fallback, so a resource still matches
+    // its own request across a trailing slash or fragment.
+    let matches = |candidates: &[String], value: &str| {
+        let value_canonical = crate::oauth::canonical_resource(value);
+        candidates.iter().any(|c| {
+            let c = c.trim();
+            c == value
+                || (value_canonical.is_some()
+                    && crate::oauth::canonical_resource(c) == value_canonical)
+        })
+    };
+    granted
+        .iter()
+        .filter(|g| matches(requested_audience, g) || matches(registered_policy, g))
+        .cloned()
+        .collect()
+}
+
 /// One read of the client's Hydra `audience`, split by what a caller may do
 /// with it. The two are not interchangeable: only `policy` may grant, only
 /// `on_record` may dedup.
@@ -923,6 +1033,9 @@ async fn finalize_consent(
     requested_audience: Vec<String>,
     request_url: &str,
     remember: bool,
+    // `false` on the auto-grant path (Hydra `skip` or the client's
+    // `skip_consent`), where no human saw the audience.
+    user_approved: bool,
     headers: &axum::http::HeaderMap,
     requested_org_id: Option<&str>,
     consent_locale: LanguageIdentifier,
@@ -937,35 +1050,37 @@ async fn finalize_consent(
     } else {
         read_client_audience(state, client_id).await
     };
-    let allowed = if audience_requested {
-        // Fail closed: an unreadable registry denies every requested audience.
-        match crate::resource_registry::list_enabled(&state.db).await {
-            Ok(resources) => resources,
-            Err(e) => {
-                tracing::error!(
-                    error = ?e,
-                    client_id,
-                    "consent: resource registry read failed; denying all requested audiences",
-                );
-                Vec::new()
-            }
-        }
+    let grant_audience =
+        resolve_consent_audience(state, client_id, &requested_audience, request_url).await;
+    // On the interactive path the user was shown the resolved audience and
+    // approved it, so healing it is recording a decision a human made — and
+    // the refresh grant needs it on the record or it fails. On the auto-grant
+    // path nobody saw anything, so a `resource=` the client never registered
+    // is honoured for that token only and not written down.
+    let healable = if user_approved {
+        grant_audience.clone()
     } else {
-        Vec::new()
+        heal_eligible_audience(
+            &grant_audience,
+            &requested_audience,
+            &client_audience.policy,
+        )
     };
-    let grant_audience = resolve_granted_audience(
-        client_id,
-        &requested_audience,
-        request_url,
-        &allowed,
-        &client_audience.policy,
-    );
+    if grant_audience.len() != healable.len() {
+        tracing::info!(
+            client_id,
+            granted = grant_audience.len(),
+            healed = healable.len(),
+            "consent: auto-granted a registry-allowed resource for this token only, not writing it onto the client",
+        );
+    }
     if !client_id.is_empty()
+        && !healable.is_empty()
         && let Err(e) = ory::hydra::add_client_audiences(
             &state.ory,
             client_id,
             &client_audience.on_record,
-            &grant_audience,
+            &healable,
         )
         .await
     {
@@ -2264,5 +2379,70 @@ mod tests {
             &de(),
         );
         assert_eq!(v.get("locale").unwrap().as_str().unwrap(), "de");
+    }
+}
+
+#[cfg(test)]
+mod audience_heal_tests {
+    use super::heal_eligible_audience;
+
+    fn v(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_registry_only_resource_is_granted_but_not_written_back() {
+        // The finding: an RFC 8707 `resource=` that passed only on the enabled
+        // registry used to be healed onto the client record, and for an
+        // operator-created client that record is policy on the next consent —
+        // so one request permanently widened what the client could ask for.
+        let granted = v(&["https://api.example.com"]);
+        assert!(
+            heal_eligible_audience(&granted, &[], &[]).is_empty(),
+            "a registry-only resource must not be written onto the client"
+        );
+    }
+
+    #[test]
+    fn an_audience_the_client_registered_is_still_healed() {
+        let granted = v(&["https://api.example.com"]);
+        let policy = v(&["https://api.example.com"]);
+        assert_eq!(
+            heal_eligible_audience(&granted, &[], &policy),
+            granted,
+            "a registered audience must still be healed, or refresh grants break"
+        );
+    }
+
+    #[test]
+    fn hydras_own_audience_carrier_is_still_healed() {
+        // `audience=` is Hydra's non-standard form parameter; healing those is
+        // the behaviour that makes the refresh grant work, and it is not the
+        // carrier the finding is about.
+        let granted = v(&["stackpit-web"]);
+        let requested = v(&["stackpit-web"]);
+        assert_eq!(heal_eligible_audience(&granted, &requested, &[]), granted);
+    }
+
+    #[test]
+    fn heal_matches_across_canonicalisation() {
+        // `resolve_granted_audience` may hand back the canonical form of what
+        // was requested; the heal filter must still recognise it.
+        let granted = v(&["https://api.example.com"]);
+        let requested = v(&["https://api.example.com/#frag"]);
+        assert_eq!(heal_eligible_audience(&granted, &requested, &[]), granted);
+    }
+
+    #[test]
+    fn a_mixed_request_heals_only_the_registered_half() {
+        let granted = v(&[
+            "https://registered.example.com",
+            "https://registry-only.example.com",
+        ]);
+        let policy = v(&["https://registered.example.com"]);
+        assert_eq!(
+            heal_eligible_audience(&granted, &[], &policy),
+            v(&["https://registered.example.com"])
+        );
     }
 }

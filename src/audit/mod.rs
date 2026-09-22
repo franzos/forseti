@@ -216,6 +216,11 @@ pub mod action {
     pub const SAML_LOGIN_BLOCKED_UNVERIFIED: &str = "saml.login.blocked_unverified";
     pub const SAML_IDENTITY_JIT_CREATED: &str = "saml.identity.jit_created";
     pub const SAML_IDENTITY_LINKED: &str = "saml.identity.linked";
+    /// An assertion matched a pre-existing identity, so the user was sent to
+    /// prove they hold it before anything was linked (RFC 9700 §4.16).
+    pub const SAML_LINK_CONFIRM_REQUIRED: &str = "saml.link.confirm_required";
+    /// The user came back from that bounce holding the matched identity.
+    pub const SAML_LINK_CONFIRMED: &str = "saml.link.confirmed";
     pub const ADMIN_SAML_CONNECTION_CREATED: &str = "admin.saml.connection_created";
     pub const ADMIN_SAML_CONNECTION_DELETED: &str = "admin.saml.connection_deleted";
     pub const ADMIN_SAML_CONNECTION_TOGGLED: &str = "admin.saml.connection_toggled";

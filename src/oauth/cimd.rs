@@ -155,6 +155,22 @@ async fn authorize(
         }
     };
 
+    // Known to Hydra but untracked by Forseti: refuse. The guard above catches
+    // a client with a non-CIMD metadata row, but a client with NO row at all
+    // is the more dangerous shape — it predates this table, or was created out
+    // of band, and a CIMD document fetch would otherwise silently rewrite its
+    // redirects and auth method. Mirrors `handoff::referrer_is_vouched`'s
+    // "known-but-untracked = refuse".
+    if existing.is_some() && meta_row.is_none() {
+        return reject(
+            &state,
+            &actx,
+            &client_id,
+            "client_id is already registered in Hydra but not tracked as a CIMD client",
+        )
+        .await;
+    }
+
     // Warm path: unchanged document + already-registered redirect_uri + no
     // scope the row is missing means the Hydra row and metadata row are both
     // current — skip every write.

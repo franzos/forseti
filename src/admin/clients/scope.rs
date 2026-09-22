@@ -135,6 +135,27 @@ pub(super) async fn constrain_org_scoped_client(
             }
         }
     }
+    // Hydra fetches these itself on logout, from inside the deployment, so an
+    // org owner supplying an internal URL turns Hydra into an SSRF proxy they
+    // do not otherwise reach. Same guard the webhook targets get.
+    for (field, raw) in [
+        (
+            "Back-channel logout URI",
+            payload.backchannel_logout_uri.as_deref(),
+        ),
+        (
+            "Front-channel logout URI",
+            payload.frontchannel_logout_uri.as_deref(),
+        ),
+    ] {
+        let Some(uri) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        if let Err(e) = crate::webhook::validate_webhook_url(uri) {
+            return Err(format!("{field}: {e}"));
+        }
+    }
+
     Ok(())
 }
 

@@ -149,7 +149,7 @@ async fn join_confirm_get(
             chrome: themed_chrome(
                 &state,
                 &org,
-                PageChrome::from_parts(&state, String::new(), csrf_token, locale),
+                PageChrome::from_parts(&state, String::new(), None, csrf_token, locale),
             ),
             org_name: org.name.clone(),
             org_slug: slug,
@@ -173,7 +173,13 @@ async fn join_confirm_get(
         chrome: themed_chrome(
             &state,
             &org,
-            PageChrome::from_parts(&state, session_email, csrf_token, locale),
+            PageChrome::from_parts(
+                &state,
+                session_email,
+                crate::ory::session_addresses(&session),
+                csrf_token,
+                locale,
+            ),
         ),
         org_name: org.name.clone(),
         org_slug: slug,
@@ -228,7 +234,10 @@ async fn join_confirm_post(
             .into_response();
     }
 
-    let drop_default = !state.cfg.admin.is_admin(&session_email);
+    let drop_default = !state
+        .cfg
+        .admin
+        .is_admin_actor(&session_email, crate::ory::session_addresses(&session));
     if let Err(e) = crate::orgs::db::join_org_race_safe(
         &state.db,
         &identity_id,

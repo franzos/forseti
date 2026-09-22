@@ -168,7 +168,10 @@ pub(super) async fn orgs_create(
     }
     // Creator becomes owner of the new tenant org; drop their Default floor row
     // in the same txn unless they are an allowlisted operator (who keep Default).
-    let drop_default = !state.cfg.admin.is_admin(&email);
+    let drop_default = !state
+        .cfg
+        .admin
+        .is_admin_actor(&email, crate::ory::session_addresses(&sess.session));
     if let Err(e) =
         orgs::db::join_org_race_safe(&state.db, &identity_id, &id, Role::Owner, drop_default).await
     {

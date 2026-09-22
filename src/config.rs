@@ -232,6 +232,23 @@ pub struct PosixConfig {
     pub offline_max_lifetime_hours: u64,
     /// Server-side floor on offline passphrase length; never below [`posix::offline::OFFLINE_MIN_LEN`] (8).
     pub offline_min_len: usize,
+    /// Per-client cap on offline-passphrase saves per hour. Each save runs
+    /// Argon2id at m=64MiB/t=3, so an unbounded endpoint is a memory-and-CPU
+    /// amplifier. `0` disables the limiter.
+    #[serde(default = "default_offline_saves_per_hour")]
+    pub offline_saves_per_hour: u32,
+    /// How many offline-passphrase hashes may run at once, process-wide.
+    /// Small on purpose: each one reserves 64 MiB. Saturation returns 503.
+    #[serde(default = "default_offline_hash_concurrency")]
+    pub offline_hash_concurrency: usize,
+}
+
+fn default_offline_saves_per_hour() -> u32 {
+    10
+}
+
+fn default_offline_hash_concurrency() -> usize {
+    2
 }
 
 impl Default for PosixConfig {
@@ -256,6 +273,8 @@ impl Default for PosixConfig {
             offline_ttl_hours: 24,
             offline_max_lifetime_hours: 168,
             offline_min_len: 8,
+            offline_saves_per_hour: default_offline_saves_per_hour(),
+            offline_hash_concurrency: default_offline_hash_concurrency(),
         }
     }
 }
@@ -566,6 +585,22 @@ impl AdminConfig {
         self.allowed_emails
             .iter()
             .any(|e| e.eq_ignore_ascii_case(email))
+    }
+
+    /// Actor-authorization form of [`Self::is_admin`]: the allowlisted address
+    /// must additionally be verified on the acting identity. Kratos issues a
+    /// session at registration, so a plain allowlist match would hand operator
+    /// rights to anyone who signs up as an allowlisted address they don't own.
+    ///
+    /// Use this for every decision that *grants* the actor something. The raw
+    /// [`Self::is_admin`] stays correct for protective checks that refuse to
+    /// touch an allowlisted address.
+    pub fn is_admin_actor(
+        &self,
+        email: &str,
+        addrs: Option<&[crate::ory::VerifiableIdentityAddress]>,
+    ) -> bool {
+        self.is_admin(email) && crate::ory::address_is_verified(addrs, email)
     }
 }
 
@@ -1016,6 +1051,10 @@ pub struct ClaimEmailConfig {
     pub rate_limit_per_minute: u32,
     #[serde(default = "default_claim_email_per_hour")]
     pub rate_limit_per_hour: u32,
+    /// Claim codes that may be mailed to one address per hour, whatever IP
+    /// asks. The per-IP governor above can't bound this. `0` disables.
+    #[serde(default = "default_claim_sends_per_recipient_per_hour")]
+    pub sends_per_recipient_per_hour: usize,
 }
 
 impl Default for ClaimEmailConfig {
@@ -1023,12 +1062,17 @@ impl Default for ClaimEmailConfig {
         Self {
             rate_limit_per_minute: default_claim_email_per_minute(),
             rate_limit_per_hour: default_claim_email_per_hour(),
+            sends_per_recipient_per_hour: default_claim_sends_per_recipient_per_hour(),
         }
     }
 }
 
 fn default_claim_email_per_minute() -> u32 {
     5
+}
+
+fn default_claim_sends_per_recipient_per_hour() -> usize {
+    3
 }
 
 fn default_claim_email_per_hour() -> u32 {
@@ -1151,6 +1195,14 @@ pub struct OrgsConfig {
     pub active_org_cookie_ttl_seconds: u64,
     #[serde(default = "default_invite_ttl_days")]
     pub invite_ttl_days: i64,
+    /// Invites per recipient address per hour, across all orgs. Stops one
+    /// address being buried under invite mail. `0` disables.
+    #[serde(default = "default_invites_per_recipient_per_hour")]
+    pub invites_per_recipient_per_hour: usize,
+    /// Invites one org may mint per hour. Bounds a compromised owner account
+    /// (or an over-enthusiastic script) rather than the recipient. `0` disables.
+    #[serde(default = "default_invites_per_org_per_hour")]
+    pub invites_per_org_per_hour: usize,
     /// Per-IP rate limit on `GET /branding/{slug}/logo`, max requests per minute.
     /// `None` falls back to the code-side default (60). Set to `0` to disable the per-minute bucket.
     #[serde(default)]
@@ -1200,10 +1252,20 @@ pub struct OrgsConfig {
     pub domain_max_per_org: u32,
 }
 
+fn default_invites_per_recipient_per_hour() -> usize {
+    5
+}
+
+fn default_invites_per_org_per_hour() -> usize {
+    100
+}
+
 impl Default for OrgsConfig {
     fn default() -> Self {
         Self {
             active_org_cookie_ttl_seconds: default_active_org_cookie_ttl_seconds(),
+            invites_per_recipient_per_hour: default_invites_per_recipient_per_hour(),
+            invites_per_org_per_hour: default_invites_per_org_per_hour(),
             invite_ttl_days: default_invite_ttl_days(),
             logo_ip_rate_per_minute: None,
             logo_ip_rate_per_hour: None,

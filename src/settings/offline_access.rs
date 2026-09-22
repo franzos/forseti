@@ -83,7 +83,21 @@ pub(crate) async fn settings_offline_access_save(
         .offline_min_len
         .max(offline::OFFLINE_MIN_LEN);
 
-    // Argon2id at m=64MiB/t=3 is too heavy to run on the async runtime.
+    // Argon2id at m=64MiB/t=3 is too heavy to run on the async runtime, and
+    // each concurrent hash reserves that 64 MiB. The rate limiter on the route
+    // bounds one client; this bounds the process, so a spread of clients can't
+    // turn the endpoint into a memory exhaustion primitive. `try_acquire`, not
+    // `acquire`: queueing here would hold requests open and pile up the very
+    // memory the permit is rationing.
+    let Ok(_permit) = hash_semaphore(&state).try_acquire() else {
+        tracing::warn!("settings/offline-access: hash concurrency cap reached; shedding");
+        return (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            [("retry-after", "5")],
+            "Busy. Try again in a moment.",
+        )
+            .into_response();
+    };
     let minted =
         tokio::task::spawn_blocking(move || offline::mint_verifier(&form.passphrase, min_len))
             .await;
@@ -172,4 +186,12 @@ pub(crate) async fn settings_offline_access_clear(
     };
 
     state.flash_redirect("/settings/offline-access", &msg)
+}
+
+/// Process-wide permit pool for offline-passphrase hashing, sized from
+/// `[posix].offline_hash_concurrency`. A `OnceLock` rather than a field on
+/// `AppState` so the cap is shared by every clone of the state.
+fn hash_semaphore(state: &AppState) -> &'static tokio::sync::Semaphore {
+    static SEM: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+    SEM.get_or_init(|| tokio::sync::Semaphore::new(state.cfg.posix.offline_hash_concurrency.max(1)))
 }

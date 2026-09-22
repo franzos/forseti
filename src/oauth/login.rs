@@ -8,7 +8,10 @@ use serde::Deserialize;
 use crate::db::DbPool;
 use crate::extractors::OptionalSession;
 use crate::ory;
+use crate::signed_cookie::unix_seconds_now;
 use crate::state::AppState;
+
+use super::reauth::{self, ReauthDecision, ReauthMark};
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct OAuthLoginQuery {
@@ -50,6 +53,7 @@ pub(crate) async fn oauth_login(
         .oidc_context
         .as_ref()
         .and_then(|ctx| ctx.ui_locales.clone());
+    let headers_for_reauth = headers.clone();
     let login_locale = {
         let (mut p, _) = axum::http::Request::new(()).into_parts();
         p.uri = uri;
@@ -74,6 +78,52 @@ pub(crate) async fn oauth_login(
         }
     };
 
+    // RP-driven re-authentication (OIDC Core 3.1.2.1). Hydra forwards `prompt`
+    // and `max_age` in `request_url` but acts on neither — it stamps
+    // `auth_time` when we accept, so without this an RP asking for a fresh
+    // authentication gets a "fresh" token off a days-old session.
+    let reauth_cookie = reauth::reauth_mark_cookie(state.cfg.self_.is_https());
+    let ask = reauth::parse_reauth_ask(req.request_url.as_str());
+    let auth_time = reauth::session_auth_time(&session);
+    let mut clear_reauth_mark = false;
+    if !ask.is_empty() {
+        let now_secs = unix_seconds_now();
+        let now = chrono::Utc::now();
+        let mark = reauth_cookie
+            .decode(&state.cookie_secret, &headers_for_reauth, now_secs)
+            .and_then(|b| serde_json::from_slice::<ReauthMark>(&b).ok())
+            .filter(|m| m.c == challenge)
+            .map(|m| reauth::Mark {
+                prior_auth_time: reauth::parse_rfc3339(&m.t),
+                bounced_at: reauth::parse_rfc3339(&m.b),
+            });
+        match reauth::decide(&ask, auth_time, now, mark) {
+            ReauthDecision::Reauthenticate => {
+                let payload = serde_json::to_vec(&ReauthMark {
+                    c: challenge.clone(),
+                    t: auth_time.map(|t| t.to_rfc3339()).unwrap_or_default(),
+                    b: now.to_rfc3339(),
+                })
+                .unwrap_or_default();
+                let encoded = reauth_cookie.encode(&state.cookie_secret, &payload, now_secs);
+                let url = format!(
+                    "/login?refresh=true&return_to={}&lang={}",
+                    ory_client::apis::urlencode(&self_login_url),
+                    login_locale.language.as_str(),
+                );
+                let mut resp = Redirect::to(&url).into_response();
+                crate::web::append_set_cookie(&mut resp, Some(reauth_cookie.set_header(&encoded)));
+                return resp;
+            }
+            // The ask is satisfied; drop the mark once this flow finishes so
+            // a later one on the same browser can't ride it. The in-flow
+            // detours below (AAL2 step-up, the org-join interstitial) come
+            // back to this same challenge, so they deliberately keep it —
+            // clearing there would cost the user a second bounce.
+            ReauthDecision::Proceed => clear_reauth_mark = mark.is_some(),
+        }
+    }
+
     // ACR / AAL step-up: if the client asks `acr_values=aal2` and the session
     // is weaker, force a fresh login at the requested AAL before accepting.
     let requested_acrs: Vec<String> = req
@@ -97,26 +147,39 @@ pub(crate) async fn oauth_login(
         .unwrap_or_default();
     if subject.is_empty() {
         tracing::error!("session missing identity.id");
-        return Redirect::to("/error").into_response();
+        let mut resp = Redirect::to("/error").into_response();
+        if clear_reauth_mark {
+            crate::web::append_set_cookie(&mut resp, Some(reauth_cookie.clear_header()));
+        }
+        return resp;
     }
 
     // The SDK's `MethodEnum` has no `Display`; round-trip through serde to
-    // recover the wire string (`"password"`, `"oidc"`, …) for the `amr` claim.
+    // recover the wire string (`"password"`, `"oidc"`, …), then map it onto
+    // RFC 8176 so relying parties reading `amr` get the registered values
+    // rather than Kratos's internal names.
     let amr: Vec<String> = session
         .authentication_methods
         .as_ref()
         .map(|methods| {
-            methods
-                .iter()
-                .filter_map(|m| {
-                    m.method.as_ref().and_then(|x| {
-                        serde_json::to_value(x)
-                            .ok()
-                            .and_then(|v| v.as_str().map(str::to_string))
-                    })
-                })
-                .collect()
+            let mut out: Vec<String> = Vec::new();
+            for m in methods {
+                let Some(kratos_name) = m.method.as_ref().and_then(|x| {
+                    serde_json::to_value(x)
+                        .ok()
+                        .and_then(|v| v.as_str().map(str::to_string))
+                }) else {
+                    continue;
+                };
+                for value in amr_values(&kratos_name) {
+                    if !out.contains(&value) {
+                        out.push(value);
+                    }
+                }
+            }
+            out
         })
+        .filter(|v: &Vec<String>| !v.is_empty())
         .unwrap_or_else(|| vec!["pwd".to_string()]);
 
     // Optional `organization_id` (id or slug) from Hydra's `request_url`.
@@ -129,7 +192,7 @@ pub(crate) async fn oauth_login(
     {
         match resolve_pin_action(&state.db, &subject, &raw, skip_org_join).await {
             PinAction::Cookie(org_id) => {
-                set_org_cookie = Some(crate::orgs::cookie::set_active_org_cookie(
+                set_org_cookie = Some(crate::orgs::cookie::set_active_org_pin_for_flow(
                     &state.cookie_secret,
                     state.cfg.orgs.active_org_cookie_ttl_seconds,
                     &org_id,
@@ -176,11 +239,18 @@ pub(crate) async fn oauth_login(
             {
                 resp.headers_mut().append(axum::http::header::SET_COOKIE, v);
             }
+            if clear_reauth_mark {
+                crate::web::append_set_cookie(&mut resp, Some(reauth_cookie.clear_header()));
+            }
             resp
         }
         Err(e) => {
             tracing::error!(error = ?e, "hydra accept_login_request failed");
-            Redirect::to("/error").into_response()
+            let mut resp = Redirect::to("/error").into_response();
+            if clear_reauth_mark {
+                crate::web::append_set_cookie(&mut resp, Some(reauth_cookie.clear_header()));
+            }
+            resp
         }
     }
 }
@@ -199,6 +269,34 @@ fn anonymous_login_redirect_url(self_login_url: &str, lang: &str, request_url: &
         lang,
         org_q,
     )
+}
+
+/// Map a Kratos authentication-method name onto RFC 8176 `amr` values.
+///
+/// Kratos's names are its own (`password`, `lookup_secret`, `code`); RFC 8176
+/// defines the registered ones an RP can actually interpret. A method may
+/// yield more than one value — a passkey is both possession-based and, in
+/// practice, user-verifying, and `mfa` is what an RP checks for.
+///
+/// An unrecognised method passes through verbatim rather than being dropped:
+/// a future Kratos method should be visible to the RP, not silently absent.
+///
+/// `mfa` marks a genuine second factor, and the PAM `force_mfa` allowlist
+/// (`posix::device::SECOND_FACTOR_AMR`) reads these values off the id_token
+/// Forseti mints here — so the two have to move together.
+fn amr_values(kratos_method: &str) -> Vec<String> {
+    let mapped: &[&str] = match kratos_method {
+        "password" => &["pwd"],
+        "oidc" => &["federated"],
+        "totp" | "totp_v2" => &["otp", "mfa"],
+        "lookup_secret" => &["otp", "mfa"],
+        "webauthn" | "webauthn_v2" => &["hwk", "user", "mfa"],
+        // A passkey is a primary credential here, not a step-up, so no `mfa`.
+        "passkey" => &["hwk", "user"],
+        "code" | "code_recovery" | "link_recovery" => &["otp"],
+        _ => return vec![kratos_method.to_string()],
+    };
+    mapped.iter().map(|s| s.to_string()).collect()
 }
 
 /// Pull `organization_id=<id>` out of Hydra's `request_url` (the verbatim
@@ -266,6 +364,52 @@ mod tests {
             parse_organization_id_param(url),
             Some("acme-co".to_string())
         );
+    }
+
+    #[test]
+    fn amr_maps_kratos_methods_onto_rfc_8176() {
+        use super::amr_values;
+        assert_eq!(amr_values("password"), vec!["pwd"]);
+        assert_eq!(amr_values("oidc"), vec!["federated"]);
+        assert_eq!(amr_values("totp"), vec!["otp", "mfa"]);
+        assert_eq!(amr_values("lookup_secret"), vec!["otp", "mfa"]);
+        assert_eq!(amr_values("webauthn"), vec!["hwk", "user", "mfa"]);
+    }
+
+    #[test]
+    fn a_passkey_is_not_marked_as_a_second_factor() {
+        use super::amr_values;
+        // It is a primary credential in this flow; `mfa` would let a passkey
+        // login satisfy a `force_mfa` host on its own.
+        assert!(!amr_values("passkey").contains(&"mfa".to_string()));
+    }
+
+    #[test]
+    fn an_unknown_method_passes_through_rather_than_vanishing() {
+        use super::amr_values;
+        assert_eq!(amr_values("some_future_method"), vec!["some_future_method"]);
+    }
+
+    #[test]
+    fn every_second_factor_method_yields_the_pam_allowlist_marker() {
+        use super::amr_values;
+        // The PAM `force_mfa` allowlist reads these values off the id_token,
+        // so the mapping and the allowlist have to agree.
+        for method in [
+            "totp",
+            "totp_v2",
+            "lookup_secret",
+            "webauthn",
+            "webauthn_v2",
+        ] {
+            let values = amr_values(method);
+            assert!(
+                values
+                    .iter()
+                    .any(|v| crate::posix::device_second_factor_amr().contains(&v.as_str())),
+                "{method} -> {values:?} satisfies no entry of SECOND_FACTOR_AMR"
+            );
+        }
     }
 
     #[test]

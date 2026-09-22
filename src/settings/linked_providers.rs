@@ -224,6 +224,7 @@ async fn render_linked_providers(
             memberships,
             headers,
             session_email(session),
+            crate::ory::session_addresses(session),
             csrf_token.to_string(),
             locale,
         ),

@@ -116,6 +116,31 @@ async fn post_invite_for(
         _ => Role::Member,
     };
 
+    // Throttle before the insert, on two keys. Per recipient, so one address
+    // can't be buried under invite mail from a handful of orgs; per org, so a
+    // compromised owner account can't use the org as a mail cannon. An org
+    // owner is a paying customer, not an anonymous caller, so the audit trail
+    // (every mint is logged with its actor) is the real backstop — these caps
+    // just bound the blast radius.
+    if !invite_recipient_quota(&state).admit(&email) {
+        return back_to_members(
+            &state.db,
+            &org_id,
+            "That address has been invited too many times recently. Try again later.",
+        )
+        .await
+        .into_response();
+    }
+    if !invite_org_quota(&state).admit(&org_id) {
+        return back_to_members(
+            &state.db,
+            &org_id,
+            "This organization has sent too many invites in the last hour. Try again later.",
+        )
+        .await
+        .into_response();
+    }
+
     let token = random_invite_token();
     let ttl_days = state.cfg.orgs.invite_ttl_days;
     if let Err(e) = orgs::insert_invite(
@@ -303,6 +328,7 @@ async fn invite_accept_get(
             chrome: theme(PageChrome::from_parts(
                 &state,
                 String::new(),
+                None,
                 csrf_token.clone(),
                 locale.clone(),
             )),
@@ -319,17 +345,8 @@ async fn invite_accept_get(
     let session_email = crate::flow_view::session_email(&session);
     if session_email.to_lowercase() == invite.email.to_lowercase() {
         // Force email verification before joining any org (spec mitigation #3).
-        let verified = session
-            .identity
-            .as_ref()
-            .and_then(|i| i.verifiable_addresses.as_ref())
-            .map(|addrs| {
-                addrs
-                    .iter()
-                    .any(|a| a.value.to_lowercase() == session_email.to_lowercase() && a.verified)
-            })
-            .unwrap_or(false);
-        if !verified {
+        let addrs = crate::ory::session_addresses(&session);
+        if !crate::ory::address_is_verified(addrs, &session_email) {
             return render_invalid_invite_themed(
                 &state,
                 &csrf_token,
@@ -342,7 +359,8 @@ async fn invite_accept_get(
         return render(&InviteAcceptTemplate {
             chrome: theme(PageChrome::from_parts(
                 &state,
-                session_email,
+                session_email.clone(),
+                addrs,
                 csrf_token.clone(),
                 locale.clone(),
             )),
@@ -361,6 +379,7 @@ async fn invite_accept_get(
         chrome: theme(PageChrome::from_parts(
             &state,
             session_email,
+            crate::ory::session_addresses(&session),
             csrf_token,
             locale,
         )),
@@ -429,17 +448,8 @@ async fn invite_accept_post(
         )
         .into_response();
     }
-    let verified = session
-        .identity
-        .as_ref()
-        .and_then(|i| i.verifiable_addresses.as_ref())
-        .map(|addrs| {
-            addrs
-                .iter()
-                .any(|a| a.value.to_lowercase() == session_email.to_lowercase() && a.verified)
-        })
-        .unwrap_or(false);
-    if !verified {
+    let addrs = crate::ory::session_addresses(&session);
+    if !crate::ory::address_is_verified(addrs, &session_email) {
         return render_invalid_invite(
             &state,
             &csrf_token,
@@ -460,6 +470,7 @@ async fn invite_accept_post(
         &invite,
         &identity_id,
         &session_email,
+        addrs,
         &actx,
     )
     .await
@@ -488,6 +499,7 @@ async fn invite_finalize_get(
     .into_response()
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn finalize_membership(
     state: &AppState,
     csrf_token: &str,
@@ -495,6 +507,7 @@ async fn finalize_membership(
     invite: &orgs::OrgInvite,
     identity_id: &str,
     session_email: &str,
+    addrs: Option<&[crate::ory::VerifiableIdentityAddress]>,
     actx: &AuditCtx,
 ) -> Response {
     let role: Role = match invite.role.parse() {
@@ -512,7 +525,7 @@ async fn finalize_membership(
                 .into_response();
         }
     };
-    let drop_default = !state.cfg.admin.is_admin(session_email);
+    let drop_default = !state.cfg.admin.is_admin_actor(session_email, addrs);
     match crate::orgs::db::finalize_invite_txn(
         &state.db,
         &invite.token,
@@ -597,7 +610,7 @@ fn render_invalid_invite_themed(
     message: &str,
     org: Option<&orgs::db::Org>,
 ) -> Response {
-    let chrome = PageChrome::from_parts(state, String::new(), csrf_token.to_string(), locale);
+    let chrome = PageChrome::from_parts(state, String::new(), None, csrf_token.to_string(), locale);
     let chrome = match org {
         Some(o) => chrome.with_theme(theming::resolve(
             &theming::overrides_from_org(o),
@@ -648,6 +661,28 @@ pub(crate) fn build_invite_email(
         "Hello,\n\n{inviter_email} has invited you to join \"{org_name}\" on {brand_name} as {role}.\n\nAccept the invite by visiting:\n\n  {accept_url}\n\nThis invite expires in {ttl_days} days.\n\nIf you weren't expecting this email, you can safely ignore it.\n",
     );
     (subject, body)
+}
+
+/// Per-recipient invite quota, sized from `[orgs].invites_per_recipient_per_hour`.
+fn invite_recipient_quota(state: &AppState) -> &'static crate::rate_limit::KeyedQuota {
+    static Q: std::sync::OnceLock<crate::rate_limit::KeyedQuota> = std::sync::OnceLock::new();
+    Q.get_or_init(|| {
+        crate::rate_limit::KeyedQuota::new(
+            std::time::Duration::from_secs(3600),
+            state.cfg.orgs.invites_per_recipient_per_hour,
+        )
+    })
+}
+
+/// Per-org invite quota, sized from `[orgs].invites_per_org_per_hour`.
+fn invite_org_quota(state: &AppState) -> &'static crate::rate_limit::KeyedQuota {
+    static Q: std::sync::OnceLock<crate::rate_limit::KeyedQuota> = std::sync::OnceLock::new();
+    Q.get_or_init(|| {
+        crate::rate_limit::KeyedQuota::new(
+            std::time::Duration::from_secs(3600),
+            state.cfg.orgs.invites_per_org_per_hour,
+        )
+    })
 }
 
 #[cfg(test)]

@@ -92,6 +92,27 @@ impl Finding {
 // Check logic operates on parsed Values so it's testable without the FS.
 // ---------------------------------------------------------------------------
 
+/// Login methods that actually authenticate (as opposed to elevating an
+/// existing session). `require_verified_address` belongs on these; putting it
+/// on the AAL2 step-up methods would strand a user mid-step-up.
+const LOGIN_PRIMARY_METHODS: &[&str] = &["password", "passkey"];
+
+/// True when the login flow runs `hook` for `method`, either from the
+/// method's own `after` hooks or the flow-wide `after.hooks` list.
+fn login_after_has_hook(root: &Value, method: &str, hook: &str) -> bool {
+    let has = |path: &[&str]| {
+        dig(root, path)
+            .and_then(Value::as_sequence)
+            .is_some_and(|hooks| {
+                hooks
+                    .iter()
+                    .any(|h| h.get("hook").and_then(Value::as_str) == Some(hook))
+            })
+    };
+    has(&["selfservice", "flows", "login", "after", method, "hooks"])
+        || has(&["selfservice", "flows", "login", "after", "hooks"])
+}
+
 pub(crate) fn check_kratos(root: &Value) -> Vec<Finding> {
     let mut findings = Vec::new();
 
@@ -125,6 +146,24 @@ pub(crate) fn check_kratos(root: &Value) -> Vec<Finding> {
             "highest_available",
             "an AAL1 session (password-only login, or an email-recovery session) can open settings and REMOVE a second factor — full 2FA bypass.",
         )),
+    }
+
+    // selfservice.flows.login.after.*: require_verified_address on the primary
+    // credentials. Without it Kratos will re-authenticate an identity whose
+    // address was never proven, which is how an allowlisted-but-unregistered
+    // admin address becomes an operator session.
+    for method in LOGIN_PRIMARY_METHODS {
+        let key = format!("selfservice.flows.login.after.{method}.hooks[require_verified_address]");
+        if login_after_has_hook(root, method, "require_verified_address") {
+            findings.push(Finding::ok(&key, "present"));
+        } else {
+            findings.push(Finding::fail(
+                &key,
+                "<absent>",
+                "require_verified_address",
+                "Kratos will re-authenticate an identity whose email was never verified — anyone who registers as an allowlisted admin address can sign back in as it.",
+            ));
+        }
     }
 
     // selfservice.methods.lookup_secret.enabled
@@ -232,6 +271,27 @@ pub(crate) fn check_hydra(root: &Value) -> Vec<Finding> {
                 "endpoint unset; Hydra won't hand the flow to Forseti.",
             )),
         }
+    }
+
+    // oidc.dynamic_client_registration.enabled: anyone who can reach
+    // `/oauth2/register` mints a client. Forseti's trust model treats a client
+    // with no `oauth_client_metadata` row as unverified precisely because of
+    // this endpoint, and leaving it on means a self-registered client can sit
+    // in front of users on the consent screen.
+    match dig_bool(
+        root,
+        &["oidc", "dynamic_client_registration", "enabled"],
+    ) {
+        Some(false) | None => findings.push(Finding::ok(
+            "oidc.dynamic_client_registration.enabled",
+            "false",
+        )),
+        Some(true) => findings.push(Finding::fail(
+            "oidc.dynamic_client_registration.enabled",
+            "true",
+            "false",
+            "anyone who can reach /oauth2/register can mint an OAuth client; Forseti can't tell a self-registered one from an operator's.",
+        )),
     }
 
     findings.extend(placeholder_findings(root, &findings));
@@ -829,6 +889,107 @@ pub(crate) fn check_forseti_crosslink(kratos: &Value, doc: &DocumentMut) -> Vec<
     findings
 }
 
+/// Secret-shaped keys in Forseti's own `config.toml`. Values here are
+/// credentials, so a shipped placeholder is a live hole, not a cosmetic one.
+const FORSETI_SECRET_KEYS: &[&str] = &[
+    "webhook_token",
+    "cookie_secret",
+    "pam_client_secret",
+    "client_secret",
+    "scrape_token",
+    "smtp_password",
+];
+
+/// FAIL on any secret-shaped value in `config.toml` that is still a
+/// placeholder. The YAML scan covers Kratos and Hydra; this covers Forseti's
+/// own file, which is where `config.ci.toml`'s `...-change-me` literals live
+/// — committed, and easy to carry into a real deployment by accident.
+pub(crate) fn check_forseti_placeholders(doc: &DocumentMut) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    walk_toml(doc.as_item(), &mut String::new(), &mut |path, value| {
+        // An array entry's path ends `key[0]`; the key is what matters.
+        let last = path
+            .rsplit('.')
+            .next()
+            .map(|seg| seg.split('[').next().unwrap_or(seg))
+            .unwrap_or_default();
+        if !FORSETI_SECRET_KEYS.contains(&last) {
+            return;
+        }
+        // FAIL only: several of these keys already get an `[ OK ]` line from a
+        // more specific check (the webhook-token crosslink, for one), and two
+        // OK lines for one key reads like a bug.
+        if is_placeholder(value) {
+            findings.push(Finding::fail(
+                path,
+                "<placeholder>",
+                "a real secret",
+                "a placeholder secret shipped in config.toml — anyone reading the repo knows it.",
+            ));
+        }
+    });
+    findings
+}
+
+/// Walk every scalar in a TOML document, building dotted paths.
+fn walk_toml(item: &toml_edit::Item, path: &mut String, emit: &mut impl FnMut(&str, &str)) {
+    match item {
+        toml_edit::Item::Value(v) => walk_toml_value(v, path, emit),
+        toml_edit::Item::Table(t) => {
+            for (k, v) in t.iter() {
+                let len = path.len();
+                if !path.is_empty() {
+                    path.push('.');
+                }
+                path.push_str(k);
+                walk_toml(v, path, emit);
+                path.truncate(len);
+            }
+        }
+        toml_edit::Item::ArrayOfTables(arr) => {
+            for (i, t) in arr.iter().enumerate() {
+                let len = path.len();
+                path.push_str(&format!("[{i}]"));
+                for (k, v) in t.iter() {
+                    let klen = path.len();
+                    path.push('.');
+                    path.push_str(k);
+                    walk_toml(v, path, emit);
+                    path.truncate(klen);
+                }
+                path.truncate(len);
+            }
+        }
+        toml_edit::Item::None => {}
+    }
+}
+
+fn walk_toml_value(value: &toml_edit::Value, path: &mut String, emit: &mut impl FnMut(&str, &str)) {
+    match value {
+        toml_edit::Value::String(s) => emit(path, s.value()),
+        toml_edit::Value::Array(a) => {
+            for (i, v) in a.iter().enumerate() {
+                let len = path.len();
+                path.push_str(&format!("[{i}]"));
+                walk_toml_value(v, path, emit);
+                path.truncate(len);
+            }
+        }
+        toml_edit::Value::InlineTable(t) => {
+            for (k, v) in t.iter() {
+                let len = path.len();
+                if !path.is_empty() {
+                    path.push('.');
+                }
+                path.push_str(k);
+                walk_toml_value(v, path, emit);
+                path.truncate(len);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Strip any `user:pass@` userinfo so credentials never hit stdout/CI logs.
 pub(crate) fn redact_uri(uri: &str) -> String {
     if let Some((scheme, rest)) = uri.split_once("://")
@@ -962,6 +1123,7 @@ pub(crate) fn check(args: &CheckArgs) -> i32 {
                     findings.extend(check_oidc_providers(&root, config_dir));
                     if let Some(doc) = &forseti_doc {
                         findings.extend(check_forseti_crosslink(&root, doc));
+                        findings.extend(check_forseti_placeholders(doc));
                     }
                 }
                 for f in &findings {
@@ -1142,6 +1304,198 @@ mod tests {
         assert!(err.contains(ENV_KRATOS));
     }
 
+    const PW_HOOK_KEY: &str =
+        "selfservice.flows.login.after.password.hooks[require_verified_address]";
+    const PK_HOOK_KEY: &str =
+        "selfservice.flows.login.after.passkey.hooks[require_verified_address]";
+
+    #[test]
+    fn login_without_require_verified_address_is_fail() {
+        let v = parse(
+            r#"
+selfservice:
+  flows:
+    login:
+      ui_url: http://localhost:3000/login
+"#,
+        );
+        let findings = check_kratos(&v);
+        assert_eq!(severity_of(&findings, PW_HOOK_KEY), Some(Severity::Fail));
+        assert_eq!(severity_of(&findings, PK_HOOK_KEY), Some(Severity::Fail));
+    }
+
+    #[test]
+    fn login_with_per_method_require_verified_address_is_ok() {
+        let v = parse(
+            r#"
+selfservice:
+  flows:
+    login:
+      after:
+        password:
+          hooks:
+            - hook: require_verified_address
+        passkey:
+          hooks:
+            - hook: require_verified_address
+"#,
+        );
+        let findings = check_kratos(&v);
+        assert_eq!(severity_of(&findings, PW_HOOK_KEY), Some(Severity::Ok));
+        assert_eq!(severity_of(&findings, PK_HOOK_KEY), Some(Severity::Ok));
+    }
+
+    #[test]
+    fn flow_wide_require_verified_address_satisfies_every_method() {
+        let v = parse(
+            r#"
+selfservice:
+  flows:
+    login:
+      after:
+        hooks:
+          - hook: require_verified_address
+"#,
+        );
+        let findings = check_kratos(&v);
+        assert_eq!(severity_of(&findings, PW_HOOK_KEY), Some(Severity::Ok));
+        assert_eq!(severity_of(&findings, PK_HOOK_KEY), Some(Severity::Ok));
+    }
+
+    #[test]
+    fn step_up_only_require_verified_address_is_fail() {
+        // On totp alone it does nothing for re-authentication.
+        let v = parse(
+            r#"
+selfservice:
+  flows:
+    login:
+      after:
+        totp:
+          hooks:
+            - hook: require_verified_address
+"#,
+        );
+        let findings = check_kratos(&v);
+        assert_eq!(severity_of(&findings, PW_HOOK_KEY), Some(Severity::Fail));
+    }
+
+    #[test]
+    fn playground_kratos_passes_the_verified_address_lint() {
+        let v = load_yaml(Path::new(DEFAULT_KRATOS)).expect("playground kratos.yml parses");
+        let findings = check_kratos(&v);
+        assert_eq!(severity_of(&findings, PW_HOOK_KEY), Some(Severity::Ok));
+        assert_eq!(severity_of(&findings, PK_HOOK_KEY), Some(Severity::Ok));
+    }
+
+    #[test]
+    fn a_placeholder_secret_in_forseti_toml_is_fail() {
+        let doc: DocumentMut = r#"
+[audit]
+webhook_token = "dev-playground-token-change-me"
+
+[posix]
+pam_client_secret = "dev-posix-pam-secret-change-me"
+"#
+        .parse()
+        .expect("test toml parses");
+        let findings = check_forseti_placeholders(&doc);
+        assert_eq!(
+            severity_of(&findings, "audit.webhook_token"),
+            Some(Severity::Fail)
+        );
+        assert_eq!(
+            severity_of(&findings, "posix.pam_client_secret"),
+            Some(Severity::Fail)
+        );
+    }
+
+    #[test]
+    fn a_real_secret_in_forseti_toml_is_ok() {
+        let doc: DocumentMut = r#"
+[audit]
+webhook_token = "0f3b8c1d9a2e4f7b6c5d8e9a0b1c2d3e"
+"#
+        .parse()
+        .expect("test toml parses");
+        assert_eq!(
+            severity_of(&check_forseti_placeholders(&doc), "audit.webhook_token"),
+            None,
+            "a real secret produces no finding; the OK line belongs to the crosslink check"
+        );
+    }
+
+    #[test]
+    fn a_placeholder_inside_an_accept_list_is_still_caught() {
+        // `[audit].webhook_token` may be an array mid-rotation.
+        let doc: DocumentMut = r#"
+[audit]
+webhook_token = ["0f3b8c1d9a2e4f7b6c5d8e9a0b1c2d3e", "change-me"]
+"#
+        .parse()
+        .expect("test toml parses");
+        let findings = check_forseti_placeholders(&doc);
+        assert!(
+            findings.iter().any(|f| f.severity == Severity::Fail),
+            "a placeholder anywhere in the list must FAIL: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn the_committed_ci_config_is_caught() {
+        // `config.ci.toml` ships `...-change-me` literals on purpose; the
+        // point of this lint is that carrying that file into a real
+        // deployment fails loudly rather than silently.
+        let text = std::fs::read_to_string("config.ci.toml").expect("config.ci.toml exists");
+        let doc: DocumentMut = text.parse().expect("config.ci.toml parses");
+        let findings = check_forseti_placeholders(&doc);
+        assert!(
+            findings.iter().any(|f| f.severity == Severity::Fail),
+            "config.ci.toml's placeholder secrets must FAIL: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn hydra_dcr_enabled_is_fail() {
+        let v = parse(
+            r#"
+oidc:
+  dynamic_client_registration:
+    enabled: true
+"#,
+        );
+        let findings = check_hydra(&v);
+        assert_eq!(
+            severity_of(&findings, "oidc.dynamic_client_registration.enabled"),
+            Some(Severity::Fail)
+        );
+    }
+
+    #[test]
+    fn hydra_dcr_disabled_or_absent_is_ok() {
+        for yaml in [
+            "oidc:\n  dynamic_client_registration:\n    enabled: false\n",
+            "urls:\n  login: https://forseti.example.com/oauth/login\n",
+        ] {
+            let findings = check_hydra(&parse(yaml));
+            assert_eq!(
+                severity_of(&findings, "oidc.dynamic_client_registration.enabled"),
+                Some(Severity::Ok),
+                "yaml: {yaml}"
+            );
+        }
+    }
+
+    #[test]
+    fn playground_hydra_passes_the_dcr_lint() {
+        let v = load_yaml(Path::new(DEFAULT_HYDRA)).expect("playground hydra.yml parses");
+        let findings = check_hydra(&v);
+        assert_eq!(
+            severity_of(&findings, "oidc.dynamic_client_registration.enabled"),
+            Some(Severity::Ok)
+        );
+    }
+
     #[test]
     fn settings_aal_wrong_is_fail() {
         let v = parse(
@@ -1243,6 +1597,14 @@ selfservice:
       required_aal: highest_available
     recovery:
       enabled: true
+    login:
+      after:
+        password:
+          hooks:
+            - hook: require_verified_address
+        passkey:
+          hooks:
+            - hook: require_verified_address
   methods:
     lookup_secret:
       enabled: true
