@@ -6,6 +6,7 @@ error-cta-back-to-sign-in = Zurück zur Anmeldung
 logout-card-title = Von allen Apps abmelden?
 logout-card-subtitle = Dadurch wird Ihre Sitzung bei { $brand } beendet und alle Apps, bei denen Sie angemeldet sind, werden benachrichtigt.
 logout-body-text = Die App, die Ihre Abmeldung angefordert hat, wird über den abgeschlossenen Vorgang informiert. Einige Apps behalten möglicherweise kurzzeitig Daten im Cache; die Abmeldung hier beendet die Sitzung bei { $brand }.
+logout-body-text-direct = Einige Apps behalten möglicherweise kurzzeitig Daten im Cache; die Abmeldung hier beendet die Sitzung bei { $brand }.
 logout-action-sign-out = Abmelden
 logout-action-cancel = Abbrechen
 
@@ -64,6 +65,7 @@ error-page-link-expired-body = Dieser Link ist nicht mehr gültig. Bitte beginne
 error-page-security-title = Sicherheitsprüfung fehlgeschlagen
 error-page-already-signed-in-title = Bereits angemeldet
 error-page-default-message = Wir konnten diese Anfrage nicht abschließen.
+error-page-oauth-title = Anmeldeanfrage fehlgeschlagen
 
 # Admin-Sperrseite (admin/forbidden.html), in Rust gesetzt.
 error-admin-access-denied-title = Zugriff verweigert
@@ -79,3 +81,6 @@ error-saml-unverified-suffix = ist bereits vorhanden, aber die E-Mail-Adresse wu
 error-saml-cross-org-not-member = Ihr Konto ist noch kein Mitglied dieser Organisation. Bitten Sie Ihren Administrator, Sie hinzuzufügen, und versuchen Sie es dann erneut.
 error-saml-conflict = Anmeldung nicht möglich. Bitte wenden Sie sich an Ihren Administrator.
 error-saml-blocked-cta = Zur Anmeldung
+error-saml-admin-allowlisted = Diese Adresse gehört zu einem Betreiberkonto und kann nicht über den Identitätsanbieter Ihrer Organisation angemeldet werden. Melden Sie sich stattdessen direkt an.
+error-saml-unproven-domain = Ihre Organisation hat diese E-Mail-Domain noch nicht bestätigt. Bitten Sie Ihren Administrator, sie zu bestätigen, und versuchen Sie es dann erneut.
+error-saml-confirm-failed = Um dieses Konto mit dem Identitätsanbieter Ihrer Organisation zu verknüpfen, melden Sie sich mit dem Konto an, dem diese Adresse gehört.

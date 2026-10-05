@@ -8,9 +8,8 @@
 //! `"verified"`. This table is unreachable by the RAT (no Forseti route
 //! mutates it from a Hydra-issued credential).
 //!
-//! Back-compat: a missing row defaults to `verified`; legacy clients came in
-//! through the admin UI (the act of vouching). Verify/unverify lazily insert
-//! a row for legacy clients an admin touches.
+//! A missing row reads as unverified and not operator-written. Verify/unverify
+//! lazily insert one, stamped with the acting admin scope's `source`.
 
 use chrono::Utc;
 use diesel::prelude::*;
@@ -291,13 +290,13 @@ pub async fn backfill_legacy_admin(db: &DbPool, client_id: &str) -> anyhow::Resu
 
 /// Inside an open transaction (`$c`): return the prior verification state for
 /// `$id` ("verified"/"unverified"/"missing"), lazy-inserting a baseline
-/// `unverified`/`source = "admin"` row when absent so the caller's UPDATE
+/// `unverified` row stamped with `$source` when absent so the caller's UPDATE
 /// always lands.
 ///
 /// A macro, not a function: `db_interact!` monomorphizes the body for both
 /// connection types, and a shared helper would need full dual-backend bounds.
 macro_rules! ensure_row_and_prior {
-    ($c:expr_2021, $id:expr_2021, $now:expr_2021) => {{
+    ($c:expr_2021, $id:expr_2021, $now:expr_2021, $source:expr_2021) => {{
         let existing: Option<Row> = ocm::table
             .filter(ocm::client_id.eq($id))
             .select(Row::as_select())
@@ -312,7 +311,7 @@ macro_rules! ensure_row_and_prior {
                         verification: verification::UNVERIFIED,
                         verified_by: None,
                         verified_at: None,
-                        source: source::ADMIN,
+                        source: $source,
                         dcr_iat_id: None,
                         dcr_registered_at: None,
                         created_at: $now.clone(),
@@ -331,7 +330,7 @@ macro_rules! ensure_row_and_prior {
 /// Flip `verification` to `"verified"`, record the vouching admin +
 /// timestamp, and clear any prior revocation markers. If no row exists
 /// (legacy client created before this table shipped), one is lazily
-/// inserted first (see [`ensure_row_and_prior`]).
+/// inserted first, stamped `lazy_source` (see [`ensure_row_and_prior`]).
 ///
 /// Returns the prior verification state ("verified" / "unverified" /
 /// "missing") so the audit row can record what flipped.
@@ -339,13 +338,14 @@ pub async fn mark_verified(
     db: &DbPool,
     client_id: &str,
     admin_email: &str,
+    lazy_source: &'static str,
 ) -> anyhow::Result<String> {
     let now = Utc::now().to_rfc3339();
     let id = client_id.to_string();
     let admin = admin_email.to_string();
     // Reads the prior state before writing, so it needs the write lock up front.
     let prior: String = crate::serialized_txn!(db, String, diesel::result::Error, |c| {
-        let prior = ensure_row_and_prior!(c, &id, now);
+        let prior = ensure_row_and_prior!(c, &id, now, lazy_source);
         diesel::update(ocm::table.filter(ocm::client_id.eq(&id)))
             .set((
                 ocm::verification.eq(verification::VERIFIED),
@@ -372,12 +372,13 @@ pub async fn mark_unverified(
     db: &DbPool,
     client_id: &str,
     admin_email: &str,
+    lazy_source: &'static str,
 ) -> anyhow::Result<String> {
     let now = Utc::now().to_rfc3339();
     let id = client_id.to_string();
     let admin = admin_email.to_string();
     let prior: String = crate::serialized_txn!(db, String, diesel::result::Error, |c| {
-        let prior = ensure_row_and_prior!(c, &id, now);
+        let prior = ensure_row_and_prior!(c, &id, now, lazy_source);
         diesel::update(ocm::table.filter(ocm::client_id.eq(&id)))
             .set((
                 ocm::verification.eq(verification::UNVERIFIED),

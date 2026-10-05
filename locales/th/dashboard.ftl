@@ -3,6 +3,7 @@ dashboard-verify-email-resend = ส่งอีเมลอีกครั้ง
 dashboard-2fa-no-recovery-body = การยืนยันตัวตนแบบสองปัจจัยเปิดอยู่ แต่คุณยังไม่มีรหัสกู้คืน สร้างรหัสไว้เพื่อไม่ให้ถูกล็อกออกจากบัญชี
 dashboard-2fa-no-recovery-action = สร้างรหัส
 dashboard-welcome-heading = ยินดีต้อนรับกลับ
+dashboard-welcome-heading-new = ยินดีต้อนรับ
 dashboard-welcome-subtitle = จัดการตัวตนและแอปพลิเคชันที่เชื่อมต่อของคุณ
 dashboard-health-heading = สุขภาพบัญชี
 dashboard-health-email-title = ที่อยู่อีเมล

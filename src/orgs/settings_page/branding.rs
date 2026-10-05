@@ -311,16 +311,17 @@ pub(super) async fn branding_save(
     // branding page with an error banner and the just-submitted values echoed
     // back, rather than a raw 400 text page that loses the user's input.
     let validated: Result<ThemeUpdate, String> = (|| {
-        // logo_url renders as `<img src>`, so reject internal targets (loopback
-        // / RFC1918 / cloud metadata) that would leak referer/cookies. Reuses
-        // `validate_webhook_url`'s private-IP filter to stay in lockstep with
-        // the outbound-webhook SSRF guard.
+        // logo_url renders as `<img src>` in the browser, never fetched by
+        // Forseti, so it gets the rendered-URL gate: https, public DNS name,
+        // no IP literals or internal names.
         if !logo_url.is_empty() {
             if logo_url.len() > 2048 {
                 return Err("logo_url is too long (max 2048 chars)".to_string());
             }
-            if let Err(e) = crate::webhook::validate_webhook_url(logo_url) {
-                return Err(format!("logo_url rejected: {e}"));
+            if crate::web::safe_external_uri(logo_url, false).is_none() {
+                return Err(
+                    "logo_url rejected: use an https:// URL on a public host name".to_string(),
+                );
             }
         }
         // Basic shape check (one `@`, non-empty parts, <= 254). The control-char

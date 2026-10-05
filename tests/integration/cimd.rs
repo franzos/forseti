@@ -1072,3 +1072,47 @@ async fn cimd_refuses_a_new_client_past_the_per_host_ceiling() {
     delete_client_metadata(&known);
     hydra_delete_client(&known).await;
 }
+
+/// A CIMD client's POSTed authorization request materializes the client like
+/// a GET does, then goes on to Hydra as a GET carrying the form.
+#[tokio::test]
+async fn cimd_post_authorize_materializes_and_redirects_303() {
+    assert!(portal_reachable().await);
+    let client_id = serve_cimd_doc(|_| {}).await;
+    let redirect = "http://127.0.0.1/callback";
+    let (_verifier, challenge) = pkce_pair();
+    let res = manual_redirect_client()
+        .post(format!("{PORTAL}/oauth2/authorize"))
+        .form(&[
+            ("client_id", client_id.as_str()),
+            ("response_type", "code"),
+            ("scope", "openid offline"),
+            ("redirect_uri", redirect),
+            ("state", "cimd-post-test"),
+            ("code_challenge", challenge.as_str()),
+            ("code_challenge_method", "S256"),
+        ])
+        .send()
+        .await
+        .expect("POST authorize");
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    let location = res
+        .headers()
+        .get(reqwest::header::LOCATION)
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        location.contains("/oauth2/auth?") && location.contains("state=cimd-post-test"),
+        "the form rides the query: {location}"
+    );
+
+    let row = hydra_get_client_json(&client_id).await;
+    assert!(
+        client_redirect_uris(&row).iter().any(|u| u == redirect),
+        "the CIMD client is materialized: {row}"
+    );
+
+    cleanup_cimd_client(&client_id).await;
+    delete_client_metadata(&client_id);
+}

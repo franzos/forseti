@@ -2,6 +2,7 @@
 auth-login-page-title = 登录
 auth-login-card-title = 登录你的账号
 auth-login-card-subtitle = 欢迎回到 { $brand }。
+auth-continue-to-app = 以继续使用 { $app }
 auth-login-aal2-body = 此区域需要两步验证，但你的账号尚未设置第二重身份验证。
 auth-login-aal2-hint = 请在设置中配置身份验证器应用、安全密钥或恢复代码，然后再回来。
 auth-login-aal2-setup-link = 设置两步验证
@@ -12,6 +13,7 @@ auth-login-create-account = 创建账号
 # Shared divider (login + registration)
 auth-or-continue-with = 或使用以下方式继续
 auth-oidc-signin = 使用 { $provider } 登录
+auth-oidc-email-needed = { $provider } 未提供已验证的电子邮件地址。请输入你想用于此账户的地址。
 
 # Registration page
 auth-registration-page-title = 创建账号

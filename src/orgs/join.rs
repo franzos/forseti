@@ -200,9 +200,8 @@ struct JoinConfirmForm {
 
 /// `POST /join/confirm` — explicit confirmation of a self-serve join.
 /// Validates CSRF, re-resolves the org (TOCTOU-safe against a mode/toggle
-/// flip between GET and POST), then writes the membership row. No
-/// verification gate: join happens immediately on explicit confirm, matching
-/// today's Default auto-join.
+/// flip between GET and POST), then writes the membership row. An unverified
+/// address is sent to verify first, the same bar invite acceptance sets.
 async fn join_confirm_post(
     State(state): State<AppState>,
     actx: AuditCtx,
@@ -232,6 +231,21 @@ async fn join_confirm_post(
     {
         return Redirect::to(&redirect_target(&state.cfg, form.return_to.as_deref()))
             .into_response();
+    }
+    // Same bar as accepting an invite: an unproven address joins nothing.
+    if !crate::ory::address_is_verified(crate::ory::session_addresses(&session), &session_email) {
+        let mut back = format!(
+            "/join/confirm?org={}",
+            ory_client::apis::urlencode(&form.org)
+        );
+        if let Some(rt) = form.return_to.as_deref().filter(|s| !s.is_empty()) {
+            back.push_str(&format!("&return_to={}", ory_client::apis::urlencode(rt)));
+        }
+        return Redirect::to(&format!(
+            "/verification?return_to={}",
+            ory_client::apis::urlencode(&back)
+        ))
+        .into_response();
     }
 
     let drop_default = !state

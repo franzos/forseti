@@ -1134,14 +1134,19 @@ pub async fn insert_ssh_key(
     Ok(inserted)
 }
 
-pub async fn delete_ssh_key(db: &DbPool, id: &str) -> anyhow::Result<()> {
+/// Delete one key, only if it belongs to `identity_id`. Returns whether a row went.
+pub async fn delete_ssh_key(db: &DbPool, identity_id: &str, id: &str) -> anyhow::Result<bool> {
     let id = id.to_string();
-    db_interact!(db, |conn| {
-        diesel::delete(ssh_authorized_keys::table.filter(ssh_authorized_keys::id.eq(&id)))
-            .execute(conn)
-            .map(|_| ())
+    let ident = identity_id.to_string();
+    let n = db_interact!(db, |conn| {
+        diesel::delete(
+            ssh_authorized_keys::table
+                .filter(ssh_authorized_keys::id.eq(&id))
+                .filter(ssh_authorized_keys::identity_id.eq(&ident)),
+        )
+        .execute(conn)
     })?;
-    Ok(())
+    Ok(n > 0)
 }
 
 pub async fn add_group_member(db: &DbPool, gid: u32, identity_id: &str) -> anyhow::Result<()> {

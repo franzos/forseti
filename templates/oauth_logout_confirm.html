@@ -9,7 +9,11 @@
 {% block card_body %}
   <div class="flex flex-col gap-stack-md">
     <p class="font-body-sm text-body-sm text-on-surface-variant">
-      {{ chrome.tv1("logout-body-text", "brand", &chrome.brand.name) }}
+      {% if app_initiated %}
+        {{ chrome.tv1("logout-body-text", "brand", &chrome.brand.name) }}
+      {% else %}
+        {{ chrome.tv1("logout-body-text-direct", "brand", &chrome.brand.name) }}
+      {% endif %}
     </p>
 
     <form method="POST"

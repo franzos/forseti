@@ -30,6 +30,14 @@ struct RegistrationTemplate {
     /// WebAuthn / passkey helper script; without it the passkey enrollment
     /// button's `window.oryPasskeyRegistration` is undefined.
     webauthn_scripts: Vec<ScriptView>,
+    /// The OAuth client this sign-up continues to, when it is vouched for.
+    continue_to_app: Option<String>,
+    /// Second step of the two-step flow: the address is in, a credential is
+    /// being chosen. Kratos marks it with a `screen=previous` back button.
+    credential_step: bool,
+    /// Provider that signed the user in without a verified address Forseti
+    /// will take, leaving Kratos asking for one.
+    oidc_email_needed: Option<String>,
 }
 
 pub(crate) async fn registration(
@@ -79,23 +87,71 @@ pub(crate) async fn registration(
         )
     };
 
+    let secure = state.cfg.self_.is_https();
+    let query_hint = query
+        .login_hint
+        .as_deref()
+        .and_then(crate::auth::email_login_hint);
+    let hint_cookie_name = crate::auth::login::LOGIN_HINT_COOKIE;
     match ory::kratos::resolve_flow(&state.ory, FlowKind::Registration, flow_id, &cookie).await {
         FlowOutcome::Init => {
-            let secure = state.cfg.self_.is_https();
-            csrf::attach_csrf(
+            let mut resp = csrf::attach_csrf(
                 Redirect::to(&init_url()).into_response(),
                 Some(csrf::delete_csrf_cookie(secure)),
-            )
+            );
+            if let Some(hint) = query_hint {
+                crate::web::append_set_cookie(
+                    &mut resp,
+                    Some(crate::auth::hint_cookie(
+                        hint_cookie_name,
+                        "/registration",
+                        Some(hint),
+                        secure,
+                    )),
+                );
+            }
+            resp
         }
         FlowOutcome::Ready(flow) => {
+            let return_to = query.return_to.as_deref().or_else(|| flow_return_to(&flow));
+            let cookie_hint = cookies::read_cookie(&headers, hint_cookie_name);
+            // An OIDC `login_hint` is the weakest source: an explicit prefill
+            // or the invite's address wins.
+            let prefill_email = match prefill_email {
+                Some(email) => Some(email),
+                None => invited_email(&state, return_to).await,
+            }
+            .or_else(|| query_hint.map(str::to_string))
+            .or_else(|| {
+                cookie_hint
+                    .as_deref()
+                    .and_then(crate::auth::decode_hint_cookie)
+            });
+            let app = crate::auth::continuing_app_name(
+                &state,
+                query.return_to.as_deref().or_else(|| flow_return_to(&flow)),
+            )
+            .await;
             let mut resp = render_registration(
                 chrome,
                 &flow,
                 query.return_to.as_deref(),
                 prefill_email.as_deref(),
+                app,
             );
             if prefill_email.is_some() {
-                attach_prefill_clear_cookie(&mut resp, state.cfg.self_.is_https());
+                attach_prefill_clear_cookie(&mut resp, secure);
+            }
+            if cookie_hint.is_some() {
+                crate::web::append_set_cookie(
+                    &mut resp,
+                    Some(crate::auth::hint_cookie(
+                        hint_cookie_name,
+                        "/registration",
+                        None,
+                        secure,
+                    )),
+                );
             }
             crate::app::allow_form_action_to(
                 &mut resp,
@@ -119,6 +175,28 @@ pub(crate) async fn registration(
             .into_response()
         }
     }
+}
+
+/// The invited address, when this sign-up is on its way to accept an open
+/// invite (`return_to` = `/invite/finalize?token=…`). Read from the invite
+/// row rather than carried in a cookie, so it can't outlive that one sign-up.
+async fn invited_email(state: &AppState, return_to: Option<&str>) -> Option<String> {
+    let token = invite_token_in(&state.cfg, return_to?)?;
+    let invite = crate::orgs::fetch_invite(&state.db, &token).await.ok()??;
+    (!invite.is_accepted() && !invite.is_expired(chrono::Utc::now())).then_some(invite.email)
+}
+
+/// `token` of a same-origin `/invite/finalize` return target.
+fn invite_token_in(cfg: &crate::config::AppConfig, return_to: &str) -> Option<String> {
+    let safe = safe_return_to(cfg, return_to);
+    let url = url::Url::parse(&cfg.self_.url).ok()?.join(safe).ok()?;
+    if url.path() != "/invite/finalize" {
+        return None;
+    }
+    url.query_pairs()
+        .find(|(k, _)| k == "token")
+        .map(|(_, v)| v.into_owned())
+        .filter(|t| !t.is_empty())
 }
 
 // Fail-safe: any missing/invalid step leaves the global theme.
@@ -154,6 +232,7 @@ fn render_registration(
     flow: &serde_json::Value,
     return_to: Option<&str>,
     prefill_email: Option<&str>,
+    continue_to_app: Option<String>,
 ) -> Response {
     let mut form = FlowFormView::from_flow(flow, FlowKind::Registration, return_to, &chrome.locale);
     // Overwrite the empty `traits.email` Kratos persists on flow init rather
@@ -173,12 +252,89 @@ fn render_registration(
         }
     }
     let webauthn_scripts = collect_webauthn_scripts(flow);
+    let credential_step = form
+        .groups
+        .profile
+        .iter()
+        .any(|n| n.name == "screen" && n.value == "previous");
+    // Kratos returns a provider sign-up whose mapper left `traits.email` unset
+    // as the traits form with only the provider button to submit it.
+    let oidc_email_needed = (form.groups.profile.is_empty() && form.groups.password.is_empty())
+        .then(|| {
+            form.groups
+                .oidc
+                .iter()
+                .find(|n| n.input_type == "submit")
+                .map(|n| n.provider_display.clone())
+        })
+        .flatten();
+
+    // Forseti's own prompt explains the missing address; Kratos's raw
+    // "Property email is missing." (4000002) would only repeat it badly.
+    if oidc_email_needed.is_some() {
+        drop_missing_property_messages(&mut form);
+    }
 
     render(&RegistrationTemplate {
         chrome,
         form,
         webauthn_scripts,
+        continue_to_app,
+        credential_step,
+        oidc_email_needed,
     })
+}
+
+/// Kratos's "Property {property} is missing." validation message.
+const KRATOS_MISSING_PROPERTY: u64 = 4000002;
+
+fn drop_missing_property_messages(form: &mut FlowFormView) {
+    form.flow_messages
+        .retain(|m| m.id != KRATOS_MISSING_PROPERTY);
+    for group in [
+        &mut form.groups.default,
+        &mut form.groups.oidc,
+        &mut form.groups.code,
+        &mut form.groups.password,
+        &mut form.groups.profile,
+        &mut form.groups.other,
+    ] {
+        for node in group.iter_mut() {
+            node.messages.retain(|m| m.id != KRATOS_MISSING_PROPERTY);
+        }
+    }
+}
+
+#[cfg(test)]
+mod invite_prefill_tests {
+    use super::invite_token_in;
+    use crate::config::AppConfig;
+
+    fn cfg() -> AppConfig {
+        let mut cfg = AppConfig::test_fixture();
+        cfg.self_.url = "https://id.example.com".into();
+        cfg
+    }
+
+    #[test]
+    fn reads_the_token_from_an_invite_return() {
+        assert_eq!(
+            invite_token_in(&cfg(), "https://id.example.com/invite/finalize?token=t1").as_deref(),
+            Some("t1")
+        );
+    }
+
+    #[test]
+    fn ignores_other_targets() {
+        assert_eq!(
+            invite_token_in(&cfg(), "/oauth/login?login_challenge=c"),
+            None
+        );
+        assert_eq!(
+            invite_token_in(&cfg(), "https://evil.example/invite/finalize?token=t1"),
+            None
+        );
+    }
 }
 
 #[cfg(test)]

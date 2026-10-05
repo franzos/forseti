@@ -19,6 +19,7 @@ kratos-1010014 = Ein Code wurde an die angegebene Adresse gesendet. Falls Sie ih
 kratos-1010015 = Anmeldecode senden
 kratos-1010021 = Mit Passkey anmelden
 kratos-1010022 = Mit Passwort anmelden
+kratos-1010016 = Für { $duplicateIdentifier } gibt es bereits ein Konto. Melden Sie sich unten dort an, um { $provider } zu verknüpfen; danach können Sie beides zur Anmeldung verwenden.
 
 # --- Registrierung (1040xxx) ---
 kratos-1040001 = Registrieren

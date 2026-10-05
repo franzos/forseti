@@ -6,6 +6,7 @@ error-cta-back-to-sign-in = Retour à la connexion
 logout-card-title = Se déconnecter de toutes les applications ?
 logout-card-subtitle = Cela mettra fin à votre session avec { $brand } et notifiera chaque application à laquelle vous vous êtes connecté.
 logout-body-text = L'application qui vous a demandé de vous déconnecter sera informée que la demande est terminée. Certaines applications peuvent conserver des données en cache pendant un court moment ; se déconnecter ici met fin à la session sur { $brand }.
+logout-body-text-direct = Certaines applications peuvent conserver des données en cache pendant un court moment ; se déconnecter ici met fin à la session sur { $brand }.
 logout-action-sign-out = Se déconnecter
 logout-action-cancel = Annuler
 
@@ -64,6 +65,7 @@ error-page-link-expired-body = Ce lien n'est plus valide. Veuillez recommencer �
 error-page-security-title = Échec du contrôle de sécurité
 error-page-already-signed-in-title = Déjà connecté
 error-page-default-message = Nous n'avons pas pu finaliser cette demande.
+error-page-oauth-title = La demande de connexion a échoué
 
 # Page d'accès interdit du contrôle admin (admin/forbidden.html), définie dans Rust.
 error-admin-access-denied-title = Accès refusé
@@ -79,3 +81,6 @@ error-saml-unverified-suffix = existe déjà mais son adresse e-mail n'a pas ét
 error-saml-cross-org-not-member = Votre compte n'est pas encore membre de cette organisation. Demandez à votre administrateur de vous ajouter, puis réessayez.
 error-saml-conflict = Nous n'avons pas pu vous connecter. Veuillez contacter votre administrateur.
 error-saml-blocked-cta = Aller à la connexion
+error-saml-admin-allowlisted = Cette adresse appartient à un compte opérateur et ne peut pas se connecter via le fournisseur d'identité de votre organisation. Connectez-vous directement.
+error-saml-unproven-domain = Votre organisation n'a pas encore vérifié ce domaine de messagerie. Demandez à votre administrateur de le vérifier, puis réessayez.
+error-saml-confirm-failed = Pour associer ce compte au fournisseur d'identité de votre organisation, connectez-vous avec le compte propriétaire de cette adresse.

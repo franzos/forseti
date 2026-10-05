@@ -22,6 +22,7 @@ claim-confirm-start-over = Начать заново
 invite-accept-page-title = Принять приглашение
 invite-accept-heading = Присоединиться к { $org }
 invite-accept-body = Вас пригласили присоединиться к { $org } в роли { $role }. Приглашение было отправлено на { $email }.
+invite-accept-cta-switch = Выйти и продолжить как { $email }
 
 # Приглашение недоступно (invite/invalid.html)
 invite-invalid-page-title = Приглашение недоступно
@@ -41,3 +42,7 @@ claim-error-release-failed = Не удалось освободить почту
 
 # Завершение приглашения (задано в Rust)
 invite-error-corrupt = Приглашение повреждено. Обратитесь к вашему администратору.
+onboarding-username-page-title = Выберите имя пользователя
+onboarding-username-body = Приложения, которые создают для вас аккаунт, используют его как ваше имя пользователя. Его можно изменить позже в профиле.
+onboarding-username-hint = От 2 до 39 букв, цифр, точек, подчёркиваний или дефисов. Менять можно раз в 30 дней.
+onboarding-username-skip = Пропустить

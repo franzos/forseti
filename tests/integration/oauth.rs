@@ -301,6 +301,8 @@ async fn groups_only_emits_active_org_slugs() {
     let user = register_test_user("grp-active").await;
     let (client_id, client_secret, redirect_uri) =
         hydra_create_test_client(&["openid", "groups"]).await;
+    // Only an operator-written client may pin an org other than its own.
+    set_client_metadata_owner(&client_id, "admin", "default");
 
     let org_id = uuid::Uuid::new_v4().to_string();
     let team_id = uuid::Uuid::new_v4().to_string();
@@ -340,6 +342,73 @@ async fn groups_only_emits_active_org_slugs() {
     delete_org_membership(&org_id, &user.identity_id);
     delete_organization(&org_id);
     hydra_delete_client(&client_id).await;
+    delete_client_metadata(&client_id);
+    user.cleanup().await;
+}
+
+/// Finding C2 (round-3 review): an org-owned client got the subject's full
+/// `orgs` membership set, and an `organization_id=` pin pulled another org's
+/// team slugs into `groups`.
+#[tokio::test]
+async fn an_org_client_sees_only_its_own_org() {
+    assert!(portal_reachable().await);
+
+    let user = register_test_user("oauth-org-scope").await;
+    let (client_id, client_secret, redirect_uri) =
+        hydra_create_test_client(&["openid", "orgs", "groups"]).await;
+
+    seed_org_membership("default", &user.identity_id, "member");
+    delete_team_by_slug("default", "c2-secret");
+    let default_team = uuid::Uuid::new_v4().to_string();
+    seed_team(&default_team, "default", "C2", "c2-secret", None);
+    add_team_member(&default_team, &user.identity_id);
+
+    let org_b = uuid::Uuid::new_v4().to_string();
+    seed_organization(&org_b, &format!("c2-{}", &org_b[..8]), "C2 B", "all");
+    seed_org_membership(&org_b, &user.identity_id, "member");
+    set_client_metadata_owner(&client_id, "org", &org_b);
+
+    let auth_url = oauth_auth_url(
+        &client_id,
+        &redirect_uri,
+        "openid orgs groups",
+        "&organization_id=default",
+    );
+    let (consent_challenge, csrf, _) = drive_to_consent(&user.client, &auth_url).await;
+    let code = consent_accept_chase_code(
+        &user.manual_client,
+        &csrf,
+        &consent_challenge,
+        &["openid", "orgs", "groups"],
+        false,
+    )
+    .await
+    .expect("code");
+    let tokens = exchange_code_for_tokens(&client_id, &client_secret, &redirect_uri, &code).await;
+    let claims = decode_jwt_claims(tokens["id_token"].as_str().expect("id_token"));
+
+    let org_ids: Vec<&str> = claims["orgs"]
+        .as_array()
+        .expect("orgs claim")
+        .iter()
+        .filter_map(|o| o["id"].as_str())
+        .collect();
+    assert_eq!(
+        org_ids,
+        vec![org_b.as_str()],
+        "orgs must hold only the client's org"
+    );
+    assert_eq!(
+        claims["groups"],
+        serde_json::json!([]),
+        "a pin to another org must not leak that org's team slugs"
+    );
+
+    delete_team(&default_team);
+    delete_org_membership(&org_b, &user.identity_id);
+    delete_organization(&org_b);
+    hydra_delete_client(&client_id).await;
+    delete_client_metadata(&client_id);
     user.cleanup().await;
 }
 
@@ -764,6 +833,106 @@ async fn prompt_login_completes_after_the_user_reauthenticates() {
         landed.contains("/oauth/consent"),
         "after re-authenticating, prompt=login must be satisfied and the flow \
          must continue to consent instead of bouncing again; landed on {landed}"
+    );
+
+    hydra_delete_client(&client_id).await;
+    delete_client_metadata(&client_id);
+    user.cleanup().await;
+}
+
+// --- OP logout ends the Hydra sessions (C5) -------------------------------
+
+/// Start an `/oauth2/auth` chain on the redirect-less client and return the
+/// first `login_challenge` Hydra hands out.
+async fn fresh_login_challenge(client: &reqwest::Client, auth_url: &str) -> String {
+    let mut resp = client.get(auth_url).send().await.expect("authorize");
+    for _ in 0..10 {
+        let next = next_hop(resp).await.expect("authorize chain continues");
+        if let Some(c) = extract_query_param(next.as_str(), "login_challenge") {
+            return c;
+        }
+        resp = client.get(next).send().await.expect("follow hop");
+    }
+    panic!("no login_challenge in the authorize chain");
+}
+
+async fn hydra_login_request_skip(challenge: &str) -> bool {
+    let v: serde_json::Value = reqwest::Client::new()
+        .get(format!(
+            "{HYDRA_ADMIN}/admin/oauth2/auth/requests/login?login_challenge={challenge}"
+        ))
+        .send()
+        .await
+        .expect("get login request")
+        .json()
+        .await
+        .expect("login request body");
+    v["skip"].as_bool().expect("skip field")
+}
+
+async fn access_token_active(token: &str) -> bool {
+    hydra_introspect(token).await["active"]
+        .as_bool()
+        .unwrap_or(false)
+}
+
+/// Finding C5 (round-3 review): `/logout` ended only the Kratos session, and
+/// Hydra kept its remembered login session (the next authorize came back
+/// `skip=true` for the old subject). The RP's grant is not revoked: logout
+/// ends this browser's app sessions through back-channel logout instead
+/// (`sso_spec::dashboard_logout_sends_backchannel_for_that_browser_only`).
+#[tokio::test]
+async fn logout_ends_the_hydra_login_and_consent_sessions() {
+    assert!(portal_reachable().await);
+
+    let user = register_test_user("oauth-op-logout").await;
+    let (client_id, client_secret, redirect_uri) = hydra_create_test_client(&["openid"]).await;
+    let auth_url = oauth_auth_url(&client_id, &redirect_uri, "openid", "");
+
+    let (consent_challenge, csrf, _) = drive_to_consent(&user.client, &auth_url).await;
+    let code = consent_accept_chase_code(
+        &user.manual_client,
+        &csrf,
+        &consent_challenge,
+        &["openid"],
+        true,
+    )
+    .await
+    .expect("authorization code");
+    let tokens = exchange_code_for_tokens(&client_id, &client_secret, &redirect_uri, &code).await;
+    let access_token = tokens["access_token"].as_str().expect("access_token");
+    assert!(access_token_active(access_token).await);
+
+    // Control: Hydra remembers the login, so the next authorize is a skip.
+    let challenge = fresh_login_challenge(&user.manual_client, &auth_url).await;
+    assert!(
+        hydra_login_request_skip(&challenge).await,
+        "precondition: a remembered Hydra login session yields skip=true"
+    );
+
+    let body = user
+        .client
+        .get(format!("{PORTAL}/settings"))
+        .send()
+        .await
+        .expect("GET /settings")
+        .text()
+        .await
+        .expect("settings body");
+    let logout_csrf = extract_csrf_form_token(&body).expect("_csrf on /settings");
+    let res = user
+        .client
+        .post(format!("{PORTAL}/logout"))
+        .form(&[("_csrf", logout_csrf.as_str())])
+        .send()
+        .await
+        .expect("POST /logout");
+    assert!(res.status().is_success() || res.status().is_redirection());
+
+    let challenge = fresh_login_challenge(&user.manual_client, &auth_url).await;
+    assert!(
+        !hydra_login_request_skip(&challenge).await,
+        "after /logout Hydra must not skip-login the old subject"
     );
 
     hydra_delete_client(&client_id).await;

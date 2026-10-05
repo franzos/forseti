@@ -273,6 +273,52 @@ pub(crate) fn check_hydra(root: &Value) -> Vec<Finding> {
         }
     }
 
+    // Error, signed-out and `prompt=create` landings: unset means Hydra's
+    // unbranded fallback pages. They belong on the same origin as urls.login.
+    let forseti_origin = dig_str(root, &["urls", "login"])
+        .and_then(|u| url::Url::parse(u).ok())
+        .map(|u| u.origin());
+    for (endpoint, target) in [
+        ("error", "/error"),
+        ("post_logout_redirect", "/"),
+        ("registration", "/oauth/register"),
+    ] {
+        let key = format!("urls.{endpoint}");
+        let recommended = format!("Forseti's {target}");
+        let same_origin = |u: &str| {
+            forseti_origin.is_none()
+                || url::Url::parse(u).ok().map(|p| p.origin()) == forseti_origin
+        };
+        findings.push(match dig_str(root, &["urls", endpoint]) {
+            Some(u) if !is_placeholder(u) && same_origin(u) => Finding::ok(&key, u),
+            Some(u) if !is_placeholder(u) => Finding::warn(
+                &key,
+                u,
+                &recommended,
+                "not on the same origin as urls.login; users land outside Forseti.",
+            ),
+            other => Finding::warn(
+                &key,
+                other.unwrap_or("<unset>"),
+                &recommended,
+                "unset; users see Hydra's unbranded fallback page instead.",
+            ),
+        });
+    }
+
+    match dig(root, &["webfinger", "oidc_discovery", "supported_scope"]) {
+        Some(Value::Sequence(s)) if !s.is_empty() => findings.push(Finding::ok(
+            "webfinger.oidc_discovery.supported_scope",
+            "<set>",
+        )),
+        _ => findings.push(Finding::warn(
+            "webfinger.oidc_discovery.supported_scope",
+            "<unset>",
+            "the scopes Forseti issues (email, profile, org, orgs, groups, ...)",
+            "discovery's scopes_supported lists only openid/offline; RPs can't see what else they may request.",
+        )),
+    }
+
     // oidc.dynamic_client_registration.enabled: anyone who can reach
     // `/oauth2/register` mints a client. Forseti's trust model treats a client
     // with no `oauth_client_metadata` row as unverified precisely because of
@@ -292,6 +338,20 @@ pub(crate) fn check_hydra(root: &Value) -> Vec<Finding> {
             "false",
             "anyone who can reach /oauth2/register can mint an OAuth client; Forseti can't tell a self-registered one from an operator's.",
         )),
+    }
+
+    // A published salt lets anyone reverse pairwise subjects back to the
+    // identity ids they were derived from.
+    const PAIRWISE_SALT: &str = "oidc.subject_identifiers.pairwise.salt";
+    match dig_str(root, &["oidc", "subject_identifiers", "pairwise", "salt"]) {
+        None => {}
+        Some(salt) if is_placeholder(salt) => findings.push(Finding::fail(
+            PAIRWISE_SALT,
+            salt,
+            "a random secret (`forseti config rotate pairwise-salt`)",
+            "placeholder pairwise salt; pairwise subjects are reversible by anyone who knows it.",
+        )),
+        Some(_) => findings.push(Finding::ok(PAIRWISE_SALT, "<set>")),
     }
 
     findings.extend(placeholder_findings(root, &findings));
@@ -527,6 +587,23 @@ pub(crate) fn check_oidc_providers(root: &Value, config_dir: &Path) -> Vec<Findi
         // credential instead. Requiring `client_secret` here would FAIL every
         // correctly-configured Apple provider.
         let is_apple = dig_str(provider, &["provider"]).unwrap_or(id) == "apple";
+
+        // Kratos names a generic provider by its `label`, falling back to the
+        // type, so users would read "generic" in the account-link prompt.
+        if dig_str(provider, &["provider"]) == Some("generic") {
+            let key = format!("{base}.label");
+            findings.push(
+                match dig_str(provider, &["label"]).filter(|l| !l.is_empty()) {
+                    Some(l) => Finding::ok(&key, l),
+                    None => Finding::warn(
+                        &key,
+                        "<unset>",
+                        "the name users know the provider by",
+                        "unset; sign-in and account-link prompts call this provider \"generic\".",
+                    ),
+                },
+            );
+        }
         // `apple_private_key` is linted on its own below: it needs a PEM shape
         // check too, and one key must yield exactly one finding.
         let required: &[&str] = if is_apple {
@@ -1484,6 +1561,99 @@ oidc:
                 "yaml: {yaml}"
             );
         }
+    }
+
+    /// C44 (round-3 review): a placeholder pairwise salt passed `config check`.
+    #[test]
+    fn hydra_placeholder_pairwise_salt_is_fail() {
+        let yaml = |salt: &str| {
+            format!("oidc:\n  subject_identifiers:\n    pairwise:\n      salt: {salt}\n")
+        };
+        let key = "oidc.subject_identifiers.pairwise.salt";
+        let findings = check_hydra(&parse(&yaml("please-change-me-32-chars-long-xx")));
+        assert_eq!(severity_of(&findings, key), Some(Severity::Fail));
+        let findings = check_hydra(&parse(&yaml("q8Zr1vYk3nP0wLx7Tb2mHs9dCe4uFa6G")));
+        assert_eq!(severity_of(&findings, key), Some(Severity::Ok));
+    }
+
+    #[test]
+    fn generic_oidc_provider_without_label_warns() {
+        let yaml = |label: &str| {
+            format!(
+                "selfservice:\n  methods:\n    oidc:\n      config:\n        providers:\n          - id: corp\n            provider: generic\n            client_id: x\n            client_secret: y\n{label}"
+            )
+        };
+        let key = "selfservice.methods.oidc.config.providers[0].label";
+        let f = check_oidc_providers(&parse(&yaml("")), Path::new("."));
+        assert_eq!(severity_of(&f, key), Some(Severity::Warn));
+        let f = check_oidc_providers(
+            &parse(&yaml("            label: Corp SSO\n")),
+            Path::new("."),
+        );
+        assert_eq!(severity_of(&f, key), Some(Severity::Ok));
+    }
+
+    #[test]
+    fn hydra_landing_urls_and_supported_scope_are_checked() {
+        let findings = check_hydra(&parse(
+            "urls:\n  login: https://id.example.com/oauth/login\n",
+        ));
+        for key in [
+            "urls.error",
+            "urls.post_logout_redirect",
+            "urls.registration",
+            "webfinger.oidc_discovery.supported_scope",
+        ] {
+            assert_eq!(severity_of(&findings, key), Some(Severity::Warn), "{key}");
+        }
+
+        let findings = check_hydra(&parse(
+            r#"
+urls:
+  login: https://id.example.com/oauth/login
+  error: https://id.example.com/error
+  post_logout_redirect: https://elsewhere.example.com/
+  registration: https://id.example.com/oauth/register
+webfinger:
+  oidc_discovery:
+    supported_scope: [email, profile]
+"#,
+        ));
+        assert_eq!(severity_of(&findings, "urls.error"), Some(Severity::Ok));
+        assert_eq!(
+            severity_of(&findings, "urls.registration"),
+            Some(Severity::Ok)
+        );
+        assert_eq!(
+            severity_of(&findings, "urls.post_logout_redirect"),
+            Some(Severity::Warn)
+        );
+        assert_eq!(
+            severity_of(&findings, "webfinger.oidc_discovery.supported_scope"),
+            Some(Severity::Ok)
+        );
+    }
+
+    /// The playground's discovery lists must match what the consent handler issues.
+    #[test]
+    fn playground_hydra_advertises_the_issued_scopes_and_claims() {
+        let v = load_yaml(Path::new(DEFAULT_HYDRA)).expect("playground hydra.yml parses");
+        let list = |key: &str| -> Vec<String> {
+            dig(&v, &["webfinger", "oidc_discovery", key])
+                .and_then(Value::as_sequence)
+                .expect(key)
+                .iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect()
+        };
+        assert_eq!(
+            list("supported_scope"),
+            crate::oauth::consent::SUPPORTED_SCOPES
+        );
+        assert_eq!(
+            list("supported_claims"),
+            crate::oauth::consent::SUPPORTED_CLAIMS
+        );
     }
 
     #[test]

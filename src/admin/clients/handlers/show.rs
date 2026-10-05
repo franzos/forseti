@@ -356,8 +356,11 @@ pub async fn update(
             );
         }
     };
+    let existing_grants = existing.grant_types.clone();
     let mut payload = form.to_oauth2_client(Some(existing));
-    if let Err(msg) = constrain_org_scoped_client(&state, &scope, &mut payload).await {
+    if let Err(msg) =
+        constrain_org_scoped_client(&state, &scope, &mut payload, existing_grants.as_deref()).await
+    {
         return render_admin_error(&state, "Client not saved", &msg);
     }
 

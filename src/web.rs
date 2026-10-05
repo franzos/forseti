@@ -70,6 +70,9 @@ pub(crate) struct FlowQuery {
     /// theme itself from the org's public branding; ignored by every other
     /// consumer of `FlowQuery`.
     pub(crate) organization_id: Option<String>,
+    /// OIDC `login_hint` forwarded from `/oauth/login`; shown only when
+    /// email-shaped ([`crate::auth::email_login_hint`]).
+    pub(crate) login_hint: Option<String>,
 }
 
 /// Coerce bare query strings (`true`/`1`/`yes`/`on`) to `Option<bool>`, since the default
@@ -129,15 +132,23 @@ pub(crate) fn safe_external_uri(raw: &str, allow_private: bool) -> Option<String
         return None;
     }
     let host = parsed.host()?;
+    let is_localhost = |d: &str| {
+        let d = d.trim_end_matches('.').to_ascii_lowercase();
+        d == "localhost" || d.ends_with(".localhost")
+    };
     if allow_private {
-        return Some(raw.to_string());
+        // The hatch admits private hosts, but a name that resolves to the
+        // viewer's own machine is never a legitimate registration target.
+        return match host {
+            url::Host::Domain(d) if is_localhost(d) => None,
+            _ => Some(raw.to_string()),
+        };
     }
     let host = match host {
         url::Host::Domain(d) => d.trim_end_matches('.').to_ascii_lowercase(),
         url::Host::Ipv4(_) | url::Host::Ipv6(_) => return None,
     };
-    if host == "localhost"
-        || host.ends_with(".localhost")
+    if is_localhost(&host)
         || host.ends_with(".local")
         || host.ends_with(".internal")
         || !host.contains('.')
@@ -209,15 +220,29 @@ mod tests {
     #[test]
     fn safe_external_uri_private_hatch_admits_http_loopback_only_for_real_urls() {
         assert_eq!(
-            safe_external_uri("http://localhost:8080/app", true).as_deref(),
-            Some("http://localhost:8080/app")
-        );
-        assert_eq!(
             safe_external_uri("http://127.0.0.1/app", true).as_deref(),
             Some("http://127.0.0.1/app")
         );
+        assert_eq!(
+            safe_external_uri("http://10.0.0.5:8080/app", true).as_deref(),
+            Some("http://10.0.0.5:8080/app")
+        );
         assert!(safe_external_uri("javascript:alert(1)", true).is_none());
-        assert!(safe_external_uri("http://user:pw@localhost/app", true).is_none());
+        assert!(safe_external_uri("http://user:pw@127.0.0.1/app", true).is_none());
+    }
+
+    /// C24 (round-3 review): `localhost` names the viewer's own machine, so the
+    /// private hatch must not admit it either.
+    #[test]
+    fn safe_external_uri_refuses_localhost_names_even_in_the_private_hatch() {
+        for raw in [
+            "http://localhost:8080/app",
+            "https://LOCALHOST./app",
+            "http://app.localhost/",
+        ] {
+            assert!(safe_external_uri(raw, true).is_none(), "{raw}");
+            assert!(safe_external_uri(raw, false).is_none(), "{raw}");
+        }
     }
 
     fn cfg_with_self_url(url: &str) -> AppConfig {

@@ -22,6 +22,7 @@ claim-confirm-start-over = Ricomincia
 invite-accept-page-title = Accetta invito
 invite-accept-heading = Unisciti a { $org }
 invite-accept-body = Sei stato invitato a unirti a { $org } come { $role }. L'invito è stato inviato a { $email }.
+invite-accept-cta-switch = Esci e continua come { $email }
 
 # Invito non disponibile (invite/invalid.html)
 invite-invalid-page-title = Invito non disponibile
@@ -41,3 +42,7 @@ claim-error-release-failed = Non è stato possibile rilasciare l'email. Contatta
 
 # Finalizzazione invito (impostato in Rust)
 invite-error-corrupt = L'invito è danneggiato. Contatta il tuo amministratore.
+onboarding-username-page-title = Scegli un nome utente
+onboarding-username-body = Le app che creano un account per te lo usano come tuo nome utente. Puoi cambiarlo più tardi nel tuo profilo.
+onboarding-username-hint = Da 2 a 39 lettere, cifre, punti, trattini bassi o trattini. Puoi cambiarlo una volta ogni 30 giorni.
+onboarding-username-skip = Salta per ora

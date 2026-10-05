@@ -172,7 +172,8 @@ async fn render_members(
         }
         let avatar_url = profiles_by_id
             .get(&m.identity_id)
-            .and_then(|p| p.avatar_url.clone())
+            .and_then(|p| p.avatar_url.as_deref())
+            .and_then(|u| crate::web::safe_external_uri(u, false))
             .unwrap_or_default();
         let identicon_svg = crate::profiles::identicon::render(&m.identity_id);
         members.push(MemberView {
@@ -406,6 +407,13 @@ pub(super) async fn members_hidden(
     let is_owner = orgs::org_role(&state.db, actor, org_id).await == Some(Role::Owner);
     if !is_owner && actor != &target_identity {
         return (StatusCode::FORBIDDEN, "owner role required").into_response();
+    }
+    // A no-op UPDATE on a non-member would still write an audit row naming them.
+    if orgs::org_role(&state.db, &target_identity, org_id)
+        .await
+        .is_none()
+    {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
     }
     let hidden = form.hidden == "true";
     if let Err(e) = orgs::set_member_hidden(&state.db, org_id, &target_identity, hidden).await {

@@ -18,6 +18,8 @@ pub(crate) struct OAuthLoginQuery {
     login_challenge: String,
     #[serde(default)]
     skip_org_join: Option<String>,
+    #[serde(default)]
+    skip_username: Option<String>,
 }
 
 /// `/oauth/login?login_challenge=...` — Hydra's "who is this user?" redirect
@@ -31,6 +33,7 @@ pub(crate) async fn oauth_login(
     session: OptionalSession,
 ) -> Response {
     let skip_org_join = query.skip_org_join.is_some();
+    let skipped_username_now = query.skip_username.is_some();
     let challenge = query.login_challenge;
     let req = match ory::hydra::get_login_request(&state.ory, &challenge).await {
         Ok(r) => r,
@@ -39,6 +42,94 @@ pub(crate) async fn oauth_login(
             return Redirect::to("/error").into_response();
         }
     };
+
+    // OIDC Core 3.1.2.1: `none` stands alone, and with it no page may be shown.
+    let prompts = reauth::parse_prompt(req.request_url.as_str());
+    let prompt_none = prompts.iter().any(|p| p == "none");
+    if prompt_none && prompts.len() > 1 {
+        return reject(
+            &state,
+            &challenge,
+            "invalid_request",
+            "prompt=none can't be combined with other values.",
+        )
+        .await;
+    }
+
+    // Hydra snapshotted a remembered login for a subject this browser is no
+    // longer signed in as. Accepting it for anyone else makes Hydra restart
+    // the flow with `prompt=login` (a second sign-in), so end that session
+    // and restart the authorize request on a clean slate instead.
+    if req.skip
+        && session.identity_id() != Some(req.subject.as_str())
+        && !matches!(session, OptionalSession::InsufficientAal)
+    {
+        // `OptionalSession::None` also covers a Kratos transport error; ending
+        // a still-valid session over a network blip would sign the user out
+        // of every app, so confirm the session is really gone first.
+        if matches!(session, OptionalSession::None)
+            && !matches!(
+                ory::kratos::whoami(&state.ory, Some(&crate::cookies::cookie_header(&headers)))
+                    .await,
+                Ok(ory::kratos::WhoamiOutcome::None)
+            )
+        {
+            return reject(
+                &state,
+                &challenge,
+                "temporarily_unavailable",
+                "The sign-in service is unavailable.",
+            )
+            .await;
+        }
+        let Some(sid) = req.session_id.as_deref().filter(|s| !s.is_empty()) else {
+            return reject(
+                &state,
+                &challenge,
+                "server_error",
+                "The remembered sign-in can't be ended.",
+            )
+            .await;
+        };
+        // Only a `sid` whose own Kratos session is gone is ours to end; a live
+        // one means this challenge was replayed from another browser.
+        match stale_sid_is_abandoned(&state, sid, &req.subject).await {
+            Ok(true) => {}
+            Ok(false) => {
+                return reject(
+                    &state,
+                    &challenge,
+                    "login_required",
+                    "The remembered sign-in belongs to another browser.",
+                )
+                .await;
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "checking a stale hydra login session failed");
+                return reject(
+                    &state,
+                    &challenge,
+                    "temporarily_unavailable",
+                    "The sign-in service is unavailable.",
+                )
+                .await;
+            }
+        }
+        if let Err(e) =
+            super::op_sessions::end_sid(&state, sid, super::op_sessions::GrantRevocation::Keep)
+                .await
+        {
+            tracing::error!(error = %e, "ending a stale hydra login session failed");
+            return reject(
+                &state,
+                &challenge,
+                "temporarily_unavailable",
+                "The sign-in service is unavailable.",
+            )
+            .await;
+        }
+        return Redirect::to(req.request_url.as_str()).into_response();
+    }
 
     let self_login_url = format!(
         "{}/oauth/login?login_challenge={}",
@@ -65,14 +156,34 @@ pub(crate) async fn oauth_login(
         OptionalSession::Ok { session, .. } => *session,
         // InsufficientAal: we don't know the client's ACR ask yet, but the
         // outcome is the same either way (re-auth at AAL2), so route there.
+        OptionalSession::InsufficientAal if prompt_none => {
+            return reject(
+                &state,
+                &challenge,
+                "login_required",
+                "Step-up authentication is required.",
+            )
+            .await;
+        }
         OptionalSession::InsufficientAal => {
             return Redirect::to(&crate::auth::aal2_step_up_url(&self_login_url)).into_response();
         }
+        OptionalSession::None if prompt_none => {
+            return reject(
+                &state,
+                &challenge,
+                "login_required",
+                "The user is not signed in.",
+            )
+            .await;
+        }
         OptionalSession::None => {
             let url = anonymous_login_redirect_url(
+                "/login",
                 &self_login_url,
                 login_locale.language.as_str(),
                 req.request_url.as_str(),
+                login_hint(&req),
             );
             return Redirect::to(&url).into_response();
         }
@@ -98,6 +209,15 @@ pub(crate) async fn oauth_login(
                 bounced_at: reauth::parse_rfc3339(&m.b),
             });
         match reauth::decide(&ask, auth_time, now, mark) {
+            ReauthDecision::Reauthenticate if prompt_none => {
+                return reject(
+                    &state,
+                    &challenge,
+                    "login_required",
+                    "Re-authentication is required.",
+                )
+                .await;
+            }
             ReauthDecision::Reauthenticate => {
                 let payload = serde_json::to_vec(&ReauthMark {
                     c: challenge.clone(),
@@ -137,6 +257,15 @@ pub(crate) async fn oauth_login(
         .iter()
         .any(|acr| acr == "aal2" && !session_is_aal2)
     {
+        if prompt_none {
+            return reject(
+                &state,
+                &challenge,
+                "login_required",
+                "Step-up authentication is required.",
+            )
+            .await;
+        }
         return Redirect::to(&crate::auth::aal2_step_up_url(&self_login_url)).into_response();
     }
 
@@ -147,7 +276,13 @@ pub(crate) async fn oauth_login(
         .unwrap_or_default();
     if subject.is_empty() {
         tracing::error!("session missing identity.id");
-        let mut resp = Redirect::to("/error").into_response();
+        let mut resp = reject(
+            &state,
+            &challenge,
+            "server_error",
+            "The session has no identity.",
+        )
+        .await;
         if clear_reauth_mark {
             crate::web::append_set_cookie(&mut resp, Some(reauth_cookie.clear_header()));
         }
@@ -158,29 +293,19 @@ pub(crate) async fn oauth_login(
     // recover the wire string (`"password"`, `"oidc"`, …), then map it onto
     // RFC 8176 so relying parties reading `amr` get the registered values
     // rather than Kratos's internal names.
-    let amr: Vec<String> = session
+    let kratos_methods: Vec<String> = session
         .authentication_methods
-        .as_ref()
-        .map(|methods| {
-            let mut out: Vec<String> = Vec::new();
-            for m in methods {
-                let Some(kratos_name) = m.method.as_ref().and_then(|x| {
-                    serde_json::to_value(x)
-                        .ok()
-                        .and_then(|v| v.as_str().map(str::to_string))
-                }) else {
-                    continue;
-                };
-                for value in amr_values(&kratos_name) {
-                    if !out.contains(&value) {
-                        out.push(value);
-                    }
-                }
-            }
-            out
+        .iter()
+        .flatten()
+        .filter_map(|m| {
+            m.method.as_ref().and_then(|x| {
+                serde_json::to_value(x)
+                    .ok()
+                    .and_then(|v| v.as_str().map(str::to_string))
+            })
         })
-        .filter(|v: &Vec<String>| !v.is_empty())
-        .unwrap_or_else(|| vec!["pwd".to_string()]);
+        .collect();
+    let amr = amr_for(&kratos_methods);
 
     // Optional `organization_id` (id or slug) from Hydra's `request_url`.
     // Members: pre-select via the active-org cookie. Eligible non-members:
@@ -199,6 +324,13 @@ pub(crate) async fn oauth_login(
                     state.cfg.self_.is_https(),
                 ));
             }
+            // Rejecting would tell any client whether the user could join
+            // that org, so the pin is dropped as if the org were unknown.
+            PinAction::Interstitial { .. } if prompt_none => tracing::info!(
+                subject = %subject,
+                organization_id = %raw,
+                "oauth login: organization_id ignored under prompt=none",
+            ),
             PinAction::Interstitial { slug } => {
                 let mut url = format!(
                     "/join/confirm?org={}&return_to={}",
@@ -221,12 +353,64 @@ pub(crate) async fn oauth_login(
         }
     }
 
+    // A new account on its way into an app that reads `preferred_username`
+    // gets one chance to pick a handle first; otherwise apps like Forgejo ask
+    // for one themselves. A skip is remembered for the account on this
+    // browser, so the next app doesn't ask again.
+    let skip_username = skipped_username_now
+        || crate::cookies::read_cookie(&headers_for_reauth, USERNAME_SKIPPED_COOKIE).as_deref()
+            == Some(subject.as_str());
+    if !skip_username
+        && wants_profile(req.requested_scope.as_deref())
+        && crate::flow_view::is_new_account(&session, chrono::Utc::now())
+        && crate::profiles::fetch(&state.db, &subject)
+            .await
+            .ok()
+            .and_then(|p| p.username)
+            .is_none()
+    {
+        if prompt_none {
+            return reject(
+                &state,
+                &challenge,
+                "interaction_required",
+                "Choosing a username needs the user.",
+            )
+            .await;
+        }
+        let mut back = self_login_url.clone();
+        if skip_org_join {
+            back.push_str("&skip_org_join=1");
+        }
+        return Redirect::to(&format!(
+            "/onboarding/username?return_to={}",
+            ory_client::apis::urlencode(&back)
+        ))
+        .into_response();
+    }
+
+    let remember_for = state.cfg.oauth.login_session_remember_for.unwrap_or(86400);
+    // An unrecorded `sid` is one logout can't find, so the login fails instead.
+    if let Some(sid) = req.session_id.as_deref().filter(|s| !s.is_empty())
+        && let Err(e) =
+            super::op_sessions::record(&state.db, sid, &subject, &session.id, remember_for).await
+    {
+        tracing::error!(error = %e, "recording the hydra login session failed");
+        return reject(
+            &state,
+            &challenge,
+            "temporarily_unavailable",
+            "The sign-in service is unavailable.",
+        )
+        .await;
+    }
+
     match ory::hydra::accept_login_request(
         &state.ory,
         &challenge,
         &subject,
         true,
-        state.cfg.oauth.login_session_remember_for.unwrap_or(86400),
+        remember_for,
         amr,
         Some(session_aal),
     )
@@ -234,6 +418,19 @@ pub(crate) async fn oauth_login(
     {
         Ok(redirect) => {
             let mut resp = Redirect::to(&redirect.redirect_to).into_response();
+            if skipped_username_now {
+                let secure = if state.cfg.self_.is_https() {
+                    "; Secure"
+                } else {
+                    ""
+                };
+                crate::web::append_set_cookie(
+                    &mut resp,
+                    Some(format!(
+                        "{USERNAME_SKIPPED_COOKIE}={subject}; Path=/oauth/login; Max-Age=3600; HttpOnly; SameSite=Lax{secure}"
+                    )),
+                );
+            }
             if let Some(cookie) = set_org_cookie
                 && let Ok(v) = axum::http::HeaderValue::from_str(&cookie)
             {
@@ -246,7 +443,13 @@ pub(crate) async fn oauth_login(
         }
         Err(e) => {
             tracing::error!(error = ?e, "hydra accept_login_request failed");
-            let mut resp = Redirect::to("/error").into_response();
+            let mut resp = reject(
+                &state,
+                &challenge,
+                "server_error",
+                "The sign-in couldn't be completed.",
+            )
+            .await;
             if clear_reauth_mark {
                 crate::web::append_set_cookie(&mut resp, Some(reauth_cookie.clear_header()));
             }
@@ -255,20 +458,123 @@ pub(crate) async fn oauth_login(
     }
 }
 
-/// Build the `/login` redirect for an anonymous visitor, forwarding
-/// `organization_id` (if present on the original `/oauth2/auth` request) so
-/// `/login` can theme itself from the org's public branding.
-fn anonymous_login_redirect_url(self_login_url: &str, lang: &str, request_url: &str) -> String {
+/// Reject the challenge back to the relying party (OIDC Core 3.1.2.6), or land
+/// on `/error` when Hydra can't take the rejection either.
+async fn reject(state: &AppState, challenge: &str, error: &str, description: &str) -> Response {
+    match ory::hydra::reject_login_request(&state.ory, challenge, error, description).await {
+        Ok(r) => Redirect::to(&r.redirect_to).into_response(),
+        Err(e) => {
+            tracing::error!(error = ?e, "hydra reject_login_request failed");
+            Redirect::to("/error").into_response()
+        }
+    }
+}
+
+/// `preferred_username` rides the `profile` scope; without it the handle
+/// would never reach the app, so there's nothing to ask for.
+fn wants_profile(scopes: Option<&[String]>) -> bool {
+    scopes.is_some_and(|s| s.iter().any(|x| x == "profile"))
+}
+
+/// Identity that skipped the username step on this browser. Lives as long as
+/// the step is offered at all (an account's first hour).
+const USERNAME_SKIPPED_COOKIE: &str = "forseti_username_skipped";
+
+/// The request's OIDC `login_hint`, when it's an email worth showing.
+fn login_hint(req: &ory::OAuth2LoginRequest) -> Option<&str> {
+    req.oidc_context
+        .as_ref()
+        .and_then(|c| c.login_hint.as_deref())
+        .and_then(crate::auth::email_login_hint)
+}
+
+/// Build the `/login` (or `/registration`) redirect for an anonymous visitor,
+/// forwarding `organization_id` (if present on the original `/oauth2/auth`
+/// request) so the page can theme itself from the org's public branding, and
+/// an email `login_hint` to prefill.
+fn anonymous_login_redirect_url(
+    page: &str,
+    self_login_url: &str,
+    lang: &str,
+    request_url: &str,
+    login_hint: Option<&str>,
+) -> String {
     let org_q = parse_organization_id_param(request_url)
         .filter(|id: &String| !id.is_empty())
         .map(|id| format!("&organization_id={}", ory_client::apis::urlencode(&id)))
         .unwrap_or_default();
+    let hint_q = login_hint
+        .map(|h| format!("&login_hint={}", ory_client::apis::urlencode(h)))
+        .unwrap_or_default();
     format!(
-        "/login?return_to={}&lang={}{}",
+        "{page}?return_to={}&lang={}{}{}",
         ory_client::apis::urlencode(self_login_url),
         lang,
         org_q,
+        hint_q,
     )
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct OAuthRegisterQuery {
+    login_challenge: String,
+}
+
+/// `/oauth/register?login_challenge=...` — Hydra's `urls.registration`, the
+/// target of `prompt=create` (Initiating User Registration 1.0). Sends the
+/// visitor to sign-up with the challenge preserved: registration →
+/// verification → Continue returns to `/oauth/login`, which finishes the flow.
+pub(crate) async fn oauth_register(
+    State(state): State<AppState>,
+    Query(query): Query<OAuthRegisterQuery>,
+    uri: Uri,
+    headers: HeaderMap,
+    session: OptionalSession,
+) -> Response {
+    let challenge = query.login_challenge;
+    let req = match ory::hydra::get_login_request(&state.ory, &challenge).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!(error = ?e, "hydra get_login_request failed");
+            return Redirect::to("/error").into_response();
+        }
+    };
+    let self_login_url = format!(
+        "{}/oauth/login?login_challenge={}",
+        state.cfg.self_.url.trim_end_matches('/'),
+        ory_client::apis::urlencode(&challenge),
+    );
+    // Already signed in: there's nothing to register; carry on as a login.
+    if !matches!(session, OptionalSession::None) {
+        return Redirect::to(&self_login_url).into_response();
+    }
+    let ui_locales = req.oidc_context.as_ref().and_then(|c| c.ui_locales.clone());
+    let locale = {
+        let (mut p, _) = axum::http::Request::new(()).into_parts();
+        p.uri = uri;
+        p.headers = headers;
+        crate::page_chrome::resolve_locale_for_flow(&p, &session, ui_locales.as_deref())
+    };
+    Redirect::to(&anonymous_login_redirect_url(
+        "/registration",
+        &self_login_url,
+        locale.language.as_str(),
+        req.request_url.as_str(),
+        login_hint(&req),
+    ))
+    .into_response()
+}
+
+/// The deduplicated `amr` for a session's Kratos methods. Empty means the
+/// claim is left out (an upstream provider's own methods are unknown here).
+fn amr_for(kratos_methods: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for value in kratos_methods.iter().flat_map(|m| amr_values(m)) {
+        if !out.contains(&value) {
+            out.push(value);
+        }
+    }
+    out
 }
 
 /// Map a Kratos authentication-method name onto RFC 8176 `amr` values.
@@ -287,7 +593,9 @@ fn anonymous_login_redirect_url(self_login_url: &str, lang: &str, request_url: &
 fn amr_values(kratos_method: &str) -> Vec<String> {
     let mapped: &[&str] = match kratos_method {
         "password" => &["pwd"],
-        "oidc" => &["federated"],
+        // RFC 8176 has no "federated" value, and the upstream's own methods
+        // aren't known here, so a provider login contributes nothing.
+        "oidc" => &[],
         "totp" | "totp_v2" => &["otp", "mfa"],
         "lookup_secret" => &["otp", "mfa"],
         "webauthn" | "webauthn_v2" => &["hwk", "user", "mfa"],
@@ -307,6 +615,23 @@ pub(crate) fn parse_organization_id_param(request_url: &str) -> Option<String> {
         .query_pairs()
         .find(|(k, _)| k == "organization_id")
         .map(|(_, v)| v.into_owned())
+}
+
+/// Whether a remembered `sid` has lost the Kratos session it was recorded
+/// against. A `sid` without one (no row, or a row without a session) counts as
+/// abandoned, as before the table existed.
+async fn stale_sid_is_abandoned(
+    state: &AppState,
+    sid: &str,
+    subject: &str,
+) -> anyhow::Result<bool> {
+    use super::op_sessions::RecordedKratosSession;
+    match super::op_sessions::recorded_kratos_session(&state.db, sid).await? {
+        RecordedKratosSession::Unknown | RecordedKratosSession::None => Ok(true),
+        RecordedKratosSession::Some(ksid) => {
+            Ok(!ory::kratos::is_session_active(&state.ory, subject, &ksid).await?)
+        }
+    }
 }
 
 /// What the `organization_id` pin resolves to for a signed-in subject.
@@ -337,7 +662,15 @@ async fn resolve_pin_action(db: &DbPool, subject: &str, raw: &str, skip_join: bo
 
 #[cfg(test)]
 mod tests {
-    use super::{anonymous_login_redirect_url, parse_organization_id_param};
+    use super::{anonymous_login_redirect_url, parse_organization_id_param, wants_profile};
+
+    #[test]
+    fn username_step_needs_the_profile_scope() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert!(wants_profile(Some(&s(&["openid", "profile"]))));
+        assert!(!wants_profile(Some(&s(&["openid", "email"]))));
+        assert!(!wants_profile(None));
+    }
 
     #[test]
     fn parses_valid_organization_id() {
@@ -370,10 +703,22 @@ mod tests {
     fn amr_maps_kratos_methods_onto_rfc_8176() {
         use super::amr_values;
         assert_eq!(amr_values("password"), vec!["pwd"]);
-        assert_eq!(amr_values("oidc"), vec!["federated"]);
+        assert!(amr_values("oidc").is_empty());
         assert_eq!(amr_values("totp"), vec!["otp", "mfa"]);
         assert_eq!(amr_values("lookup_secret"), vec!["otp", "mfa"]);
         assert_eq!(amr_values("webauthn"), vec!["hwk", "user", "mfa"]);
+    }
+
+    #[test]
+    fn amr_omitted_for_federated_only() {
+        use super::amr_for;
+        let m = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(amr_for(&m(&["oidc"])).is_empty());
+        assert_eq!(
+            amr_for(&m(&["password", "totp", "password"])),
+            vec!["pwd", "otp", "mfa"]
+        );
+        assert_eq!(amr_for(&m(&["oidc", "totp"])), vec!["otp", "mfa"]);
     }
 
     #[test]
@@ -416,15 +761,53 @@ mod tests {
     fn anonymous_redirect_forwards_organization_id() {
         let request_url =
             "https://hydra.example.com/oauth2/auth?client_id=x&organization_id=acme-id";
-        let url = anonymous_login_redirect_url("https://self/oauth/login", "en", request_url);
+        let url = anonymous_login_redirect_url(
+            "/login",
+            "https://self/oauth/login",
+            "en",
+            request_url,
+            None,
+        );
         assert!(url.starts_with("/login?return_to="));
         assert!(url.contains("organization_id=acme-id"));
     }
 
     #[test]
+    fn anonymous_redirect_forwards_the_login_hint_to_either_page() {
+        let request_url = "https://hydra.example.com/oauth2/auth?client_id=x";
+        let url = anonymous_login_redirect_url(
+            "/registration",
+            "https://self/oauth/login",
+            "en",
+            request_url,
+            Some("a+b@example.com"),
+        );
+        assert!(url.starts_with("/registration?return_to="));
+        assert!(url.ends_with("&login_hint=a%2Bb%40example.com"));
+    }
+
+    #[test]
+    fn only_email_shaped_hints_are_used() {
+        use crate::auth::email_login_hint;
+        assert_eq!(email_login_hint("a@example.com"), Some("a@example.com"));
+        assert_eq!(
+            email_login_hint("5f0c6a4e-1d2b-4c1e-9f7a-0a1b2c3d4e5f"),
+            None
+        );
+        assert_eq!(email_login_hint("a b@example.com"), None);
+        assert_eq!(email_login_hint("a;b@example.com"), None);
+    }
+
+    #[test]
     fn anonymous_redirect_omits_organization_id_when_absent() {
         let request_url = "https://hydra.example.com/oauth2/auth?client_id=x";
-        let url = anonymous_login_redirect_url("https://self/oauth/login", "en", request_url);
+        let url = anonymous_login_redirect_url(
+            "/login",
+            "https://self/oauth/login",
+            "en",
+            request_url,
+            None,
+        );
         assert!(!url.contains("organization_id"));
     }
 }

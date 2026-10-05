@@ -30,7 +30,8 @@ pub fn is_valid_username(s: &str) -> bool {
 }
 
 /// A login shell fit to hand the NSS resolver: an absolute path, no control
-/// characters, no whitespace. The NUL is the pointed one - the shell is a
+/// characters, no whitespace, no `:` (the `passwd` field separator, which
+/// would let a shell smuggle extra fields into the entry). The NUL is the pointed one - the shell is a
 /// field of every `passwd` entry, and a NUL in there is what makes the C-side
 /// buffer writer panic across the ABI into sshd or sudo. The resolver drops
 /// such an entry now, but nothing should be able to store one in the first
@@ -42,7 +43,9 @@ pub fn is_valid_shell(s: &str) -> bool {
         && s.starts_with('/')
         && !s.contains("//")
         && !s.ends_with('/')
-        && !s.chars().any(|c| c.is_control() || c.is_whitespace())
+        && !s
+            .chars()
+            .any(|c| c.is_control() || c.is_whitespace() || c == ':')
 }
 
 /// Next free id: `max(existing) + 1`, or `base` when none allocated at/above
@@ -74,6 +77,7 @@ mod tests {
         assert!(!is_valid_shell("/bin//bash"), "empty path segment");
         assert!(!is_valid_shell("/bin/my shell"), "whitespace");
         assert!(!is_valid_shell("/bin/sh\n/bin/evil"), "newline");
+        assert!(!is_valid_shell("/bin/sh:0:0"), "passwd field separator");
         // The one that aborts sshd if it reaches the NSS buffer writer.
         assert!(!is_valid_shell("/bin/sh\0/bin/evil"), "interior NUL");
         assert!(!is_valid_shell(&format!("/bin/{}", "a".repeat(300))));

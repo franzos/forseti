@@ -52,7 +52,7 @@
 
   <header class="mt-2 mb-2">
     <h1 class="font-headline-lg-mobile md:font-headline-lg text-headline-lg-mobile md:text-headline-lg text-on-surface">
-      {{ chrome.t("dashboard-welcome-heading") }}
+      {% if new_account %}{{ chrome.t("dashboard-welcome-heading-new") }}{% else %}{{ chrome.t("dashboard-welcome-heading") }}{% endif %}
     </h1>
     <p class="font-body-md text-body-md text-on-surface-variant mt-1">{{ chrome.t("dashboard-welcome-subtitle") }}</p>
   </header>

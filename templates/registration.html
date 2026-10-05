@@ -3,7 +3,7 @@
 {% block title %}{{ chrome.t("auth-registration-page-title") }} &middot; {{ chrome.brand.name }}{% endblock %}
 
 {% block card_title %}{{ chrome.t("auth-registration-card-title") }}{% endblock %}
-{% block card_subtitle %}{{ chrome.t("auth-registration-card-subtitle") }}{% endblock %}
+{% block card_subtitle %}{% match continue_to_app %}{% when Some with (app) %}{{ chrome.tv1("auth-continue-to-app", "app", app) }}{% when None %}{{ chrome.t("auth-registration-card-subtitle") }}{% endmatch %}{% endblock %}
 
 {% block card_body %}
   {# Flow-level messages (e.g. "Email already in use", "Password too short"). #}
@@ -26,6 +26,12 @@
       {% endfor %}
     </div>
   {% endif %}
+
+  {% match oidc_email_needed %}
+  {% when Some with (provider) %}
+    <p class="font-body-sm text-body-sm text-on-surface-variant">{{ chrome.tv1("auth-oidc-email-needed", "provider", provider) }}</p>
+  {% when None %}
+  {% endmatch %}
 
   <form method="{{ form.form_method }}"
         action="{{ form.form_action }}"
@@ -90,17 +96,30 @@
   </div>
 {% endif %}
 
-{# OR divider — sits between the create-account button and OIDC stack, per the design mock. #}
-{% if !form.groups.oidc.is_empty() %}
-  <div class="flex items-center gap-stack-md">
-    <div class="flex-grow h-px bg-outline-variant"></div>
-    <span class="font-label-sm text-label-sm text-outline uppercase tracking-wider">{{ chrome.t("auth-or-continue-with") }}</span>
-    <div class="flex-grow h-px bg-outline-variant"></div>
-  </div>
+{# Upstream providers. Hidden on the password step, where the address is
+   already typed; without another submit on the page (Kratos asking for an
+   address the provider didn't verify), the provider button is the only
+   way on, so it stands alone rather than under an "or". #}
+{% if !form.groups.oidc.is_empty() && !credential_step %}
+  {% if !form.groups.profile.is_empty() || !form.groups.password.is_empty() %}
+    <div class="flex items-center gap-stack-md">
+      <div class="flex-grow h-px bg-outline-variant"></div>
+      <span class="font-label-sm text-label-sm text-outline uppercase tracking-wider">{{ chrome.t("auth-or-continue-with") }}</span>
+      <div class="flex-grow h-px bg-outline-variant"></div>
+    </div>
+  {% endif %}
 
   <div class="flex flex-col gap-stack-sm">
     {% for node in form.groups.oidc %}
-      {% include "partials/flow_node.html" %}
+      {% if node.input_type == "hidden" %}
+        {% include "partials/flow_node.html" %}
+      {% else %}
+        {% let oidc_btn_name = node.name.as_str() %}
+        {% let oidc_btn_value = node.value.as_str() %}
+        {% let oidc_icon = node.provider_icon_svg %}
+        {% let oidc_label = chrome.tv1("kratos-1040002", "provider", node.provider_display.as_str()) %}
+        {% include "partials/oidc_button.html" %}
+      {% endif %}
     {% endfor %}
   </div>
 {% endif %}

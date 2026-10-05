@@ -22,6 +22,7 @@ claim-confirm-start-over = ابدأ من جديد
 invite-accept-page-title = قبول الدعوة
 invite-accept-heading = انضم إلى { $org }
 invite-accept-body = لقد دُعيت للانضمام إلى { $org } بصفة { $role }. أُرسلت الدعوة إلى { $email }.
+invite-accept-cta-switch = سجّل الخروج وتابع باسم { $email }
 
 # الدعوة غير متاحة (invite/invalid.html)
 invite-invalid-page-title = الدعوة غير متاحة
@@ -41,3 +42,7 @@ claim-error-release-failed = تعذّر علينا تحرير البريد ال�
 
 # إتمام الدعوة (مضبوط في Rust)
 invite-error-corrupt = الدعوة تالفة. تواصل مع مسؤولك.
+onboarding-username-page-title = اختر اسم مستخدم
+onboarding-username-body = تستخدمه التطبيقات التي تنشئ لك حسابًا اسمَ مستخدمٍ لك فيها. يمكنك تغييره لاحقًا من ملفك الشخصي.
+onboarding-username-hint = من 2 إلى 39 حرفًا أو رقمًا أو نقطة أو شرطة سفلية أو شرطة. يمكن تغييره مرة كل 30 يومًا.
+onboarding-username-skip = تخطَّ الآن

@@ -194,4 +194,45 @@ mod tests {
             Some(ip("203.0.113.9"))
         );
     }
+
+    /// C8 (round-3 review): the public `[proxy]` trust bled onto the internal
+    /// listener, so a machine caller could pick its own audit and limiter IP.
+    #[test]
+    fn the_internal_listener_ignores_forwarded_for_unless_its_own_flag_is_on() {
+        let mut cfg = crate::config::AppConfig::test_fixture();
+        cfg.proxy = proxy(true, 1);
+        let h = headers(&["198.51.100.7"], None);
+        let peer = Some(ip("10.0.0.1"));
+
+        assert_eq!(client_ip(&h, &cfg.proxy, peer), Some(ip("198.51.100.7")));
+        assert_eq!(client_ip(&h, &cfg.internal_proxy(), peer), peer);
+
+        cfg.internal.trust_forwarded_for = true;
+        assert_eq!(
+            client_ip(&h, &cfg.internal_proxy(), peer),
+            Some(ip("198.51.100.7"))
+        );
+    }
+
+    #[test]
+    fn the_internal_listener_mounts_its_own_audit_middleware() {
+        let app = include_str!("app.rs");
+        let internal = &app[app.find("let internal_app").expect("internal_app")..];
+        let block = &internal[..internal.find(".with_state(").expect("internal state")];
+        assert!(block.contains("audit::internal_middleware"));
+        assert!(!block.contains("audit::middleware,"));
+    }
+
+    #[test]
+    fn internal_trust_forwarded_for_parses_and_defaults_off() {
+        use figment::{
+            Figment,
+            providers::{Format, Toml},
+        };
+        let parse = |src: &str| -> crate::config::InternalConfig {
+            Figment::new().merge(Toml::string(src)).extract().unwrap()
+        };
+        assert!(parse("trust_forwarded_for = true").trust_forwarded_for);
+        assert!(!parse(r#"bind = "0.0.0.0:8081""#).trust_forwarded_for);
+    }
 }

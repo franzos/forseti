@@ -21,6 +21,7 @@ kratos-1010014 = Un code a été envoyé à l'adresse indiquée. Si vous ne l'av
 kratos-1010015 = Envoyer le code de connexion
 kratos-1010021 = Se connecter avec une clé d'accès
 kratos-1010022 = Se connecter avec un mot de passe
+kratos-1010016 = { $duplicateIdentifier } a déjà un compte. Connectez-vous ci-dessous pour y associer { $provider } ; vous pourrez ensuite utiliser l’un ou l’autre pour vous connecter.
 
 # --- Inscription (1040xxx) ---
 kratos-1040001 = S'inscrire

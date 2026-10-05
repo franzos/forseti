@@ -270,7 +270,11 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         // and the rate-limited /oauth2/authorize shim — all public, outside CSRF.
         .merge(crate::hydra_front::well_known_router(&state.cfg.hydra))
         .merge(crate::hydra_front::router(&state.cfg.hydra))
-        .merge(oauth::cimd::router(&state.cfg.oauth, &state.cfg.proxy));
+        .merge(oauth::cimd::router(
+            &state.cfg.oauth,
+            &state.cfg.proxy,
+            &state.cfg.hydra,
+        ));
     // SSO routes mount only when [saml] is configured; outside CSRF (Jackson's callback is a cross-site GET).
     if state.cfg.saml.is_some() {
         public_app = public_app.merge(crate::saml::router());
@@ -356,7 +360,7 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         .merge(crate::posix::router(state.clone()))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
-            audit::middleware,
+            audit::internal_middleware,
         ))
         .layer(axum::middleware::from_fn(
             crate::metrics::track_http_metrics,

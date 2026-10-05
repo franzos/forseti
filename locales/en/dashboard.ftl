@@ -3,6 +3,7 @@ dashboard-verify-email-resend = Resend email
 dashboard-2fa-no-recovery-body = Two-factor is on but you have no recovery codes. Generate some so you can't get locked out.
 dashboard-2fa-no-recovery-action = Generate codes
 dashboard-welcome-heading = Welcome back
+dashboard-welcome-heading-new = Welcome
 dashboard-welcome-subtitle = Manage your identity and connected applications.
 dashboard-health-heading = Account health
 dashboard-health-email-title = Email address

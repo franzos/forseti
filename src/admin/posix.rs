@@ -569,8 +569,13 @@ pub async fn remove_key(
 ) -> Response {
     let ctx = admin.ctx;
     let target = format!("/admin/posix/{}", ory_client::apis::urlencode(&id));
-    match posix_db::delete_ssh_key(&state.db, &key_id).await {
-        Ok(()) => {
+    match posix_db::delete_ssh_key(&state.db, &id, &key_id).await {
+        Ok(false) => render_admin_error(
+            &state,
+            "Remove key failed",
+            "That key does not belong to this account.",
+        ),
+        Ok(true) => {
             let _ = audit::log(
                 &state.db,
                 ctx.audit_event(action::POSIX_SSH_KEY_REMOVED, &actx)

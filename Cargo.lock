@@ -1367,6 +1367,7 @@ dependencies = [
  "mime_guess",
  "moka",
  "ory-client",
+ "percent-encoding",
  "polymail",
  "rand 0.10.2",
  "regex",

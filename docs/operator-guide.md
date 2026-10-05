@@ -116,7 +116,7 @@ CSRF protection uses a double-submit token (`src/csrf.rs`) keyed off the same se
 | `name`          | string | `"Forseti"`     | Brand name shown in the header, page titles, and email templates.      |
 | `support_email` | string | none               | Support address rendered in footer / error pages.                      |
 | `logo_url`      | string | none               | Optional logo URL. When omitted, the brand name is rendered as text.   |
-| `consent_intro` | string | (generic sentence) | Intro paragraph rendered on `/oauth/consent` above the scope list.     |
+| `consent_intro` | string | (localised sentence) | Intro paragraph rendered on `/oauth/consent` above the scope list. Unset, it follows the user's language; set, it's shown as written in every language. |
 | `theme_preset`  | string | none               | Global theme preset applied to every page: `default`, `midnight`, or `cyberpunk`. Each derives its own dark-mode variant automatically. A per-org preset overrides this within that org's scope. |
 | `brand_primary` | string | none               | Global primary brand colour (`#rrggbb`). Overrides the preset's primary. |
 | `brand_on_primary` | string | none            | Foreground colour used on top of `brand_primary` (`#rrggbb`); set it to keep text legible on a custom primary. |
@@ -416,9 +416,10 @@ Neither closes the register-to-verify window on its own, because the registratio
 1. **Active Kratos session** — same as Tier 1.
 2. **Org ownership.** The caller must be an `owner` of the org named by `<slug>` (i.e. an `organization_members` row with `role = 'owner'`). Non-owners — including members with the `member` role and Forseti-wide admins who aren't members of that specific org — get a 403.
 3. **AAL2** — same as Tier 1.
-4. **Orgs license** — only for non-Default orgs. The Default org's admin surface stays OSS-tier; additional orgs are a commercial feature and a missing/expired license renders the upsell page instead.
+4. **Orgs license** — only for non-Default orgs. Additional orgs are a commercial feature and a missing/expired license renders the upsell page instead.
+5. **Operator, for the Default org.** `?org=default` also requires the Tier-1 allowlist check (verified allowlisted address). The Default org holds the operator's own OAuth clients, so an ordinary identity that ends up owning Default must not manage them.
 
-**`[admin].allowed_emails` is not checked on Tier 2.** This is deliberate: org owners need to manage their own org without the operator having to add every customer's email to the allowlist. The trust boundary on Tier 2 is "you own this org", not "the operator vouches for you".
+**`[admin].allowed_emails` is not checked on Tier 2 for non-Default orgs.** This is deliberate: org owners need to manage their own org without the operator having to add every customer's email to the allowlist. The trust boundary there is "you own this org", not "the operator vouches for you".
 
 **Which surface is which.** Only four of the admin surfaces accept `?org=`; the rest are Tier 1 whatever you append to the URL.
 
@@ -556,6 +557,8 @@ Three sources feed the table:
 1. **Forseti-owned handlers — direct emit.** Logout, settings session revoke, OAuth consent (granted / denied), account self-deletion, every admin action (`/admin/clients/*`, `/admin/identities/*`, `/admin/sessions/*`, `/admin/webhooks/*`).
 2. **Kratos flow webhooks** delivered to `POST /internal/audit/kratos` on the **internal listener**. Flow-completion events only: `identity.created` (registration), `auth.login` (login.{password,passkey} — AAL2 step-up methods intentionally don't fire so a single sign-in produces one row, not two), `password.changed` (settings.password), `password.recovered` (recovery), `verification.completed` (verification), `mfa.*` (settings.{totp,webauthn,lookup}). Kratos's admin API does not fire flow hooks, so admin-driven identity writes go through path 1.
 3. **Hydra consent decisions** emitted from Forseti's own `src/oauth/consent.rs` (Hydra has thin hook surface; scraping logs is fragile).
+
+The `password.changed` webhook does more than audit: Forseti ends the user's app sessions in their other browsers and revokes those sessions' grants, keeping the browser that made the change. A password reset counts too, since Kratos sets the new password through the same settings flow. This needs the `settings.after.password` hook and the `kratos_session_id` field the reference `audit_event.jsonnet` reads from `ctx.session`; a deployment without them keeps working, but skips this step (and logs a warning when the session id is missing).
 
 #### IP pseudonymization
 
@@ -1037,7 +1040,7 @@ Every mutating subcommand backs up the file it's about to change first (see [Bac
 
 Apple is the exception to the client-secret shape. Apple issues no static secret: Kratos mints one per handshake as a JWT signed with the `.p8` key from the Apple Developer portal, so `enable apple` takes `--apple-team-id`, `--apple-key-id`, and the key itself through its own `--apple-private-key-env/-file/-stdin` group (no masked-prompt fallback: a PEM doesn't survive a single-line read). `--client-secret-*` is refused for Apple, and the `--apple-*` flags are refused for everyone else. The key lands in `kratos.yml` as a literal PEM block, and the diff `enable` prints redacts it line by line. `config check` knows the difference too: it lints Apple's three key fields instead of demanding a `client_secret`, and warns if a stale one is left behind.
 
-If the target mapper file already exists with content that doesn't match Forseti's pinned body, `enable` refuses and asks for `--keep-mapper` to proceed without touching it: it won't silently clobber a mapper you've customized.
+If the target mapper file already exists with content that doesn't match Forseti's pinned body, `enable` refuses and asks for `--keep-mapper` to proceed without touching it: it won't silently clobber a mapper you've customized. A mapper Forseti itself shipped in an earlier release isn't treated as customized: `config check` reports it as out of date, and `enable` replaces it. The current pinned bodies also map the provider's `given_name`/`family_name` onto `traits.name`, so sign-up through a provider prefills the name.
 
 **The audit gap.** `config init`-generated `kratos.yml` files carry no audit `web_hook` nodes at all (see [Audit logging](#audit-logging): the reference playground has them, a from-scratch `config init` doesn't). `oidc enable` looks for an existing `web_hook` template on another flow to clone onto the OIDC login/registration flows; when it finds none, it still enables the provider but prints a loud warning that OIDC sign-ins won't reach the audit log until a webhook is wired up by hand. This is a known, documented gap, not a bug: wiring one up requires an audit-endpoint URL and bearer token that only the operator knows.
 
@@ -1378,10 +1381,21 @@ urls:
   login:   https://accounts.example.com/oauth/login
   consent: https://accounts.example.com/oauth/consent
   logout:  https://accounts.example.com/oauth/logout
+  error:   https://accounts.example.com/error
+  post_logout_redirect: https://accounts.example.com/
+  registration: https://accounts.example.com/oauth/register
+
+webfinger:
+  oidc_discovery:
+    supported_scope: [email, profile, org, orgs, groups, extended_profile]
+    supported_claims: [sub, iss, aud, exp, iat, auth_time, nonce, acr, amr, sid, email, email_verified, name, given_name, family_name, picture, website, preferred_username, locale, updated_at, org, orgs, groups, bio, pronouns, links]
 ```
 
 - `issuer` is the public hostname downstream apps see in `iss` claims and use for OIDC discovery.
 - `login`, `consent`, `logout` redirect the user to Forseti carrying a challenge query parameter. Forseti exchanges the challenge with Hydra's admin API and accepts or rejects it.
+- `error` is where Hydra sends OAuth errors it can't return to the client (unknown client, unregistered redirect URI). `post_logout_redirect` is the landing after a logout that names no registered `post_logout_redirect_uri`. `registration` serves `prompt=create`: Forseti's authorize endpoint rewrites it to Hydra's `prompt=registration`, and Hydra hands the challenge to this URL. Unset, users see Hydra's unbranded fallback pages.
+- `webfinger.oidc_discovery` fills discovery's `scopes_supported` and `claims_supported`. Hydra adds `openid`, `offline` and `offline_access` itself.
+- `forseti config check` warns when any of these are unset or the three landings aren't on the same origin as `urls.login`.
 
 ### Secrets
 

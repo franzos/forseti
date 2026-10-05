@@ -252,6 +252,9 @@ struct InviteAcceptTemplate {
     can_accept_now: bool,
     /// Carried into the POST form. Empty when `can_accept_now == false`.
     token: String,
+    /// Sign-in alternative to the register CTA, for an invitee who already
+    /// has an account. Empty unless anonymous.
+    sign_in_url: String,
 }
 
 /// `GET /invite/accept?token=...`: idempotent confirmation page only; the
@@ -324,21 +327,28 @@ async fn invite_accept_get(
             &state.cfg.kratos.public_url,
             Some(&return_to),
         );
+        let chrome = theme(PageChrome::from_parts(
+            &state,
+            String::new(),
+            None,
+            csrf_token.clone(),
+            locale.clone(),
+        ));
+        let cta_label = chrome.t("auth-login-create-account");
         return render(&InviteAcceptTemplate {
-            chrome: theme(PageChrome::from_parts(
-                &state,
-                String::new(),
-                None,
-                csrf_token.clone(),
-                locale.clone(),
-            )),
+            chrome,
             org_name,
             invited_email: invite.email.clone(),
             role: invite.role.clone(),
-            cta_label: format!("Register as {} and accept", invite.email),
+            cta_label,
             cta_url: reg_url,
             can_accept_now: false,
             token: String::new(),
+            sign_in_url: format!(
+                "/login?return_to={}&login_hint={}",
+                ory_client::apis::urlencode(&return_to),
+                ory_client::apis::urlencode(&invite.email)
+            ),
         });
     };
 
@@ -347,52 +357,61 @@ async fn invite_accept_get(
         // Force email verification before joining any org (spec mitigation #3).
         let addrs = crate::ory::session_addresses(&session);
         if !crate::ory::address_is_verified(addrs, &session_email) {
-            return render_invalid_invite_themed(
-                &state,
-                &csrf_token,
-                locale.clone(),
-                "Please verify your email before accepting the invite",
-                org.as_ref(),
-            )
+            // Verify, then land back here: the verified page continues to it.
+            let back = format!(
+                "{}/invite/accept?token={}",
+                state.cfg.self_.url.trim_end_matches('/'),
+                ory_client::apis::urlencode(&token)
+            );
+            return Redirect::to(&format!(
+                "/verification?return_to={}",
+                ory_client::apis::urlencode(&back)
+            ))
             .into_response();
         }
+        let chrome = theme(PageChrome::from_parts(
+            &state,
+            session_email.clone(),
+            addrs,
+            csrf_token.clone(),
+            locale.clone(),
+        ));
+        let cta_label = chrome.tv1("invite-accept-heading", "org", &org_name);
         return render(&InviteAcceptTemplate {
-            chrome: theme(PageChrome::from_parts(
-                &state,
-                session_email.clone(),
-                addrs,
-                csrf_token.clone(),
-                locale.clone(),
-            )),
+            chrome,
             org_name,
             invited_email: invite.email.clone(),
             role: invite.role.clone(),
-            cta_label: format!("Join {}", invite.email),
+            cta_label,
             cta_url: String::new(),
             can_accept_now: true,
             token,
+            sign_in_url: String::new(),
         });
     }
 
     // A different account is signed in: CTA signs out then re-routes to accept.
+    let chrome = theme(PageChrome::from_parts(
+        &state,
+        session_email,
+        crate::ory::session_addresses(&session),
+        csrf_token,
+        locale,
+    ));
+    let cta_label = chrome.tv1("invite-accept-cta-switch", "email", &invite.email);
     render(&InviteAcceptTemplate {
-        chrome: theme(PageChrome::from_parts(
-            &state,
-            session_email,
-            crate::ory::session_addresses(&session),
-            csrf_token,
-            locale,
-        )),
+        chrome,
         org_name,
         invited_email: invite.email.clone(),
         role: invite.role.clone(),
-        cta_label: format!("Sign out and sign in as {}", invite.email),
+        cta_label,
         cta_url: format!(
             "/logout?return_to=/invite/accept?token={}",
             ory_client::apis::urlencode(&token)
         ),
         can_accept_now: false,
         token: String::new(),
+        sign_in_url: String::new(),
     })
 }
 

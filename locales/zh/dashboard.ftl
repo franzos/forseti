@@ -3,6 +3,7 @@ dashboard-verify-email-resend = 重新发送邮件
 dashboard-2fa-no-recovery-body = 两步验证已开启，但你还没有恢复代码。请生成一些，以免被锁在账号之外。
 dashboard-2fa-no-recovery-action = 生成代码
 dashboard-welcome-heading = 欢迎回来
+dashboard-welcome-heading-new = 欢迎
 dashboard-welcome-subtitle = 管理你的身份和已连接的应用。
 dashboard-health-heading = 账号健康状况
 dashboard-health-email-title = 邮箱地址

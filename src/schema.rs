@@ -288,6 +288,25 @@ diesel::table! {
 }
 
 diesel::table! {
+    hydra_login_sessions (sid) {
+        sid -> Text,
+        subject -> Text,
+        kratos_session_id -> Nullable<Text>,
+        created_at -> Text,
+    }
+}
+
+diesel::table! {
+    hydra_consent_grants (consent_request_id) {
+        consent_request_id -> Text,
+        sid -> Text,
+        subject -> Text,
+        client_id -> Text,
+        created_at -> Text,
+    }
+}
+
+diesel::table! {
     device_sessions (device_code) {
         device_code -> Text,
         user_code -> Text,

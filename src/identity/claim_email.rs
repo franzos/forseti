@@ -126,17 +126,6 @@ async fn claim_post(
             })
             .unwrap_or(false)
     });
-    let verified_exists = identities.iter().any(|i| {
-        i.verifiable_addresses
-            .as_ref()
-            .map(|addrs| {
-                addrs
-                    .iter()
-                    .any(|a| a.value.to_lowercase() == email && a.verified)
-            })
-            .unwrap_or(false)
-    });
-
     let token = match unverified {
         // Over the per-recipient quota: fall through to the decoy branch
         // rather than answering differently. The whole point of this flow is
@@ -148,7 +137,6 @@ async fn claim_post(
                 && !claim_recipient_quota(&state).admit(&email) =>
         {
             tracing::warn!(
-                email = %email,
                 target_identity = %target.id,
                 "claim-email: per-recipient quota exhausted; serving decoy without sending",
             );
@@ -177,7 +165,7 @@ async fn claim_post(
                                 flash::take_secret_reveal(&db, reveal_ttl, &token_for_task).await;
                         }
                     });
-                    tracing::info!(email = %email, state = "found-unverified", "claim-email: minted claim code");
+                    tracing::info!(target_identity = %target.id, "claim-email: minted claim code");
                     t
                 }
                 Err(e) => {
@@ -192,23 +180,13 @@ async fn claim_post(
         Some(target) => {
             // Admin-allowlisted email: refuse silently.
             tracing::warn!(
-                email = %email,
                 target_identity = %target.id,
                 "claim-email: refused — target email is in admin.allowed_emails",
             );
             decoy_token_with_write(&state).await
         }
         None => {
-            let state_label = if verified_exists {
-                "found-verified"
-            } else {
-                "not-found"
-            };
-            tracing::info!(
-                email = %email,
-                state = state_label,
-                "claim-email: no actionable unverified identity; serving decoy",
-            );
+            tracing::info!("claim-email: no actionable unverified identity; serving decoy");
             decoy_token_with_write(&state).await
         }
     };
@@ -407,7 +385,6 @@ async fn confirm_post(
     if now_verified || target_email_is_admin {
         tracing::warn!(
             target_identity = %target_identity,
-            email = %target_email,
             now_verified,
             target_email_is_admin,
             "claim-email: refused at confirm — identity verified or in admin allowlist",

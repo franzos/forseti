@@ -36,13 +36,16 @@ pub(crate) async fn switch(
 
     // Capture the actor's identity before teardown so the audit row records who
     // initiated the switch even after the session is gone.
-    let actor_id = match ory::kratos::whoami(&state.ory, Some(&cookie)).await {
-        Ok(WhoamiOutcome::Ok(session)) => session
-            .identity
-            .as_ref()
-            .map(|i| i.id.clone())
-            .unwrap_or_default(),
-        _ => String::new(),
+    let (actor_id, kratos_session_id) = match ory::kratos::whoami(&state.ory, Some(&cookie)).await {
+        Ok(WhoamiOutcome::Ok(session)) => (
+            session
+                .identity
+                .as_ref()
+                .map(|i| i.id.clone())
+                .unwrap_or_default(),
+            session.id.clone(),
+        ),
+        _ => (String::new(), String::new()),
     };
 
     ory::kratos::tear_down_session(&state.ory, &cookie).await;
@@ -63,6 +66,16 @@ pub(crate) async fn switch(
             tracing::error!(error = ?e, "account switch: post-teardown whoami check failed");
             return Redirect::to("/error").into_response();
         }
+    }
+
+    if !actor_id.is_empty() {
+        crate::oauth::op_sessions::end_op_sessions_for_browser(
+            &state,
+            &actor_id,
+            &kratos_session_id,
+            crate::oauth::op_sessions::GrantRevocation::Keep,
+        )
+        .await;
     }
 
     // Session is confirmed gone; clear the active-org pin on the success path only.

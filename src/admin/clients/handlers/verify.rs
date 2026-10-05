@@ -101,8 +101,14 @@ async fn set_verification(
         }
     };
 
+    // A rowless client verified from an org scope must not come out looking
+    // operator-written; same mapping the create path uses.
+    let lazy_source = match scope {
+        AdminScope::Org { .. } => oauth_client_metadata::source::ORG,
+        AdminScope::Forseti => oauth_client_metadata::source::ADMIN,
+    };
     let prior = if verify_now {
-        match oauth_client_metadata::mark_verified(&state.db, id, admin_email).await {
+        match oauth_client_metadata::mark_verified(&state.db, id, admin_email, lazy_source).await {
             Ok(p) => p,
             Err(e) => {
                 tracing::error!(error = ?e, id, "admin: mark_verified failed");
@@ -114,7 +120,8 @@ async fn set_verification(
             }
         }
     } else {
-        match oauth_client_metadata::mark_unverified(&state.db, id, admin_email).await {
+        match oauth_client_metadata::mark_unverified(&state.db, id, admin_email, lazy_source).await
+        {
             Ok(p) => p,
             Err(e) => {
                 tracing::error!(error = ?e, id, "admin: mark_unverified failed");

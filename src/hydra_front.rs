@@ -165,8 +165,8 @@ async fn augmented_discovery_route(State(state): State<AppState>) -> Response {
     augmented_discovery(&state).await
 }
 
-/// Hydra's discovery document (via the shared cache) with the three CIMD
-/// mutations applied by [`augment_discovery_doc`].
+/// Hydra's discovery document (via the shared cache) as adjusted by
+/// [`augment_discovery_doc`].
 pub(crate) async fn augmented_discovery(state: &AppState) -> Response {
     let Some(raw) = state.openid_configuration_raw().await else {
         return (StatusCode::BAD_GATEWAY, "hydra discovery unavailable").into_response();
@@ -185,11 +185,12 @@ pub(crate) async fn augmented_discovery(state: &AppState) -> Response {
         .into_response()
 }
 
-/// The three CIMD mutations over Hydra's raw discovery doc: advertise CIMD
-/// support, point `authorization_endpoint` at the Forseti shim, and drop
-/// `registration_endpoint` (no anonymous registration surface). Everything
-/// else — `issuer` above all — passes through untouched. `None` when the doc
-/// is not a JSON object.
+/// Hydra's raw discovery doc, adjusted to what Forseti actually serves:
+/// advertise CIMD support, point `authorization_endpoint` at the Forseti
+/// shim, drop `registration_endpoint` (no anonymous registration surface),
+/// advertise only the code flow, S256 and signed tokens, and add the
+/// `prompt`/`acr` values Forseti handles. `issuer` and the remaining
+/// endpoints pass through untouched. `None` when the doc is not a JSON object.
 fn augment_discovery_doc(
     raw: &serde_json::Value,
     issuer_path: Option<&str>,
@@ -212,6 +213,30 @@ fn augment_discovery_doc(
         );
     }
     doc.remove("registration_endpoint");
+    doc.retain(|k, _| !k.starts_with("credentials_"));
+    doc.insert(
+        "response_types_supported".to_string(),
+        serde_json::json!(["code"]),
+    );
+    doc.insert(
+        "code_challenge_methods_supported".to_string(),
+        serde_json::json!(["S256"]),
+    );
+    for (key, value) in doc.iter_mut() {
+        if key.ends_with("_signing_alg_values_supported")
+            && let Some(algs) = value.as_array_mut()
+        {
+            algs.retain(|a| a.as_str() != Some("none"));
+        }
+    }
+    doc.insert(
+        "prompt_values_supported".to_string(),
+        serde_json::json!(["none", "login", "consent", "create"]),
+    );
+    doc.insert(
+        "acr_values_supported".to_string(),
+        serde_json::json!(["aal1", "aal2"]),
+    );
     Some(serde_json::Value::Object(doc))
 }
 
@@ -220,7 +245,7 @@ mod tests {
     use super::augment_discovery_doc;
 
     #[test]
-    fn augmentation_mutates_three_keys_and_nothing_else() {
+    fn augmentation_trims_to_supported_features_and_keeps_the_rest() {
         let raw = serde_json::json!({
             "issuer": "http://host.containers.internal:3000/hydra",
             "authorization_endpoint": "http://host.containers.internal:3000/hydra/oauth2/auth",
@@ -228,10 +253,15 @@ mod tests {
             "jwks_uri": "http://host.containers.internal:3000/hydra/.well-known/jwks.json",
             "registration_endpoint": "http://host.containers.internal:3000/hydra/oauth2/register",
             "scopes_supported": ["openid", "offline", "offline_access"],
-            "response_types_supported": ["code", "id_token"],
+            "response_types_supported": ["code", "id_token", "code id_token", "token"],
             "token_endpoint_auth_methods_supported": ["client_secret_basic", "none"],
-            "code_challenge_methods_supported": ["S256", "plain"],
+            "code_challenge_methods_supported": ["plain", "S256"],
             "subject_types_supported": ["public"],
+            "id_token_signing_alg_values_supported": ["RS256"],
+            "userinfo_signing_alg_values_supported": ["none", "RS256"],
+            "request_object_signing_alg_values_supported": ["none", "RS256", "ES256"],
+            "credentials_endpoint_draft_00": "http://host.containers.internal:3000/hydra/credentials",
+            "credentials_supported_draft_00": [{"format": "jwt_vc_json"}],
         });
         let out = augment_discovery_doc(&raw, Some("hydra")).expect("object doc");
 
@@ -241,15 +271,45 @@ mod tests {
             "http://host.containers.internal:3000/oauth2/authorize"
         );
         assert!(out.get("registration_endpoint").is_none());
+        assert!(out.get("credentials_endpoint_draft_00").is_none());
+        assert!(out.get("credentials_supported_draft_00").is_none());
+        assert_eq!(out["response_types_supported"], serde_json::json!(["code"]));
+        assert_eq!(
+            out["code_challenge_methods_supported"],
+            serde_json::json!(["S256"])
+        );
+        assert_eq!(
+            out["userinfo_signing_alg_values_supported"],
+            serde_json::json!(["RS256"])
+        );
+        assert_eq!(
+            out["request_object_signing_alg_values_supported"],
+            serde_json::json!(["RS256", "ES256"])
+        );
+        assert_eq!(
+            out["prompt_values_supported"],
+            serde_json::json!(["none", "login", "consent", "create"])
+        );
+        assert_eq!(
+            out["acr_values_supported"],
+            serde_json::json!(["aal1", "aal2"])
+        );
 
         // Every untouched key survives byte-identical — the issuer above all,
         // since it is the `iss` in every token.
+        let rewritten = [
+            "authorization_endpoint",
+            "registration_endpoint",
+            "response_types_supported",
+            "code_challenge_methods_supported",
+            "userinfo_signing_alg_values_supported",
+            "request_object_signing_alg_values_supported",
+            "credentials_endpoint_draft_00",
+            "credentials_supported_draft_00",
+        ];
         let (raw, out) = (raw.as_object().unwrap(), out.as_object().unwrap());
         for (key, value) in raw {
-            if matches!(
-                key.as_str(),
-                "authorization_endpoint" | "registration_endpoint"
-            ) {
+            if rewritten.contains(&key.as_str()) {
                 continue;
             }
             assert_eq!(
@@ -258,7 +318,6 @@ mod tests {
                 "key {key} must pass through verbatim"
             );
         }
-        assert_eq!(out.len(), raw.len()); // -registration_endpoint +cimd_supported
     }
 
     #[test]

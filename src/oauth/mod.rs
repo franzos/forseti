@@ -17,6 +17,7 @@ pub(crate) mod device;
 pub(crate) mod device_verify;
 pub(crate) mod login;
 pub(crate) mod logout;
+pub(crate) mod op_sessions;
 pub(crate) mod reauth;
 
 /// Consent-screen descriptions for built-in scopes (standard OIDC plus
@@ -52,6 +53,7 @@ pub(crate) fn canonical_resource(raw: &str) -> Option<String> {
 pub(crate) fn router(oauth_cfg: &OAuthConfig, proxy_cfg: &ProxyConfig) -> Router<AppState> {
     Router::new()
         .route("/oauth/login", get(login::oauth_login))
+        .route("/oauth/register", get(login::oauth_register))
         .route(
             "/oauth/consent",
             get(consent::oauth_consent).post(consent::oauth_consent_submit),

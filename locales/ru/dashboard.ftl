@@ -3,6 +3,7 @@ dashboard-verify-email-resend = Отправить письмо повторно
 dashboard-2fa-no-recovery-body = Двухфакторная аутентификация включена, но у вас нет кодов восстановления. Сгенерируйте их, чтобы не потерять доступ.
 dashboard-2fa-no-recovery-action = Сгенерировать коды
 dashboard-welcome-heading = С возвращением
+dashboard-welcome-heading-new = Добро пожаловать
 dashboard-welcome-subtitle = Управляйте своей учётной записью и подключёнными приложениями.
 dashboard-health-heading = Состояние аккаунта
 dashboard-health-email-title = Адрес электронной почты

@@ -322,3 +322,63 @@ async fn invite_token_is_hashed_at_rest() {
     owner.cleanup().await;
     let _ = delete_test_identity(&invitee_id).await;
 }
+
+/// Finding C14 (round-3 review): self-serve join wrote the membership for an
+/// address nobody had proven, while invite acceptance already required it.
+#[tokio::test]
+async fn self_serve_join_requires_a_verified_address() {
+    assert!(portal_reachable().await);
+
+    let org_id = uuid::Uuid::new_v4().to_string();
+    let slug = format!("c14-{}", &org_id[..8]);
+    seed_organization(&org_id, &slug, "C14", "all");
+    open_org_signup(&org_id);
+    let user = register_test_user("join-unverified").await;
+
+    let join = |client: reqwest::Client, slug: String| async move {
+        let body = client
+            .get(format!("{PORTAL}/join/confirm?org={slug}"))
+            .send()
+            .await
+            .expect("GET /join/confirm")
+            .text()
+            .await
+            .expect("join body");
+        let csrf = extract_csrf_form_token(&body).expect("_csrf on /join/confirm");
+        client
+            .post(format!("{PORTAL}/join/confirm"))
+            .form(&[("_csrf", csrf.as_str()), ("org", slug.as_str())])
+            .send()
+            .await
+            .expect("POST /join/confirm")
+    };
+
+    let res = join(user.manual_client.clone(), slug.clone()).await;
+    let location = res
+        .headers()
+        .get(reqwest::header::LOCATION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        location.starts_with("/verification"),
+        "an unverified address must be sent to verify; got {} {location}",
+        res.status()
+    );
+    assert_eq!(org_member_role(&org_id, &user.identity_id), None);
+
+    mark_identity_verified(&user.identity_id).await;
+    let res = join(user.manual_client.clone(), slug.clone()).await;
+    assert!(
+        res.status().is_redirection(),
+        "verified join: {}",
+        res.status()
+    );
+    assert_eq!(
+        org_member_role(&org_id, &user.identity_id).as_deref(),
+        Some("member")
+    );
+
+    delete_organization(&org_id);
+    user.cleanup().await;
+}

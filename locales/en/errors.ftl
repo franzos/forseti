@@ -6,6 +6,7 @@ error-cta-back-to-sign-in = Back to sign in
 logout-card-title = Sign out of all apps?
 logout-card-subtitle = This will end your session with { $brand } and notify every app you signed in to.
 logout-body-text = The app that asked you to sign out will be told the request is complete. Some apps may keep local data cached for a short while; signing out here ends the session at { $brand }.
+logout-body-text-direct = Some apps may keep local data cached for a short while; signing out here ends the session at { $brand }.
 logout-action-sign-out = Sign out
 logout-action-cancel = Cancel
 
@@ -64,6 +65,7 @@ error-page-link-expired-body = This link is no longer valid. Please start again 
 error-page-security-title = Security check failed
 error-page-already-signed-in-title = Already signed in
 error-page-default-message = We couldn't complete that request.
+error-page-oauth-title = Sign-in request failed
 
 # Admin gate forbidden page (admin/forbidden.html), set in Rust.
 error-admin-access-denied-title = Access denied

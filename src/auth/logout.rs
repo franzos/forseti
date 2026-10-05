@@ -32,11 +32,22 @@ pub(crate) async fn logout(
             session.email().unwrap_or_default().to_string(),
         )
     });
+    let kratos_session_id = session.ok().map(|s| s.id.clone());
 
     let secure = state.cfg.self_.is_https();
     match ory::kratos::fetch_logout_url(&state.ory, &cookie).await {
         Ok(Some(url)) => {
             if let Some((actor_id, actor_email)) = &actor {
+                if let Some(ksid) = &kratos_session_id {
+                    crate::oauth::op_sessions::end_op_sessions_for_browser(
+                        &state,
+                        actor_id,
+                        ksid,
+                        crate::oauth::op_sessions::GrantRevocation::Keep,
+                    )
+                    .await;
+                }
+                crate::oauth::op_sessions::sweep_dead_browser_sessions(&state, actor_id).await;
                 let _ = audit::log(
                     &state.db,
                     AuditEvent::new(action::AUTH_LOGOUT)

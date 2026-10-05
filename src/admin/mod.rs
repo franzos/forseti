@@ -264,7 +264,8 @@ async fn gate_admin_prefix(
 /// - **Org-scoped** (`?org=<slug>`): org-owner surface. Gated by org ownership
 ///   plus session + AAL2; `[admin].allowed_emails` is **not** checked, so
 ///   owners manage their own org without the operator allowlisting every
-///   customer email. Non-Default orgs additionally require the Orgs license.
+///   customer email. Non-Default orgs additionally require the Orgs license;
+///   the Default org instead requires an allowlisted operator.
 ///
 /// Documented for operators in `docs/operator-guide.md` ("Admin access
 /// model"). If you change which tier requires what, update that section.
@@ -297,9 +298,25 @@ pub async fn require_admin_with_scope(
             AdminScope::Forseti
         }
         AdminScopeOutcome::Resolved(other @ AdminScope::Org { .. }) => {
-            // Non-Default orgs need the license; the Default org stays OSS-tier.
+            // Non-Default orgs need the license. The Default org is where the
+            // operator's own clients live, so owning it is not enough: the
+            // actor must be an operator too.
             let org_id_str = other.org_id().unwrap_or("").to_string();
-            if org_id_str != crate::orgs::DEFAULT_ORG_ID {
+            if org_id_str == crate::orgs::DEFAULT_ORG_ID {
+                if !state
+                    .cfg
+                    .admin
+                    .is_admin_actor(&email, ory::session_addresses(&session))
+                {
+                    let locale = admin_gate_locale(&parts.headers);
+                    return Err(render_forbidden(
+                        state,
+                        &locale,
+                        &crate::i18n::lookup(&locale, "error-admin-access-denied-title"),
+                        &crate::i18n::lookup(&locale, "error-admin-access-denied-forseti-body"),
+                    ));
+                }
+            } else {
                 crate::extractors::gate_orgs_feature_or_upsell(state, csrf_token, &email)?;
             }
             other
@@ -346,9 +363,8 @@ pub async fn require_admin(
         .is_admin_actor(&email, ory::session_addresses(&session))
     {
         tracing::warn!(
-            actor = %email,
+            actor = %identity_id,
             path,
-            allowlisted = state.cfg.admin.is_admin(&email),
             "admin gate: rejected non-admin"
         );
         let locale = admin_gate_locale(&parts.headers);

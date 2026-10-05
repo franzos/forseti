@@ -3,9 +3,10 @@
 //! An org owner is not a Forseti operator. Kratos identities and sessions are
 //! global - one identity spans every org - so the identity and session admin
 //! surfaces are Tier-1 (`[admin].allowed_emails` + AAL2) and `?org=<slug>`
-//! buys nothing there. These tests drive a *non-allowlisted* owner of the
-//! Default org at AAL2, which is exactly the principal the org-scoped tier
-//! used to let through.
+//! buys nothing there. These tests drive a *non-allowlisted* org owner at
+//! AAL2, which is exactly the principal the org-scoped tier used to let
+//! through. A named org needs the Orgs license; owning the Default org buys
+//! nothing without the allowlist either.
 //!
 //! The fixture needs a second AAL2-capable identity, so it plants a TOTP
 //! credential into Kratos the way `make seed-admin` does. The Tier-1 control
@@ -18,9 +19,8 @@ fn extract_form_csrf(body: &str) -> Option<String> {
     re.captures(body).map(|c| c[1].to_string())
 }
 
-/// A non-allowlisted identity at AAL2 who owns the Default org - the exact
-/// principal `RequireAdminScoped` admitted. Default is used rather than a
-/// named org so the fixture needs no Orgs license.
+/// A non-allowlisted identity at AAL2 who owns an org - the exact principal
+/// `RequireAdminScoped` admits for a named org.
 struct OrgOwner {
     user: RegisteredUser,
     csrf: String,
@@ -33,7 +33,18 @@ impl OrgOwner {
         // first request, so make one before promoting the role.
         let _ = user.client.get(PORTAL).send().await;
         set_org_member_role("default", &user.identity_id, "owner");
+        Self::step_up(user).await
+    }
 
+    /// Owner of a named org; the caller seeds the org and holds the license.
+    async fn build_in(prefix: &str, org_id: &str) -> Self {
+        let user = register_test_user(prefix).await;
+        let _ = user.client.get(PORTAL).send().await;
+        seed_org_membership(org_id, &user.identity_id, "owner");
+        Self::step_up(user).await
+    }
+
+    async fn step_up(user: RegisteredUser) -> Self {
         plant_totp(&user.identity_id, TEST_TOTP_SECRET);
         totp_step_up(&user.client, &totp_code_for(TEST_TOTP_SECRET)).await;
 
@@ -58,8 +69,16 @@ impl OrgOwner {
 #[tokio::test]
 async fn org_owner_is_refused_on_identity_and_session_admin() {
     assert!(portal_reachable().await);
+    if !with_orgs_license(org_owner_is_refused_on_identity_and_session_admin_body).await {
+        eprintln!("skipping: needs the admin fixture and tests/fixtures/license/active.blob");
+    }
+}
 
-    let owner = OrgOwner::build("tier-owner").await;
+async fn org_owner_is_refused_on_identity_and_session_admin_body() {
+    let org_id = uuid::Uuid::new_v4().to_string();
+    let slug = format!("tier-{}", &org_id[..8]);
+    seed_organization(&org_id, &slug, "Tier", "all");
+    let owner = OrgOwner::build_in("tier-owner", &org_id).await;
     let victim = register_test_user("tier-victim").await;
     let _ = victim.client.get(PORTAL).send().await;
 
@@ -69,10 +88,10 @@ async fn org_owner_is_refused_on_identity_and_session_admin() {
     let res = owner
         .user
         .client
-        .get(format!("{PORTAL}/admin/clients?org=default"))
+        .get(format!("{PORTAL}/admin/clients?org={slug}"))
         .send()
         .await
-        .expect("GET /admin/clients?org=default");
+        .expect("GET /admin/clients?org=<slug>");
     assert_eq!(
         res.status().as_u16(),
         200,
@@ -86,15 +105,15 @@ async fn org_owner_is_refused_on_identity_and_session_admin() {
         format!("/admin/identities/{vid}"),
         format!("/admin/identities/{vid}/disable"),
         format!("/admin/identities/{vid}/delete"),
-        "/admin/identity-picker?return_to=/admin/posix/new&org=default".to_string(),
+        format!("/admin/identity-picker?return_to=/admin/posix/new&org={slug}"),
         "/admin/sessions".to_string(),
         "/admin/sessions/00000000-0000-0000-0000-000000000000/revoke".to_string(),
     ];
     for path in &gets {
         let sep = if path.contains('?') {
-            ""
+            String::new()
         } else {
-            "?org=default"
+            format!("?org={slug}")
         };
         let url = format!("{PORTAL}{path}{sep}");
         let res = owner
@@ -119,7 +138,7 @@ async fn org_owner_is_refused_on_identity_and_session_admin() {
         format!("/admin/identities/{vid}/delete"),
     ];
     for path in &posts {
-        let url = format!("{PORTAL}{path}?org=default");
+        let url = format!("{PORTAL}{path}?org={slug}");
         let res = owner
             .user
             .client
@@ -155,7 +174,8 @@ async fn org_owner_is_refused_on_identity_and_session_admin() {
         res.status()
     );
 
-    delete_org_membership("default", &owner.user.identity_id);
+    delete_org_membership(&org_id, &owner.user.identity_id);
+    delete_organization(&org_id);
     owner.user.cleanup().await;
     victim.cleanup().await;
 }
@@ -167,8 +187,16 @@ async fn org_owner_is_refused_on_identity_and_session_admin() {
 #[tokio::test]
 async fn org_owner_client_cannot_skip_consent_or_borrow_audience() {
     assert!(portal_reachable().await);
+    if !with_orgs_license(org_owner_client_cannot_skip_consent_or_borrow_audience_body).await {
+        eprintln!("skipping: needs the admin fixture and tests/fixtures/license/active.blob");
+    }
+}
 
-    let owner = OrgOwner::build("tier-client").await;
+async fn org_owner_client_cannot_skip_consent_or_borrow_audience_body() {
+    let org_id = uuid::Uuid::new_v4().to_string();
+    let slug = format!("tier-{}", &org_id[..8]);
+    seed_organization(&org_id, &slug, "Tier", "all");
+    let owner = OrgOwner::build_in("tier-client", &org_id).await;
     let base = [
         ("_csrf", owner.csrf.as_str()),
         ("name", "org-scoped-client"),
@@ -187,11 +215,11 @@ async fn org_owner_client_cannot_skip_consent_or_borrow_audience() {
     let res = owner
         .user
         .client
-        .post(format!("{PORTAL}/admin/clients?org=default"))
+        .post(format!("{PORTAL}/admin/clients?org={slug}"))
         .form(&form)
         .send()
         .await
-        .expect("POST /admin/clients?org=default");
+        .expect("POST /admin/clients?org=<slug>");
     assert_eq!(
         res.status().as_u16(),
         200,
@@ -224,7 +252,7 @@ async fn org_owner_client_cannot_skip_consent_or_borrow_audience() {
     let res = owner
         .user
         .client
-        .post(format!("{PORTAL}/admin/clients?org=default"))
+        .post(format!("{PORTAL}/admin/clients?org={slug}"))
         .form(&form)
         .send()
         .await
@@ -241,8 +269,163 @@ async fn org_owner_client_cannot_skip_consent_or_borrow_audience() {
         "a refused create must not leave a Hydra client behind"
     );
 
+    delete_org_membership(&org_id, &owner.user.identity_id);
+    delete_organization(&org_id);
+    owner.user.cleanup().await;
+}
+
+/// Finding C15 (round-3 review): the org-scoped client form left `scope`,
+/// `grant_types` and `response_types` open, so an owner could build a client
+/// asking for `orgs`, or one that skips the user entirely.
+#[tokio::test]
+async fn org_owner_client_is_held_to_the_code_flow_and_described_scopes() {
+    assert!(portal_reachable().await);
+    if !with_orgs_license(org_client_protocol_body).await {
+        eprintln!("skipping: needs the admin fixture and tests/fixtures/license/active.blob");
+    }
+}
+
+async fn org_client_protocol_body() {
+    let org_id = uuid::Uuid::new_v4().to_string();
+    let slug = format!("c15-{}", &org_id[..8]);
+    seed_organization(&org_id, &slug, "C15", "all");
+    let owner = OrgOwner::build_in("tier-c15", &org_id).await;
+    let url = format!("{PORTAL}/admin/clients?org={slug}");
+
+    let refused = [
+        (
+            "scope",
+            "openid orgs",
+            "scope is not available to organization clients",
+        ),
+        (
+            "scope",
+            "openid groups",
+            "scope is not available to organization clients",
+        ),
+        (
+            "grant_types",
+            "client_credentials",
+            "grant type is not available",
+        ),
+        ("response_types", "token", "response type is not available"),
+    ];
+    for (field, value, needle) in refused {
+        let name = format!("c15-{field}-{}", value.replace(' ', "-"));
+        let mut form = vec![
+            ("_csrf", owner.csrf.as_str()),
+            ("name", name.as_str()),
+            ("grant_types", "authorization_code"),
+            ("response_types", "code"),
+            ("scope", "openid email"),
+            ("redirect_uris", "http://127.0.0.1:5556/callback"),
+            ("post_logout_redirect_uris", ""),
+            ("token_endpoint_auth_method", "client_secret_post"),
+            ("client_type", "web_app"),
+        ];
+        form.retain(|(k, _)| *k != field);
+        form.push((field, value));
+        let res = owner
+            .user
+            .client
+            .post(&url)
+            .form(&form)
+            .send()
+            .await
+            .expect("POST org-scoped client");
+        let body = res.text().await.unwrap_or_default();
+        assert!(
+            body.contains(needle),
+            "{field}={value} must be refused on the form; body was: {}",
+            body.chars().take(400).collect::<String>()
+        );
+        assert_eq!(
+            hydra_client_count_by_name(&name).await,
+            0,
+            "{field}={value}: a refused create must not leave a Hydra client behind"
+        );
+    }
+
+    delete_org_membership(&org_id, &owner.user.identity_id);
+    delete_organization(&org_id);
+    owner.user.cleanup().await;
+}
+
+/// Finding C3 (round-3 review): the Default org holds the operator's own
+/// clients, and a non-allowlisted identity that owned it got the org-scoped
+/// client admin over all of them.
+#[tokio::test]
+async fn a_default_org_owner_needs_the_allowlist() {
+    assert!(portal_reachable().await);
+
+    let owner = OrgOwner::build("tier-default").await;
+    let res = owner
+        .user
+        .client
+        .get(format!("{PORTAL}/admin/clients?org=default"))
+        .send()
+        .await
+        .expect("GET /admin/clients?org=default");
+    assert_eq!(
+        res.status().as_u16(),
+        403,
+        "a non-allowlisted Default owner must be refused; got {}",
+        res.status()
+    );
+
     delete_org_membership("default", &owner.user.identity_id);
     owner.user.cleanup().await;
+}
+
+/// A rowless client verified from an org scope used to be lazily stamped
+/// `source=admin`, which consent reads as operator-written.
+#[tokio::test]
+async fn verifying_a_rowless_client_from_an_org_scope_stamps_source_org() {
+    assert!(portal_reachable().await);
+    let Some(admin) = try_admin_signed_in_client().await else {
+        eprintln!("FORSETI_ADMIN_TEST_* not set; skipping");
+        return;
+    };
+    let creds = admin_test_credentials().expect("admin creds");
+    let admin_id = identity_id_by_email(&creds.email)
+        .await
+        .expect("seeded admin identity");
+    set_org_member_role("default", &admin_id, "owner");
+
+    let (client_id, _secret, _redirect) = hydra_create_test_client(&["openid"]).await;
+    assert_eq!(
+        client_metadata_source(&client_id),
+        None,
+        "precondition: rowless"
+    );
+
+    let show = format!("{PORTAL}/admin/clients/{client_id}?org=default");
+    let body = admin
+        .get(&show)
+        .send()
+        .await
+        .expect("GET client show")
+        .text()
+        .await
+        .expect("show body");
+    let csrf = extract_form_csrf(&body).expect("_csrf on client show");
+    let res = admin
+        .post(format!(
+            "{PORTAL}/admin/clients/{client_id}/verify?org=default"
+        ))
+        .form(&[("_csrf", csrf.as_str()), ("confirm", "yes")])
+        .send()
+        .await
+        .expect("POST verify");
+    assert!(res.status().is_success(), "verify: {}", res.status());
+    assert_eq!(
+        client_metadata_source(&client_id).as_deref(),
+        Some("org"),
+        "a lazy row written from an org scope must not claim operator provenance"
+    );
+
+    hydra_delete_client(&client_id).await;
+    delete_client_metadata(&client_id);
 }
 
 /// The Forseti operator keeps the capability the org owner just lost.
@@ -411,10 +594,15 @@ async fn reveal_token_is_hashed_at_rest() {
     delete_client_metadata(&client_id);
 }
 
-/// The email `[admin].allowed_emails` carries in both `config.toml` and
-/// `config.ci.toml` but which is deliberately *not* a registered identity.
-/// The whole point of the fixture is to register it fresh.
-const UNREGISTERED_ALLOWLISTED_EMAIL: &str = "admin@example.com";
+/// An address `[admin].allowed_emails` carries in both `config.toml` and
+/// `config.ci.toml` but which is deliberately *never* registered or seeded.
+/// The fixture registers it itself and deletes it again.
+///
+/// It must not be the operator `seed-admin` plants, or this test destroys the
+/// admin every other admin-gated test depends on — which is exactly what
+/// happened when it used `admin@example.com`, CI's seeded operator. Locally
+/// that address is unclaimed, so the damage only ever showed on CI.
+const UNREGISTERED_ALLOWLISTED_EMAIL: &str = "unclaimed-admin@example.com";
 
 /// Finding 1 (round-2 review): registering as an allowlisted address that
 /// nobody has proven control of used to hand out Tier-1 admin. Kratos issues a
@@ -428,8 +616,19 @@ const UNREGISTERED_ALLOWLISTED_EMAIL: &str = "admin@example.com";
 async fn unverified_allowlisted_email_is_not_an_admin() {
     assert!(portal_reachable().await);
 
-    // A previous run (or a real operator) may hold the address; the fixture
-    // needs to register it itself.
+    // Never touch the seeded operator, whatever the config says.
+    if let Some(creds) = admin_test_credentials()
+        && creds
+            .email
+            .eq_ignore_ascii_case(UNREGISTERED_ALLOWLISTED_EMAIL)
+    {
+        panic!(
+            "{UNREGISTERED_ALLOWLISTED_EMAIL} is the seeded admin; this fixture \
+             would delete it. Point FORSETI_ADMIN_TEST_EMAIL somewhere else."
+        );
+    }
+    // A previous run may have left the identity behind; the fixture needs to
+    // register it itself.
     if let Some(existing) = identity_id_by_email(UNREGISTERED_ALLOWLISTED_EMAIL).await {
         let _ = delete_test_identity(&existing).await;
     }

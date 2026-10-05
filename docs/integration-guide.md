@@ -202,7 +202,7 @@ The id_token is a JWT signed with RS256 by Hydra's signing key. The claims depen
 | `exp`       | number  | Unix seconds when the token expires.                                                         |
 | `sid`       | string  | Session ID. Used to scope back-channel logouts to a specific session.                        |
 | `acr`       | string  | Authenticator context class reference. Typically `aal1` or `aal2`.                           |
-| `amr`       | string[]| Authentication methods used. E.g. `["password"]`, `["password","totp"]`.                     |
+| `amr`       | string[]| RFC 8176 authentication methods, e.g. `["pwd"]`, `["pwd","otp","mfa"]`. Absent for an upstream-provider sign-in. |
 | `jti`       | string  | Unique token ID. Use for replay defence on backchannel logout tokens.                        |
 | `at_hash`   | string  | Hash of the access_token (first half of `SHA-256(at)`, base64url). Bind id_token to at.      |
 | `nonce`     | string  | Echoed from your auth request if you sent one.                                               |
@@ -254,7 +254,7 @@ Forseti applies restrictions the spec doesn't require, because apps key on the v
 
 | Claim              | Type     | Description                                                                                       |
 |--------------------|----------|---------------------------------------------------------------------------------------------------|
-| `groups`           | string[] | Slugs of the teams the user belongs to in their active org. Empty array when the user has no teams. Always present when the scope is granted. |
+| `groups`           | string[] | Slugs of the teams the user belongs to in their active org. Empty array when the user has no teams. Always present when the scope is granted: if Forseti can't read the memberships, the authorization fails with `temporarily_unavailable` rather than issuing an empty list. |
 | `groups_truncated` | boolean  | Present and `true` only when the user is in more than 200 teams and the list was capped.          |
 
 `groups` is scoped to the user's active org (the same org the `org` claim resolves to). It reflects state as of the user's last authorization and is not re-resolved on a refresh-token grant. See the [scope reference](#scope-reference).
@@ -271,7 +271,7 @@ Forseti applies restrictions the spec doesn't require, because apps key on the v
   "auth_time": 1700000000,
   "sid": "0a1b2c3d-4e5f-6789-abcd-ef0123456789",
   "acr": "aal1",
-  "amr": ["password"],
+  "amr": ["pwd"],
   "jti": "9f8e7d6c-5b4a-3210-fedc-ba9876543210",
   "at_hash": "wfgvdfP3qS6mPq3jeKxYHA",
   "email": "user@example.com",
@@ -1090,7 +1090,7 @@ Forseti is not a single point of failure if your app degrades gracefully.
 | `org`     | Adds an `org` claim — `{ id, slug, role, name }`. When the auth request carries `organization_id=<id>`, the claim is pinned to that org (or omitted entirely if the user isn't a member — see below); otherwise it reflects the user's currently-active org (the signed `active_org` cookie, else their first membership). |
 | `orgs`    | Adds an `orgs` claim — an array of `{ id, slug, role, name }` — listing every org the user belongs to. Capped at 32 entries. Apps that show a tenant picker request this. |
 | `groups`  | Adds a `groups` claim, a flat array of the user's team slugs in their active org, for apps that map group names to roles (Parseable, Grafana, Argo CD). Empty array when the user has no teams. Capped at 200 with a `groups_truncated` flag. Scoped to the active org. |
-| `profile` (extended) | When `[profiles].enabled = true` on Forseti, `profile` additionally surfaces `picture` (avatar URL) and `website` from the user's portal-owned profile. Standard OIDC slots — apps already requesting `profile` pick these up with no client-side change. Missing/empty fields are simply omitted. |
+| `profile` (extended) | When `[profiles].enabled = true` on Forseti, `profile` additionally surfaces `picture` (avatar URL) and `website` from the user's portal-owned profile. Standard OIDC slots — apps already requesting `profile` pick these up with no client-side change. Missing/empty fields are simply omitted, and `picture` is only sent when it's an `https` URL on a public host. |
 | `extended_profile` | Portal-owned non-standard claims: `bio`, `pronouns`, and `links` (array of `{label, url}`). Only added when `[profiles].enabled` is on AND the user filled the fields. Request alongside `profile` when you want the full profile block. Revocation is whole-grant — see `/settings/authorized-apps`. |
 
 #### Active-org selection (`org` scope)

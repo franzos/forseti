@@ -2897,3 +2897,47 @@ async fn device_auth_force_mfa_stale_second_factor_denied() {
     delete_org_membership(&org_id, &approver.identity_id);
     approver.cleanup().await;
 }
+
+/// Finding C34 (round-3 review): `/admin/posix/{id}/keys/{key_id}/delete`
+/// deleted `key_id` whoever it belonged to, so the audit row named the wrong
+/// account.
+#[tokio::test]
+async fn admin_key_delete_is_bound_to_the_path_account() {
+    assert!(portal_reachable().await);
+    let Some(admin) = try_admin_signed_in_client().await else {
+        eprintln!("FORSETI_ADMIN_TEST_* not set; skipping");
+        return;
+    };
+
+    let seed = chrono::Utc::now().timestamp_millis() % 50_000;
+    let a = uuid::Uuid::new_v4().to_string();
+    let b = uuid::Uuid::new_v4().to_string();
+    seed_posix_account(&a, &format!("keybinda{seed}"), 20_000 + seed, 20_000 + seed);
+    seed_posix_account(&b, &format!("keybindb{seed}"), 71_000 + seed, 71_000 + seed);
+    let b_key = ssh_key_ids(&b).pop().expect("b has a key");
+
+    let body = admin
+        .get(format!("{PORTAL}/admin/posix"))
+        .send()
+        .await
+        .expect("GET posix account")
+        .text()
+        .await
+        .expect("posix account body");
+    let csrf = extract_csrf_form_token(&body).expect("_csrf on the posix admin page");
+    let res = admin
+        .post(format!("{PORTAL}/admin/posix/{a}/keys/{b_key}/delete"))
+        .form(&[("_csrf", csrf.as_str())])
+        .send()
+        .await
+        .expect("POST cross-account key delete");
+    let _ = res.text().await;
+    assert_eq!(
+        ssh_key_ids(&b),
+        vec![b_key.clone()],
+        "a key must not be deletable through another account's path"
+    );
+
+    delete_posix_account(&a);
+    delete_posix_account(&b);
+}

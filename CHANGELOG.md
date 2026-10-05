@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+- OAuth clients without a Forseti metadata row (created with `hydra create oauth2-client` and not reconciled) now receive only the Default organization in the `orgs` claim; register clients through Forseti or run `forseti reconcile-client-metadata` after creating them
+
 ## [0.2.10] - 2026-09-22
 
 ### Security

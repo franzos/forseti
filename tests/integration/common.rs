@@ -210,11 +210,20 @@ pub async fn register_test_user(prefix: &str) -> RegisteredUser {
     register_test_user_with_email(&unique_email(prefix)).await
 }
 
+/// [`register_test_user`] without skipping the new-account username step.
+pub async fn register_test_user_with_username_step(prefix: &str) -> RegisteredUser {
+    register_inner(&unique_email(prefix), false).await
+}
+
 /// [`register_test_user`] at a caller-chosen address, for tests that need a
 /// specific email (e.g. one the running Forseti has in `[admin].allowed_emails`).
 /// The address must not already be a Kratos identifier.
 pub async fn register_test_user_with_email(email: &str) -> RegisteredUser {
-    let (client, manual_client, _jar) = paired_clients();
+    register_inner(email, true).await
+}
+
+async fn register_inner(email: &str, skip_username: bool) -> RegisteredUser {
+    let (client, manual_client, jar) = paired_clients();
     let email = email.to_string();
     let password = "Sup3rSecret-Test-Password!";
 
@@ -310,6 +319,9 @@ pub async fn register_test_user_with_email(email: &str) -> RegisteredUser {
             .await
             .unwrap_or_else(|| panic!("identity id after registration (not in response body and Kratos admin lookup failed for {email})")),
     };
+    if skip_username {
+        skip_username_step(&jar, &identity_id);
+    }
 
     RegisteredUser {
         client,
@@ -317,6 +329,19 @@ pub async fn register_test_user_with_email(email: &str) -> RegisteredUser {
         identity_id,
         email,
         password: password.to_string(),
+    }
+}
+
+/// Mark the new-account username step as skipped for `identity_id` in this
+/// browser, as its "Skip for now" does, so OAuth tests asking for `profile`
+/// reach consent instead of `/onboarding/username`.
+pub fn skip_username_step(jar: &reqwest::cookie::Jar, identity_id: &str) {
+    for origin in [PORTAL, "http://host.containers.internal:3000"] {
+        let url: reqwest::Url = origin.parse().expect("portal origin");
+        jar.add_cookie_str(
+            &format!("forseti_username_skipped={identity_id}; Path=/oauth/login"),
+            &url,
+        );
     }
 }
 
@@ -1604,6 +1629,17 @@ pub fn seed_organization(id: &str, slug: &str, name: &str, visibility: &str) {
     .unwrap_or_else(|e| panic!("seed organizations: {e}"));
 }
 
+/// Open an org to external self-serve signup (`/join/confirm`).
+pub fn open_org_signup(org_id: &str) {
+    forseti_db_conn()
+        .execute(
+            "UPDATE organizations SET access_mode = 'external', public_login_enabled = 1 \
+             WHERE id = ?1",
+            params![org_id],
+        )
+        .unwrap_or_else(|e| panic!("open org signup: {e}"));
+}
+
 /// Delete an org plus its membership rows (test cleanup for [`seed_organization`]).
 pub fn delete_organization(id: &str) {
     let conn = forseti_db_conn();
@@ -1930,6 +1966,29 @@ pub fn count_audit_events_for_host(action: &str, host_id: &str) -> i64 {
     .unwrap_or_else(|e| panic!("count audit_events: {e}"))
 }
 
+/// Ids of the SSH keys an identity holds.
+pub fn ssh_key_ids(identity_id: &str) -> Vec<String> {
+    let conn = forseti_db_conn();
+    let mut stmt = conn
+        .prepare("SELECT id FROM ssh_authorized_keys WHERE identity_id = ?1")
+        .expect("prepare ssh key ids");
+    stmt.query_map(params![identity_id], |r| r.get(0))
+        .expect("query ssh key ids")
+        .map(|r| r.expect("ssh key id"))
+        .collect()
+}
+
+/// Count `audit_events` rows for `action` naming `target_id`.
+pub fn count_audit_events_for_target(action: &str, target_id: &str) -> i64 {
+    forseti_db_conn()
+        .query_row(
+            "SELECT COUNT(*) FROM audit_events WHERE action = ?1 AND target_id = ?2",
+            params![action, target_id],
+            |r| r.get(0),
+        )
+        .unwrap_or_else(|e| panic!("count audit_events: {e}"))
+}
+
 /// Delete every `device_sessions` row for a host (test cleanup).
 pub fn delete_device_sessions_for_host(host_id: &str) {
     let conn = forseti_db_conn();
@@ -2061,6 +2120,20 @@ pub fn mark_client_verified(client_id: &str) {
         )
         .unwrap_or_else(|e| panic!("insert oauth_client_metadata: {e}"));
     }
+}
+
+/// Plant an `oauth_client_metadata` row with the given `source` and owning org,
+/// unverified - the shape an org owner's create leaves behind.
+pub fn set_client_metadata_owner(client_id: &str, source: &str, org_id: &str) {
+    let now = chrono::Utc::now().to_rfc3339();
+    forseti_db_conn()
+        .execute(
+            "INSERT OR REPLACE INTO oauth_client_metadata \
+                (client_id, verification, source, org_id, created_at) \
+             VALUES (?1, 'unverified', ?2, ?3, ?4)",
+            params![client_id, source, org_id, now],
+        )
+        .unwrap_or_else(|e| panic!("plant oauth_client_metadata: {e}"));
 }
 
 /// Flip a Hydra client's `skip_consent` via the admin API, for tests that need
@@ -2795,4 +2868,220 @@ pub fn count_reveals_with_token(token: &str) -> i64 {
         |r| r.get(0),
     )
     .unwrap_or_else(|e| panic!("count secret_reveals: {e}"))
+}
+
+// --- Back-channel logout capture ------------------------------------------
+
+/// A local HTTP listener standing in for an RP's `backchannel_logout_uri`.
+/// Hydra runs in a container, so it reaches the listener through
+/// `host.containers.internal`.
+pub struct BackchannelSink {
+    pub url: String,
+    tokens: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl BackchannelSink {
+    pub async fn start() -> Self {
+        let tokens = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = tokens.clone();
+        let app = axum::Router::new().route(
+            "/bc",
+            axum::routing::post(
+                move |axum::extract::Form(form): axum::extract::Form<
+                    std::collections::HashMap<String, String>,
+                >| {
+                    let sink = sink.clone();
+                    async move {
+                        if let Some(t) = form.get("logout_token") {
+                            sink.lock().unwrap().push(t.clone());
+                        }
+                        StatusCode::OK
+                    }
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("0.0.0.0:0")
+            .await
+            .expect("bind back-channel sink");
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        BackchannelSink {
+            url: format!("http://host.containers.internal:{port}/bc"),
+            tokens,
+        }
+    }
+
+    /// The `sid` of every logout token received so far, after waiting up to
+    /// `secs` for at least `min` of them (and a short grace for stragglers).
+    pub async fn sids_after(&self, min: usize, secs: u64) -> Vec<String> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(secs);
+        while self.tokens.lock().unwrap().len() < min && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        self.tokens
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|t| {
+                decode_jwt_claims(t)["sid"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string()
+            })
+            .collect()
+    }
+}
+
+/// A confidential client with `backchannel_logout_uri` (session required) and
+/// the refresh grant. Returns `(client_id, client_secret, redirect_uri)`.
+pub async fn hydra_create_backchannel_client(
+    scopes: &[&str],
+    backchannel_logout_uri: &str,
+) -> (String, String, String) {
+    let redirect_uri = "http://127.0.0.1:5555/callback";
+    let body = serde_json::json!({
+        "client_name": "integration-test-backchannel",
+        "grant_types": ["authorization_code", "refresh_token"],
+        "response_types": ["code"],
+        "scope": scopes.join(" "),
+        "redirect_uris": [redirect_uri],
+        "token_endpoint_auth_method": "client_secret_post",
+        "backchannel_logout_uri": backchannel_logout_uri,
+        "backchannel_logout_session_required": true,
+    });
+    let res = browser_client()
+        .post(format!("{HYDRA_ADMIN}/admin/clients"))
+        .json(&body)
+        .send()
+        .await
+        .expect("hydra create client transport");
+    assert!(
+        res.status().is_success(),
+        "hydra create client: {}",
+        res.status()
+    );
+    let v: Value = res.json().await.expect("hydra create client body");
+    (
+        v["client_id"].as_str().expect("client_id").to_string(),
+        v["client_secret"]
+            .as_str()
+            .expect("client_secret")
+            .to_string(),
+        redirect_uri.to_string(),
+    )
+}
+
+/// Refresh at Hydra's token endpoint; `true` when Hydra issues new tokens.
+pub async fn refresh_succeeds(client_id: &str, client_secret: &str, refresh_token: &str) -> bool {
+    browser_client()
+        .post(format!("{HYDRA_PUBLIC}/oauth2/token"))
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("client_id", client_id),
+            ("client_secret", client_secret),
+            ("refresh_token", refresh_token),
+        ])
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
+}
+
+/// Walk an authorize chain on a redirect-less client until a hop reaches the
+/// client's `/callback`; returns that URL. `None` if the chain stops on a
+/// Forseti page instead (login, consent, error).
+pub async fn authorize_chase_callback(client: &Client, auth_url: &str) -> Option<String> {
+    let mut resp = client.get(auth_url).send().await.ok()?;
+    for _ in 0..20 {
+        let next = next_hop(resp).await?;
+        if next.path().contains("/callback") {
+            return Some(next.to_string());
+        }
+        resp = client.get(next).send().await.ok()?;
+    }
+    None
+}
+
+/// End every Kratos session of an identity through Kratos's admin API,
+/// bypassing Forseti: the "Kratos session gone, Hydra still remembers the
+/// login" state a session ended by another route leaves behind.
+pub async fn kratos_admin_end_sessions(identity_id: &str) {
+    let res = Client::new()
+        .delete(format!(
+            "{KRATOS_ADMIN}/admin/identities/{identity_id}/sessions"
+        ))
+        .send()
+        .await
+        .expect("kratos delete sessions transport");
+    assert!(
+        res.status().is_success() || res.status() == StatusCode::NOT_FOUND,
+        "kratos delete sessions: {}",
+        res.status()
+    );
+}
+
+/// Refresh at Hydra's token endpoint; the new token response, or `None` when
+/// Hydra refuses.
+pub async fn refresh_tokens(
+    client_id: &str,
+    client_secret: &str,
+    refresh_token: &str,
+) -> Option<Value> {
+    let res = browser_client()
+        .post(format!("{HYDRA_PUBLIC}/oauth2/token"))
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("client_id", client_id),
+            ("client_secret", client_secret),
+            ("refresh_token", refresh_token),
+        ])
+        .send()
+        .await
+        .ok()?;
+    if !res.status().is_success() {
+        return None;
+    }
+    res.json().await.ok()
+}
+
+/// Change the signed-in user's password through a Kratos settings flow in
+/// `client`'s browser.
+pub async fn kratos_change_password(client: &Client, new_password: &str) {
+    let res = client
+        .get(format!("{KRATOS_PUBLIC}/self-service/settings/browser"))
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .expect("init settings flow: transport");
+    assert!(
+        res.status().is_success(),
+        "init settings flow: status {}",
+        res.status()
+    );
+    let flow: Value = res.json().await.expect("init settings flow: parse json");
+    let action = flow["ui"]["action"]
+        .as_str()
+        .expect("settings flow has ui.action")
+        .to_string();
+    let csrf = flow_csrf_token(&flow).expect("settings flow has csrf_token");
+    let res = client
+        .post(&action)
+        .header("Accept", "application/json")
+        .form(&[
+            ("method", "password"),
+            ("password", new_password),
+            ("csrf_token", csrf.as_str()),
+        ])
+        .send()
+        .await
+        .expect("submit password change: transport");
+    let status = res.status();
+    let body = res.text().await.unwrap_or_default();
+    assert!(
+        status.is_success(),
+        "submit password change: status {status} body {body}"
+    );
 }

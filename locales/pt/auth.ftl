@@ -2,6 +2,7 @@
 auth-login-page-title = Iniciar sessão
 auth-login-card-title = Inicie sessão na sua conta
 auth-login-card-subtitle = Bem-vindo de volta ao { $brand }.
+auth-continue-to-app = para continuar para { $app }
 auth-login-aal2-body = Esta área exige autenticação de dois fatores, mas a sua conta ainda não tem um segundo fator configurado.
 auth-login-aal2-hint = Configure uma aplicação de autenticação, uma chave de segurança ou códigos de recuperação nas definições e depois volte.
 auth-login-aal2-setup-link = Configurar a autenticação de dois fatores
@@ -12,6 +13,7 @@ auth-login-create-account = Criar conta
 # Separador partilhado (início de sessão + registo)
 auth-or-continue-with = Ou continue com
 auth-oidc-signin = Iniciar sessão com { $provider }
+auth-oidc-email-needed = { $provider } não partilhou um endereço de email verificado. Introduza o que pretende usar nesta conta.
 
 # Página de registo
 auth-registration-page-title = Criar conta

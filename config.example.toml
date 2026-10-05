@@ -235,6 +235,10 @@ support_email = "support@example.com"
 # primary boundary.
 # [internal]
 # bind = "127.0.0.1:8081"
+# Trust `X-Forwarded-For` on this listener. Independent of
+# `[proxy].trust_forwarded_for`; leave off unless a proxy you control sits
+# in front of the internal listener (hop count follows `[proxy].trusted_hops`).
+# trust_forwarded_for = false
 
 # Forseti-owned per-identity profiles (bio, location, pronouns, website,
 # avatar URL, links). When `enabled = true`:

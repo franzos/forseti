@@ -465,3 +465,50 @@ async fn owner_toggles_peer_opt_out_but_member_cannot() {
 //   `teams::team_member_ids`, `teams::co_team_member_ids`, and the `visible(...)`
 //   predicate) are unit-tested in-module under `src/orgs/`.
 // ----------------------------------------------------------------------------
+
+/// Finding C35 (round-3 review): toggling a non-member was a no-op UPDATE that
+/// still wrote an audit row naming them, putting any identity id in the org's
+/// audit trail.
+#[tokio::test]
+async fn hiding_a_non_member_is_refused_without_an_audit_row() {
+    assert!(portal_reachable().await, "portal must be up");
+    let owner = register_test_user("vis-nonmember-owner").await;
+    let stranger = register_test_user("vis-nonmember-stranger").await;
+    let _ = owner.client.get(format!("{PORTAL}/")).send().await;
+
+    let org_id = uniq("nmorg");
+    let org_slug = uniq("nm");
+    seed_organization(&org_id, &org_slug, &uniq("NonMemberOrg"), "all");
+    seed_org_membership(&org_id, &owner.identity_id, "owner");
+
+    let body = owner
+        .client
+        .get(format!("{PORTAL}/"))
+        .send()
+        .await
+        .expect("GET / owner")
+        .text()
+        .await
+        .unwrap_or_default();
+    let csrf = extract_form_csrf(&body).expect("_csrf for owner");
+    let res = owner
+        .manual_client
+        .post(format!(
+            "{PORTAL}/settings/organizations/{org_slug}/members/{}/hidden",
+            stranger.identity_id
+        ))
+        .form(&[("_csrf", csrf.as_str()), ("hidden", "true")])
+        .send()
+        .await
+        .expect("owner POST hidden for a non-member");
+    assert_eq!(res.status().as_u16(), 404);
+    assert_eq!(
+        count_audit_events_for_target("org.member.directory_hidden", &stranger.identity_id),
+        0,
+        "no audit row may name a non-member"
+    );
+
+    delete_organization(&org_id);
+    owner.cleanup().await;
+    stranger.cleanup().await;
+}

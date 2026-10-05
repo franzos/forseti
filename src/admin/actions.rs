@@ -49,6 +49,13 @@ pub(crate) async fn delete_identity_audited(
     ctx: Option<&AuditCtx>,
 ) -> anyhow::Result<()> {
     ory::kratos::admin_delete_identity(&state.ory, target_identity_id).await?;
+    crate::oauth::op_sessions::end_op_sessions_for_subject(
+        state,
+        target_identity_id,
+        None,
+        crate::oauth::op_sessions::GrantRevocation::Keep,
+    )
+    .await;
     // Cascade: drop org memberships, else the members page lists ghost rows
     // and the last-owner guard counts ex-owners. Best-effort.
     match crate::orgs::db::remove_member_everywhere(&state.db, target_identity_id).await {

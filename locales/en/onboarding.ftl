@@ -22,6 +22,7 @@ claim-confirm-start-over = Start over
 invite-accept-page-title = Accept invite
 invite-accept-heading = Join { $org }
 invite-accept-body = You've been invited to join { $org } as { $role }. The invite was sent to { $email }.
+invite-accept-cta-switch = Sign out and continue as { $email }
 
 # Invite unavailable (invite/invalid.html)
 invite-invalid-page-title = Invite unavailable
@@ -41,3 +42,7 @@ claim-error-release-failed = We couldn't release the email. Contact support.
 
 # Invite finalize (set in Rust)
 invite-error-corrupt = Invitation is corrupt. Contact your administrator.
+onboarding-username-page-title = Choose a username
+onboarding-username-body = Apps that create an account for you use it as your username there. You can change it later in your profile.
+onboarding-username-hint = 2 to 39 letters, digits, dots, underscores or hyphens. You can change it once every 30 days.
+onboarding-username-skip = Skip for now

@@ -783,13 +783,22 @@ pub async fn remove_member(db: &DbPool, org_id: &str, identity_id: &str) -> anyh
     let org = org_id.to_string();
     let ident = identity_id.to_string();
     db_interact!(db, |conn| {
-        diesel::delete(
-            organization_members::table
-                .filter(organization_members::org_id.eq(&org))
-                .filter(organization_members::identity_id.eq(&ident)),
-        )
-        .execute(conn)
-        .map(|_| ())
+        conn.transaction::<_, diesel::result::Error, _>(|c| {
+            diesel::delete(
+                organization_members::table
+                    .filter(organization_members::org_id.eq(&org))
+                    .filter(organization_members::identity_id.eq(&ident)),
+            )
+            .execute(c)?;
+            // A surviving SAML link would let the next SSO silently re-join.
+            diesel::delete(
+                saml_links::table
+                    .filter(saml_links::org_id.eq(&org))
+                    .filter(saml_links::identity_id.eq(&ident)),
+            )
+            .execute(c)?;
+            Ok(())
+        })
     })?;
     Ok(())
 }
@@ -803,10 +812,15 @@ pub async fn remove_member(db: &DbPool, org_id: &str, identity_id: &str) -> anyh
 pub async fn remove_member_everywhere(db: &DbPool, identity_id: &str) -> anyhow::Result<usize> {
     let ident = identity_id.to_string();
     let affected = db_interact!(db, |conn| {
-        diesel::delete(
-            organization_members::table.filter(organization_members::identity_id.eq(&ident)),
-        )
-        .execute(conn)
+        conn.transaction::<_, diesel::result::Error, _>(|c| {
+            let n = diesel::delete(
+                organization_members::table.filter(organization_members::identity_id.eq(&ident)),
+            )
+            .execute(c)?;
+            diesel::delete(saml_links::table.filter(saml_links::identity_id.eq(&ident)))
+                .execute(c)?;
+            Ok(n)
+        })
     })?;
     if let Err(e) = super::teams::remove_identity_from_all_teams(db, identity_id).await {
         tracing::error!(error = ?e, identity_id, "failed to purge org-team membership on identity delete");
@@ -1238,6 +1252,34 @@ mod tests {
             Some("o1".to_string())
         );
         assert!(org_by_ref(&db, "nope").await.unwrap().is_none());
+    }
+
+    /// C1 (round-3 review): a surviving `saml_links` row let the next SSO
+    /// silently re-join a removed member.
+    #[tokio::test]
+    async fn removing_a_member_drops_their_saml_link_for_that_org_only() {
+        use crate::saml::db::{link_for, upsert_link};
+        let db = test_pool().await;
+        create_org(&db, "oa", "orga", "A", None).await.unwrap();
+        create_org(&db, "ob", "orgb", "B", None).await.unwrap();
+        for org in ["oa", "ob"] {
+            add_member_race_safe(&db, "id1", org, Role::Member)
+                .await
+                .unwrap();
+            upsert_link(&db, org, "u@x.test", Some("sub"), "id1")
+                .await
+                .unwrap();
+        }
+
+        remove_member(&db, "oa", "id1").await.unwrap();
+        assert_eq!(link_for(&db, "oa", "u@x.test").await.unwrap(), None);
+        assert_eq!(
+            link_for(&db, "ob", "u@x.test").await.unwrap().as_deref(),
+            Some("id1")
+        );
+
+        remove_member_everywhere(&db, "id1").await.unwrap();
+        assert_eq!(link_for(&db, "ob", "u@x.test").await.unwrap(), None);
     }
 
     #[tokio::test]

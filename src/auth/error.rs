@@ -1,5 +1,7 @@
 //! `/error?id=<error_id>` — landing page for Kratos self-service errors that
-//! have no flow context (stale links, already-consumed flows, etc.).
+//! have no flow context (stale links, already-consumed flows, etc.). Also
+//! Hydra's `urls.error` (`?error=&error_description=`), for OAuth errors it
+//! can't redirect back to the client.
 
 use askama::Template;
 use axum::extract::{Query, State};
@@ -26,6 +28,8 @@ struct ErrorTemplate {
 #[derive(Debug, Deserialize)]
 pub(crate) struct ErrorQuery {
     id: Option<String>,
+    error: Option<String>,
+    error_description: Option<String>,
 }
 
 pub(crate) async fn error_page(
@@ -33,6 +37,23 @@ pub(crate) async fn error_page(
     Query(query): Query<ErrorQuery>,
     Chrome(chrome): Chrome,
 ) -> Response {
+    if let Some(code) = query.error.filter(|s| !s.is_empty()) {
+        let title = chrome.t("error-page-oauth-title");
+        let cta_label = chrome.t("error-boundary-cta-back-to-dashboard");
+        let message = query
+            .error_description
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| chrome.t("error-page-default-message"));
+        return render(&ErrorTemplate {
+            chrome,
+            error_title: title,
+            error_message: message,
+            error_reason: code,
+            error_id: String::new(),
+            cta_href: "/".to_string(),
+            cta_label,
+        });
+    }
     let error_id = query.id.unwrap_or_default();
     let locale = &chrome.locale;
     let (title, message, reason) = if error_id.is_empty() {

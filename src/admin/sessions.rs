@@ -198,8 +198,25 @@ pub async fn revoke(
     if let Some(r) = form.bounce_unless_confirmed(&redirect_to) {
         return r;
     }
+    // Looked up first: the session may 404 once revoked.
+    let identity_id = match ory::kratos::admin_get_session(&state.ory, &id).await {
+        Ok(s) => s.identity.map(|i| i.id),
+        Err(e) => {
+            tracing::warn!(error = %e, id, "admin: session lookup failed; app sessions stay");
+            None
+        }
+    };
     match ory::kratos::admin_revoke_session(&state.ory, &id).await {
         Ok(()) => {
+            if let Some(identity_id) = &identity_id {
+                crate::oauth::op_sessions::end_op_sessions_for_browser(
+                    &state,
+                    identity_id,
+                    &id,
+                    crate::oauth::op_sessions::GrantRevocation::Revoke,
+                )
+                .await;
+            }
             let _ = audit::log(
                 &state.db,
                 ctx.audit_event(action::ADMIN_SESSION_REVOKED, &actx)

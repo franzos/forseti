@@ -149,7 +149,10 @@
         <ul class="flex flex-col gap-stack-xs">
           {% for aud in granted_audience %}
             <li class="font-body-sm text-body-sm text-on-surface-variant break-all">
-              <bdi>{{ aud }}</bdi>
+              <bdi>{{ aud.name }}</bdi>
+              {% if aud.name != aud.id %}
+                <span class="block font-label-sm text-label-sm text-outline"><bdi>{{ aud.id }}</bdi></span>
+              {% endif %}
             </li>
           {% endfor %}
         </ul>
@@ -193,6 +196,7 @@
       </ul>
     </div>
 
+    {% if can_remember %}
     <label class="flex items-start gap-stack-sm font-body-sm text-body-sm text-on-surface">
       <input type="checkbox"
              name="remember"
@@ -204,6 +208,7 @@
     class="underline hover:text-on-surface">{{ chrome.t("consent-remember-decision-hint-link") }}</a>.</span>
       </span>
     </label>
+    {% endif %}
 
     <label class="flex items-start gap-stack-sm font-body-sm text-body-sm text-on-surface">
       <input type="checkbox"

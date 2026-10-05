@@ -98,3 +98,6 @@ mod settings;
 
 #[path = "integration/verification.rs"]
 mod verification;
+
+#[path = "integration/sso_spec.rs"]
+mod sso_spec;

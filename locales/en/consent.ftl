@@ -22,6 +22,7 @@ consent-audience-heading = Will use this access on
 consent-unverified-warning-title = This application has not been reviewed by an administrator.
 consent-unverified-warning-body = Only proceed if you trust it.
 consent-cimd-self-asserted-name = Calls itself “{ $name }”. The name is self-reported and not verified.
+consent-intro-default = The application below is requesting access to your account.
 consent-requesting-heading = This app is requesting
 consent-required-for-signin = Required for sign-in
 consent-remember-decision = Remember my decision for this application

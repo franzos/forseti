@@ -125,6 +125,11 @@
   </p>
 {% endif %}
 
+{% match continue_href %}
+{% when Some with (href) %}
+<a href="{{ href }}"
+   class="w-full bg-primary text-on-primary font-label-md text-label-md py-stack-md px-stack-lg rounded-lg hover:bg-primary-hover focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2 transition-colors flex items-center justify-center gap-base">{{ chrome.t("common-action-continue") }}</a>
+{% when None %}
 <div class="text-center mt-stack-sm">
   <p class="font-body-sm text-body-sm text-on-surface-variant">
     {% if is_logged_in %}
@@ -136,4 +141,5 @@
     {% endif %}
   </p>
 </div>
+{% endmatch %}
 {% endblock %}

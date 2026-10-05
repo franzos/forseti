@@ -554,7 +554,7 @@ pub async fn disable_confirm(Path(id): Path<String>, admin: RequireAdmin, csrf: 
         chrome,
         admin_active: AdminSection::Identities,
         title: format!("Disable identity {id}?"),
-        body: "The identity will no longer be able to sign in. Existing sessions are not revoked — use the sessions admin to do that separately.".to_string(),
+        body: "The identity will no longer be able to sign in. Its OAuth sign-in and app grants are revoked; existing Forseti browser sessions are not — use the sessions admin to do that separately.".to_string(),
         action_url,
         cancel_url,
         submit_label: "Disable identity",
@@ -581,6 +581,13 @@ pub async fn disable(
     .await
     {
         Ok(_) => {
+            crate::oauth::op_sessions::end_op_sessions_for_subject(
+                &state,
+                &id,
+                None,
+                crate::oauth::op_sessions::GrantRevocation::Keep,
+            )
+            .await;
             let _ = audit::log(
                 &state.db,
                 ctx.audit_event(action::ADMIN_IDENTITY_DISABLED, &actx)

@@ -21,6 +21,7 @@ kratos-1010014 = 代码已发送至你提供的地址。如果没有收到，请
 kratos-1010015 = 发送登录代码
 kratos-1010021 = 使用通行密钥登录
 kratos-1010022 = 使用密码登录
+kratos-1010016 = { $duplicateIdentifier } 已有账户。请在下方登录以关联 { $provider }，之后两种方式都可用于登录。
 
 # --- Registration (1040xxx) ---
 kratos-1040001 = 注册

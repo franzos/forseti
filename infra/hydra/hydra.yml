@@ -18,6 +18,12 @@ urls:
   consent: http://localhost:3000/oauth/consent
   login:   http://localhost:3000/oauth/login
   logout:  http://localhost:3000/oauth/logout
+  # OAuth errors Hydra can't send back to the client, the landing after a
+  # logout without a registered post_logout_redirect_uri, and `prompt=create`
+  # (the shim rewrites it to Hydra's `registration`).
+  error: http://localhost:3000/error
+  post_logout_redirect: http://localhost:3000/
+  registration: http://localhost:3000/oauth/register
   # OAuth 2.0 Device Authorization Grant (RFC 8628). Nested under `device`
   # (NOT flat `device_verification`/`post_device_done`). The device grant
   # itself is enabled per-client by granting the
@@ -46,6 +52,13 @@ oidc:
   # proved Claude Code registers via CIMD with no registration_endpoint anywhere.
   dynamic_client_registration:
     enabled: false
+
+# What Forseti's consent handler actually issues; keep in sync with
+# `SUPPORTED_SCOPES` / `SUPPORTED_CLAIMS` in src/oauth/consent.rs.
+webfinger:
+  oidc_discovery:
+    supported_scope: [email, profile, org, orgs, groups, extended_profile]
+    supported_claims: [sub, iss, aud, exp, iat, auth_time, nonce, acr, amr, sid, email, email_verified, name, given_name, family_name, picture, website, preferred_username, locale, updated_at, org, orgs, groups, bio, pronouns, links]
 
 oauth2:
   expose_internal_errors: true

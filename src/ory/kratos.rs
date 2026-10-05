@@ -346,6 +346,48 @@ pub async fn list_identity_sessions(
     .map_err(|e| anyhow::anyhow!("kratos admin list_identity_sessions failed: {e}"))
 }
 
+/// The ids of the identity's active, unexpired sessions. Kratos applies the
+/// expiry in its `active` filter.
+pub async fn active_session_ids(
+    clients: &OryClients,
+    identity_id: &str,
+) -> Result<std::collections::HashSet<String>> {
+    let active = identity_api::list_identity_sessions(
+        &clients.kratos_admin,
+        identity_id,
+        None,
+        None,
+        Some(1000),
+        None,
+        Some(true),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("kratos admin list_identity_sessions failed: {e}"))?;
+    Ok(active.into_iter().map(|s| s.id).collect())
+}
+
+/// Whether `kratos_session_id` is one of the identity's active sessions.
+pub async fn is_session_active(
+    clients: &OryClients,
+    identity_id: &str,
+    kratos_session_id: &str,
+) -> Result<bool> {
+    Ok(active_session_ids(clients, identity_id)
+        .await?
+        .contains(kratos_session_id))
+}
+
+/// Admin lookup of one session with its identity expanded.
+pub async fn admin_get_session(clients: &OryClients, id: &str) -> Result<Session> {
+    identity_api::get_session(
+        &clients.kratos_admin,
+        id,
+        Some(vec!["identity".to_string()]),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("kratos admin get_session failed: {e}"))
+}
+
 // --- Admin surface ---------------------------------------------------
 
 /// Paginated identity list via the Kratos admin API. `page_token` comes from the previous page's `Link` header.

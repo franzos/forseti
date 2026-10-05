@@ -98,17 +98,27 @@ where
 ///   * `audience` - an entry is only allowed when it is an enabled resource
 ///     registered to this same org, so a client can't be pointed at another
 ///     tenant's resource server.
+///   * `grant_types`/`response_types`/`scope` - the code flow only, and only
+///     scopes the operator describes; `orgs`/`groups` stay operator-only.
 ///
+/// `existing_grant_types` is the pre-edit client's, so a device-grant client
+/// keeps that grant on update without an owner being able to introduce it.
 /// The Err variant is the message to show on the re-rendered form.
 pub(super) async fn constrain_org_scoped_client(
     state: &AppState,
     scope: &AdminScope,
     payload: &mut ory::OAuth2Client,
+    existing_grant_types: Option<&[String]>,
 ) -> Result<(), String> {
     let AdminScope::Org { id: org_id, .. } = scope else {
         return Ok(());
     };
     payload.skip_consent = Some(false);
+    check_org_client_protocol(
+        payload,
+        existing_grant_types,
+        &state.cfg.oauth.scope_descriptions,
+    )?;
 
     for raw in payload.audience.as_deref().unwrap_or_default() {
         let entry = raw.trim();
@@ -159,6 +169,54 @@ pub(super) async fn constrain_org_scoped_client(
     Ok(())
 }
 
+const DEVICE_CODE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
+
+/// Scopes an org owner may never request, whatever the operator describes.
+const OPERATOR_ONLY_SCOPES: &[&str] = &["orgs", "groups"];
+
+fn check_org_client_protocol(
+    payload: &ory::OAuth2Client,
+    existing_grant_types: Option<&[String]>,
+    scope_descriptions: &std::collections::HashMap<String, String>,
+) -> Result<(), String> {
+    let had_device = existing_grant_types
+        .unwrap_or_default()
+        .iter()
+        .any(|g| g == DEVICE_CODE_GRANT);
+    for grant in payload.grant_types.as_deref().unwrap_or_default() {
+        let allowed = matches!(grant.as_str(), "authorization_code" | "refresh_token")
+            || (grant == DEVICE_CODE_GRANT && had_device);
+        if !allowed {
+            return Err(format!(
+                "The \"{grant}\" grant type is not available to organization clients."
+            ));
+        }
+    }
+    for rt in payload.response_types.as_deref().unwrap_or_default() {
+        if rt != "code" {
+            return Err(format!(
+                "The \"{rt}\" response type is not available to organization clients; use \"code\"."
+            ));
+        }
+    }
+    for s in payload
+        .scope
+        .as_deref()
+        .unwrap_or_default()
+        .split_whitespace()
+    {
+        let described = scope_descriptions.contains_key(s)
+            || crate::oauth::default_scope_description(s).is_some()
+            || matches!(s, "offline" | "extended_profile");
+        if OPERATOR_ONLY_SCOPES.contains(&s) || !described {
+            return Err(format!(
+                "The \"{s}\" scope is not available to organization clients. Ask an administrator."
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Pick the `org_id` to stamp on a newly-created client's Forseti
 /// metadata row. The non-obvious bit is the Forseti-scope license re-check
 /// that defends against a Forseti admin whose `active_org` cookie targets
@@ -205,5 +263,72 @@ pub(super) async fn resolve_create_target_org(
         }
         Some(org_id) => org_id,
         None => crate::orgs::DEFAULT_ORG_ID.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn client(grants: &[&str], responses: &[&str], scope: &str) -> ory::OAuth2Client {
+        ory::OAuth2Client {
+            grant_types: Some(grants.iter().map(|s| s.to_string()).collect()),
+            response_types: Some(responses.iter().map(|s| s.to_string()).collect()),
+            scope: Some(scope.to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn check(c: &ory::OAuth2Client, existing: Option<&[String]>) -> Result<(), String> {
+        check_org_client_protocol(c, existing, &Default::default())
+    }
+
+    #[test]
+    fn the_code_flow_with_described_scopes_passes() {
+        let c = client(
+            &["authorization_code", "refresh_token"],
+            &["code"],
+            "openid email profile offline org",
+        );
+        assert!(check(&c, None).is_ok());
+    }
+
+    #[test]
+    fn org_owners_cannot_request_operator_only_or_undescribed_scopes() {
+        for scope in ["openid orgs", "openid groups", "openid custom:thing"] {
+            let c = client(&["authorization_code"], &["code"], scope);
+            assert!(check(&c, None).is_err(), "{scope} must be refused");
+        }
+        let mut described = std::collections::HashMap::new();
+        described.insert("custom:thing".to_string(), "A thing".to_string());
+        described.insert("orgs".to_string(), "Orgs".to_string());
+        let c = client(&["authorization_code"], &["code"], "openid custom:thing");
+        assert!(check_org_client_protocol(&c, None, &described).is_ok());
+        let c = client(&["authorization_code"], &["code"], "openid orgs");
+        assert!(check_org_client_protocol(&c, None, &described).is_err());
+    }
+
+    #[test]
+    fn non_code_grants_and_response_types_are_refused() {
+        let c = client(&["client_credentials"], &["code"], "openid");
+        assert!(check(&c, None).is_err());
+        let c = client(&["implicit"], &["token"], "openid");
+        assert!(check(&c, None).is_err());
+        let c = client(&["authorization_code"], &["code", "id_token"], "openid");
+        assert!(check(&c, None).is_err());
+    }
+
+    #[test]
+    fn the_device_grant_is_kept_but_never_introduced() {
+        let c = client(
+            &["authorization_code", DEVICE_CODE_GRANT],
+            &["code"],
+            "openid",
+        );
+        assert!(check(&c, None).is_err());
+        let plain = vec!["authorization_code".to_string()];
+        assert!(check(&c, Some(&plain)).is_err());
+        let device = vec![DEVICE_CODE_GRANT.to_string()];
+        assert!(check(&c, Some(&device)).is_ok());
     }
 }

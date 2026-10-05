@@ -1,19 +1,24 @@
-//! CIMD authorization shim (`GET /oauth2/authorize`): resolves URL-shaped
-//! client_ids per draft-ietf-oauth-client-id-metadata-document, upserts the
-//! matching Hydra client, then 302s into Hydra's real `/oauth2/auth` with the
-//! query untouched. Non-URL client_ids pass straight through. Fetching and
-//! caching live in [`cimd_fetch`].
+//! Forseti's authorization endpoint (`/oauth2/authorize`) in front of Hydra's
+//! `/oauth2/auth`. URL-shaped client_ids are resolved per
+//! draft-ietf-oauth-client-id-metadata-document (rate-limited, the matching
+//! Hydra client upserted); every other client_id passes straight through,
+//! unlimited. A POST (OIDC Core 3.1.2.1) becomes a GET with a 303, since
+//! Hydra resumes a flow from the request URL, and
+//! `prompt=create` (Initiating User Registration 1.0) becomes Hydra's
+//! `prompt=registration`. Fetching and caching live in [`cimd_fetch`].
 
 use axum::Router;
-use axum::extract::{RawQuery, State};
-use axum::http::{StatusCode, header};
+use axum::body::Bytes;
+use axum::extract::{RawQuery, Request, State};
+use axum::http::{Method, StatusCode, header};
+use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 
 use super::cimd_fetch::{self, CimdDocument};
 use crate::audit::{self, AuditCtx, AuditEvent, action};
 use crate::audit_metadata;
-use crate::config::{OAuthConfig, ProxyConfig};
+use crate::config::{HydraConfig, OAuthConfig, ProxyConfig};
 use crate::oauth_client_metadata::{self, source};
 use crate::ory::OAuth2Client;
 use crate::ory::hydra;
@@ -36,6 +41,9 @@ const DEFAULT_CIMD_IP_RATE_PER_HOUR: u32 = 100;
 const DEFAULT_CIMD_GLOBAL_RATE_PER_MINUTE: u32 = 40;
 const DEFAULT_CIMD_GLOBAL_RATE_PER_HOUR: u32 = 400;
 
+/// Cap on a POSTed authorization request; the parameters fit a URL anyway.
+const AUTHORIZE_FORM_LIMIT: usize = 16 * 1024;
+
 /// Standing-count ceilings, applied only when a brand-new client_id turns up.
 /// The rate limits bound how fast clients can be registered; these bound how
 /// many can exist, which is the part an unauthenticated caller with time on
@@ -43,10 +51,43 @@ const DEFAULT_CIMD_GLOBAL_RATE_PER_HOUR: u32 = 400;
 const DEFAULT_CIMD_MAX_CLIENTS: u32 = 500;
 const DEFAULT_CIMD_MAX_CLIENTS_PER_HOST: u32 = 50;
 
-pub(crate) fn router(oauth_cfg: &OAuthConfig, proxy_cfg: &ProxyConfig) -> Router<AppState> {
-    let r = Router::new().route("/oauth2/authorize", get(authorize));
+pub(crate) fn router(
+    oauth_cfg: &OAuthConfig,
+    proxy_cfg: &ProxyConfig,
+    hydra_cfg: &HydraConfig,
+) -> Router<AppState> {
+    let r = Router::new().route("/oauth2/authorize", get(authorize).post(authorize_post));
     let cimd = &oauth_cfg.cimd;
-    rate_limit::dual_window_with_global(
+    // Outermost, so only a CIMD-shaped request reaches the limiter below.
+    let allow_private = cimd.allow_private_targets;
+    let hydra_cfg = hydra_cfg.clone();
+    let passthrough = axum::middleware::from_fn(move |req: Request, next: Next| {
+        let hydra_cfg = hydra_cfg.clone();
+        async move {
+            if req.method() == Method::POST {
+                let (parts, body) = req.into_parts();
+                let body = match axum::body::to_bytes(body, AUTHORIZE_FORM_LIMIT).await {
+                    Ok(b) => b,
+                    Err(_) => {
+                        return (StatusCode::PAYLOAD_TOO_LARGE, "authorize: form too large")
+                            .into_response();
+                    }
+                };
+                if !client_id_is_cimd(form_param(&body, "client_id").as_deref(), allow_private) {
+                    return redirect_post_to_hydra(&hydra_cfg, &body);
+                }
+                return next
+                    .run(Request::from_parts(parts, axum::body::Body::from(body)))
+                    .await;
+            }
+            let raw_query = req.uri().query().unwrap_or_default().to_string();
+            if !is_cimd_request(&raw_query, allow_private) {
+                return redirect_to_hydra(&hydra_cfg, &raw_query);
+            }
+            next.run(req).await
+        }
+    });
+    let limited = rate_limit::dual_window_with_global(
         r,
         proxy_cfg,
         cimd.ip_rate_per_minute
@@ -58,7 +99,37 @@ pub(crate) fn router(oauth_cfg: &OAuthConfig, proxy_cfg: &ProxyConfig) -> Router
         cimd.global_rate_per_hour
             .unwrap_or(DEFAULT_CIMD_GLOBAL_RATE_PER_HOUR),
         rate_limit::plain_text_error("cimd_authorize"),
+    );
+    limited.layer(passthrough)
+}
+
+/// Whether `client_id` is URL-shaped, so it names a CIMD document. `http://`
+/// counts only under `[oauth.cimd].allow_private_targets` (loopback fixture
+/// servers).
+fn client_id_is_cimd(client_id: Option<&str>, allow_private: bool) -> bool {
+    client_id
+        .is_some_and(|c| c.starts_with("https://") || (allow_private && c.starts_with("http://")))
+}
+
+fn form_param(form: &[u8], name: &str) -> Option<String> {
+    url::form_urlencoded::parse(form)
+        .find(|(k, _)| k == name)
+        .map(|(_, v)| v.into_owned())
+}
+
+fn is_cimd_request(raw_query: &str, allow_private: bool) -> bool {
+    client_id_is_cimd(
+        form_param(raw_query.as_bytes(), "client_id").as_deref(),
+        allow_private,
     )
+}
+
+/// Where the authorization request goes on to Hydra.
+enum AuthorizeOrigin<'a> {
+    /// A GET; its query is forwarded.
+    Get(&'a str),
+    /// A POST; its form body is re-sent by the browser.
+    Post(&'a [u8]),
 }
 
 async fn authorize(
@@ -67,9 +138,33 @@ async fn authorize(
     RawQuery(query): RawQuery,
 ) -> Response {
     let raw_query = query.unwrap_or_default();
-    let params: Vec<(String, String)> = url::form_urlencoded::parse(raw_query.as_bytes())
-        .into_owned()
-        .collect();
+    authorize_core(
+        &state,
+        &actx,
+        raw_query.as_bytes(),
+        AuthorizeOrigin::Get(&raw_query),
+    )
+    .await
+}
+
+/// A CIMD-shaped POST, replayed here by the passthrough layer.
+async fn authorize_post(State(state): State<AppState>, actx: AuditCtx, body: Bytes) -> Response {
+    authorize_core(&state, &actx, &body, AuthorizeOrigin::Post(&body)).await
+}
+
+/// Resolve a CIMD client from the request's parameters, then send the request
+/// on to Hydra the way it came.
+async fn authorize_core(
+    state: &AppState,
+    actx: &AuditCtx,
+    form: &[u8],
+    origin: AuthorizeOrigin<'_>,
+) -> Response {
+    let to_hydra = |origin: AuthorizeOrigin<'_>| match origin {
+        AuthorizeOrigin::Get(q) => redirect_to_hydra(&state.cfg.hydra, q),
+        AuthorizeOrigin::Post(b) => redirect_post_to_hydra(&state.cfg.hydra, b),
+    };
+    let params: Vec<(String, String)> = url::form_urlencoded::parse(form).into_owned().collect();
     let param = |k: &str| {
         params
             .iter()
@@ -77,14 +172,12 @@ async fn authorize(
             .map(|(_, v)| v.as_str())
     };
 
-    // Pre-registered (non-CIMD) clients pass through untouched; http:// ids
-    // count as CIMD only under the [oauth.cimd].allow_private_targets hatch
-    // (loopback fixture servers) — in production they pass through as before.
-    let allow_private = state.cfg.oauth.cimd.allow_private_targets;
+    // Non-CIMD requests are passed through by the router's outer layer;
+    // this check keeps the handler safe on its own.
     let Some(client_id) = param("client_id")
-        .filter(|c| c.starts_with("https://") || (allow_private && c.starts_with("http://")))
+        .filter(|c| client_id_is_cimd(Some(c), state.cfg.oauth.cimd.allow_private_targets))
     else {
-        return redirect_to_hydra(&state.cfg.hydra, &raw_query);
+        return to_hydra(origin);
     };
     let client_id = client_id.to_string();
     let request_redirect_uri = param("redirect_uri").unwrap_or("").to_string();
@@ -94,8 +187,8 @@ async fn authorize(
     let meta_row = match oauth_client_metadata::get(&state.db, &client_id).await {
         Ok(Some(row)) if row.source != source::CIMD => {
             return reject(
-                &state,
-                &actx,
+                state,
+                actx,
                 &client_id,
                 "client_id collides with an existing non-CIMD client",
             )
@@ -113,26 +206,26 @@ async fn authorize(
     };
 
     let Ok(doc_url) = url::Url::parse(&client_id) else {
-        return reject(&state, &actx, &client_id, "client_id is not a valid URL").await;
+        return reject(state, actx, &client_id, "client_id is not a valid URL").await;
     };
     if let Some(reason) =
         host_policy_violation(&doc_url, &state.cfg.oauth.cimd.allowed_client_hosts)
     {
-        return reject(&state, &actx, &client_id, &reason).await;
+        return reject(state, actx, &client_id, &reason).await;
     }
-    let doc = match cimd_fetch::fetch_document(&state, &doc_url).await {
+    let doc = match cimd_fetch::fetch_document(state, &doc_url).await {
         Ok(d) => d,
-        Err(e) => return reject(&state, &actx, &client_id, &e.to_string()).await,
+        Err(e) => return reject(state, actx, &client_id, &e.to_string()).await,
     };
     if let Err(reason) = validate_doc(&doc, &client_id) {
-        return reject(&state, &actx, &client_id, &reason).await;
+        return reject(state, actx, &client_id, &reason).await;
     }
     let matched = match match_redirect_uri(&request_redirect_uri, &doc.redirect_uris) {
         Some(m) => m,
         None => {
             return reject(
-                &state,
-                &actx,
+                state,
+                actx,
                 &client_id,
                 "redirect_uri does not match the client metadata document",
             )
@@ -163,8 +256,8 @@ async fn authorize(
     // "known-but-untracked = refuse".
     if existing.is_some() && meta_row.is_none() {
         return reject(
-            &state,
-            &actx,
+            state,
+            actx,
             &client_id,
             "client_id is already registered in Hydra but not tracked as a CIMD client",
         )
@@ -199,14 +292,14 @@ async fn authorize(
     // A row already present means this client_id is registered; only a first
     // sighting adds to the standing count, so only that is capped.
     if meta_row.is_none()
-        && let Some(reason) = over_client_ceiling(&state, &doc_url).await
+        && let Some(reason) = over_client_ceiling(state, &doc_url).await
     {
-        return reject(&state, &actx, &client_id, &reason).await;
+        return reject(state, actx, &client_id, &reason).await;
     }
 
     if !warm {
         if let Err(reason) = upsert_hydra_client(
-            &state,
+            state,
             &client_id,
             &doc,
             existing,
@@ -243,12 +336,12 @@ async fn authorize(
     }
 
     let ev = AuditEvent::new(action::OAUTH_CIMD_CLIENT_SEEN)
-        .with_ctx(&actx)
+        .with_ctx(actx)
         .target(audit::target_kind::OAUTH_CLIENT, client_id.clone())
         .metadata(audit_metadata!("client_id" => client_id));
     let _ = audit::log(&state.db, ev).await;
 
-    redirect_to_hydra(&state.cfg.hydra, &raw_query)
+    to_hydra(origin)
 }
 
 /// The reason a new CIMD client can't be registered right now, or `None` when
@@ -292,23 +385,71 @@ async fn over_client_ceiling(state: &AppState, doc_url: &url::Url) -> Option<Str
     None
 }
 
-/// 302 into Hydra's authorize endpoint with the query string byte-identical.
-fn redirect_to_hydra(hydra_cfg: &crate::config::HydraConfig, raw_query: &str) -> Response {
-    // Relative redirect when the issuer carries a path: the browser must stay on the
-    // issuer origin it arrived on (Hydra's CSRF cookies are host-scoped), and
-    // `/{issuer_path}/oauth2/auth` resolves to the front proxy here and to haproxy's
-    // Hydra route in prod. Path-less issuer = front-proxy-less deployment: go absolute.
+/// The query for Hydra: byte-identical, unless `prompt` carries `create`,
+/// which Hydra v26 knows as `registration`.
+fn hydra_query(raw_query: &str) -> std::borrow::Cow<'_, str> {
+    let has_create = url::form_urlencoded::parse(raw_query.as_bytes())
+        .any(|(k, v)| k == "prompt" && v.split_whitespace().any(|p| p == "create"));
+    if !has_create {
+        return std::borrow::Cow::Borrowed(raw_query);
+    }
+    let pairs = url::form_urlencoded::parse(raw_query.as_bytes()).map(|(k, v)| {
+        if k == "prompt" {
+            let v = v
+                .split_whitespace()
+                .map(|p| if p == "create" { "registration" } else { p })
+                .collect::<Vec<_>>()
+                .join(" ");
+            (k.into_owned(), v)
+        } else {
+            (k.into_owned(), v.into_owned())
+        }
+    });
+    std::borrow::Cow::Owned(
+        url::form_urlencoded::Serializer::new(String::new())
+            .extend_pairs(pairs)
+            .finish(),
+    )
+}
+
+/// Hydra's authorize endpoint. Relative when the issuer carries a path: the
+/// browser must stay on the issuer origin it arrived on (Hydra's CSRF cookies
+/// are host-scoped), and `/{issuer_path}/oauth2/auth` resolves to the front
+/// proxy here and to haproxy's Hydra route in prod. Path-less issuer =
+/// front-proxy-less deployment: go absolute.
+fn hydra_auth_endpoint(hydra_cfg: &HydraConfig) -> String {
     let base = match hydra_cfg.issuer_path() {
         Some(p) => format!("/{p}"),
         None => hydra_cfg.public_url.trim_end_matches('/').to_string(),
     };
+    format!("{base}/oauth2/auth")
+}
+
+/// 302 into Hydra's authorize endpoint (query per [`hydra_query`]).
+fn redirect_to_hydra(hydra_cfg: &HydraConfig, raw_query: &str) -> Response {
+    redirect_with_query(hydra_cfg, raw_query, StatusCode::FOUND)
+}
+
+/// 303 into Hydra's authorize endpoint with the POSTed form as the query
+/// (RFC 9110 §15.4.4). Hydra resumes a flow from the stored request URL, so a
+/// body re-sent with a 307 loses its parameters once login or consent runs.
+fn redirect_post_to_hydra(hydra_cfg: &HydraConfig, body: &[u8]) -> Response {
+    let Ok(form) = std::str::from_utf8(body) else {
+        return (StatusCode::BAD_REQUEST, "authorize: malformed form body").into_response();
+    };
+    redirect_with_query(hydra_cfg, form, StatusCode::SEE_OTHER)
+}
+
+fn redirect_with_query(hydra_cfg: &HydraConfig, raw_query: &str, status: StatusCode) -> Response {
+    let raw_query = hydra_query(raw_query);
+    let endpoint = hydra_auth_endpoint(hydra_cfg);
     let target = if raw_query.is_empty() {
-        format!("{base}/oauth2/auth")
+        endpoint
     } else {
-        format!("{base}/oauth2/auth?{raw_query}")
+        format!("{endpoint}?{raw_query}")
     };
     match axum::http::HeaderValue::from_str(&target) {
-        Ok(loc) => (StatusCode::FOUND, [(header::LOCATION, loc)]).into_response(),
+        Ok(loc) => (status, [(header::LOCATION, loc)]).into_response(),
         Err(_) => (StatusCode::BAD_REQUEST, "cimd: malformed query").into_response(),
     }
 }
@@ -551,6 +692,54 @@ async fn upsert_hydra_client(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn client_id_is_cimd_needs_a_url() {
+        use super::client_id_is_cimd;
+        assert!(client_id_is_cimd(Some("https://app.example/c.json"), false));
+        assert!(!client_id_is_cimd(Some("forgejo"), false));
+        assert!(!client_id_is_cimd(Some("http://127.0.0.1/c"), false));
+        assert!(client_id_is_cimd(Some("http://127.0.0.1/c"), true));
+        assert!(!client_id_is_cimd(None, true));
+    }
+
+    #[test]
+    fn only_url_shaped_client_ids_count_as_cimd() {
+        use super::is_cimd_request;
+        assert!(is_cimd_request(
+            "client_id=https%3A%2F%2Fapp.example%2Fc.json",
+            false
+        ));
+        assert!(!is_cimd_request("client_id=forgejo&scope=openid", false));
+        assert!(!is_cimd_request(
+            "client_id=http%3A%2F%2F127.0.0.1%2Fc",
+            false
+        ));
+        assert!(is_cimd_request(
+            "client_id=http%3A%2F%2F127.0.0.1%2Fc",
+            true
+        ));
+        assert!(!is_cimd_request("", false));
+    }
+
+    #[test]
+    fn prompt_create_becomes_registration_and_nothing_else_changes() {
+        use super::hydra_query;
+        let untouched = "client_id=x&scope=openid+email&prompt=login";
+        assert_eq!(hydra_query(untouched), untouched);
+        let out = hydra_query("client_id=x&prompt=create&state=s%20t");
+        let pairs: Vec<(String, String)> = url::form_urlencoded::parse(out.as_bytes())
+            .into_owned()
+            .collect();
+        assert_eq!(
+            pairs,
+            vec![
+                ("client_id".to_string(), "x".to_string()),
+                ("prompt".to_string(), "registration".to_string()),
+                ("state".to_string(), "s t".to_string()),
+            ]
+        );
+    }
+
     use super::{
         CimdDocument, MAX_SCOPE_ENTRIES, RedirectMatch, host_policy_violation,
         is_acceptable_redirect_entry, match_redirect_uri, scope_union, scopes_already_on_row,

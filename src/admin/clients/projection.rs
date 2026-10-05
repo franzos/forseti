@@ -67,8 +67,9 @@ pub(super) fn read_require_pkce(c: &ory::OAuth2Client) -> bool {
 }
 
 /// Project a Hydra client into a `ClientRow`, merging in the matching
-/// Forseti-side metadata row when present. A missing Forseti row produces
-/// the legacy defaults (`verified = true`, `self_registered = false`).
+/// Forseti-side metadata row when present. "Verified" means what the consent
+/// screen treats as vouched for: an operator's word. Org-vouched clients and
+/// clients with no Forseti row are not verified.
 pub(super) fn project_row(
     locale: &crate::locale::LanguageIdentifier,
     c: &ory::OAuth2Client,
@@ -82,14 +83,11 @@ pub(super) fn project_row(
     let (self_registered, verified, verified_by, verified_at) = match meta {
         Some(m) => (
             m.is_self_registered(),
-            m.is_verified(),
+            m.is_admin_vouched(),
             m.verified_by.clone().unwrap_or_default(),
             m.verified_at.clone().unwrap_or_default(),
         ),
-        // Legacy default: no Forseti row → treat as verified, not
-        // self-registered. See the module doc on
-        // `oauth_client_metadata` for the rationale.
-        None => (false, true, String::new(), String::new()),
+        None => (false, false, String::new(), String::new()),
     };
     let (logo, logo_dark) = meta
         .and_then(|m| m.template_slug.as_deref())
@@ -111,5 +109,15 @@ pub(super) fn project_row(
         verified_at,
         logo,
         logo_dark,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn rowless_client_projects_unverified() {
+        let locale: crate::locale::LanguageIdentifier = "en".parse().unwrap();
+        let client = crate::ory::OAuth2Client::new();
+        assert!(!super::project_row(&locale, &client, None).verified);
     }
 }

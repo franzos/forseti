@@ -6,6 +6,7 @@ error-cta-back-to-sign-in = العودة إلى تسجيل الدخول
 logout-card-title = تسجيل الخروج من جميع التطبيقات؟
 logout-card-subtitle = سيؤدي هذا إلى إنهاء جلستك مع { $brand } وإخطار كل تطبيق سجّلت الدخول إليه.
 logout-body-text = سيُبلَّغ التطبيق الذي طلب منك تسجيل الخروج بأن الطلب قد اكتمل. قد تحتفظ بعض التطبيقات ببيانات محلية مخزّنة مؤقتًا لفترة قصيرة؛ تسجيل الخروج هنا ينهي الجلسة لدى { $brand }.
+logout-body-text-direct = قد تحتفظ بعض التطبيقات ببيانات محلية مخزّنة مؤقتًا لفترة قصيرة؛ تسجيل الخروج هنا ينهي الجلسة لدى { $brand }.
 logout-action-sign-out = تسجيل الخروج
 logout-action-cancel = إلغاء
 
@@ -64,6 +65,7 @@ error-page-link-expired-body = لم يعد هذا الرابط صالحًا. ي�
 error-page-security-title = فشل الفحص الأمني
 error-page-already-signed-in-title = مسجّل الدخول بالفعل
 error-page-default-message = تعذّر علينا إكمال ذلك الطلب.
+error-page-oauth-title = تعذّر إكمال طلب تسجيل الدخول
 
 # صفحة منع الوصول إلى بوابة الإدارة (admin/forbidden.html)، مضبوطة في Rust.
 error-admin-access-denied-title = تم رفض الوصول
@@ -79,3 +81,6 @@ error-saml-unverified-suffix = بالفعل لكن لم يُتحقَّق من ع
 error-saml-cross-org-not-member = حسابك ليس عضوًا في هذه المؤسسة بعد. اطلب من مسؤولك إضافتك، ثم حاول مرة أخرى.
 error-saml-conflict = تعذّر علينا تسجيل دخولك. يُرجى التواصل مع مسؤولك.
 error-saml-blocked-cta = الانتقال إلى تسجيل الدخول
+error-saml-admin-allowlisted = ينتمي هذا العنوان إلى حساب مشغّل ولا يمكن تسجيل الدخول به عبر مزوّد الهوية الخاص بمؤسستك. سجّل الدخول مباشرةً.
+error-saml-unproven-domain = لم تتحقق مؤسستك من نطاق البريد الإلكتروني هذا بعد. اطلب من المسؤول التحقق منه ثم حاول مجددًا.
+error-saml-confirm-failed = لربط هذا الحساب بمزوّد الهوية الخاص بمؤسستك، سجّل الدخول بالحساب الذي يملك هذا العنوان.

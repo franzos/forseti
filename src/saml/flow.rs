@@ -697,6 +697,75 @@ enum Resolution {
     },
 }
 
+/// One `RefuseReason` → audit action + blocked-page mapping for every link path.
+fn blocked_resolution_for(reason: RefuseReason, identity_id: Option<String>) -> Resolution {
+    let (action, reason_str, block_reason, identity_id) = match reason {
+        RefuseReason::AdminAllowlisted => (
+            action::SAML_LOGIN_FAILED,
+            "admin_allowlisted_email",
+            BlockedReason::AdminAllowlisted,
+            identity_id,
+        ),
+        RefuseReason::UnverifiedMatch => (
+            action::SAML_LOGIN_BLOCKED_UNVERIFIED,
+            "unverified_email",
+            BlockedReason::Unverified,
+            identity_id,
+        ),
+        RefuseReason::CrossOrgNotMember => (
+            action::SAML_LOGIN_FAILED,
+            "cross_org_not_member",
+            BlockedReason::CrossOrgNotMember,
+            identity_id,
+        ),
+        RefuseReason::UnprovenDomain => (
+            action::SAML_LOGIN_FAILED,
+            "unproven_domain",
+            BlockedReason::UnprovenDomain,
+            None,
+        ),
+    };
+    Resolution::Blocked {
+        action,
+        reason: reason_str,
+        block_reason,
+        identity_id,
+    }
+}
+
+/// A `saml_links` hit is not a standing grant: re-run the link decision on the
+/// linked identity's live facts, so a removed member or an identity holding a
+/// verified allowlisted address is refused like a fresh match would be.
+async fn resolve_established_link(
+    state: &AppState,
+    org_id: &str,
+    identity: Identity,
+) -> anyhow::Result<Resolution> {
+    let matched_is_member = orgs::db::find_member(&state.db, &identity.id, org_id)
+        .await?
+        .is_some();
+    let addrs = crate::ory::identity_addresses(&identity);
+    let is_admin_email = addrs
+        .unwrap_or_default()
+        .iter()
+        .any(|a| state.cfg.admin.is_admin_actor(&a.value, addrs));
+    let facts = LinkFacts {
+        matched_identity: true,
+        matched_verified: true,
+        matched_is_member,
+        is_admin_email,
+        org_domain_verified: false,
+        credential_confirmed: true,
+    };
+    match saml_link_decision(facts) {
+        LinkDecision::LinkExisting => Ok(Resolution::Identity(Box::new(identity))),
+        LinkDecision::Refuse(reason) => Ok(blocked_resolution_for(reason, Some(identity.id))),
+        LinkDecision::ConfirmCredential | LinkDecision::JitCreate => {
+            anyhow::bail!("a confirmed, verified match only links or refuses")
+        }
+    }
+}
+
 /// Subject → email → Kratos identity decision tree. Durable hit: a
 /// saml_links row keyed on the stable IdP subject (NameID) survives an
 /// email change at the IdP. Falls back to the legacy email-keyed row, then
@@ -740,7 +809,7 @@ async fn resolve_identity(
         && let Some((linked, row_email)) = db::link_subject(&state.db, org_id, subject).await?
     {
         match kratos::admin_get_identity_optional(&state.ory, &linked).await? {
-            Some(identity) => return Ok(Resolution::Identity(Box::new(identity))),
+            Some(identity) => return resolve_established_link(state, org_id, identity).await,
             None => db::delete_link(&state.db, org_id, &row_email).await?,
         }
     }
@@ -751,7 +820,7 @@ async fn resolve_identity(
             // Backfill the subject onto the legacy row.
             Some(identity) => {
                 db::upsert_link(&state.db, org_id, email, subject_opt, &identity.id).await?;
-                return Ok(Resolution::Identity(Box::new(identity)));
+                return resolve_established_link(state, org_id, identity).await;
             }
             None => db::delete_link(&state.db, org_id, email).await?,
         }
@@ -783,37 +852,8 @@ async fn resolve_identity(
     };
 
     match saml_link_decision(facts) {
-        LinkDecision::Refuse(RefuseReason::AdminAllowlisted) => {
-            return Ok(Resolution::Blocked {
-                action: action::SAML_LOGIN_FAILED,
-                reason: "admin_allowlisted_email",
-                block_reason: BlockedReason::AdminAllowlisted,
-                identity_id: matched.map(|(i, _)| i.id),
-            });
-        }
-        LinkDecision::Refuse(RefuseReason::UnverifiedMatch) => {
-            return Ok(Resolution::Blocked {
-                action: action::SAML_LOGIN_BLOCKED_UNVERIFIED,
-                reason: "unverified_email",
-                block_reason: BlockedReason::Unverified,
-                identity_id: matched.map(|(i, _)| i.id),
-            });
-        }
-        LinkDecision::Refuse(RefuseReason::CrossOrgNotMember) => {
-            return Ok(Resolution::Blocked {
-                action: action::SAML_LOGIN_FAILED,
-                reason: "cross_org_not_member",
-                block_reason: BlockedReason::CrossOrgNotMember,
-                identity_id: matched.map(|(i, _)| i.id),
-            });
-        }
-        LinkDecision::Refuse(RefuseReason::UnprovenDomain) => {
-            return Ok(Resolution::Blocked {
-                action: action::SAML_LOGIN_FAILED,
-                reason: "unproven_domain",
-                block_reason: BlockedReason::UnprovenDomain,
-                identity_id: None,
-            });
+        LinkDecision::Refuse(reason) => {
+            return Ok(blocked_resolution_for(reason, matched.map(|(i, _)| i.id)));
         }
         LinkDecision::ConfirmCredential => {
             let identity_id = matched
@@ -1020,6 +1060,37 @@ mod link_decision_tests {
         assert!(
             guard < subject_lookup && guard < email_lookup,
             "the operator refusal must run before both link fast paths"
+        );
+    }
+
+    /// C1 (round-3 review): both link fast paths returned the linked identity
+    /// without re-running the link decision.
+    #[test]
+    fn both_link_fast_paths_rerun_the_link_decision() {
+        let src = include_str!("flow.rs");
+        let body_start = src
+            .find("async fn resolve_identity(")
+            .expect("resolve_identity");
+        let body = &src[body_start..];
+        let fresh_match = body
+            .find("kratos::admin_find_identity_by_email(")
+            .expect("the fresh-match lookup");
+        let fast_paths = &body[..fresh_match];
+        for anchor in [
+            "db::link_subject(&state.db, org_id, subject)",
+            "db::link_for(&state.db, org_id, email)",
+        ] {
+            let at = fast_paths.find(anchor).expect(anchor);
+            let rest = &fast_paths[at..];
+            let arm_end = rest.find("None =>").expect("the stale-link arm");
+            assert!(
+                rest[..arm_end].contains("resolve_established_link(state, org_id, identity)"),
+                "{anchor}: a link hit must go through resolve_established_link"
+            );
+        }
+        assert!(
+            !fast_paths.contains("Resolution::Identity("),
+            "no fast path may construct Resolution::Identity directly"
         );
     }
 

@@ -22,6 +22,7 @@ claim-confirm-start-over = เริ่มใหม่
 invite-accept-page-title = ตอบรับคำเชิญ
 invite-accept-heading = เข้าร่วม { $org }
 invite-accept-body = คุณได้รับเชิญให้เข้าร่วม { $org } ในฐานะ { $role } คำเชิญถูกส่งไปยัง { $email }
+invite-accept-cta-switch = ออกจากระบบและดำเนินการต่อในชื่อ { $email }
 
 # คำเชิญไม่พร้อมใช้งาน (invite/invalid.html)
 invite-invalid-page-title = คำเชิญไม่พร้อมใช้งาน
@@ -41,3 +42,7 @@ claim-error-release-failed = เราไม่สามารถปลดอี
 
 # การสรุปผลคำเชิญ (กำหนดใน Rust)
 invite-error-corrupt = คำเชิญเสียหาย ติดต่อผู้ดูแลระบบของคุณ
+onboarding-username-page-title = เลือกชื่อผู้ใช้
+onboarding-username-body = แอปที่สร้างบัญชีให้คุณจะใช้ชื่อนี้เป็นชื่อผู้ใช้ของคุณ คุณเปลี่ยนได้ภายหลังในโปรไฟล์
+onboarding-username-hint = ตัวอักษร ตัวเลข จุด ขีดล่าง หรือขีดกลาง 2 ถึง 39 ตัว เปลี่ยนได้ทุก 30 วัน
+onboarding-username-skip = ข้ามไปก่อน

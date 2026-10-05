@@ -27,7 +27,7 @@ pub(crate) fn hash_token(raw_token: &str) -> String {
 /// license-gated: `Feature::LinuxAuth` only caps provisioning (see
 /// [`crate::admin::posix`]), never resolution or login.
 pub fn router(state: AppState) -> Router<AppState> {
-    let proxy = state.cfg.proxy.clone();
+    let proxy = state.cfg.internal_proxy();
     resolver::router(state).merge(device::router(&proxy))
 }
 

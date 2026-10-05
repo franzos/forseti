@@ -23,6 +23,13 @@
       {% else %}
         <a href="{{ cta_url }}"
            class="bg-primary text-on-primary rounded-lg px-4 py-2 font-label-md text-label-md inline-block w-fit">{{ cta_label }}</a>
+        {% if !sign_in_url.is_empty() %}
+          <p class="font-body-sm text-body-sm text-on-surface-variant">
+            {{ chrome.t("auth-registration-have-account") }}
+            <a href="{{ sign_in_url }}"
+               class="font-label-md text-label-md text-primary hover:underline transition-colors">{{ chrome.t("auth-registration-sign-in-link") }}</a>
+          </p>
+        {% endif %}
       {% endif %}
     </div>
   </div>

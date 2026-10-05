@@ -51,7 +51,10 @@ registration_global_rate_per_hour    = 10000
 # integration + Playwright tests run unattended. Keep this list in sync with
 # SEED_ADMIN_EMAIL in infra/seed-admin.sh.
 [admin]
-allowed_emails = ["admin@example.com"]
+# `unclaimed-admin@` is allowlisted but deliberately never registered: it is
+# the fixture for the "an allowlisted address nobody has verified is not an
+# operator" regression test. Keep it out of `seed-admin`.
+allowed_emails = ["admin@example.com", "unclaimed-admin@example.com"]
 
 # Kratos runs in the compose network and reaches the audit webhook receiver
 # via host.docker.internal:8081 (compose maps that to the host gateway), so

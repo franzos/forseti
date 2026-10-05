@@ -2,6 +2,7 @@
 auth-login-page-title = Sign in
 auth-login-card-title = Sign in to your account
 auth-login-card-subtitle = Welcome back to { $brand }.
+auth-continue-to-app = to continue to { $app }
 auth-login-aal2-body = This area requires two-factor authentication, but your account doesn't have a second factor set up yet.
 auth-login-aal2-hint = Set up an authenticator app, security key, or recovery codes in settings, then come back.
 auth-login-aal2-setup-link = Set up two-factor authentication
@@ -12,6 +13,7 @@ auth-login-create-account = Create account
 # Shared divider (login + registration)
 auth-or-continue-with = Or continue with
 auth-oidc-signin = Sign in with { $provider }
+auth-oidc-email-needed = { $provider } didn't share a verified email address. Enter the one you'd like to use for this account.
 
 # Registration page
 auth-registration-page-title = Create account

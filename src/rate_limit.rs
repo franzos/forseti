@@ -33,9 +33,10 @@ pub(crate) fn spawn_retention(shutdown: CancellationToken) -> tokio::task::JoinH
             tokio::select! {
                 () = shutdown.cancelled() => break,
                 _ = tick.tick() => {
+                    // A poisoned registry still holds valid closures; keep pruning.
                     let retainers = RETAINERS
                         .lock()
-                        .expect("retainer registry mutex poisoned"); // registered closures never panic
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     for retain in retainers.iter() {
                         retain();
                     }
@@ -76,7 +77,7 @@ where
     let limiter = cfg.limiter().clone();
     RETAINERS
         .lock()
-        .expect("retainer registry mutex poisoned")
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .push(Box::new(move || limiter.retain_recent()));
     r.layer(GovernorLayer::new(cfg).error_handler(error_handler))
 }

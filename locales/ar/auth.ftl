@@ -2,6 +2,7 @@
 auth-login-page-title = تسجيل الدخول
 auth-login-card-title = تسجيل الدخول إلى حسابك
 auth-login-card-subtitle = مرحبًا بعودتك إلى { $brand }.
+auth-continue-to-app = للمتابعة إلى { $app }
 auth-login-aal2-body = تتطلب هذه المنطقة مصادقة ثنائية العوامل، لكن حسابك لم يُعدّ بعد عاملًا ثانيًا.
 auth-login-aal2-hint = قم بإعداد تطبيق مصادقة أو مفتاح أمان أو رموز استرداد في الإعدادات، ثم عُد.
 auth-login-aal2-setup-link = إعداد المصادقة الثنائية العوامل
@@ -12,6 +13,7 @@ auth-login-create-account = إنشاء حساب
 # فاصل مشترك (تسجيل الدخول + التسجيل)
 auth-or-continue-with = أو تابع باستخدام
 auth-oidc-signin = تسجيل الدخول باستخدام { $provider }
+auth-oidc-email-needed = لم يشارك { $provider } عنوان بريد إلكتروني مُتحقَّقًا منه. أدخل العنوان الذي تريد استخدامه لهذا الحساب.
 
 # صفحة التسجيل
 auth-registration-page-title = إنشاء حساب

@@ -6,6 +6,7 @@ error-cta-back-to-sign-in = Torna all'accesso
 logout-card-title = Uscire da tutte le app?
 logout-card-subtitle = Questo terminerà la tua sessione con { $brand } e notificherà tutte le app a cui hai effettuato l'accesso.
 logout-body-text = L'app che ti ha chiesto di uscire riceverà conferma del completamento della richiesta. Alcune app potrebbero mantenere dati nella cache locale per un breve periodo; uscendo qui termini la sessione su { $brand }.
+logout-body-text-direct = Alcune app potrebbero mantenere dati nella cache locale per un breve periodo; uscendo qui termini la sessione su { $brand }.
 logout-action-sign-out = Esci
 logout-action-cancel = Annulla
 
@@ -64,6 +65,7 @@ error-page-link-expired-body = Questo link non è più valido. Ricomincia dall'a
 error-page-security-title = Controllo di sicurezza non riuscito
 error-page-already-signed-in-title = Già connesso
 error-page-default-message = Non è stato possibile completare questa richiesta.
+error-page-oauth-title = Richiesta di accesso non riuscita
 
 # Pagina di accesso negato dell'admin gate (admin/forbidden.html), impostata in Rust.
 error-admin-access-denied-title = Accesso negato
@@ -79,3 +81,6 @@ error-saml-unverified-suffix = esiste già ma il suo indirizzo email non è stat
 error-saml-cross-org-not-member = Il tuo account non è ancora membro di questa organizzazione. Chiedi al tuo amministratore di aggiungerti, poi riprova.
 error-saml-conflict = Non è stato possibile eseguire l'accesso. Contatta il tuo amministratore.
 error-saml-blocked-cta = Vai all'accesso
+error-saml-admin-allowlisted = Questo indirizzo appartiene a un account operatore e non può accedere tramite il provider di identità della tua organizzazione. Accedi direttamente.
+error-saml-unproven-domain = La tua organizzazione non ha ancora verificato questo dominio email. Chiedi al tuo amministratore di verificarlo, poi riprova.
+error-saml-confirm-failed = Per collegare questo account al provider di identità della tua organizzazione, accedi con l'account a cui appartiene questo indirizzo.

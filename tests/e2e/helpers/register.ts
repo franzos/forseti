@@ -14,6 +14,7 @@ export interface RegisteredUser {
 }
 
 const DEFAULT_PASSWORD = 'Sup3rSecret-E2E-Password!';
+const KRATOS_ADMIN = process.env.KRATOS_ADMIN || 'http://host.containers.internal:4434';
 
 /**
  * Build a unique email per test. Combines a prefix, the test info worker
@@ -77,7 +78,30 @@ export async function registerUserWithEmail(
   // Land on /, /verification, or /settings/profile depending on after-hooks.
   await page.waitForURL((u) => !u.pathname.startsWith('/registration'), { timeout: 15_000 });
   await expect(page).not.toHaveURL(/\/registration/);
+  await skipUsernameStep(page, email);
   return { email, password: DEFAULT_PASSWORD };
+}
+
+/**
+ * Mark the new-account username step as skipped for this browser, as its
+ * "Skip for now" does, so OAuth specs asking for `profile` reach consent.
+ * Set on both hosts the login redirect can use.
+ */
+export async function skipUsernameStep(page: Page, email: string): Promise<void> {
+  const res = await page.request.get(
+    `${KRATOS_ADMIN}/admin/identities?credentials_identifier=${encodeURIComponent(email)}`,
+  );
+  const identities = (await res.json()) as Array<{ id: string }>;
+  const id = identities[0]?.id;
+  expect(id, `no identity for ${email}`).toBeTruthy();
+  await page.context().addCookies(
+    ['localhost', 'host.containers.internal'].map((domain) => ({
+      name: 'forseti_username_skipped',
+      value: id,
+      domain,
+      path: '/oauth/login',
+    })),
+  );
 }
 
 /** Drive the portal's logout form on the current page. */

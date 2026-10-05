@@ -515,8 +515,18 @@ async fn admin_sessions_list_and_revoke_kills_target() {
         return;
     };
 
-    // A victim user with one live session.
+    // A victim user with one live session, signed in to a back-channel app.
     let victim = register_test_user("admin-sess-victim").await;
+    mark_identity_verified(&victim.identity_id).await;
+    let sink = BackchannelSink::start().await;
+    let (rp_id, rp_secret, rp_redirect) =
+        hydra_create_backchannel_client(&["openid", "offline_access"], &sink.url).await;
+    let victim_browser = crate::sso_spec::Browser {
+        client: victim.client.clone(),
+        manual: victim.manual_client.clone(),
+    };
+    let (victim_sid, victim_refresh) =
+        crate::sso_spec::authorize(&victim_browser, &rp_id, &rp_secret, &rp_redirect).await;
     let session_id = {
         let ids = kratos_identity_session_ids(&victim.identity_id).await;
         ids.into_iter()
@@ -558,7 +568,13 @@ async fn admin_sessions_list_and_revoke_kills_target() {
         !whoami_is_active(&victim.client).await,
         "admin revoke must invalidate the victim's session"
     );
+    assert_eq!(sink.sids_after(1, 10).await, vec![victim_sid]);
+    assert!(
+        !refresh_succeeds(&rp_id, &rp_secret, &victim_refresh).await,
+        "admin revoke must kill the session's grants"
+    );
 
+    hydra_delete_client(&rp_id).await;
     victim.cleanup().await;
 }
 

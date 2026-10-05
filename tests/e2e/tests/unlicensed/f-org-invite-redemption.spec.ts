@@ -117,9 +117,10 @@ test('org invite: admin mints → invitee redeems → member row lands', async (
   try {
     await inviteePage.goto(acceptUrl);
 
-    // Anonymous branch: CTA reads "Register as <email> and accept"
-    // (`src/orgs/invite.rs::invite_accept_get`, the `cta_label` field).
-    const cta = inviteePage.getByText(`Register as ${inviteeEmail} and accept`);
+    // Anonymous branch: the page names the invited address and offers
+    // "Create account" (`src/orgs/invite.rs::invite_accept_get`, `cta_label`).
+    await expect(inviteePage.getByText(inviteeEmail).first()).toBeVisible();
+    const cta = inviteePage.getByRole('link', { name: 'Create account', exact: true });
     await expect(cta).toBeVisible();
 
     // 6. Click through to Kratos registration. The `return_to` baked into

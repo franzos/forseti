@@ -2,6 +2,7 @@
 auth-login-page-title = Se connecter
 auth-login-card-title = Connectez-vous à votre compte
 auth-login-card-subtitle = Bienvenue à nouveau sur { $brand }.
+auth-continue-to-app = pour continuer vers { $app }
 auth-login-aal2-body = Cette zone nécessite l'authentification à deux facteurs, mais votre compte n'a pas encore de deuxième facteur configuré.
 auth-login-aal2-hint = Configurez une application d'authentification, une clé de sécurité ou des codes de récupération dans les paramètres, puis revenez.
 auth-login-aal2-setup-link = Configurer l'authentification à deux facteurs
@@ -12,6 +13,7 @@ auth-login-create-account = Créer un compte
 # Séparateur partagé (connexion + inscription)
 auth-or-continue-with = Ou continuer avec
 auth-oidc-signin = Se connecter avec { $provider }
+auth-oidc-email-needed = { $provider } n'a pas transmis d'adresse e-mail vérifiée. Saisissez celle que vous souhaitez utiliser pour ce compte.
 
 # Page d'inscription
 auth-registration-page-title = Créer un compte

@@ -14,8 +14,10 @@
 // inside the Kratos flow (the URL is a bare `/login?flow=…`) — that's the shape
 // a 2FA user actually hits.
 import { test, expect, type Page, type APIRequestContext } from '@playwright/test';
-import { registerUser, logout } from '../../helpers/register';
+import { registerUser, logout, skipUsernameStep } from '../../helpers/register';
 import { adminCredsFromEnv } from '../../helpers/admin';
+import { markEmailVerified } from '../../helpers/orgs';
+import { markClientVerified } from '../../helpers/clients';
 import { computeTotp } from '../../helpers/totp';
 import { generatePkcePair } from '../../helpers/oauth';
 
@@ -86,12 +88,16 @@ async function expectCallback(
 test('login inside an authorize chain reaches a skip-consent client callback', async ({
   page,
   request,
+  browser,
 }) => {
   const clientId = await createSkipConsentClient(request, 'pwd');
+  await markClientVerified(browser, clientId);
 
   // A fresh user, signed out again: the authorize chain has to run the login
   // form itself, which is the navigation under test.
   const user = await registerUser(page, 'playwright-skip-consent');
+  // Login requires a verified address (`require_verified_address`).
+  await markEmailVerified(request, user.email);
   await logout(page);
 
   const cspViolations = watchCsp(page);
@@ -113,6 +119,7 @@ test('login inside an authorize chain reaches a skip-consent client callback', a
 test('second-factor submit inside an authorize chain reaches the callback', async ({
   page,
   request,
+  browser,
 }) => {
   const creds = adminCredsFromEnv();
   test.skip(
@@ -121,6 +128,9 @@ test('second-factor submit inside an authorize chain reaches the callback', asyn
   );
 
   const clientId = await createSkipConsentClient(request, 'aal2');
+  await markClientVerified(browser, clientId);
+  // The seeded admin is a new account without a username.
+  await skipUsernameStep(page, creds!.email);
   const cspViolations = watchCsp(page);
 
   await startAuthorize(page, clientId);

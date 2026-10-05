@@ -2,6 +2,7 @@
 auth-login-page-title = เข้าสู่ระบบ
 auth-login-card-title = เข้าสู่ระบบบัญชีของคุณ
 auth-login-card-subtitle = ยินดีต้อนรับกลับสู่ { $brand }
+auth-continue-to-app = เพื่อดำเนินการต่อไปยัง { $app }
 auth-login-aal2-body = พื้นที่นี้จำเป็นต้องใช้การยืนยันตัวตนแบบสองปัจจัย แต่บัญชีของคุณยังไม่ได้ตั้งค่าปัจจัยที่สอง
 auth-login-aal2-hint = ตั้งค่าแอปยืนยันตัวตน กุญแจความปลอดภัย หรือรหัสกู้คืนในการตั้งค่า แล้วกลับมาอีกครั้ง
 auth-login-aal2-setup-link = ตั้งค่าการยืนยันตัวตนแบบสองปัจจัย
@@ -12,6 +13,7 @@ auth-login-create-account = สร้างบัญชี
 # เส้นแบ่งที่ใช้ร่วมกัน (เข้าสู่ระบบ + ลงทะเบียน)
 auth-or-continue-with = หรือดำเนินการต่อด้วย
 auth-oidc-signin = เข้าสู่ระบบด้วย { $provider }
+auth-oidc-email-needed = { $provider } ไม่ได้แชร์อีเมลที่ยืนยันแล้ว กรอกอีเมลที่คุณต้องการใช้กับบัญชีนี้
 
 # หน้าลงทะเบียน
 auth-registration-page-title = สร้างบัญชี

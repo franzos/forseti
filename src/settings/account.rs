@@ -278,15 +278,17 @@ async fn run_delete_saga(
         );
     }
 
-    // Best-effort Hydra session revoke; don't block on it.
-    if let Err(e) = ory::hydra::revoke_consent_sessions_for_subject(&state.ory, &user_id).await {
-        tracing::warn!(error = %e, "hydra revoke during self-delete failed (continuing)");
-    }
-
     // The destructive call. On failure, flip the outbox to ABORTED so the
     // worker never sends.
     match ory::kratos::admin_delete_identity(&state.ory, &user_id).await {
         Ok(()) => {
+            crate::oauth::op_sessions::end_op_sessions_for_subject(
+                state,
+                &user_id,
+                None,
+                crate::oauth::op_sessions::GrantRevocation::Keep,
+            )
+            .await;
             // Cascade: drop org memberships so neither delete route leaves
             // ghost rows on the members page.
             match crate::orgs::db::remove_member_everywhere(&state.db, &user_id).await {

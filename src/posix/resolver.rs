@@ -83,7 +83,7 @@ pub fn router(state: AppState) -> Router<AppState> {
     // (src/admin/posix.rs), never reads.
     rate_limit::single_window(
         r,
-        &state.cfg.proxy,
+        &state.cfg.internal_proxy(),
         60_000,
         RESOLVER_RATE_PER_MINUTE,
         rate_limit_error,

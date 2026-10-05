@@ -3,7 +3,7 @@
 {% block title %}{{ chrome.t("auth-login-page-title") }} &middot; {{ chrome.brand.name }}{% endblock %}
 
 {% block card_title %}{{ chrome.t("auth-login-card-title") }}{% endblock %}
-{% block card_subtitle %}{{ chrome.tv1("auth-login-card-subtitle", "brand", &chrome.brand.name) }}{% endblock %}
+{% block card_subtitle %}{% match continue_to_app %}{% when Some with (app) %}{{ chrome.tv1("auth-continue-to-app", "app", app) }}{% when None %}{{ chrome.tv1("auth-login-card-subtitle", "brand", &chrome.brand.name) }}{% endmatch %}{% endblock %}
 
 {% block card_body %}
   {# AAL2 step-up requested but the identity has no second factor enrolled.
@@ -167,6 +167,7 @@
 {% endif %}
 </form>
 
+{% if !reauth %}
 <div class="text-center mt-stack-sm">
   <p class="font-body-sm text-body-sm text-on-surface-variant">
     {{ chrome.t("auth-login-no-account") }}
@@ -174,6 +175,7 @@
        class="font-label-md text-label-md text-primary hover:underline transition-colors">{{ chrome.t("auth-login-create-account") }}</a>
   </p>
 </div>
+{% endif %}
 
 {# WebAuthn / passkey helper. Kratos serves the script and the flow tells us
    exactly which URL + integrity hash to use; we render it verbatim. Without

@@ -2,6 +2,7 @@
 auth-login-page-title = Вход
 auth-login-card-title = Вход в ваш аккаунт
 auth-login-card-subtitle = С возвращением в { $brand }.
+auth-continue-to-app = чтобы продолжить в { $app }
 auth-login-aal2-body = Этот раздел требует двухфакторной аутентификации, но в вашем аккаунте ещё не настроен второй фактор.
 auth-login-aal2-hint = Настройте приложение-аутентификатор, ключ безопасности или коды восстановления в настройках, а затем вернитесь.
 auth-login-aal2-setup-link = Настроить двухфакторную аутентификацию
@@ -12,6 +13,7 @@ auth-login-create-account = Создать аккаунт
 # Общий разделитель (вход + регистрация)
 auth-or-continue-with = Или продолжить через
 auth-oidc-signin = Войти через { $provider }
+auth-oidc-email-needed = { $provider } не передал подтверждённый адрес электронной почты. Укажите адрес, который хотите использовать для этого аккаунта.
 
 # Страница регистрации
 auth-registration-page-title = Создать аккаунт

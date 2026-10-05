@@ -95,6 +95,10 @@ pub(crate) fn translate_ory(
                         continue;
                     }
                 }
+                // Kratos passes the raw provider id ("github"); users read the brand.
+                serde_json::Value::String(s) if k == "provider" => {
+                    FluentValue::from(crate::oidc_providers::display_name(s))
+                }
                 serde_json::Value::String(s) => FluentValue::from(s.clone()),
                 _ => continue,
             };

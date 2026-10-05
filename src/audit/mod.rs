@@ -439,6 +439,27 @@ fn accept_request_id(raw: &str) -> Option<String> {
 pub async fn middleware(
     State(state): State<AppState>,
     headers: HeaderMap,
+    req: Request,
+    next: Next,
+) -> Response {
+    with_ctx(&state, &state.cfg.proxy, headers, req, next).await
+}
+
+/// [`middleware`] for the internal listener, under `[internal]` proxy trust.
+pub async fn internal_middleware(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    req: Request,
+    next: Next,
+) -> Response {
+    let proxy = state.cfg.internal_proxy();
+    with_ctx(&state, &proxy, headers, req, next).await
+}
+
+async fn with_ctx(
+    state: &AppState,
+    proxy: &crate::config::ProxyConfig,
+    headers: HeaderMap,
     mut req: Request,
     next: Next,
 ) -> Response {
@@ -447,7 +468,7 @@ pub async fn middleware(
         .extensions()
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
         .map(|ci| ci.0.ip());
-    let ip = crate::client_ip::client_ip(&headers, &state.cfg.proxy, peer_ip);
+    let ip = crate::client_ip::client_ip(&headers, proxy, peer_ip);
     let ip_hash = ip.map(|ip| hash_ip(&ip.to_string(), salt));
     let user_agent = headers
         .get("user-agent")

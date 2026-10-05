@@ -3,7 +3,8 @@
 // `/admin/clients/new?type=web_app` form-fill path. Keep this helper
 // dumb: it just fills the visible inputs and submits. Caller is
 // responsible for the admin session (`signInAdminAal2` before this).
-import type { Page } from '@playwright/test';
+import type { Browser, Page } from '@playwright/test';
+import { adminCredsFromEnv, signInAdminAal2 } from './admin';
 import { expect } from '@playwright/test';
 
 export interface CreatedClient {
@@ -82,4 +83,26 @@ export async function createOAuthClient(
   expect(clientSecret).toMatch(/^\S{20,}$/);
 
   return { clientId, clientSecret };
+}
+
+/**
+ * Mark a client created straight in Hydra as operator-verified, through the
+ * admin page in a separate browser context. Forseti auto-grants a
+ * `skip_consent` client only once it vouches for it.
+ */
+export async function markClientVerified(browser: Browser, clientId: string): Promise<void> {
+  const creds = adminCredsFromEnv();
+  if (!creds) throw new Error('admin creds needed to verify a client');
+  const context = await browser.newContext();
+  try {
+    const page = await context.newPage();
+    await signInAdminAal2(page, creds);
+    await page.goto(`/admin/clients/${clientId}`);
+    await Promise.all([
+      page.waitForURL((u) => u.pathname === `/admin/clients/${clientId}`),
+      page.locator(`form[action="/admin/clients/${clientId}/verify"] button[type="submit"]`).click(),
+    ]);
+  } finally {
+    await context.close();
+  }
 }

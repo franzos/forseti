@@ -22,6 +22,7 @@ claim-confirm-start-over = 重新开始
 invite-accept-page-title = 接受邀请
 invite-accept-heading = 加入 { $org }
 invite-accept-body = 你受邀以 { $role } 的身份加入 { $org }。邀请已发送至 { $email }。
+invite-accept-cta-switch = 退出并以 { $email } 继续
 
 # Invite unavailable (invite/invalid.html)
 invite-invalid-page-title = 邀请不可用
@@ -41,3 +42,7 @@ claim-error-release-failed = 无法释放该邮箱。请联系支持人员。
 
 # Invite finalize (set in Rust)
 invite-error-corrupt = 邀请数据已损坏。请联系你的管理员。
+onboarding-username-page-title = 选择用户名
+onboarding-username-body = 为你创建账户的应用会将其用作你的用户名。你可以稍后在个人资料中更改。
+onboarding-username-hint = 2 到 39 个字母、数字、点、下划线或连字符。每 30 天可更改一次。
+onboarding-username-skip = 暂时跳过

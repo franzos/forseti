@@ -158,11 +158,15 @@ Surfaces that honour the org scope (each filters its listing to the scoped org):
 
 Identities and sessions are deliberately **not** on that list. A Kratos identity is global — one identity spans every org, and Forseti's membership table is a join on top of it — so anything reached through `/admin/identities/*` or `/admin/sessions/*` operates on the member's whole account, not on their membership. Scope those routes by `?org=` and an org owner can mint a Kratos recovery code for any co-member and take the account outright, across every org and connected app. So they take `RequireAdmin` (`src/admin/identities.rs`, `src/admin/sessions.rs`); the org-owner member view is `/settings/organization/members`.
 
-Client creation under `AdminScope::Org` is constrained rather than merely filtered (`constrain_org_scoped_client`, `src/admin/clients/scope.rs`): `skip_consent` is forced off, each `audience` entry must be an enabled `resource_registry` row belonging to that org, and the metadata row is stamped `source = org` (`src/oauth_client_metadata.rs`). That last one matters at consent time: `read_client_audience` (`src/oauth/consent.rs`) treats a client's registered audience as operator policy only for `source = admin`.
+Client creation and update under `AdminScope::Org` are constrained rather than merely filtered (`constrain_org_scoped_client`, `src/admin/clients/scope.rs`): `skip_consent` is forced off; each `audience` entry must be an enabled `resource_registry` row belonging to that org; `grant_types` are limited to `authorization_code` and `refresh_token` (a device-code grant survives an edit of a client that already had it, but can't be introduced); `response_types` must be `code`; and every `scope` must be one Forseti or the operator describes, never `orgs` or `groups`, which stay operator-only. The metadata row is stamped `source = org` (`src/oauth_client_metadata.rs`), including the row verify/unverify lazily inserts for a rowless client when acting from an org scope. That matters at consent time twice: `read_client_audience` (`src/oauth/consent.rs`) treats a client's registered audience as operator policy only for `source = admin`, and the org claims below are scoped by it.
+
+The Default org's `?org=default` scope additionally requires an allowlisted operator: it holds the operator's own clients.
 
 ## OIDC claim construction
 
 All three scopes surface org-derived data into OIDC tokens. All three are built in `build_id_token_claims()`, and the membership fetch is skipped entirely unless the grant includes one of them, so OSS deployments and plain `openid email` grants pay nothing.
+
+What "every membership" means depends on the requesting client (`claim_org_scope`, `src/oauth/consent.rs`). An operator-written client (`oauth_client_metadata.source = admin`) sees all of the subject's memberships. Every other client, rowless ones included, sees only its own org's membership (rowless: Default). The filter runs before active-org resolution, so an `organization_id=` pin to another org finds no membership and the `org`/`groups` claims are suppressed rather than leaking that org's teams.
 
 | Scope | Claim |
 |---|---|

@@ -664,6 +664,17 @@ pub(crate) fn session_principal(session: &ory::Session) -> (String, String) {
 
 /// True when the session's identity has at least one verifiable address
 /// that's still pending verification; drives the dashboard verify banner.
+/// Identity created within the last hour: a sign-up that is still in its
+/// first visit, greeted rather than welcomed "back" and offered a handle.
+pub(crate) fn is_new_account(session: &ory::Session, now: chrono::DateTime<chrono::Utc>) -> bool {
+    session
+        .identity
+        .as_ref()
+        .and_then(|i| i.created_at.as_deref())
+        .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+        .is_some_and(|created| now.signed_duration_since(created) < chrono::Duration::hours(1))
+}
+
 pub(crate) fn session_needs_verification(session: &ory::Session) -> bool {
     session
         .identity
@@ -1196,5 +1207,34 @@ mod tests {
         assert_eq!(flow_return_to(&json!({})), None);
         assert_eq!(flow_return_to(&json!({"return_to": ""})), None);
         assert_eq!(flow_return_to(&json!({"return_to": null})), None);
+    }
+}
+
+#[cfg(test)]
+mod new_account_tests {
+    use super::is_new_account;
+
+    fn session_created(at: &str) -> crate::ory::Session {
+        let mut identity =
+            ory_client::models::Identity::new("id".into(), "default".into(), "".into(), None);
+        identity.created_at = Some(at.into());
+        let mut s = crate::ory::Session::new("sid".into());
+        s.identity = Some(Box::new(identity));
+        s
+    }
+
+    #[test]
+    fn greets_an_account_created_in_the_last_hour() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-29T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert!(is_new_account(
+            &session_created("2026-09-29T11:30:00Z"),
+            now
+        ));
+        assert!(!is_new_account(
+            &session_created("2026-09-29T10:00:00Z"),
+            now
+        ));
     }
 }

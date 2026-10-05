@@ -22,6 +22,7 @@ claim-confirm-start-over = Neu beginnen
 invite-accept-page-title = Einladung annehmen
 invite-accept-heading = { $org } beitreten
 invite-accept-body = Sie wurden eingeladen, { $org } als { $role } beizutreten. Die Einladung wurde an { $email } gesendet.
+invite-accept-cta-switch = Abmelden und als { $email } fortfahren
 
 # Einladung nicht verfügbar (invite/invalid.html)
 invite-invalid-page-title = Einladung nicht verfügbar
@@ -41,3 +42,7 @@ claim-error-release-failed = Wir konnten die E-Mail-Adresse nicht freigeben. Wen
 
 # Einladung abschließen (in Rust gesetzt)
 invite-error-corrupt = Die Einladung ist beschädigt. Wenden Sie sich an Ihren Administrator.
+onboarding-username-page-title = Benutzernamen wählen
+onboarding-username-body = Anwendungen, die ein Konto für Sie anlegen, verwenden ihn dort als Ihren Benutzernamen. Sie können ihn später in Ihrem Profil ändern.
+onboarding-username-hint = 2 bis 39 Buchstaben, Ziffern, Punkte, Unterstriche oder Bindestriche. Änderbar einmal alle 30 Tage.
+onboarding-username-skip = Jetzt überspringen

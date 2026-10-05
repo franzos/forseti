@@ -6,6 +6,7 @@ error-cta-back-to-sign-in = 返回登录
 logout-card-title = 要退出所有应用吗？
 logout-card-subtitle = 这将结束你在 { $brand } 的会话，并通知你登录过的每个应用。
 logout-body-text = 发起退出请求的应用会收到完成通知。部分应用可能会在短时间内保留本地缓存数据；在此退出会结束你在 { $brand } 的会话。
+logout-body-text-direct = 部分应用可能会在短时间内保留本地缓存数据；在此退出会结束你在 { $brand } 的会话。
 logout-action-sign-out = 退出登录
 logout-action-cancel = 取消
 
@@ -64,6 +65,7 @@ error-page-link-expired-body = 此链接已失效。请从登录页重新开始�
 error-page-security-title = 安全校验失败
 error-page-already-signed-in-title = 已登录
 error-page-default-message = 无法完成该请求。
+error-page-oauth-title = 登录请求失败
 
 # Admin gate forbidden page (admin/forbidden.html), set in Rust.
 error-admin-access-denied-title = 访问被拒绝
@@ -79,3 +81,6 @@ error-saml-unverified-suffix = 的账号，但其邮箱地址尚未验证，因�
 error-saml-cross-org-not-member = 你的账号还不是该组织的成员。请让管理员将你添加进来，然后重试。
 error-saml-conflict = 无法为你登录。请联系你的管理员。
 error-saml-blocked-cta = 前往登录
+error-saml-admin-allowlisted = 此地址属于运营者账户，不能通过你组织的身份提供商登录。请直接登录。
+error-saml-unproven-domain = 你的组织尚未验证此电子邮件域名。请让管理员验证后再试。
+error-saml-confirm-failed = 要将此账户关联到你组织的身份提供商，请使用拥有此地址的账户登录。

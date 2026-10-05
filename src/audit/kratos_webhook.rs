@@ -64,7 +64,8 @@
 //! ## Events covered
 //!
 //! Flow-driven only: `identity.created` (registration), `password.changed`
-//! (settings.password), `password.recovered` (recovery),
+//! (settings.password; also ends the user's other browsers' app sessions
+//! and grants), `password.recovered` (recovery),
 //! `verification.completed` (verification), `mfa.*` (settings.{totp,
 //! webauthn, lookup}), `auth.login` / `auth.login_failed` (login flow).
 //! Admin-API identity writes (update/delete) are emitted from Forseti's
@@ -131,8 +132,11 @@ pub struct KratosAuditPayload {
 /// Kratos's web_hook ctx doesn't carry the hook identity, and a single
 /// jsonnet template is materially simpler than one-per-hook — so we
 /// route the action through the URL.
+/// A missing `?action=` is an unknown action (204), not a 400 that would
+/// break the Kratos flow.
 #[derive(Debug, Deserialize)]
 pub struct ActionQuery {
+    #[serde(default)]
     pub action: String,
 }
 
@@ -242,7 +246,40 @@ pub async fn receive(
     let _ = audit::log(&state.db, event).await;
     audit::record_kratos_webhook_received();
 
+    if action_str == action::PASSWORD_CHANGED {
+        end_other_browsers_after_password_change(&state, &payload).await;
+    }
+
     StatusCode::NO_CONTENT.into_response()
+}
+
+/// A password change ends the user's other browsers' app sessions and grants
+/// (RFC 9700 §4.14.2, ASVS V3.3.3). A change through recovery lands here too:
+/// Kratos sets the new password in a settings flow. `password.recovered`
+/// alone changes nothing, and the SAML bridge signs in through it.
+async fn end_other_browsers_after_password_change(state: &AppState, payload: &KratosAuditPayload) {
+    let Some(identity_id) = payload.actor_id.as_deref().filter(|s| !s.is_empty()) else {
+        return;
+    };
+    let Some(ksid) = payload
+        .metadata
+        .get("kratos_session_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    else {
+        tracing::warn!(
+            identity_id,
+            "kratos audit webhook: password change without a session id; other browsers' app sessions stay",
+        );
+        return;
+    };
+    crate::oauth::op_sessions::end_op_sessions_for_subject(
+        state,
+        identity_id,
+        Some(ksid),
+        crate::oauth::op_sessions::GrantRevocation::Revoke,
+    )
+    .await;
 }
 
 /// Index of the first accept-list entry the presented bearer matches, or

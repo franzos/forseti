@@ -17,6 +17,7 @@ use crate::db_interact;
 use crate::schema::{member_profiles, member_username_history};
 
 pub mod identicon;
+pub(crate) mod onboarding;
 pub mod username;
 pub(crate) mod view;
 
@@ -24,7 +25,12 @@ use axum::Router;
 use axum::routing::get;
 
 pub(crate) fn router() -> Router<crate::state::AppState> {
-    Router::new().route("/users/{identity_id}", get(view::show_profile))
+    Router::new()
+        .route("/users/{identity_id}", get(view::show_profile))
+        .route(
+            "/onboarding/username",
+            get(onboarding::username_step_get).post(onboarding::username_step_post),
+        )
 }
 
 /// One `member_profiles` row; `links` is stored as JSON, exposed as a `Vec`.
@@ -182,6 +188,30 @@ pub struct ProfileInput<'a> {
     pub links: &'a [ProfileLink],
 }
 
+/// Caps on the free-text profile fields, in characters. They land in id_tokens
+/// and on every org-mate's view, so an unbounded value is someone else's cost.
+pub const BIO_MAX: usize = 1000;
+pub const SHORT_FIELD_MAX: usize = 100;
+pub const URL_MAX: usize = 2048;
+pub const LINKS_MAX: usize = 10;
+pub const LINK_LABEL_MAX: usize = 64;
+
+impl ProfileInput<'_> {
+    pub fn within_limits(&self) -> bool {
+        let len = |s: &str| s.chars().count();
+        len(self.bio) <= BIO_MAX
+            && len(self.location) <= SHORT_FIELD_MAX
+            && len(self.pronouns) <= SHORT_FIELD_MAX
+            && len(self.website) <= URL_MAX
+            && len(self.avatar_url) <= URL_MAX
+            && self.links.len() <= LINKS_MAX
+            && self
+                .links
+                .iter()
+                .all(|l| len(&l.label) <= LINK_LABEL_MAX && len(&l.url) <= URL_MAX)
+    }
+}
+
 fn null_if_empty(s: &str) -> Option<String> {
     let t = s.trim();
     if t.is_empty() {
@@ -238,6 +268,7 @@ impl From<diesel::result::Error> for TxError {
 /// Insert-or-update the extended fields for `identity_id`. The handle is left
 /// as it is; [`set_username`] owns it.
 pub async fn upsert(db: &DbPool, input: ProfileInput<'_>) -> Result<()> {
+    anyhow::ensure!(input.within_limits(), "profile field over its length cap");
     let links_json = if input.links.is_empty() {
         None
     } else {
@@ -390,6 +421,39 @@ pub async fn set_username(db: &DbPool, identity_id: &str, username: &str) -> Res
 mod tests {
     use super::*;
     use crate::orgs::db::test_pool;
+
+    fn capped_input<'a>(bio: &'a str, links: &'a [ProfileLink]) -> ProfileInput<'a> {
+        ProfileInput {
+            identity_id: "id-caps",
+            bio,
+            location: "",
+            pronouns: "",
+            website: "",
+            avatar_url: "",
+            links,
+        }
+    }
+
+    /// C7 (round-3 review): the extended-profile fields had no size caps.
+    #[tokio::test]
+    async fn over_cap_fields_are_refused_even_at_the_db_layer() {
+        let link = |i: usize| ProfileLink {
+            label: format!("l{i}"),
+            url: "https://example.com".into(),
+        };
+        let ten: Vec<_> = (0..LINKS_MAX).map(link).collect();
+        let eleven: Vec<_> = (0..=LINKS_MAX).map(link).collect();
+        let long_bio = "x".repeat(BIO_MAX + 1);
+        let max_bio = "é".repeat(BIO_MAX);
+
+        assert!(capped_input(&max_bio, &ten).within_limits());
+        assert!(!capped_input(&long_bio, &[]).within_limits());
+        assert!(!capped_input("", &eleven).within_limits());
+
+        let db = test_pool().await;
+        assert!(upsert(&db, capped_input(&long_bio, &[])).await.is_err());
+        assert!(upsert(&db, capped_input("fine", &ten)).await.is_ok());
+    }
 
     fn input(identity_id: &str) -> ProfileInput<'_> {
         ProfileInput {

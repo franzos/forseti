@@ -21,6 +21,7 @@ kratos-1010014 = A code was sent to the address you provided. If you didn't rece
 kratos-1010015 = Send sign in code
 kratos-1010021 = Sign in with passkey
 kratos-1010022 = Sign in with password
+kratos-1010016 = { $duplicateIdentifier } already has an account. Sign in to it below to link { $provider }, and you can use either to sign in from then on.
 
 # --- Registration (1040xxx) ---
 kratos-1040001 = Sign up

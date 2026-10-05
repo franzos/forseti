@@ -3,6 +3,7 @@ dashboard-verify-email-resend = إعادة إرسال البريد
 dashboard-2fa-no-recovery-body = المصادقة الثنائية العوامل مفعّلة لكن ليس لديك رموز استرداد. أنشئ بعضها حتى لا تُحبَس خارج حسابك.
 dashboard-2fa-no-recovery-action = إنشاء رموز
 dashboard-welcome-heading = مرحبًا بعودتك
+dashboard-welcome-heading-new = مرحبًا بك
 dashboard-welcome-subtitle = أدِر هويتك والتطبيقات المتصلة.
 dashboard-health-heading = صحة الحساب
 dashboard-health-email-title = عنوان البريد الإلكتروني

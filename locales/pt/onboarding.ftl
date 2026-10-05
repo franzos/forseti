@@ -22,6 +22,7 @@ claim-confirm-start-over = Começar de novo
 invite-accept-page-title = Aceitar convite
 invite-accept-heading = Juntar-se a { $org }
 invite-accept-body = Foi convidado para se juntar a { $org } como { $role }. O convite foi enviado para { $email }.
+invite-accept-cta-switch = Terminar sessão e continuar como { $email }
 
 # Convite indisponível (invite/invalid.html)
 invite-invalid-page-title = Convite indisponível
@@ -41,3 +42,7 @@ claim-error-release-failed = Não foi possível libertar o e-mail. Contacte o ap
 
 # Finalização do convite (definido em Rust)
 invite-error-corrupt = O convite está corrompido. Contacte o seu administrador.
+onboarding-username-page-title = Escolha um nome de utilizador
+onboarding-username-body = As aplicações que lhe criam uma conta usam-no como o seu nome de utilizador. Pode alterá-lo mais tarde no seu perfil.
+onboarding-username-hint = De 2 a 39 letras, dígitos, pontos, sublinhados ou hífenes. Pode alterá-lo uma vez a cada 30 dias.
+onboarding-username-skip = Ignorar por agora

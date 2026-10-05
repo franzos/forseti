@@ -329,6 +329,8 @@ Bind it to loopback when Kratos and Forseti share a host, or to a private interf
 
 `/healthz` and `/readyz` stay on the public listener, so load balancers don't need to know about the second port.
 
+`[proxy].trust_forwarded_for` does not apply here. The internal listener has its own `[internal].trust_forwarded_for`, default `false`, so its audit `ip_hash` and the POSIX rate-limit key come from the TCP peer. Its callers are machines (Kratos, enrolled hosts) that don't go through your proxy, and trusting their `X-Forwarded-For` would let them pick their own audit IP and limiter bucket. Turn it on only if a proxy you control sits in front of this listener; the hop count follows `[proxy].trusted_hops`.
+
 ---
 
 ## Recommendation

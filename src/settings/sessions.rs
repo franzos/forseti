@@ -116,6 +116,13 @@ pub(crate) async fn settings_sessions_revoke(
         }
     };
     if ok {
+        crate::oauth::op_sessions::end_op_sessions_for_browser(
+            &state,
+            &actor_id,
+            &session_id,
+            crate::oauth::op_sessions::GrantRevocation::Revoke,
+        )
+        .await;
         let _ = audit::log(
             &state.db,
             AuditEvent::new(action::SESSION_REVOKED)
@@ -147,6 +154,13 @@ pub(crate) async fn settings_sessions_revoke_others(
     .await
     {
         Ok(n) => {
+            crate::oauth::op_sessions::end_op_sessions_for_subject(
+                &state,
+                &actor_id,
+                Some(&sess.session.id),
+                crate::oauth::op_sessions::GrantRevocation::Revoke,
+            )
+            .await;
             let _ = audit::log(
                 &state.db,
                 AuditEvent::new(action::SESSIONS_BULK_REVOKED)

@@ -21,6 +21,7 @@ kratos-1010014 = Un codice è stato inviato all'indirizzo che hai fornito. Se no
 kratos-1010015 = Invia codice di accesso
 kratos-1010021 = Accedi con passkey
 kratos-1010022 = Accedi con password
+kratos-1010016 = { $duplicateIdentifier } ha già un account. Accedi qui sotto per collegare { $provider }; da quel momento potrai usare entrambi per accedere.
 
 # --- Registrazione (1040xxx) ---
 kratos-1040001 = Registrati

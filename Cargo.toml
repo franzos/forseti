@@ -73,6 +73,7 @@ diesel_migrations = { version = "2.2", features = ["sqlite", "postgres"] }
 deadpool-diesel = { version = "0.6", features = ["sqlite", "postgres", "rt_tokio_1"] }
 libsqlite3-sys = { version = "0.37", features = ["bundled"] }
 url = "2"
+percent-encoding = "2"
 # CIMD document cache (`oauth::cimd_fetch`): bounded, per-entry TTL,
 # `try_get_with` single-flight. Already in the tree transitively via
 # hickory-resolver; declared directly for the `future` (async cache) API.

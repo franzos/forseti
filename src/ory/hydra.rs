@@ -39,6 +39,26 @@ pub async fn accept_login_request(
         .map_err(|e| anyhow::anyhow!("hydra accept_login_request failed: {e}"))
 }
 
+/// Reject a login challenge, sending the OAuth2 `error` / `error_description`
+/// back to the relying party (`login_required`, `interaction_required`, ...).
+pub async fn reject_login_request(
+    clients: &OryClients,
+    challenge: &str,
+    error: &str,
+    error_description: &str,
+) -> Result<OAuth2RedirectTo> {
+    let body = RejectOAuth2Request {
+        error: Some(error.to_string()),
+        error_debug: None,
+        error_description: Some(error_description.to_string()),
+        error_hint: None,
+        status_code: None,
+    };
+    o_auth2_api::reject_o_auth2_login_request(&clients.hydra_admin, challenge, Some(body))
+        .await
+        .map_err(|e| anyhow::anyhow!("hydra reject_login_request failed: {e}"))
+}
+
 pub async fn get_consent_request(
     clients: &OryClients,
     challenge: &str,
@@ -771,6 +791,48 @@ pub async fn revoke_consent_sessions_for_subject(
     .map_err(|e| anyhow::anyhow!("hydra revoke_consent_sessions failed: {e}"))
 }
 
+/// Revoke one consent grant by its consent request id, which Hydra documents
+/// as revoking the token chains derived from it. Hydra takes the id alone;
+/// adding `subject` is a 400. A grant Hydra no longer knows counts as revoked.
+pub async fn revoke_consent_sessions_by_request_id(
+    clients: &OryClients,
+    consent_request_id: &str,
+) -> Result<()> {
+    match o_auth2_api::revoke_o_auth2_consent_sessions(
+        &clients.hydra_admin,
+        None,
+        None,
+        Some(consent_request_id),
+        None,
+    )
+    .await
+    {
+        Ok(()) => Ok(()),
+        Err(ory_client::apis::Error::ResponseError(rc)) if rc.status.as_u16() == 404 => Ok(()),
+        Err(e) => Err(anyhow::anyhow!(
+            "hydra revoke_consent_sessions by request id failed: {e}"
+        )),
+    }
+}
+
+/// One page of a subject's consent sessions granted under one Hydra login
+/// session. Lists only consents Hydra remembered, never skipped ones.
+pub async fn list_consent_sessions_by_login_session(
+    clients: &OryClients,
+    subject: &str,
+    sid: &str,
+) -> Result<Vec<OAuth2ConsentSession>> {
+    o_auth2_api::list_o_auth2_consent_sessions(
+        &clients.hydra_admin,
+        subject,
+        Some(CONSENT_LIST_PAGE_SIZE),
+        None,
+        Some(sid),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("hydra list_consent_sessions by login session failed: {e}"))
+}
+
 /// Revoke all consent grants for a single (subject, client) pair.
 /// Powers the per-app "Revoke access" action on `/settings/authorized-apps`.
 /// Hydra has no per-scope revocation; reducing a grant needs the user to re-consent with a narrower scope set.
@@ -789,6 +851,28 @@ pub async fn revoke_consent_sessions_for_client(
     )
     .await
     .map_err(|e| anyhow::anyhow!("hydra revoke_consent_sessions_for_client failed: {e}"))
+}
+
+/// Revoke every Hydra login session (the OP skip/remember state) for a subject.
+/// Subject-keyed revocation fires no front/back-channel logout; pair it with
+/// `revoke_consent_sessions_for_subject` to invalidate the RPs' grants.
+pub async fn revoke_login_sessions_for_subject(clients: &OryClients, subject: &str) -> Result<()> {
+    o_auth2_api::revoke_o_auth2_login_sessions(&clients.hydra_admin, Some(subject), None)
+        .await
+        .map_err(|e| anyhow::anyhow!("hydra revoke_login_sessions failed: {e}"))
+}
+
+/// Revoke one Hydra login session by `sid`. Unlike the subject-keyed revoke,
+/// this sends back-channel logout to every client the session signed in to.
+/// A session Hydra no longer knows counts as revoked.
+pub async fn revoke_login_session_by_sid(clients: &OryClients, sid: &str) -> Result<()> {
+    match o_auth2_api::revoke_o_auth2_login_sessions(&clients.hydra_admin, None, Some(sid)).await {
+        Ok(()) => Ok(()),
+        Err(ory_client::apis::Error::ResponseError(rc)) if rc.status.as_u16() == 404 => Ok(()),
+        Err(e) => Err(anyhow::anyhow!(
+            "hydra revoke_login_session_by_sid failed: {e}"
+        )),
+    }
 }
 
 /// Health probes, same shape as Kratos.

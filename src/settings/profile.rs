@@ -100,20 +100,12 @@ pub(crate) async fn settings_profile_extended_save(
         return (StatusCode::NOT_FOUND, "profiles disabled").into_response();
     }
 
-    // URLs are emitted as OIDC `website`/`picture` claims, so validate full
-    // http(s)-with-host rather than a prefix. Empty clears the field (NULL).
+    // URLs are emitted as OIDC `website`/`picture` claims and rendered as
+    // `href`/`<img src>`, so they get the same gate as client-supplied URLs.
+    // Empty clears the field (NULL).
     let url_ok = |s: &str| {
         let t = s.trim();
-        if t.is_empty() {
-            return true;
-        }
-        match url::Url::parse(t) {
-            Ok(u) => {
-                matches!(u.scheme(), "http" | "https")
-                    && u.host_str().is_some_and(|h| !h.is_empty())
-            }
-            Err(_) => false,
-        }
+        t.is_empty() || crate::web::safe_external_uri(t, false).is_some()
     };
     if !url_ok(&form.website) || !url_ok(&form.avatar_url) {
         return (
@@ -134,20 +126,23 @@ pub(crate) async fn settings_profile_extended_save(
         }
     }
 
-    if let Err(err) = profiles::upsert(
-        &state.db,
-        profiles::ProfileInput {
-            identity_id: &sess.identity_id,
-            bio: form.bio.trim(),
-            location: form.location.trim(),
-            pronouns: form.pronouns.trim(),
-            website: form.website.trim(),
-            avatar_url: form.avatar_url.trim(),
-            links: &links,
-        },
-    )
-    .await
-    {
+    let input = profiles::ProfileInput {
+        identity_id: &sess.identity_id,
+        bio: form.bio.trim(),
+        location: form.location.trim(),
+        pronouns: form.pronouns.trim(),
+        website: form.website.trim(),
+        avatar_url: form.avatar_url.trim(),
+        links: &links,
+    };
+    if !input.within_limits() {
+        return (
+            StatusCode::BAD_REQUEST,
+            crate::i18n::lookup(&locale, "settings-profile-too-long"),
+        )
+            .into_response();
+    }
+    if let Err(err) = profiles::upsert(&state.db, input).await {
         tracing::error!(error = ?err, "settings_profile_extended_save: upsert failed");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -180,51 +175,69 @@ pub(crate) struct UsernameForm {
     pub(crate) username: String,
 }
 
-/// Save the handle. Not gated by `[profiles].enabled`: `preferred_username`
-/// is a standard `profile` claim and RPs provision local accounts from it.
-pub(crate) async fn settings_profile_username_save(
-    State(state): State<AppState>,
-    sess: crate::extractors::RequireSession,
-    actx: AuditCtx,
-    crate::page_chrome::ReqLocale(locale): crate::page_chrome::ReqLocale,
-    CsrfForm(form): CsrfForm<UsernameForm>,
-) -> Response {
-    // Empty clears the handle; anything else must survive validation before it
-    // can reach an RP as `preferred_username`.
-    let username = if form.username.trim().is_empty() {
+/// Why a username save was refused; each maps to the message shown.
+pub(crate) enum UsernameSaveError {
+    Invalid,
+    Reserved,
+    Taken,
+    Cooldown,
+    Failed,
+}
+
+impl UsernameSaveError {
+    pub(crate) fn status(&self) -> StatusCode {
+        match self {
+            Self::Invalid | Self::Reserved => StatusCode::BAD_REQUEST,
+            Self::Taken | Self::Cooldown => StatusCode::CONFLICT,
+            Self::Failed => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+
+    pub(crate) fn message_key(&self) -> &'static str {
+        match self {
+            Self::Invalid => "settings-profile-username-invalid",
+            Self::Reserved => "settings-profile-username-reserved",
+            Self::Taken => "settings-profile-username-taken",
+            Self::Cooldown => "settings-profile-username-cooldown",
+            Self::Failed => "settings-save-failed",
+        }
+    }
+}
+
+/// Validate, store and audit a handle. An empty `raw` clears it. Shared by the
+/// profile page and the post-signup onboarding step.
+pub(crate) async fn save_username(
+    state: &AppState,
+    identity_id: &str,
+    email: &str,
+    actx: &AuditCtx,
+    raw: &str,
+) -> Result<(), UsernameSaveError> {
+    // Anything non-empty must survive validation before it can reach an RP as
+    // `preferred_username`.
+    let username = if raw.trim().is_empty() {
         String::new()
     } else {
-        match profiles::username::validate(&form.username) {
-            Ok(u) => u,
-            Err(_) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    crate::i18n::lookup(&locale, "settings-profile-username-invalid"),
-                )
-                    .into_response();
-            }
-        }
+        profiles::username::validate(raw).map_err(|e| match e {
+            profiles::username::UsernameError::Reserved => UsernameSaveError::Reserved,
+            _ => UsernameSaveError::Invalid,
+        })?
     };
 
-    let previous = profiles::fetch(&state.db, &sess.identity_id)
+    let previous = profiles::fetch(&state.db, identity_id)
         .await
         .ok()
         .and_then(|p| p.username);
 
-    if let Err(e) = profiles::set_username(&state.db, &sess.identity_id, &username).await {
-        let (status, key) = match e {
-            profiles::SaveError::UsernameTaken => {
-                (StatusCode::CONFLICT, "settings-profile-username-taken")
-            }
-            profiles::SaveError::UsernameCooldown => {
-                (StatusCode::CONFLICT, "settings-profile-username-cooldown")
-            }
+    if let Err(e) = profiles::set_username(&state.db, identity_id, &username).await {
+        return Err(match e {
+            profiles::SaveError::UsernameTaken => UsernameSaveError::Taken,
+            profiles::SaveError::UsernameCooldown => UsernameSaveError::Cooldown,
             profiles::SaveError::Other(err) => {
-                tracing::error!(error = ?err, "settings_profile_username_save: save failed");
-                (StatusCode::INTERNAL_SERVER_ERROR, "settings-save-failed")
+                tracing::error!(error = ?err, "save_username: save failed");
+                UsernameSaveError::Failed
             }
-        };
-        return (status, crate::i18n::lookup(&locale, key)).into_response();
+        });
     }
 
     // An RP may have provisioned a local account from the old handle, so
@@ -234,12 +247,9 @@ pub(crate) async fn settings_profile_username_save(
         let _ = audit::log(
             &state.db,
             AuditEvent::new(action::PROFILE_USERNAME_CHANGED)
-                .actor_user(&sess.identity_id, &sess.email)
-                .target(
-                    crate::audit::target_kind::IDENTITY,
-                    sess.identity_id.clone(),
-                )
-                .with_ctx(&actx)
+                .actor_user(identity_id, email)
+                .target(crate::audit::target_kind::IDENTITY, identity_id.to_string())
+                .with_ctx(actx)
                 .metadata(audit_metadata!(
                     "from" => previous.as_deref().unwrap_or(""),
                     "to" => new_username.unwrap_or(""),
@@ -247,8 +257,30 @@ pub(crate) async fn settings_profile_username_save(
         )
         .await;
     }
+    Ok(())
+}
 
-    Redirect::to("/settings/profile?username_saved=1").into_response()
+/// Save the handle. Not gated by `[profiles].enabled`: `preferred_username`
+/// is a standard `profile` claim and RPs provision local accounts from it.
+pub(crate) async fn settings_profile_username_save(
+    State(state): State<AppState>,
+    sess: crate::extractors::RequireSession,
+    actx: AuditCtx,
+    crate::page_chrome::ReqLocale(locale): crate::page_chrome::ReqLocale,
+    CsrfForm(form): CsrfForm<UsernameForm>,
+) -> Response {
+    match save_username(
+        &state,
+        &sess.identity_id,
+        &sess.email,
+        &actx,
+        &form.username,
+    )
+    .await
+    {
+        Ok(()) => Redirect::to("/settings/profile?username_saved=1").into_response(),
+        Err(e) => (e.status(), crate::i18n::lookup(&locale, e.message_key())).into_response(),
+    }
 }
 
 /// Parse one `label|url` per line; empty and malformed lines are dropped.

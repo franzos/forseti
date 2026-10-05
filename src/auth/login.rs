@@ -28,6 +28,11 @@ struct LoginTemplate {
     /// challenge message with no input nodes, so the template shows a CTA to
     /// `/settings/2fa` instead of a blank form.
     aal2_unavailable: bool,
+    /// The OAuth client this sign-in continues to, when it is vouched for.
+    continue_to_app: Option<String>,
+    /// Re-authentication or step-up for a signed-in user: there's no
+    /// account to create, so the page doesn't offer it.
+    reauth: bool,
 }
 
 pub(crate) async fn login(
@@ -82,16 +87,61 @@ pub(crate) async fn login(
         )
     };
 
+    let secure = state.cfg.self_.is_https();
+    let query_hint = query
+        .login_hint
+        .as_deref()
+        .and_then(crate::auth::email_login_hint);
     match ory::kratos::resolve_flow(&state.ory, FlowKind::Login, flow_id, &cookie).await {
         FlowOutcome::Init => {
-            let secure = state.cfg.self_.is_https();
-            csrf::attach_csrf(
+            let mut resp = csrf::attach_csrf(
                 Redirect::to(&init_url()).into_response(),
                 Some(csrf::delete_csrf_cookie(secure)),
-            )
+            );
+            // Kratos's init hop drops our query; the hint rides a cookie.
+            if let Some(hint) = query_hint {
+                crate::web::append_set_cookie(
+                    &mut resp,
+                    Some(crate::auth::hint_cookie(
+                        LOGIN_HINT_COOKIE,
+                        "/login",
+                        Some(hint),
+                        secure,
+                    )),
+                );
+            }
+            resp
         }
         FlowOutcome::Ready(flow) => {
-            let mut resp = render_login(chrome, &flow, query.return_to.as_deref());
+            let app = crate::auth::continuing_app_name(
+                &state,
+                query.return_to.as_deref().or_else(|| flow_return_to(&flow)),
+            )
+            .await;
+            let cookie_hint = cookies::read_cookie(&headers, LOGIN_HINT_COOKIE);
+            let hint = query_hint.map(str::to_string).or_else(|| {
+                cookie_hint
+                    .as_deref()
+                    .and_then(crate::auth::decode_hint_cookie)
+            });
+            let mut resp = render_login(
+                chrome,
+                &flow,
+                query.return_to.as_deref(),
+                app,
+                hint.as_deref(),
+            );
+            if cookie_hint.is_some() {
+                crate::web::append_set_cookie(
+                    &mut resp,
+                    Some(crate::auth::hint_cookie(
+                        LOGIN_HINT_COOKIE,
+                        "/login",
+                        None,
+                        secure,
+                    )),
+                );
+            }
             crate::app::allow_form_action_to(
                 &mut resp,
                 &crate::oidc_providers::flow_auth_origins(&flow),
@@ -116,8 +166,32 @@ pub(crate) async fn login(
     }
 }
 
-fn render_login(chrome: PageChrome, flow: &serde_json::Value, return_to: Option<&str>) -> Response {
-    let form = FlowFormView::from_flow(flow, FlowKind::Login, return_to, &chrome.locale);
+/// One-shot cookie carrying an OIDC `login_hint` across Kratos's init hop.
+pub(crate) const LOGIN_HINT_COOKIE: &str = "forseti_login_hint";
+
+fn render_login(
+    chrome: PageChrome,
+    flow: &serde_json::Value,
+    return_to: Option<&str>,
+    continue_to_app: Option<String>,
+    login_hint: Option<&str>,
+) -> Response {
+    let mut form = FlowFormView::from_flow(flow, FlowKind::Login, return_to, &chrome.locale);
+    // Prefill, never overwrite: a value Kratos echoes back (a failed attempt)
+    // is what the user typed.
+    if let Some(hint) = login_hint {
+        for group in [
+            &mut form.groups.default,
+            &mut form.groups.password,
+            &mut form.groups.other,
+        ] {
+            for node in group.iter_mut() {
+                if node.name == "identifier" && node.value.is_empty() {
+                    node.value = hint.to_string();
+                }
+            }
+        }
+    }
     let webauthn_scripts = collect_webauthn_scripts(flow);
 
     // AAL2 requested but no second factor available: Kratos emits the
@@ -137,12 +211,15 @@ fn render_login(chrome: PageChrome, flow: &serde_json::Value, return_to: Option<
             .iter()
             .any(|n| n.input_type != "hidden" && n.name != "method");
     let aal2_unavailable = requested_aal2 && !any_actionable_method;
+    let reauth = requested_aal2 || flow.get("refresh").and_then(|v| v.as_bool()) == Some(true);
 
     render(&LoginTemplate {
         chrome,
         form,
         webauthn_scripts,
         aal2_unavailable,
+        continue_to_app,
+        reauth,
     })
 }
 

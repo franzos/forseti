@@ -413,7 +413,8 @@ pub struct BrandConfig {
     pub support_email: Option<String>,
     pub logo_url: Option<String>,
     /// Intro paragraph rendered on `/oauth/consent` above the scope list.
-    #[serde(default = "default_consent_intro")]
+    /// Empty means the localised default.
+    #[serde(default)]
     pub consent_intro: String,
     #[serde(default)]
     pub theme_preset: Option<String>,
@@ -452,10 +453,6 @@ impl BrandConfig {
 
 fn default_brand_name() -> String {
     "Forseti".to_string()
-}
-
-fn default_consent_intro() -> String {
-    "The application below is requesting access to your account.".to_string()
 }
 
 /// One card on the dashboard "Your apps" section. Configured per deployment.
@@ -795,12 +792,18 @@ impl Default for AuditConfig {
 pub struct InternalConfig {
     #[serde(default = "default_internal_bind")]
     pub bind: String,
+    /// `X-Forwarded-For` trust for this listener only; `[proxy]` governs the
+    /// public one. Its callers are machines, so a forwarded chain is usually
+    /// caller-supplied. Hop count is shared with `[proxy].trusted_hops`.
+    #[serde(default)]
+    pub trust_forwarded_for: bool,
 }
 
 impl Default for InternalConfig {
     fn default() -> Self {
         Self {
             bind: default_internal_bind(),
+            trust_forwarded_for: false,
         }
     }
 }
@@ -1314,6 +1317,14 @@ fn clamp_rate(field: &str, value: u32, ceiling: u32) -> u32 {
 }
 
 impl AppConfig {
+    /// Proxy trust as the internal listener applies it.
+    pub fn internal_proxy(&self) -> ProxyConfig {
+        ProxyConfig {
+            trust_forwarded_for: self.internal.trust_forwarded_for,
+            trusted_hops: self.proxy.trusted_hops,
+        }
+    }
+
     /// Load config from `config.toml` (or `$FORSETI_CONFIG_PATH`) plus `FORSETI_*` env overrides.
     /// An explicitly set `FORSETI_CONFIG_PATH` that doesn't exist is a hard error; the default
     /// path staying absent is tolerated (env-only deployments).

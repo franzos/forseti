@@ -255,21 +255,21 @@ Edge cases:
 
 `GET /verification` — `verification` handler at `src/auth/verification.rs:30`.
 
-Same shape as recovery — wrapper around `get_flow` / `browser_init_url`. Renders `templates/verification.html` via `render_verification` (`src/auth/verification.rs:68`).
+Same shape as recovery — wrapper around `get_flow` / `browser_init_url`. Renders `templates/verification.html` via `render_verification` (`src/auth/verification.rs:98`).
 
 Three template states (`templates/verification.html:5-15`):
 
 - `choose_method` — email input. Skipped for logged-in users (see below).
 - `sent_email` — code input.
-- `passed_challenge` — success message.
+- `passed_challenge` — success message. When the flow carries a `return_to` (registration started from an OAuth login or an invite link, and Kratos threads it onto the verification flow), the page offers it as the primary "Continue" (`continue_href`, `src/auth/verification.rs`), so the user resumes the OAuth login or lands back on the invite instead of the dashboard. The target is pinned to Forseti's own origin with `safe_return_to` on top of Kratos's `allowed_return_urls` check; without one, the footer link below is shown as before.
 
-**Logged-in short-circuit.** The handler does an optional `whoami` (`src/auth/verification.rs:43`). When the request carries a valid session and the flow is sitting at `choose_method` with an unverified address on that identity, Forseti POSTs `method=code` + the session email + the flow's CSRF token to Kratos's `ui.action` server-side (`submit_email_method`, `src/auth/verification.rs:138`), then bounces the browser back to the same flow ID — by then Kratos has transitioned the flow to `sent_email` and the user lands directly on the code-entry screen. Failure (transport, CSRF mismatch, etc.) falls through to the regular template render, so the worst-case UX is the form they'd see today. The footer's back link follows the same signal: `is_logged_in` switches "Back to sign in" → "Back to dashboard".
+**Logged-in short-circuit.** The handler does an optional `whoami` (`src/auth/verification.rs:43`). When the request carries a valid session and the flow is sitting at `choose_method` with an unverified address on that identity, Forseti POSTs `method=code` + the session email + the flow's CSRF token to Kratos's `ui.action` server-side (`submit_email_method`, `src/auth/verification.rs:136`), then bounces the browser back to the same flow ID — by then Kratos has transitioned the flow to `sent_email` and the user lands directly on the code-entry screen. Failure (transport, CSRF mismatch, etc.) falls through to the regular template render, so the worst-case UX is the form they'd see today. The footer's back link follows the same signal: `is_logged_in` switches "Back to sign in" → "Back to dashboard".
 
 Verification is **not enforced** at sign-in time (`infra/kratos/kratos.yml:122-128`). The playground deliberately uses a soft prompt: `session_needs_verification` (`src/flow_view.rs:540`) returns true while any of the identity's `verifiable_addresses` has `verified=false`. The dashboard renders a banner that links to `/verification`, and the profile page (`templates/settings_profile.html`) surfaces a "Not verified · Send verification email →" hint below the email field via the `email_verified` flag on `SettingsProfileTemplate`. Operators who need hard enforcement (banks, healthcare) can add `{ hook: show_verification_ui }` to each registration method.
 
 Users who registered through Google or Apple never see either prompt — their address arrives already verified (see [OIDC / social registration](#oidc--social-registration)), so there's nothing for them to confirm. GitHub and Microsoft users get the banner like password registrations do.
 
-Kratos's verification config has `after.default_browser_return_url: /` (`infra/kratos/kratos.yml:107-108`), so a successful submission lands the user back on the dashboard.
+Kratos's verification config has `after.default_browser_return_url: /` (`infra/kratos/kratos.yml:107-108`), so a successful submission without a `return_to` lands the user back on the dashboard.
 
 ```mermaid
 sequenceDiagram
@@ -315,7 +315,10 @@ Steps:
 
 1. Verify Forseti's own double-submit CSRF token (`csrf::verify_csrf`, `src/csrf.rs`). 403 on mismatch.
 2. Forward the cookies to Kratos's `/self-service/logout/browser` (`fetch_logout_url`, `src/ory/kratos.rs:453`). Kratos returns `{ logout_url: "...&logout_token=..." }` — the URL embeds a single-use token.
-3. 302 the browser to that URL. Kratos clears the `ory_kratos_session` cookie and 303s to `selfservice.flows.logout.after.default_browser_return_url` (= `/login`, `infra/kratos/kratos.yml:110-112`).
+3. End the Hydra login sessions this browser signed in to, best-effort (`op_sessions::end_op_sessions_for_browser`, `src/oauth/op_sessions.rs`). `/oauth/login` records each accepted Hydra `sid` against the subject and the Kratos session in `hydra_login_sessions`, because Hydra only sends back-channel logout when a login session is revoked by `sid` and has no API to list a subject's sessions. Each recorded `sid` is revoked at Hydra, which notifies every client with a `backchannel_logout_uri`; the subject's sessions in other browsers and its consent grants stay, so offline refresh tokens survive a plain logout (Back-Channel Logout 1.0 §2.7). Logout then sweeps the subject's `sid`s whose recorded Kratos session is no longer active, such as one the browser rotated away from (`op_sessions::sweep_dead_browser_sessions`); a failed Kratos lookup skips the sweep. The account switcher (both the switcher and the consent-screen "not you?") ends one Kratos session's `sid`s the same way.
+
+   A security event ends `sid`s and also revokes their grants (RFC 9700 §4.14.2): single-session revoke and revoke-others on the Sessions page, the admin single-session revoke, and a password change (which spares the current browser). `/oauth/consent` records each accepted consent request against its `sid` in `hydra_consent_grants`, and ending a `sid` this way revokes each recorded grant at Hydra by `consent_request_id`, falling back to Hydra's consent listing by login session when none is recorded. Admin disable, identity delete and account self-deletion end every recorded `sid` of the subject, then revoke the subject's login and consent sessions as a backstop for sessions recorded before the table existed; those subject-wide revokes kill the grants but send no back-channel logout.
+4. 302 the browser to that URL. Kratos clears the `ory_kratos_session` cookie and 303s to `selfservice.flows.logout.after.default_browser_return_url` (= `/login`, `infra/kratos/kratos.yml:110-112`).
 
 If Kratos is unreachable the handler still redirects to `/login` so the user sees *something* — their session cookie stays intact, they can retry.
 
@@ -327,12 +330,15 @@ sequenceDiagram
     participant B as Browser
     participant P as Forseti
     participant K as Kratos
+    participant H as Hydra
 
     U->>B: click "Sign out"
     B->>P: POST /logout (cookie, _csrf)
     P->>P: verify_csrf
     P->>K: GET /self-service/logout/browser (cookie)
     K-->>P: { logout_url: "...&token=xyz" }
+    P->>H: revoke this browser's recorded sids (best-effort; back-channel logout fires)
+    P->>H: revoke sids of the subject's dead Kratos sessions
     P-->>B: 302 <logout_url>
     B->>K: GET <logout_url>
     K-->>B: 303 /login (Set-Cookie: ory_kratos_session=; Max-Age=0)
@@ -439,6 +445,18 @@ Privileged-session refresh: changing a password requires a recent
 authentication. If the flow comes back with `PrivilegedRequired` the user is
 redirected to `/login?refresh=true&return_to=/settings/password`.
 
+After a successful change Kratos's `settings.after.password` hook posts
+`password.changed` to `/internal/audit/kratos` with the browser's Kratos
+session id (`metadata.kratos_session_id`, from `ctx.session` in
+`infra/kratos/audit_event.jsonnet`). The receiver
+(`end_other_browsers_after_password_change`, `src/audit/kratos_webhook.rs`)
+ends the user's other browsers' Hydra `sid`s and revokes their grants,
+sparing this browser (RFC 9700 §4.14.2). A change made through recovery lands
+here too, since the new password is set in this settings flow;
+`password.recovered` alone changes nothing, and the SAML bridge signs in
+through it. Without a session id in the payload the step is skipped with a
+warning.
+
 ```mermaid
 sequenceDiagram
     actor U as User
@@ -501,14 +519,17 @@ Ory calls:
 
 `POST /settings/sessions/{id}/revoke` — `settings_sessions_revoke`
 (`src/settings/sessions.rs:152`). Verifies CSRF, re-checks the session, calls
-`kratos::revoke_session` (`src/ory/kratos.rs:234`), and 303s back to the list with
-a flash cookie set ("Session signed out." / "Could not sign out that
-session.").
+`kratos::revoke_session` (`src/ory/kratos.rs:234`), ends the Hydra login
+sessions that Kratos session signed in to and revokes their grants, since
+revoking a session is a security event (see [Logout](#logout)), and 303s
+back to the list with a flash cookie set ("Session signed out." / "Could not
+sign out that session.").
 
 `POST /settings/sessions/revoke-others` — `settings_sessions_revoke_others`
 (`src/settings/sessions.rs:188`). Calls `kratos::revoke_other_sessions`
-(`src/ory/kratos.rs:248`) which returns the count of revoked sessions; flash
-message reflects the number.
+(`src/ory/kratos.rs:248`) which returns the count of revoked sessions, then
+ends every recorded Hydra `sid` of the user except this browser's and revokes
+their grants; flash message reflects the number.
 
 Flash messages are cookie-based one-shots (`flash::store_flash` /
 `flash::take_flash`) scoped to the path.
@@ -655,9 +676,9 @@ sequenceDiagram
         Forseti-->>User: error page; identity untouched, no outbox rows
     end
     Forseti->>DB: enqueue PENDING outbox row per (client, URL) with EdDSA-signed SET as payload
-    Forseti->>Hydra: revoke_consent_sessions_for_subject(user_id) (best-effort)
     Forseti->>Kratos: admin_delete_identity(user_id)
     alt Kratos delete OK
+        Forseti->>Hydra: revoke login + consent sessions for user_id (best-effort)
         Forseti->>DB: PENDING → CONFIRMED for event_id
         Forseti->>DB: audit::log_critical(ACCOUNT_SELF_DELETED) (audit_fallback stderr on Err)
         Forseti-->>User: 303 /login?msg=account_deleted + Set-Cookie clearing ory_kratos_session
@@ -859,21 +880,70 @@ call from the relying party.
 Behaviour:
 
 1. `hydra::get_login_request` to resolve the challenge.
-2. `kratos::whoami` to read the current session.
-3. No session → 302 to `/login?return_to=/oauth/login?login_challenge=...`
-   so the user lands here again post-auth.
-4. ACR step-up: if the challenge's `oidc_context.acr_values` contains
+2. `prompt` is read from the challenge's `request_url` (`reauth::parse_prompt`).
+   `none` combined with any other value is rejected with `invalid_request`
+   (behind Hydra v26 this rarely triggers: with `login` in the value Hydra
+   disregards the remembered session and answers `login_required` itself).
+   With `prompt=none`, every step below that would show a page rejects the
+   challenge instead: no session or an AAL/`max_age`/`prompt=login` re-auth →
+   `login_required`; the username step → `interaction_required` (OIDC Core
+   3.1.2.1, 3.1.2.6). An `organization_id` the user would have to join is
+   ignored under `prompt=none`, as if the org were unknown, so the answer
+   doesn't tell the client whether the user could join it.
+3. Stale remembered login: Hydra says `skip=true` for a subject this browser
+   is no longer signed in as (the Kratos session ended by another route).
+   Accepting would make Hydra restart with `prompt=login`, a second sign-in,
+   so the handler revokes that `sid` and redirects to the original authorize
+   URL. It revokes only a `sid` whose recorded Kratos session is gone, or one
+   without a recorded session (`stale_sid_is_abandoned`); a live recorded
+   session means the challenge was replayed from another browser, which
+   rejects with `login_required` and revokes nothing. A missing session is
+   re-checked with `whoami` first, and a failed lookup rejects with
+   `temporarily_unavailable` instead of ending the user's app sessions.
+4. No session → 302 to `/login?return_to=/oauth/login?login_challenge=...`
+   so the user lands here again post-auth. An email-shaped `login_hint` rides
+   along as `&login_hint=` and prefills the identifier (and the sign-up email
+   when the visitor switches to Create account).
+5. ACR step-up: if the challenge's `oidc_context.acr_values` contains
    `aal2` and the session's AAL is below that, 302 to
    `/login?aal=aal2&return_to=...`. Kratos demands a second factor and
    bounces the user back. Note this is the *explicit* step-up; under the
    reference config (`session.whoami.required_aal: highest_available`) an
    enrolled user is also forced to AAL2 via the whoami-403 path before this
    handler ever accepts the login, even when the RP didn't request `aal2`.
-5. Otherwise: `hydra::accept_login_request` with `subject = identity.id`,
-   `remember = true`, `amr` derived from
-   `session.authentication_methods` (defaults to `["pwd"]` if missing),
-   and `acr = session_aal`. Returns a redirect to either the consent
-   endpoint or directly back to the RP (Hydra decides).
+6. Username step: when the RP asked for `profile`, the identity is new
+   (created within the hour, `flow_view::is_new_account`) and has no handle,
+   302 to `/onboarding/username?return_to=<this login>` (`src/profiles/onboarding.rs`).
+   The page saves through the same `settings::profile::save_username` the
+   profile page uses (validation, uniqueness, `profile.username_changed`
+   audit); "Skip for now" returns with `skip_username=1`, which this handler
+   honours for the rest of the flow, and a `forseti_username_skipped` cookie
+   keeps it skipped for that account on this browser. Apps that provision
+   local accounts from `preferred_username` (Forgejo, Gitea) then get a handle
+   instead of asking.
+7. Otherwise: record the Hydra `sid` (`op_sessions::record`; a failed write
+   rejects with `temporarily_unavailable`, since logout couldn't find an
+   unrecorded `sid`), then
+   `hydra::accept_login_request` with `subject = identity.id`,
+   `remember = true`, `amr` mapped onto RFC 8176 values from
+   `session.authentication_methods` (left out for an upstream-provider-only
+   login, whose methods Forseti doesn't know), and `acr = session_aal`.
+   Returns a redirect to either the consent endpoint or directly back to the
+   RP (Hydra decides).
+
+Failures while the challenge is valid (Hydra accept errors, a session
+without an identity) reject it back to the RP with `server_error` or
+`temporarily_unavailable` (`login::reject`); only a challenge Hydra can't
+resolve lands on `/error`.
+
+`GET /oauth/register?login_challenge=...` — `oauth_register`
+(`src/oauth/login.rs`), Hydra's `urls.registration`. The authorize shim
+rewrites `prompt=create` (Initiating User Registration 1.0) to Hydra's
+`prompt=registration`, and Hydra sends the challenge here. A signed-out
+visitor goes to `/registration` with the challenge as `return_to` (and the
+`login_hint` prefilled); registration, verification and Continue return to
+`/oauth/login`, which finishes the flow. A signed-in visitor goes straight
+to `/oauth/login`.
 
 ### Consent
 
@@ -884,12 +954,15 @@ Behaviour:
 
 Two paths through this handler:
 
-**Auto-grant**: Hydra's `skip == true` (it remembers a previous consent
-decision for this user × client × scope tuple) OR the client carries
-`skip_consent == true` — but only when a Forseti **operator** vouched for
-the client (`oauth_client_metadata.source = 'admin'` and verification on;
-`Row::is_admin_vouched`, fail-closed on DB error), and never for the PAM
-device client. This excludes every CIMD/DCR row, every org-created client
+**Auto-grant** (`consent_policy`, `src/oauth/consent.rs`): an
+**operator**-vouched client (`oauth_client_metadata.source = 'admin'` and
+verification on; `Row::is_admin_vouched`, fail-closed on DB error) skips the
+page when Hydra says `skip == true` (a remembered consent for this user ×
+client × scope tuple) or the client carries `skip_consent == true`; an
+**org**-vouched client skips only on a consent the user chose to remember.
+The auto-grant is itself remembered at Hydra, so a later `prompt=none`
+authorize gets a code without UI. Never for the PAM device client or a CIMD
+client, whatever its verification. `skip_consent` is ignored for every CIMD/DCR row, every org-created client
 (`source = 'org'` — an org owner can create a client in their own org, so
 their word is not an operator review), and any client Forseti has **no
 metadata row for at all**: Hydra's `/oauth2/register` is publicly routed
@@ -902,12 +975,18 @@ Operator clients that predate the metadata table are stamped by the one-shot
 `forseti reconcile-client-metadata` verb, which is a **deploy step**, not a
 boot task — Forseti's database and Hydra's are separate servers, so no
 migration can enumerate Hydra's clients. Before
-auto-granting, the handler verifies the Kratos session subject matches
-Hydra's claimed subject — without this check a crafted consent link bound
-to identity A could be auto-granted while identity B is signed in.
-Mismatch → `reject_consent_request` with `access_denied`.
+auto-granting or rendering the page, the handler verifies the Kratos session
+subject matches Hydra's claimed subject — without this check a crafted
+consent link bound to identity A could be auto-granted while identity B is
+signed in, or show A's email and requested scopes to whoever holds the
+challenge. Mismatch → `reject_consent_request` with `access_denied`.
 
-**Interactive**: render the consent page. Scopes come from
+With `prompt=none`, a consent that isn't auto-granted is rejected with
+`consent_required` instead of rendering the page.
+
+**Interactive**: render the consent page. The "remember my decision"
+checkbox only renders where a remembered consent takes effect (operator- or
+org-vouched, non-CIMD, non-PAM clients). Scopes come from
 `req.requested_scope`; descriptions are pulled from
 `AppConfig.oauth.scope_descriptions` (operator-supplied) with the scope
 name as fallback. `openid` is rendered with a disabled checkbox AND a
@@ -926,7 +1005,11 @@ guards it on `verified && cimd_host.is_empty()`). Names inside a CIMD
 document are self-asserted; the host is what its operator provably
 controls.
 
-Submission decisions:
+Submission decisions: apart from `switch_account`, the handler fetches the
+consent request once and checks the session subject owns it before acting
+on any decision, deny included, so a deny posted from another account's
+browser hits the subject gate (`access_denied`) and is never recorded as the
+owner's decision. A failed fetch rejects with `temporarily_unavailable`.
 
 - `decision = deny` → `hydra::reject_consent_request` with
   `access_denied`. RP gets an OAuth2 error redirect.
@@ -935,7 +1018,11 @@ Submission decisions:
   traits into id_token claims by granted scope
   (`build_id_token_claims`, `src/oauth/consent.rs:1110`), then
   `hydra::accept_consent_request` with the granted audiences and
-  `remember = form.remember == "true"`.
+  `remember = form.remember == "true"`. Once Hydra accepts, the consent
+  request is recorded against its login session (`op_sessions::record_consent`,
+  `hydra_consent_grants`) so a security event ending that `sid` can revoke
+  the grant (see [Logout](#logout)). The auto-grant path records it the same
+  way.
 
 Audience resolution (both grant paths go through `finalize_consent`, so
 neither can miss it):
@@ -971,6 +1058,9 @@ id_token claim mapping (`build_id_token_claims`):
   matching the traits email is verified)
 - `profile` → `name` (flattening `{first, last}` if structured), plus
   `given_name` / `family_name` when separable
+- `groups` → the active org's team slugs. A failed lookup rejects the consent
+  with `temporarily_unavailable` instead of issuing `groups: []`, which some
+  RPs (Forgejo) read as "remove from every group"
 
 ```mermaid
 sequenceDiagram
@@ -1010,11 +1100,13 @@ sequenceDiagram
         P->>K: admin_get_identity(subject) (for email display)
         P-->>U: render consent.html
         U->>P: POST /oauth/consent (decision=accept|deny, grant_scope[], remember)
+        P->>H: get_consent_request(c2), check session subject
         alt decision=deny
             P->>H: reject_consent_request(access_denied)
         else decision=accept
             P->>K: admin_get_identity(subject)
             P->>H: accept_consent_request(c2, grant_scope, audience, remember, id_token_claims)
+            P->>P: record consent_request_id against the sid
         end
         H-->>U: 302 → RP (with code or error)
     end
@@ -1022,8 +1114,11 @@ sequenceDiagram
 
 Edge cases:
 
-- Hydra `get_login_request` / `get_consent_request` failure → 302 to
-  `/error`.
+- Hydra `get_login_request` / `get_consent_request` failure on the first
+  GET → 302 to `/error` (there's no challenge to reject). Later failures
+  while the challenge is valid reject it back to the RP
+  (`consent::reject_to_client`) with `server_error` or
+  `temporarily_unavailable`.
 - CSRF failure on POST → 403 plain text.
 - The form repeats `grant_scope` once per checked scope; axum's form
   extractor handles the `Vec<String>` deserialisation. Missing scopes
@@ -1097,7 +1192,18 @@ Edge cases worth knowing:
 
 `GET /oauth2/authorize` — handler `authorize` (`src/oauth/cimd.rs:57`),
 mounted with dual per-IP + global rate limits
-(`oauth::cimd::router`, `src/oauth/cimd.rs:39`). Document fetching and
+(`oauth::cimd::router`, `src/oauth/cimd.rs:39`). The limits apply only to
+URL-shaped (CIMD) `client_id`s; any other authorize request is redirected
+to Hydra unlimited. `POST /oauth2/authorize` (OIDC Core 3.1.2.1) becomes a
+303 to Hydra's `/oauth2/auth` with the form as the query
+(`redirect_post_to_hydra`, RFC 9110 §15.4.4). Hydra resumes every flow with
+a GET to the request URL it stored, so a POST re-sent with a 307 would lose
+its parameters after login or consent; what the client posted therefore ends
+up in a URL, as with a GET. Hydra v26 has no pushed authorization requests
+(RFC 9126), the way to keep them out. A CIMD-shaped POST goes through the
+same rate limits and client resolution as a GET (`authorize_core`) before
+its 303. `prompt=create` is rewritten to Hydra's `prompt=registration` on
+the way through. Document fetching and
 caching live in `src/oauth/cimd_fetch.rs`; the discovery augmentation and
 the `/hydra/{*rest}` front proxy in `src/hydra_front.rs`.
 
@@ -1224,7 +1330,14 @@ POST path:
    post-logout redirect because Hydra's redirect is authoritative for
    this flow.
 3. `hydra::accept_logout_request` → returns the RP-specified
-   post-logout URL. 302 there.
+   post-logout URL. 302 there. Hydra sends back-channel logout to every
+   client of that login session.
+
+The confirmation page says an app asked to sign the user out only when the
+logout request names a client; a bare `/oauth2/sessions/logout` with no
+`id_token_hint` or `client_id` gets neutral copy. A logout with no
+registered `post_logout_redirect_uri` ends on Forseti's root (Hydra's
+`urls.post_logout_redirect`), not Hydra's unbranded fallback.
 
 Edge cases:
 
@@ -1292,10 +1405,14 @@ the only entry point (SP-initiated only — no IdP-initiated flow in v1).
      a route to an operator account, and checking this ahead of the link
      lookups means it holds for every login, not just the first.
    - `saml_links` row for (org, subject) or (org, email) → re-validated
-     against Kratos (stale rows pruned), use the linked identity. A row
-     only exists because an earlier login proved control of that identity,
-     and the table is keyed by org, so one tenant's IdP can never ride
-     another tenant's link.
+     against Kratos (stale rows pruned), then the linked identity's live
+     facts go through the same `saml_link_decision` a fresh match does
+     (`resolve_established_link`): refused if it is no longer a member of
+     the org, or if any of its verified addresses is admin-allowlisted.
+     A link is not a standing grant. The table is keyed by org, so one
+     tenant's IdP can never ride another tenant's link, and removing a
+     member (`remove_member` / `remove_member_everywhere`) deletes their
+     links, so the next SSO can't silently re-join them.
    - Otherwise the facts go to `saml_link_decision`, a pure function
      (`Refuse` / `ConfirmCredential` / `JitCreate` / `LinkExisting`):
      - A match on an existing identity → **`ConfirmCredential`**. The IdP
@@ -1631,12 +1748,17 @@ Ory calls:
 
 - `kratos::admin_list_all_sessions(limit=100, page_token, active_only)` —
   `src/ory/kratos.rs:383`
-- `kratos::admin_revoke_session(id)` — `src/ory/kratos.rs:403`
+- `kratos::admin_get_session(id)` (identity expanded), then
+  `kratos::admin_revoke_session(id)` — `src/ory/kratos.rs`
 
 `?active_only=1|true|on` toggles the filter passed to Kratos. Each row
 projects identity email, device user-agent / IP, authenticated_at,
 expires_at. Revoke flow is the standard confirm screen → POST → flash
-banner ("Session revoked.").
+banner ("Session revoked."). The session's identity is looked up before the
+revoke (the session may 404 afterwards); once Kratos revokes it, the Hydra
+`sid`s that session signed in to are ended and their grants revoked, as for
+the user's own single-session revoke (see [Logout](#logout)). A failed lookup
+logs and still revokes the Kratos session.
 
 Note the confirm copy: "If this is your own session you'll be signed out."
 The admin's own session lives in the same list and can be revoked.

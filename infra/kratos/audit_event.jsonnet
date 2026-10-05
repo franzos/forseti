@@ -10,6 +10,8 @@
 //   ctx.identity.id    — UUID
 //   ctx.identity.traits — typed traits object (we read .email)
 //   ctx.flow.id        — flow UUID for correlation
+//   ctx.session.id     — the browser's Kratos session, where the hook has
+//                        one; a password change spares this browser
 //
 // All field accesses are defensive — older Kratos versions sometimes
 // omit `flow` on certain hooks.
@@ -44,6 +46,11 @@ function(ctx) {
     flow_id:
       if std.objectHas(ctx, 'flow') && std.objectHas(ctx.flow, 'id')
       then ctx.flow.id
+      else null,
+    kratos_session_id:
+      if std.objectHas(ctx, 'session') && ctx.session != null
+         && std.objectHas(ctx.session, 'id')
+      then ctx.session.id
       else null,
   },
 }

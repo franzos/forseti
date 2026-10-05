@@ -196,7 +196,10 @@ async fn device_init(
 
     // A code UNIQUE collision (Ok(false)) is a rare Hydra clash; reject so the
     // daemon restarts the flow, never 500.
-    let expires_at = (Utc::now() + chrono::Duration::seconds(authz.expires_in)).to_rfc3339();
+    // `seconds` panics on an out-of-range value; Hydra's field is untrusted input here.
+    let expires_at = (Utc::now()
+        + chrono::TimeDelta::try_seconds(authz.expires_in).unwrap_or_default())
+    .to_rfc3339();
     let client_code = mint_client_code();
     match db::insert_device_session(
         &state.db,

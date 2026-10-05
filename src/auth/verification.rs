@@ -22,6 +22,9 @@ struct VerificationTemplate {
     form: FlowFormView,
     state: String,
     is_logged_in: bool,
+    /// Where the flow was headed before verification (an OAuth login, an
+    /// invite), offered once the challenge has passed.
+    continue_href: Option<String>,
 }
 
 pub(crate) async fn verification(
@@ -66,7 +69,13 @@ pub(crate) async fn verification(
                     .into_response();
                 }
             }
-            render_verification(chrome, &flow, query.return_to.as_deref(), is_logged_in)
+            render_verification(
+                &state.cfg,
+                chrome,
+                &flow,
+                query.return_to.as_deref(),
+                is_logged_in,
+            )
         }
         FlowOutcome::Init | FlowOutcome::Reinit | FlowOutcome::Privileged(_) => {
             Redirect::to(&init_url()).into_response()
@@ -87,18 +96,38 @@ pub(crate) async fn verification(
 }
 
 fn render_verification(
+    cfg: &crate::config::AppConfig,
     chrome: PageChrome,
     flow: &serde_json::Value,
     return_to: Option<&str>,
     is_logged_in: bool,
 ) -> Response {
     let form = FlowFormView::from_flow(flow, FlowKind::Verification, return_to, &chrome.locale);
+    let state = flow_state(flow).to_string();
+    let continue_href = continue_href(cfg, &state, return_to.or_else(|| flow_return_to(flow)));
     render(&VerificationTemplate {
         chrome,
         form,
-        state: flow_state(flow).to_string(),
+        state,
         is_logged_in,
+        continue_href,
     })
+}
+
+/// The post-verification destination, when there is one worth offering over
+/// the dashboard. Kratos already checked the flow's `return_to` against
+/// `allowed_return_urls`; `safe_return_to` additionally pins it to Forseti's
+/// own origin, since every legitimate destination is a Forseti route.
+fn continue_href(
+    cfg: &crate::config::AppConfig,
+    state: &str,
+    return_to: Option<&str>,
+) -> Option<String> {
+    if state != "passed_challenge" {
+        return None;
+    }
+    let href = crate::web::safe_return_to(cfg, return_to?);
+    (href != "/").then(|| href.to_string())
 }
 
 /// Server-side submit of `method=code&email=…` to the flow's `ui.action`,
@@ -137,4 +166,55 @@ async fn submit_email_method(
     });
 
     ory::kratos::submit_flow(&state.ory, action, &body, cookie).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::continue_href;
+    use crate::config::AppConfig;
+
+    fn cfg() -> AppConfig {
+        let mut cfg = AppConfig::test_fixture();
+        cfg.self_.url = "https://id.example.com".into();
+        cfg
+    }
+
+    #[test]
+    fn offers_the_oauth_login_once_verified() {
+        let rt = "https://id.example.com/oauth/login?login_challenge=abc";
+        assert_eq!(
+            continue_href(&cfg(), "passed_challenge", Some(rt)).as_deref(),
+            Some(rt)
+        );
+    }
+
+    #[test]
+    fn offers_the_invite_once_verified() {
+        let rt = "https://id.example.com/invite/finalize?token=t";
+        assert_eq!(
+            continue_href(&cfg(), "passed_challenge", Some(rt)).as_deref(),
+            Some(rt)
+        );
+    }
+
+    #[test]
+    fn nothing_before_the_challenge_passes() {
+        let rt = "https://id.example.com/oauth/login?login_challenge=abc";
+        assert_eq!(continue_href(&cfg(), "sent_email", Some(rt)), None);
+        assert_eq!(continue_href(&cfg(), "choose_method", Some(rt)), None);
+    }
+
+    #[test]
+    fn nothing_for_foreign_origins_or_no_destination() {
+        assert_eq!(
+            continue_href(&cfg(), "passed_challenge", Some("https://evil.example/x")),
+            None
+        );
+        assert_eq!(
+            continue_href(&cfg(), "passed_challenge", Some("//evil.example")),
+            None
+        );
+        assert_eq!(continue_href(&cfg(), "passed_challenge", None), None);
+        assert_eq!(continue_href(&cfg(), "passed_challenge", Some("/")), None);
+    }
 }

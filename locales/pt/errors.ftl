@@ -6,6 +6,7 @@ error-cta-back-to-sign-in = Voltar ao início de sessão
 logout-card-title = Terminar sessão em todas as aplicações?
 logout-card-subtitle = Isto encerrará a sua sessão com o { $brand } e notificará todas as aplicações onde iniciou sessão.
 logout-body-text = A aplicação que lhe pediu para terminar sessão será informada de que o pedido foi concluído. Algumas aplicações podem manter dados locais em cache durante algum tempo; terminar sessão aqui encerra a sessão no { $brand }.
+logout-body-text-direct = Algumas aplicações podem manter dados locais em cache durante algum tempo; terminar sessão aqui encerra a sessão no { $brand }.
 logout-action-sign-out = Terminar sessão
 logout-action-cancel = Cancelar
 
@@ -64,6 +65,7 @@ error-page-link-expired-body = Esta ligação já não é válida. Comece de nov
 error-page-security-title = Falha na verificação de segurança
 error-page-already-signed-in-title = Sessão já iniciada
 error-page-default-message = Não foi possível concluir esse pedido.
+error-page-oauth-title = O pedido de início de sessão falhou
 
 # Página de acesso proibido da administração (admin/forbidden.html), definida em Rust.
 error-admin-access-denied-title = Acesso negado
@@ -79,3 +81,6 @@ error-saml-unverified-suffix = mas o seu endereço de e-mail não foi verificado
 error-saml-cross-org-not-member = A sua conta ainda não é membro desta organização. Peça ao seu administrador para o adicionar e tente novamente.
 error-saml-conflict = Não foi possível iniciar a sua sessão. Contacte o seu administrador.
 error-saml-blocked-cta = Ir para o início de sessão
+error-saml-admin-allowlisted = Este endereço pertence a uma conta de operador e não pode iniciar sessão através do fornecedor de identidade da sua organização. Inicie sessão diretamente.
+error-saml-unproven-domain = A sua organização ainda não verificou este domínio de email. Peça ao seu administrador que o verifique e tente novamente.
+error-saml-confirm-failed = Para associar esta conta ao fornecedor de identidade da sua organização, inicie sessão com a conta a que pertence este endereço.

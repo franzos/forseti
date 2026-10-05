@@ -26,6 +26,9 @@ pub(crate) struct OAuthLogoutQuery {
 struct OAuthLogoutConfirmTemplate {
     chrome: PageChrome,
     logout_challenge: String,
+    /// A client named itself on the logout request (`id_token_hint` or
+    /// `client_id`), so "the app that asked" is true.
+    app_initiated: bool,
 }
 
 /// `/oauth/logout?logout_challenge=...` — Hydra's RP-initiated logout
@@ -40,14 +43,18 @@ pub(crate) async fn oauth_logout(
 
     // Validate the challenge before rendering: there's no recovery from a
     // confirm-then-submit on a stale challenge.
-    if let Err(e) = ory::hydra::get_logout_request(&state.ory, &challenge).await {
-        tracing::error!(error = ?e, "hydra get_logout_request failed");
-        return Redirect::to("/error").into_response();
-    }
+    let req = match ory::hydra::get_logout_request(&state.ory, &challenge).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!(error = ?e, "hydra get_logout_request failed");
+            return Redirect::to("/error").into_response();
+        }
+    };
 
     render(&OAuthLogoutConfirmTemplate {
         chrome,
         logout_challenge: challenge,
+        app_initiated: req.client.is_some(),
     })
 }
 

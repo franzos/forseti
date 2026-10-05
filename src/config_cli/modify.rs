@@ -57,10 +57,15 @@ use super::yamlutil::{
 /// verified. Gated, the value only ever matches what the upstream verified.
 pub(crate) const MAPPER_CARRYOVER: &str = r#"local claims = { email_verified: false } + std.extVar('claims');
 local verified = 'email' in claims && claims.email_verified;
+local name = {
+  [if 'given_name' in claims then 'first' else null]: claims.given_name,
+  [if 'family_name' in claims then 'last' else null]: claims.family_name,
+};
 {
   identity: {
     traits: {
       [if verified then 'email' else null]: claims.email,
+      [if std.length(name) > 0 then 'name' else null]: name,
     },
     verified_addresses: if verified then [{ value: claims.email, via: 'email' }] else [],
   },
@@ -74,10 +79,15 @@ local verified = 'email' in claims && claims.email_verified;
 /// its equivalent is the `xms_edov` optional claim, which Kratos doesn't read).
 /// Users of these providers verify through Forseti's own flow.
 pub(crate) const MAPPER_GATE_ONLY: &str = r#"local claims = { email_verified: false } + std.extVar('claims');
+local name = {
+  [if 'given_name' in claims then 'first' else null]: claims.given_name,
+  [if 'family_name' in claims then 'last' else null]: claims.family_name,
+};
 {
   identity: {
     traits: {
       [if 'email' in claims && claims.email_verified then 'email' else null]: claims.email,
+      [if std.length(name) > 0 then 'name' else null]: name,
     },
   },
 }
@@ -94,9 +104,20 @@ pub(crate) const MAPPER_MICROSOFT: &str = MAPPER_GATE_ONLY;
 /// explanation instead of refusing and accusing them of an account-takeover
 /// vector. Checked only after the current pinned body doesn't match.
 const SUPERSEDED_MAPPERS: &[&str] = &[
-    // <= v0.1.16, google/github/microsoft: no `email_verified` default, so an
-    // unverified upstream hard-failed the sign-in (jsonnet missing field).
-    r#"local claims = std.extVar('claims');
+    // Email only, before provider names were mapped (github/microsoft, and
+    // apple <= v0.1.16, used the second).
+    r#"local claims = { email_verified: false } + std.extVar('claims');
+local verified = 'email' in claims && claims.email_verified;
+{
+  identity: {
+    traits: {
+      [if verified then 'email' else null]: claims.email,
+    },
+    verified_addresses: if verified then [{ value: claims.email, via: 'email' }] else [],
+  },
+}
+"#,
+    r#"local claims = { email_verified: false } + std.extVar('claims');
 {
   identity: {
     traits: {
@@ -105,9 +126,9 @@ const SUPERSEDED_MAPPERS: &[&str] = &[
   },
 }
 "#,
-    // <= v0.1.16, apple: identical to today's MAPPER_GATE_ONLY, which is why
-    // this is only ever consulted after the current-pinned check.
-    r#"local claims = { email_verified: false } + std.extVar('claims');
+    // <= v0.1.16, google/github/microsoft: no `email_verified` default, so an
+    // unverified upstream hard-failed the sign-in (jsonnet missing field).
+    r#"local claims = std.extVar('claims');
 {
   identity: {
     traits: {
@@ -2991,11 +3012,11 @@ mod tests {
 
     #[test]
     fn superseded_mappers_are_recognised_but_current_ones_are_not() {
-        // The <= v0.1.16 apple body is byte-identical to today's gate-only
-        // body, so the current-pinned check has to run first.
         let old_google = "local claims = std.extVar('claims');\n{\n  identity: {\n    traits: {\n      [if 'email' in claims && claims.email_verified then 'email' else null]: claims.email,\n    },\n  },\n}\n";
         assert!(is_superseded_mapper(old_google));
-        assert!(is_superseded_mapper(MAPPER_GATE_ONLY));
+        let email_only = "local claims = { email_verified: false } + std.extVar('claims');\n{\n  identity: {\n    traits: {\n      [if 'email' in claims && claims.email_verified then 'email' else null]: claims.email,\n    },\n  },\n}\n";
+        assert!(is_superseded_mapper(email_only));
+        assert!(!is_superseded_mapper(MAPPER_GATE_ONLY));
         assert!(!is_superseded_mapper(MAPPER_CARRYOVER));
         assert!(!is_superseded_mapper(
             "local claims = std.extVar('claims'); {}"

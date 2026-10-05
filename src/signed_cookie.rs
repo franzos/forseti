@@ -14,6 +14,9 @@ use crate::cookies::read_cookie;
 
 type HmacSha256 = Hmac<Sha256>;
 
+/// How far ahead of our clock a minted timestamp may sit and still verify.
+const MAX_FUTURE_SKEW_SECS: u64 = 60;
+
 /// Per-cookie shape (name, key salt, TTL, `Secure`); reuse one for encode + decode so the paths can't drift.
 pub(crate) struct SignedCookie<'a> {
     pub name: &'a str,
@@ -82,7 +85,8 @@ impl<'a> SignedCookie<'a> {
         let ts = parts[0].parse::<u64>().ok()?;
         let payload = hex::decode(parts[1]).ok()?;
         let tag = hex::decode(parts[2]).ok()?;
-        if now_secs.saturating_sub(ts) > self.ttl_secs {
+        // A timestamp from the future never ages out; allow only clock skew.
+        if now_secs.saturating_sub(ts) > self.ttl_secs || ts > now_secs + MAX_FUTURE_SKEW_SECS {
             return None;
         }
         let key = self.derive_key(secret);
@@ -155,6 +159,27 @@ mod tests {
         let headers = headers_with("test_cookie", &encoded);
         let got = codec.decode(secret, &headers, now);
         assert_eq!(got.as_deref(), Some(b"hello".as_slice()));
+    }
+
+    /// C39 (round-3 review): a validly signed value stamped in the future
+    /// used to verify until long after its TTL.
+    #[test]
+    fn a_future_timestamp_beyond_skew_is_refused() {
+        let codec = sc();
+        let secret = b"operator-secret-32-bytes-of-key!";
+        let now = 1_700_000_000;
+        let near = codec.encode(secret, b"x", now + MAX_FUTURE_SKEW_SECS);
+        let far = codec.encode(secret, b"x", now + MAX_FUTURE_SKEW_SECS + 1);
+        assert!(
+            codec
+                .decode(secret, &headers_with("test_cookie", &near), now)
+                .is_some()
+        );
+        assert!(
+            codec
+                .decode(secret, &headers_with("test_cookie", &far), now)
+                .is_none()
+        );
     }
 
     #[test]

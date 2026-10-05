@@ -79,33 +79,42 @@ impl ReauthAsk {
     }
 }
 
+/// The `prompt` values in Hydra's `request_url` (a space-delimited set, OIDC
+/// Core 3.1.2.1), deduplicated in order. Empty when absent or unparseable.
+pub(crate) fn parse_prompt(request_url: &str) -> Vec<String> {
+    let Ok(url) = url::Url::parse(request_url) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = Vec::new();
+    for (_, v) in url.query_pairs().filter(|(k, _)| k == "prompt") {
+        for p in v.split_whitespace() {
+            if !out.iter().any(|x| x == p) {
+                out.push(p.to_string());
+            }
+        }
+    }
+    out
+}
+
 /// Parse `prompt` and `max_age` out of Hydra's `request_url` (the verbatim
 /// `/oauth2/auth` URL the RP called).
 pub(crate) fn parse_reauth_ask(request_url: &str) -> ReauthAsk {
     let Ok(url) = url::Url::parse(request_url) else {
         return ReauthAsk::default();
     };
-    let mut ask = ReauthAsk::default();
+    let mut ask = ReauthAsk {
+        prompt_login: parse_prompt(request_url).iter().any(|p| p == "login"),
+        max_age: None,
+    };
     for (k, v) in url.query_pairs() {
-        match k.as_ref() {
-            // `prompt` is a space-delimited set; `login` may sit beside
-            // `consent`, `select_account`, ...
-            "prompt" => {
-                if v.split_whitespace().any(|p| p == "login") {
-                    ask.prompt_login = true;
-                }
-            }
-            "max_age" => {
-                // Clamped: the window is compared in milliseconds, and an
-                // RP-supplied value near `i64::MAX` would overflow the
-                // conversion. Anything past the cap already means "don't care".
-                if let Ok(n) = v.trim().parse::<i64>()
-                    && n >= 0
-                {
-                    ask.max_age = Some(n.min(MAX_AGE_CAP_SECS));
-                }
-            }
-            _ => {}
+        // Clamped: the window is compared in milliseconds, and an RP-supplied
+        // value near `i64::MAX` would overflow the conversion. Anything past
+        // the cap already means "don't care".
+        if k == "max_age"
+            && let Ok(n) = v.trim().parse::<i64>()
+            && n >= 0
+        {
+            ask.max_age = Some(n.min(MAX_AGE_CAP_SECS));
         }
     }
     ask
@@ -216,6 +225,16 @@ mod tests {
             prior_auth_time: Some(t(prior)),
             bounced_at: Some(t(at)),
         }
+    }
+
+    #[test]
+    fn prompt_parses_as_a_deduplicated_set() {
+        assert_eq!(
+            parse_prompt("https://h/oauth2/auth?prompt=none%20login+none&client_id=x"),
+            vec!["none", "login"]
+        );
+        assert!(parse_prompt("https://h/oauth2/auth?client_id=x").is_empty());
+        assert!(parse_prompt("not a url").is_empty());
     }
 
     #[test]

@@ -21,6 +21,7 @@ kratos-1010014 = Se envió un código a la dirección que proporcionó. Si no lo
 kratos-1010015 = Enviar código de inicio de sesión
 kratos-1010021 = Iniciar sesión con passkey
 kratos-1010022 = Iniciar sesión con contraseña
+kratos-1010016 = { $duplicateIdentifier } ya tiene una cuenta. Inicie sesión abajo para vincular { $provider } y, a partir de entonces, podrá usar cualquiera de los dos para iniciar sesión.
 
 # --- Registro (1040xxx) ---
 kratos-1040001 = Registrarse

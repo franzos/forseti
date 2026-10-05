@@ -327,7 +327,7 @@ pub async fn create(
     let client_name = form.name.clone();
     let client_type = form.client_type.clone();
     let mut payload = form.to_oauth2_client(None);
-    if let Err(msg) = constrain_org_scoped_client(&state, &scope, &mut payload).await {
+    if let Err(msg) = constrain_org_scoped_client(&state, &scope, &mut payload, None).await {
         return rerender(msg);
     }
     match ory::hydra::create_client(&state.ory, payload).await {

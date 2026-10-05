@@ -6,6 +6,7 @@ error-cta-back-to-sign-in = Volver al inicio de sesión
 logout-card-title = ¿Cerrar sesión en todas las aplicaciones?
 logout-card-subtitle = Esto finalizará su sesión con { $brand } y notificará a todas las aplicaciones en las que inició sesión.
 logout-body-text = Se informará a la aplicación que le pidió cerrar sesión de que la solicitud se ha completado. Algunas aplicaciones pueden conservar datos en caché durante un breve tiempo; cerrar sesión aquí finaliza la sesión en { $brand }.
+logout-body-text-direct = Algunas aplicaciones pueden conservar datos en caché durante un breve tiempo; cerrar sesión aquí finaliza la sesión en { $brand }.
 logout-action-sign-out = Cerrar sesión
 logout-action-cancel = Cancelar
 
@@ -64,6 +65,7 @@ error-page-link-expired-body = Este enlace ya no es válido. Comience de nuevo d
 error-page-security-title = Error en la comprobación de seguridad
 error-page-already-signed-in-title = Ya inició sesión
 error-page-default-message = No pudimos completar esa solicitud.
+error-page-oauth-title = La solicitud de inicio de sesión falló
 
 # Página de acceso denegado del control de administración (admin/forbidden.html), establecida en Rust.
 error-admin-access-denied-title = Acceso denegado
@@ -79,3 +81,6 @@ error-saml-unverified-suffix = pero su dirección de correo electrónico no se h
 error-saml-cross-org-not-member = Su cuenta aún no es miembro de esta organización. Pida a su administrador que lo agregue y luego vuelva a intentarlo.
 error-saml-conflict = No pudimos iniciar su sesión. Póngase en contacto con su administrador.
 error-saml-blocked-cta = Ir al inicio de sesión
+error-saml-admin-allowlisted = Esta dirección pertenece a una cuenta de operador y no puede iniciar sesión mediante el proveedor de identidad de su organización. Inicie sesión directamente.
+error-saml-unproven-domain = Su organización aún no ha verificado este dominio de correo. Pida a su administrador que lo verifique y vuelva a intentarlo.
+error-saml-confirm-failed = Para vincular esta cuenta con el proveedor de identidad de su organización, inicie sesión con la cuenta propietaria de esta dirección.

@@ -20,6 +20,25 @@ use crate::page_chrome::PageChrome;
 use crate::render::render;
 use crate::state::AppState;
 
+/// One audience the token will be addressed to: its registered name when
+/// there is one, with the raw identifier alongside.
+struct AudienceView {
+    name: String,
+    id: String,
+}
+
+/// The display name an operator registered for an audience in the resource
+/// registry. Never a client-chosen name: this line is what tells the user who
+/// the token is for.
+async fn audience_name(state: &AppState, audience: &str) -> Option<String> {
+    crate::resource_registry::find_by_resource(&state.db, audience)
+        .await
+        .ok()
+        .flatten()
+        .map(|row| row.display_name)
+        .filter(|n| !n.is_empty())
+}
+
 /// View-model for a single requested OAuth2 scope on the consent screen.
 struct ConsentScopeView {
     name: String,
@@ -57,7 +76,7 @@ struct ConsentTemplate {
     org_vouched: bool,
     /// The audiences the access token will carry, resolved by the same
     /// function the grant uses. Empty for the common no-audience consent.
-    granted_audience: Vec<String>,
+    granted_audience: Vec<AudienceView>,
     /// Client id, for the logo URL. Empty when Hydra didn't give us one,
     /// which also forces `has_logo` false.
     client_id: String,
@@ -73,6 +92,9 @@ struct ConsentTemplate {
     /// clients or when the client_id fails URL parse; both render as before.
     /// Also suppresses the verification badge, which never applies to CIMD.
     cimd_host: String,
+    /// Show "remember my decision": only where a remembered consent is
+    /// honoured (operator- or org-vouched, non-CIMD clients).
+    can_remember: bool,
     /// The CIMD document's self-asserted `client_name`, demoted to a
     /// secondary line. Empty when absent or outside the CIMD rendering.
     cimd_client_name: String,
@@ -177,16 +199,26 @@ pub(crate) async fn oauth_consent(
     let is_pam_client =
         !client_id_lookup.is_empty() && client_id_lookup == state.cfg.posix.pam_client_id;
 
-    // Auto-grant path (remembered consent or trusted client). Unverified
-    // clients never auto-grant, and CIMD clients never skip regardless of
-    // verification: their identity is a fetched URL, so the host must be
-    // shown on every consent (spec invariant D.5).
-    if !is_pam_client && verified && !is_cimd && (hydra_skip || client_skip_consent) {
-        if let Some(rejected) =
-            reject_unless_session_subject(&state, &challenge, &subject, &session, &locale).await
-        {
-            return rejected;
-        }
+    let ConsentPolicy {
+        can_remember,
+        auto_grant,
+    } = consent_policy(
+        is_pam_client,
+        is_cimd,
+        verified,
+        org_vouched,
+        hydra_skip,
+        client_skip_consent,
+    );
+    // The consent screen and an auto-grant both belong to the challenge's
+    // subject only; the page would otherwise show their email and the
+    // requested scopes to whoever holds the challenge.
+    if let Some(rejected) =
+        reject_unless_session_subject(&state, &challenge, &subject, &session, &locale).await
+    {
+        return rejected;
+    }
+    if auto_grant {
         let request_url = req.request_url.as_deref().unwrap_or_default();
         let requested_org_id =
             crate::oauth::login::parse_organization_id_param(request_url).filter(|s| !s.is_empty());
@@ -198,14 +230,32 @@ pub(crate) async fn oauth_consent(
             requested_scope,
             requested_audience,
             request_url,
-            false,
+            // Remembered, so Hydra can answer the next `prompt=none` itself.
+            true,
             false,
             &headers,
             requested_org_id.as_deref(),
             locale,
+            req.login_session_id.as_deref(),
+            req.consent_request_id.as_deref(),
         )
         .await
         .into_response();
+    }
+
+    // Past the auto-grant, consent needs the user, which `prompt=none` rules out.
+    if super::reauth::parse_prompt(req.request_url.as_deref().unwrap_or_default())
+        .iter()
+        .any(|p| p == "none")
+    {
+        return reject_to_client(
+            &state,
+            &challenge,
+            "consent_required",
+            "The user has not consented to this client.",
+            &locale,
+        )
+        .await;
     }
 
     let self_asserted_name = req
@@ -260,9 +310,8 @@ pub(crate) async fn oauth_consent(
         })
         .collect();
 
-    // Subject email for the "Signed in as ..." line. Via the admin API
-    // because the Kratos session cookie isn't guaranteed in scope here, and
-    // we already trust `subject` from Hydra.
+    // Subject email for the "Signed in as ..." line, via the admin API; the
+    // session was checked against `subject` above.
     let subject_identity = match ory::kratos::admin_get_identity(&state.ory, &subject).await {
         Ok(id) => Some(id),
         Err(e) => {
@@ -334,18 +383,33 @@ pub(crate) async fn oauth_consent(
     // Show what the token will actually be addressed to. An RP can request an
     // audience the user never sees otherwise, and "approve" should not mean
     // approving an unnamed third party.
-    let granted_audience = resolve_consent_audience(
-        &state,
+    let audience_ids = third_party_audience(
+        resolve_consent_audience(
+            &state,
+            client_id_lookup,
+            &requested_audience,
+            req.request_url.as_deref().unwrap_or_default(),
+        )
+        .await,
         client_id_lookup,
-        &requested_audience,
-        req.request_url.as_deref().unwrap_or_default(),
-    )
-    .await;
+    );
+    let mut granted_audience = Vec::with_capacity(audience_ids.len());
+    for id in audience_ids {
+        let name = audience_name(&state, &id)
+            .await
+            .unwrap_or_else(|| id.clone());
+        granted_audience.push(AudienceView { name, id });
+    }
 
+    let consent_intro = if state.cfg.brand.consent_intro.is_empty() {
+        chrome.t("consent-intro-default")
+    } else {
+        state.cfg.brand.consent_intro.clone()
+    };
     render(&ConsentTemplate {
         chrome,
         granted_audience,
-        consent_intro: state.cfg.brand.consent_intro.clone(),
+        consent_intro,
         client_name,
         subject_email,
         challenge,
@@ -357,6 +421,7 @@ pub(crate) async fn oauth_consent(
         known_accounts,
         cimd_host,
         cimd_client_name,
+        can_remember,
     })
 }
 
@@ -410,22 +475,43 @@ pub(crate) async fn oauth_consent_submit(
         return switch_account(&state, &headers, &actx, &form.consent_challenge, None).await;
     }
 
+    // The browser's session must own the challenge before any decision on it,
+    // deny included.
+    let req = match ory::hydra::get_consent_request(&state.ory, &form.consent_challenge).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!(error = ?e, "hydra get_consent_request failed during submit");
+            return reject_to_client(
+                &state,
+                &form.consent_challenge,
+                "temporarily_unavailable",
+                "The consent service is unavailable.",
+                &req_locale,
+            )
+            .await;
+        }
+    };
+    let subject = req.subject.clone().unwrap_or_default();
+    if let Some(rejected) = reject_unless_session_subject(
+        &state,
+        &form.consent_challenge,
+        &subject,
+        &session,
+        &req_locale,
+    )
+    .await
+    {
+        return rejected;
+    }
+
     let remember = form.remember.as_deref() == Some("true");
 
     if form.decision == "deny" {
-        // Best-effort subject + client for the audit row; a failure here
-        // doesn't block the reject.
-        let (subject, client_id) =
-            match ory::hydra::get_consent_request(&state.ory, &form.consent_challenge).await {
-                Ok(r) => (
-                    r.subject.clone().unwrap_or_default(),
-                    r.client
-                        .as_ref()
-                        .and_then(|c| c.client_id.clone())
-                        .unwrap_or_default(),
-                ),
-                Err(_) => (String::new(), String::new()),
-            };
+        let client_id = req
+            .client
+            .as_ref()
+            .and_then(|c| c.client_id.clone())
+            .unwrap_or_default();
         let actor_email = lookup_identity_email(&state, &subject).await;
         match ory::hydra::reject_consent_request(
             &state.ory,
@@ -457,29 +543,15 @@ pub(crate) async fn oauth_consent_submit(
     // handled above. Anything else (empty from a submitterless POST, or a
     // tampered value) is a friendly error, never an implicit grant.
     if form.decision != "accept" {
-        tracing::warn!(decision = %form.decision, "consent: unrecognized decision; redirecting to error");
-        return Redirect::to("/error").into_response();
-    }
-
-    let req = match ory::hydra::get_consent_request(&state.ory, &form.consent_challenge).await {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::error!(error = ?e, "hydra get_consent_request failed during accept");
-            return Redirect::to("/error").into_response();
-        }
-    };
-
-    let subject = req.subject.clone().unwrap_or_default();
-    if let Some(rejected) = reject_unless_session_subject(
-        &state,
-        &form.consent_challenge,
-        &subject,
-        &session,
-        &req_locale,
-    )
-    .await
-    {
-        return rejected;
+        tracing::warn!(decision = %form.decision, "consent: unrecognized decision; rejecting");
+        return reject_to_client(
+            &state,
+            &form.consent_challenge,
+            "server_error",
+            "The consent form was incomplete.",
+            &req_locale,
+        )
+        .await;
     }
 
     let client_id = req
@@ -531,6 +603,8 @@ pub(crate) async fn oauth_consent_submit(
         &headers,
         requested_org_id.as_deref(),
         consent_locale,
+        req.login_session_id.as_deref(),
+        req.consent_request_id.as_deref(),
     )
     .await;
 
@@ -540,7 +614,7 @@ pub(crate) async fn oauth_consent_submit(
             groups_count,
             groups_truncated,
         } => (redirect, groups_count, groups_truncated),
-        FinalizeOutcome::RedirectedToError { redirect } => return redirect,
+        FinalizeOutcome::Rejected { redirect } => return redirect,
     };
 
     if form.remember_account.as_deref() == Some("true") && !subject.is_empty() {
@@ -593,6 +667,54 @@ pub(crate) async fn oauth_consent_submit(
     redirect
 }
 
+struct ConsentPolicy {
+    /// A remembered consent takes effect, so offer the checkbox.
+    can_remember: bool,
+    /// Grant without showing the consent screen.
+    auto_grant: bool,
+}
+
+/// Operator-vouched clients skip consent on `skip_consent` or a remembered
+/// consent; org-vouched ones only on a consent the user chose to remember.
+/// Unverified clients never skip, and neither do CIMD clients, whatever
+/// their verification: their identity is a fetched URL, so the host must be
+/// shown on every consent (spec invariant D.5). The PAM device client always
+/// shows its host+account binding.
+fn consent_policy(
+    is_pam: bool,
+    is_cimd: bool,
+    verified: bool,
+    org_vouched: bool,
+    hydra_skip: bool,
+    client_skip_consent: bool,
+) -> ConsentPolicy {
+    let can_remember = !is_pam && !is_cimd && (verified || org_vouched);
+    let auto_grant = can_remember
+        && ((verified && (hydra_skip || client_skip_consent)) || (org_vouched && hydra_skip));
+    ConsentPolicy {
+        can_remember,
+        auto_grant,
+    }
+}
+
+/// Reject the consent challenge back to the relying party (OIDC Core
+/// 3.1.2.6), or land on `/error` when Hydra can't take the rejection either.
+async fn reject_to_client(
+    state: &AppState,
+    challenge: &str,
+    error: &str,
+    description: &str,
+    locale: &LanguageIdentifier,
+) -> Response {
+    match ory::hydra::reject_consent_request(&state.ory, challenge, error, description).await {
+        Ok(redirect) => continue_nav::continue_to(&redirect.redirect_to, locale),
+        Err(e) => {
+            tracing::error!(error = ?e, "hydra reject_consent_request failed");
+            Redirect::to("/error").into_response()
+        }
+    }
+}
+
 /// Gate every grant path on "the consent subject IS the signed-in identity":
 /// a consent link bound to one subject and opened by another would otherwise
 /// mint tokens for the link's owner while the clicking user believes they
@@ -617,20 +739,16 @@ async fn reject_unless_session_subject(
         session_subject = %session_subject,
         "rejecting consent: session subject mismatch"
     );
-    match ory::hydra::reject_consent_request(
-        &state.ory,
-        challenge,
-        "access_denied",
-        "Consent subject does not match the signed-in identity.",
+    Some(
+        reject_to_client(
+            state,
+            challenge,
+            "access_denied",
+            "Consent subject does not match the signed-in identity.",
+            locale,
+        )
+        .await,
     )
-    .await
-    {
-        Ok(redirect) => Some(continue_nav::continue_to(&redirect.redirect_to, locale)),
-        Err(e) => {
-            tracing::error!(error = ?e, "hydra reject_consent_request (mismatch) failed");
-            Some(Redirect::to("/error").into_response())
-        }
-    }
 }
 
 /// The grant predicate behind [`reject_unless_session_subject`]: an empty
@@ -675,7 +793,22 @@ async fn switch_account(
     let request_url = req.request_url.clone().unwrap_or_default();
 
     let cookie = crate::cookies::cookie_header(headers);
+    let kratos_session_id = match ory::kratos::whoami(&state.ory, Some(&cookie)).await {
+        Ok(ory::kratos::WhoamiOutcome::Ok(s)) => Some(s.id.clone()),
+        _ => None,
+    };
     ory::kratos::tear_down_session(&state.ory, &cookie).await;
+    if !subject.is_empty()
+        && let Some(ksid) = &kratos_session_id
+    {
+        super::op_sessions::end_op_sessions_for_browser(
+            state,
+            &subject,
+            ksid,
+            super::op_sessions::GrantRevocation::Keep,
+        )
+        .await;
+    }
 
     let actor_email = lookup_identity_email(state, &subject).await;
     let mut ev = AuditEvent::new(action::OAUTH_ACCOUNT_SWITCH).with_ctx(actx);
@@ -782,6 +915,13 @@ fn resolve_granted_audience(
         }
     }
     granted
+}
+
+/// The granted audiences worth showing the user: a client addressing tokens
+/// to itself (its own `client_id` as audience) is not a third party, and its
+/// id is an opaque string the user can't act on.
+fn third_party_audience(granted: Vec<String>, client_id: &str) -> Vec<String> {
+    granted.into_iter().filter(|a| a != client_id).collect()
 }
 
 /// Resolve the audiences this consent would grant, for both the interactive
@@ -945,6 +1085,8 @@ fn with_prompt_login(request_url: &str, login_hint: Option<&str>) -> Option<Stri
             _ => preserved.push((k.into_owned(), v.into_owned())),
         }
     }
+    // `none` can't sit beside `login` (OIDC Core 3.1.2.1).
+    prompts.retain(|p| p != "none");
     if !prompts.iter().any(|p| p == "login") {
         prompts.push("login".to_string());
     }
@@ -984,7 +1126,7 @@ enum FinalizeOutcome {
         groups_count: usize,
         groups_truncated: bool,
     },
-    RedirectedToError {
+    Rejected {
         redirect: Response,
     },
 }
@@ -993,7 +1135,29 @@ impl FinalizeOutcome {
     fn into_response(self) -> Response {
         match self {
             FinalizeOutcome::Granted { redirect, .. } => redirect,
-            FinalizeOutcome::RedirectedToError { redirect } => redirect,
+            FinalizeOutcome::Rejected { redirect } => redirect,
+        }
+    }
+}
+
+/// The one org whose membership a client may see in `orgs`/`org`/`groups`, or
+/// `None` for an operator-written (`source = admin`) client, which sees all of
+/// them. Anything else, rowless included, is held to its own org (Default).
+async fn claim_org_scope(state: &AppState, client_id: &str, needed: bool) -> Option<String> {
+    if !needed {
+        return None;
+    }
+    let default = || Some(crate::orgs::DEFAULT_ORG_ID.to_string());
+    if client_id.is_empty() {
+        return default();
+    }
+    match oauth_client_metadata::get(&state.db, client_id).await {
+        Ok(Some(row)) if row.source == oauth_client_metadata::source::ADMIN => None,
+        Ok(Some(row)) => Some(row.org_id),
+        Ok(None) => default(),
+        Err(e) => {
+            tracing::warn!(error = ?e, client_id, "consent: client metadata lookup failed; scoping org claims to Default");
+            default()
         }
     }
 }
@@ -1039,6 +1203,10 @@ async fn finalize_consent(
     headers: &axum::http::HeaderMap,
     requested_org_id: Option<&str>,
     consent_locale: LanguageIdentifier,
+    // Hydra's ids for this consent, recorded so revoking the session can
+    // revoke the grant.
+    login_session_id: Option<&str>,
+    consent_request_id: Option<&str>,
 ) -> FinalizeOutcome {
     // Both policy arms are fetched lazily: skipped entirely when nothing was
     // requested, so a consent with no audience carrier costs no extra
@@ -1096,16 +1264,31 @@ async fn finalize_consent(
         .iter()
         .any(|s| s == "org" || s == "orgs" || s == "groups");
     let identity_fut = ory::kratos::admin_get_identity(&state.ory, subject);
+    let scope_org = claim_org_scope(state, client_id, needs_org_claims).await;
     let (identity_res, memberships) = if needs_org_claims {
-        let memberships_fut = crate::orgs::list_memberships_limited(
-            &state.db,
-            subject,
-            crate::orgs::nav::ORGS_CLAIM_CAP as i64 + 1,
-        );
+        // A scoped client filters the full set: capping first could drop the
+        // one membership it is allowed to see.
+        let limit = match scope_org {
+            Some(_) => None,
+            None => Some(crate::orgs::nav::ORGS_CLAIM_CAP as i64 + 1),
+        };
+        let memberships_fut = async {
+            match limit {
+                Some(n) => crate::orgs::list_memberships_limited(&state.db, subject, n).await,
+                None => crate::orgs::list_memberships(&state.db, subject).await,
+            }
+        };
         let (id_res, mem_res) = tokio::join!(identity_fut, memberships_fut);
         (id_res, mem_res.unwrap_or_default())
     } else {
         (identity_fut.await, Vec::new())
+    };
+    let memberships: Vec<_> = match scope_org {
+        Some(org_id) => memberships
+            .into_iter()
+            .filter(|m| m.org_id == org_id)
+            .collect(),
+        None => memberships,
     };
     let orgs_truncated = memberships.len() > crate::orgs::nav::ORGS_CLAIM_CAP;
     let memberships = {
@@ -1176,26 +1359,31 @@ async fn finalize_consent(
     };
 
     // Team slugs for the `groups` claim, scoped to the active org. Only when
-    // the scope is granted and an active org resolved; a DB error degrades to
-    // empty, consistent with the memberships fetch above.
+    // the scope is granted and an active org resolved. A failed lookup fails
+    // the consent: RPs like Forgejo read `groups: []` as "remove from every
+    // group", so an empty claim isn't a safe stand-in.
     let wants_groups = grant_scope.iter().any(|s| s == "groups");
-    let (group_slugs, groups_truncated) = if wants_groups {
-        match active.as_ref() {
-            Some(m) => {
-                match crate::orgs::teams::group_slugs_for_identity(&state.db, &m.org_id, subject)
-                    .await
-                {
-                    Ok(raw) => project_group_slugs(&raw, crate::orgs::teams::GROUPS_CLAIM_CAP),
-                    Err(e) => {
-                        tracing::warn!(error = ?e, subject, "consent: group_slugs fetch failed; groups will be empty");
-                        (Vec::new(), false)
-                    }
+    let (group_slugs, groups_truncated) = match active.as_ref().filter(|_| wants_groups) {
+        Some(m) => {
+            match crate::orgs::teams::group_slugs_for_identity(&state.db, &m.org_id, subject).await
+            {
+                Ok(raw) => project_group_slugs(&raw, crate::orgs::teams::GROUPS_CLAIM_CAP),
+                Err(e) => {
+                    tracing::error!(error = ?e, subject, "consent: group_slugs fetch failed; rejecting");
+                    return FinalizeOutcome::Rejected {
+                        redirect: reject_to_client(
+                            state,
+                            challenge,
+                            "temporarily_unavailable",
+                            "Group memberships are unavailable.",
+                            &consent_locale,
+                        )
+                        .await,
+                    };
                 }
             }
-            None => (Vec::new(), false),
         }
-    } else {
-        (Vec::new(), false)
+        None => (Vec::new(), false),
     };
     if groups_truncated {
         tracing::warn!(
@@ -1227,15 +1415,38 @@ async fn finalize_consent(
     )
     .await
     {
-        Ok(redirect) => FinalizeOutcome::Granted {
-            redirect: continue_nav::continue_to(&redirect.redirect_to, &consent_locale),
-            groups_count: group_slugs.len(),
-            groups_truncated,
-        },
+        Ok(redirect) => {
+            match (login_session_id, consent_request_id) {
+                (Some(sid), Some(crid)) => {
+                    if let Err(e) =
+                        super::op_sessions::record_consent(&state.db, crid, sid, subject, client_id)
+                            .await
+                    {
+                        tracing::warn!(error = %e, "consent grant record failed");
+                    }
+                }
+                _ => tracing::warn!(
+                    client_id,
+                    "consent: no login session or consent request id; grant isn't revocable per session",
+                ),
+            }
+            FinalizeOutcome::Granted {
+                redirect: continue_nav::continue_to(&redirect.redirect_to, &consent_locale),
+                groups_count: group_slugs.len(),
+                groups_truncated,
+            }
+        }
         Err(e) => {
             tracing::error!(error = ?e, "hydra accept_consent_request failed");
-            FinalizeOutcome::RedirectedToError {
-                redirect: Redirect::to("/error").into_response(),
+            FinalizeOutcome::Rejected {
+                redirect: reject_to_client(
+                    state,
+                    challenge,
+                    "server_error",
+                    "The consent couldn't be recorded.",
+                    &consent_locale,
+                )
+                .await,
             }
         }
     }
@@ -1251,6 +1462,49 @@ fn project_group_slugs(raw: &[String], cap: usize) -> (Vec<String>, bool) {
     slugs.truncate(cap);
     (slugs, truncated)
 }
+
+/// Scopes [`build_id_token_claims`] acts on, advertised through Hydra's
+/// `webfinger.oidc_discovery.supported_scope` (Hydra adds `openid`,
+/// `offline` and `offline_access` itself).
+pub(crate) const SUPPORTED_SCOPES: [&str; 6] = [
+    "email",
+    "profile",
+    "org",
+    "orgs",
+    "groups",
+    "extended_profile",
+];
+
+/// Claims Forseti and Hydra put in ID tokens, advertised through Hydra's
+/// `webfinger.oidc_discovery.supported_claims`.
+pub(crate) const SUPPORTED_CLAIMS: [&str; 26] = [
+    "sub",
+    "iss",
+    "aud",
+    "exp",
+    "iat",
+    "auth_time",
+    "nonce",
+    "acr",
+    "amr",
+    "sid",
+    "email",
+    "email_verified",
+    "name",
+    "given_name",
+    "family_name",
+    "picture",
+    "website",
+    "preferred_username",
+    "locale",
+    "updated_at",
+    "org",
+    "orgs",
+    "groups",
+    "bio",
+    "pronouns",
+    "links",
+];
 
 /// Fold identity traits into id_token claims, scoped by granted scope.
 /// `email` adds `email`/`email_verified`; `profile` adds
@@ -1400,11 +1654,13 @@ fn build_id_token_claims(
             }
         }
         if let Some(p) = profile {
-            if let Some(url) = p.avatar_url.as_deref().filter(|s| !s.is_empty()) {
-                claims.insert(
-                    "picture".to_string(),
-                    serde_json::Value::String(url.to_string()),
-                );
+            // An https URL on a public host only: RPs fetch it.
+            if let Some(url) = p
+                .avatar_url
+                .as_deref()
+                .and_then(|u| crate::web::safe_external_uri(u, false))
+            {
+                claims.insert("picture".to_string(), serde_json::Value::String(url));
             }
             if let Some(w) = p.website.as_deref().filter(|s| !s.is_empty()) {
                 claims.insert(
@@ -1472,6 +1728,18 @@ fn build_id_token_claims(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn consent_hides_the_clients_own_id_from_the_audience_list() {
+        let granted = vec![
+            "client-1".to_string(),
+            "https://api.example.com".to_string(),
+        ];
+        assert_eq!(
+            super::third_party_audience(granted, "client-1"),
+            vec!["https://api.example.com".to_string()]
+        );
+    }
+
     use super::{
         ClientAudience, build_id_token_claims, extract_resource_url, intersect_requested_scope,
         project_group_slugs, resolve_claim_active_org, resolve_granted_audience, resource_params,
@@ -1582,6 +1850,29 @@ mod tests {
     fn with_prompt_login_appends_login_hint() {
         let out = with_prompt_login("https://h/oauth2/auth?client_id=x", Some("uuid-123")).unwrap();
         assert_eq!(query_value(&out, "login_hint").as_deref(), Some("uuid-123"));
+        assert_eq!(prompt_values(&out), vec!["login".to_string()]);
+    }
+
+    #[test]
+    fn remember_and_auto_grant_follow_who_vouched() {
+        use super::consent_policy;
+        // (pam, cimd, verified, org_vouched, hydra_skip, skip_consent) -> (remember, auto)
+        let p = |a, b, c, d, e, f| {
+            let r = consent_policy(a, b, c, d, e, f);
+            (r.can_remember, r.auto_grant)
+        };
+        assert_eq!(p(false, false, true, false, false, true), (true, true));
+        assert_eq!(p(false, false, true, false, true, false), (true, true));
+        assert_eq!(p(false, false, false, true, true, false), (true, true));
+        assert_eq!(p(false, false, false, true, false, true), (true, false));
+        assert_eq!(p(false, false, false, false, true, true), (false, false));
+        assert_eq!(p(false, true, true, false, true, true), (false, false));
+        assert_eq!(p(true, false, true, false, true, true), (false, false));
+    }
+
+    #[test]
+    fn with_prompt_login_never_produces_none_login() {
+        let out = with_prompt_login("https://h/oauth2/auth?prompt=none", None).unwrap();
         assert_eq!(prompt_values(&out), vec!["login".to_string()]);
     }
 
@@ -2217,6 +2508,42 @@ mod tests {
         );
         assert!(v.get("preferred_username").is_none());
         assert_eq!(v.get("updated_at").unwrap(), &serde_json::json!(1785492000));
+    }
+
+    #[test]
+    fn picture_requires_https() {
+        let claims_for = |avatar: &str| {
+            let profile = crate::profiles::Profile {
+                avatar_url: Some(avatar.to_string()),
+                ..Default::default()
+            };
+            build_id_token_claims(
+                Some(&bare_identity()),
+                &["openid".to_string(), "profile".to_string()],
+                &[],
+                None,
+                Some(&profile),
+                &[],
+                false,
+                false,
+                &en(),
+            )
+        };
+        assert_eq!(
+            claims_for("https://cdn.example.com/me.png")["picture"],
+            serde_json::json!("https://cdn.example.com/me.png")
+        );
+        for unsafe_url in [
+            "http://cdn.example.com/me.png",
+            "https://127.0.0.1/me.png",
+            "https://intranet.local/me.png",
+            "javascript:alert(1)",
+        ] {
+            assert!(
+                claims_for(unsafe_url).get("picture").is_none(),
+                "{unsafe_url}"
+            );
+        }
     }
 
     #[test]

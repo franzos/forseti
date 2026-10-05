@@ -8,7 +8,7 @@ use axum::{extract::State, http::HeaderMap, response::Response};
 use crate::config::AppEntry;
 use crate::cookies;
 use crate::extractors::RequireSession;
-use crate::flow_view::session_needs_verification;
+use crate::flow_view::{is_new_account, session_needs_verification};
 use crate::format::{humanise_timestamp, humanise_user_agent};
 use crate::ory;
 use crate::page_chrome::PageChrome;
@@ -29,6 +29,8 @@ struct DashboardTemplate {
     /// `Some` when a verified-domain address resolves to a proven `auto_join`
     /// org the caller isn't a member of: renders the explicit join prompt.
     domain_prompt: Option<crate::orgs::domain_prompt::ProvenJoin>,
+    /// Identity created within the last hour: greet, don't welcome "back".
+    new_account: bool,
 }
 
 struct ActivityEvent {
@@ -76,6 +78,7 @@ pub(crate) async fn root(
         activity,
         health,
         domain_prompt,
+        new_account: is_new_account(&session, chrono::Utc::now()),
     })
 }
 

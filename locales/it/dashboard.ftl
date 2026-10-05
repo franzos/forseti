@@ -3,6 +3,7 @@ dashboard-verify-email-resend = Invia di nuovo l'email
 dashboard-2fa-no-recovery-body = L'autenticazione a due fattori è attiva ma non hai codici di recupero. Generane alcuni per non rischiare di rimanere bloccato fuori.
 dashboard-2fa-no-recovery-action = Genera codici
 dashboard-welcome-heading = Bentornato
+dashboard-welcome-heading-new = Benvenuto
 dashboard-welcome-subtitle = Gestisci la tua identità e le applicazioni collegate.
 dashboard-health-heading = Stato dell'account
 dashboard-health-email-title = Indirizzo email
