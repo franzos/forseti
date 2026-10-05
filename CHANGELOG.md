@@ -1,9 +1,28 @@
 # Changelog
 
-## [Unreleased]
+## [0.2.11] - 2026-10-05
+
+### Security
+- Signing out left apps signed in through Hydra's login session
+- The `orgs` claim could list organizations outside the client's own
+- Self-serve join accepted an unverified address
+- A SAML link kept working after the member was removed
+- Someone other than the challenge's subject could answer a consent page
+- Revoking a session or changing the password left its app grants live
+- Profile and logo URLs were not checked or size-capped
+
+### Added
+- Username step for new accounts before continuing to an app
+- `POST` authorize, `prompt=create` and `login_hint`
+- Back-channel logout per browser session (`sid`)
+- Forseti pages for Hydra errors, sign-out and registration
 
 ### Changed
-- OAuth clients without a Forseti metadata row (created with `hydra create oauth2-client` and not reconciled) now receive only the Default organization in the `orgs` claim; register clients through Forseti or run `forseti reconcile-client-metadata` after creating them
+- `prompt=none` never shows a page and returns errors to the app
+- Remembered and first-party consents allow silent sign-in
+- Verified signups continue to the app or invite they started from
+- The internal listener has its own forwarded-for trust flag, off by default
+- OAuth clients without a Forseti metadata row (created with `hydra create oauth2-client` and not reconciled) receive only the Default organization in the `orgs` claim; register clients through Forseti or run `forseti reconcile-client-metadata` after creating them
 
 ## [0.2.10] - 2026-09-22
 
