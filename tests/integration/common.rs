@@ -498,22 +498,19 @@ pub fn backdate_second_factor(identity_id: &str, secs: i64) -> u64 {
     kratos_psql(&sql)
 }
 
-/// Run `sql` against Kratos's Postgres through the compose container, the way
-/// `infra/seed-admin.sh` does. Returns the row count reported by psql.
+/// Run `sql` against Kratos's Postgres through `$COMPOSE exec postgres`, the
+/// same path as [`plant_totp`]. Returns the row count reported by psql.
 pub fn kratos_psql(sql: &str) -> u64 {
-    let out = std::process::Command::new("podman")
+    let compose = compose_engine();
+    let compose_file =
+        std::env::var("COMPOSE_FILE").unwrap_or_else(|_| "infra/docker-compose.yml".to_string());
+    let mut parts = compose.split_whitespace();
+    let program = parts.next().expect("compose engine must name a program");
+    let out = std::process::Command::new(program)
+        .args(parts)
+        .args(["-f", &compose_file])
         .args([
-            "exec",
-            "infra_postgres_1",
-            "psql",
-            "-U",
-            "kratos",
-            "-d",
-            "kratos",
-            "-t",
-            "-A",
-            "-c",
-            sql,
+            "exec", "-T", "postgres", "psql", "-U", "kratos", "-d", "kratos", "-t", "-A", "-c", sql,
         ])
         .output()
         .expect("psql against the Kratos database");

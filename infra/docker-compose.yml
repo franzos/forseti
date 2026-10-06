@@ -103,6 +103,9 @@ services:
       - ./hydra:/etc/config/hydra
     command: serve -c /etc/config/hydra/hydra.yml all --dev
     restart: unless-stopped
+    # Back-channel logout URIs point at the host; Docker Engine doesn't define this name.
+    extra_hosts:
+      - "host.containers.internal:host-gateway"
     networks:
       - ory
 
