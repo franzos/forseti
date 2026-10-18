@@ -84,13 +84,13 @@ pub(crate) fn secret_entries<'a>(root: &'a Value, path: &[&str]) -> Vec<&'a str>
 
 /// Strict booleans keep YAML 1.1 spellings like `yes`/`on` as strings, which
 /// is how Kratos and Hydra (YAML 1.2) read them.
-pub(crate) fn parse_yaml(text: &str) -> Result<Value, serde_saphyr::DeserializeError> {
+pub fn parse_yaml(text: &str) -> Result<Value, serde_saphyr::DeserializeError> {
     serde_saphyr::from_str_with_options(text, serde_saphyr::options! { strict_booleans: true })
 }
 
 /// Long single-line scalars (DSNs, webhook URLs) stay plain instead of being
 /// folded into `>-` blocks; multi-line ones still get `|`.
-pub(crate) fn to_yaml(value: &Value) -> Result<String, serde_saphyr::SerializeError> {
+pub fn to_yaml(value: &Value) -> Result<String, serde_saphyr::SerializeError> {
     let options = serde_saphyr::ser_options! { folded_wrap_chars: usize::MAX };
     serde_saphyr::to_string_with_options(value, options)
 }
@@ -107,7 +107,7 @@ pub(crate) fn load_yaml(path: &Path) -> anyhow::Result<Value> {
 /// because the serializer emits a multi-line block scalar for newline-bearing
 /// strings, which would be invalid inline; `validate_inputs` rejects those
 /// anyway, but the escaping keeps this robust on its own.
-pub(crate) fn yaml_scalar(s: &str) -> String {
+pub fn yaml_scalar(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
     for c in s.chars() {

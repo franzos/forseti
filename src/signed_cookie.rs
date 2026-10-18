@@ -18,7 +18,7 @@ type HmacSha256 = Hmac<Sha256>;
 const MAX_FUTURE_SKEW_SECS: u64 = 60;
 
 /// Per-cookie shape (name, key salt, TTL, `Secure`); reuse one for encode + decode so the paths can't drift.
-pub(crate) struct SignedCookie<'a> {
+pub struct SignedCookie<'a> {
     pub name: &'a str,
     pub salt: &'a [u8],
     pub ttl_secs: u64,
@@ -49,7 +49,7 @@ impl<'a> SignedCookie<'a> {
     }
 
     /// Build the `<ts>.<hex_payload>.<hex_mac>` value (no cookie attributes; see [`Self::set_header`]).
-    pub(crate) fn encode(&self, secret: &[u8], payload: &[u8], now_secs: u64) -> String {
+    pub fn encode(&self, secret: &[u8], payload: &[u8], now_secs: u64) -> String {
         let key = self.derive_key(secret);
         let payload_hex = hex::encode(payload);
         let mut mac = HmacSha256::new_from_slice(&key).expect("HMAC-SHA256 accepts any key length");
@@ -59,19 +59,14 @@ impl<'a> SignedCookie<'a> {
     }
 
     /// Read + verify the cookie off `headers`; payload bytes on success, `None` on any failure.
-    pub(crate) fn decode(
-        &self,
-        secret: &[u8],
-        headers: &HeaderMap,
-        now_secs: u64,
-    ) -> Option<Vec<u8>> {
+    pub fn decode(&self, secret: &[u8], headers: &HeaderMap, now_secs: u64) -> Option<Vec<u8>> {
         self.decode_with_issued_at(secret, headers, now_secs)
             .map(|(_, payload)| payload)
     }
 
     /// [`Self::decode`] plus the second the value was minted, for callers that
     /// enforce a shorter window than the cookie's own TTL on some payloads.
-    pub(crate) fn decode_with_issued_at(
+    pub fn decode_with_issued_at(
         &self,
         secret: &[u8],
         headers: &HeaderMap,
@@ -86,7 +81,9 @@ impl<'a> SignedCookie<'a> {
         let payload = hex::decode(parts[1]).ok()?;
         let tag = hex::decode(parts[2]).ok()?;
         // A timestamp from the future never ages out; allow only clock skew.
-        if now_secs.saturating_sub(ts) > self.ttl_secs || ts > now_secs + MAX_FUTURE_SKEW_SECS {
+        if now_secs.saturating_sub(ts) > self.ttl_secs
+            || ts > now_secs.saturating_add(MAX_FUTURE_SKEW_SECS)
+        {
             return None;
         }
         let key = self.derive_key(secret);

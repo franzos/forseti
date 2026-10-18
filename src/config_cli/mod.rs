@@ -8,7 +8,7 @@ mod init;
 mod io;
 mod menu;
 mod modify;
-mod yamlutil;
+pub(crate) mod yamlutil;
 
 pub(crate) use check::check;
 pub(crate) use check::redact_uri;

@@ -15,7 +15,7 @@ else
 TAILWIND_RUN  := guix shell glibc gcc-toolchain -- bash -c 'export LD_LIBRARY_PATH=$$LIBRARY_PATH:$$LD_LIBRARY_PATH; $(TAILWIND) $$0 "$$@"' --
 endif
 
-.PHONY: css css-watch dev build check clean run test-integration \
+.PHONY: css css-watch dev build check clean run test-integration fuzz \
 	stack-up stack-up-saml stack-wait stack-down stack-reset stack-logs seed-admin \
 	e2e e2e-expired e2e-licensed e2e-trace license-fixtures \
 	test-linux-host linux-test-seed linux-test-unseed linux-test-build
@@ -63,6 +63,15 @@ clean:
 
 run: ## Run the portal (debug) against the local playground stack
 	cargo run
+
+# cargo-fuzz needs nightly, which Guix doesn't ship; run it in a container.
+# FUZZ_SECS bounds the run; TARGET is any name under fuzz/fuzz_targets.
+FUZZ_IMAGE ?= docker.io/rustlang/rust:nightly
+FUZZ_SECS  ?= 60
+TARGET     ?= return_to
+fuzz: ## Run one libFuzzer target in a nightly container (TARGET=... FUZZ_SECS=...)
+	podman run --rm -v $(CURDIR):/src:Z -w /src -e CARGO_HOME=/src/fuzz/target/cargo-home $(FUZZ_IMAGE) \
+		sh -c "cargo install cargo-fuzz --locked --version 0.13.2 && cargo fuzz run $(TARGET) -- -max_total_time=$(FUZZ_SECS) -timeout=30"
 
 test-integration: ## Rust integration suite (stack + Forseti must already be running)
 	COMPOSE="$(COMPOSE)" cargo test --test integration -- --test-threads=1

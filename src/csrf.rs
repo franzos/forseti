@@ -71,7 +71,7 @@ pub(crate) fn read_csrf_cookie(headers: &HeaderMap) -> Option<String> {
 
 /// Reduce a URL to its `scheme://host[:port]` origin with default ports elided, matching
 /// how browsers serialize `Origin`. `None` for relative, malformed, or opaque-origin input.
-pub(crate) fn url_origin(url: &str) -> Option<String> {
+pub fn url_origin(url: &str) -> Option<String> {
     let origin = url::Url::parse(url).ok()?.origin();
     origin.is_tuple().then(|| origin.ascii_serialization())
 }
@@ -93,7 +93,7 @@ fn sign_random(secret: &[u8], random: &str) -> String {
 
 /// True when `token` is `<random>.<hex hmac>` with a valid signature under this
 /// deployment's derived CSRF key.
-pub(crate) fn token_is_valid(secret: &[u8], token: &str) -> bool {
+pub fn token_is_valid(secret: &[u8], token: &str) -> bool {
     let Some((random, tag_hex)) = token.split_once('.') else {
         return false;
     };

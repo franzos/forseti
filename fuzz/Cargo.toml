@@ -1,0 +1,63 @@
+[package]
+name = "forseti-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+axum = { version = "0.8", default-features = false }
+url = "2"
+forseti = { path = ".." }
+
+[[bin]]
+name = "return_to"
+path = "fuzz_targets/return_to.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "client_ip"
+path = "fuzz_targets/client_ip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "signed_cookie"
+path = "fuzz_targets/signed_cookie.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "csrf"
+path = "fuzz_targets/csrf.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "locale"
+path = "fuzz_targets/locale.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "yaml"
+path = "fuzz_targets/yaml.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "format"
+path = "fuzz_targets/format.rs"
+test = false
+doc = false
+bench = false

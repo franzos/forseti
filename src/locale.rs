@@ -6,7 +6,7 @@ use axum::extract::{Request, State};
 use axum::http::HeaderMap;
 use axum::middleware::Next;
 use axum::response::Response;
-pub(crate) use unic_langid::LanguageIdentifier;
+pub use unic_langid::LanguageIdentifier;
 use unic_langid::langid;
 
 use crate::state::AppState;
@@ -14,7 +14,7 @@ use crate::state::AppState;
 pub(crate) const LOCALE_COOKIE: &str = "forseti_locale";
 pub(crate) const SUPPORTED: &[&str] = &["en", "de", "fr", "es", "it", "pt", "ru", "th", "ar", "zh"];
 
-pub(crate) fn default_locale() -> LanguageIdentifier {
+pub fn default_locale() -> LanguageIdentifier {
     langid!("en")
 }
 
@@ -41,7 +41,7 @@ pub(crate) fn negotiate(requested: &[LanguageIdentifier]) -> LanguageIdentifier 
 
 /// Parse a single tag (query/cookie); accept only if it negotiates to a
 /// non-default supported locale or is itself the default.
-pub(crate) fn from_query_or_cookie(value: &str) -> Option<LanguageIdentifier> {
+pub fn from_query_or_cookie(value: &str) -> Option<LanguageIdentifier> {
     let parsed: LanguageIdentifier = value.parse().ok()?;
     // Accept only tags whose primary language subtag is supported; narrow
     // regional variants (de-AT) to the canonical supported locale.
@@ -52,7 +52,7 @@ pub(crate) fn from_query_or_cookie(value: &str) -> Option<LanguageIdentifier> {
     }
 }
 
-pub(crate) fn from_accept_language(header: Option<&str>) -> LanguageIdentifier {
+pub fn from_accept_language(header: Option<&str>) -> LanguageIdentifier {
     let Some(raw) = header else {
         return default_locale();
     };

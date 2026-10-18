@@ -18,6 +18,11 @@ pub(crate) const FORSETI_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Safe when path-only (`/` but not `//` or `/\`) or an absolute URL whose origin matches
 /// `cfg.self_.url`; anything else falls back to `/` and logs a warn.
 pub(crate) fn safe_return_to<'a>(cfg: &AppConfig, raw: &'a str) -> &'a str {
+    safe_return_to_for_origin(&cfg.self_.url, raw)
+}
+
+/// [`safe_return_to`] against an explicit self URL instead of the loaded config.
+pub fn safe_return_to_for_origin<'a>(self_url: &str, raw: &'a str) -> &'a str {
     if raw.is_empty() {
         return "/";
     }
@@ -36,7 +41,7 @@ pub(crate) fn safe_return_to<'a>(cfg: &AppConfig, raw: &'a str) -> &'a str {
         return raw;
     }
     // Compare canonical origins; string-prefix matching would be fooled by `https://forseti.example.com.attacker.tld`.
-    if let (Ok(forseti), Ok(candidate)) = (url::Url::parse(&cfg.self_.url), url::Url::parse(raw))
+    if let (Ok(forseti), Ok(candidate)) = (url::Url::parse(self_url), url::Url::parse(raw))
         && candidate.origin() == forseti.origin()
     {
         return raw;
@@ -121,7 +126,7 @@ pub(crate) fn render_error_boundary(
 /// https, no userinfo, and a public-looking DNS name: IP-literal hosts and
 /// obviously internal names are dropped. `allow_private` (the CIMD dev
 /// hatch) additionally admits http and any host. `None` on any failure.
-pub(crate) fn safe_external_uri(raw: &str, allow_private: bool) -> Option<String> {
+pub fn safe_external_uri(raw: &str, allow_private: bool) -> Option<String> {
     let parsed = url::Url::parse(raw).ok()?;
     match parsed.scheme() {
         "https" => {}

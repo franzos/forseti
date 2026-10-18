@@ -19,7 +19,7 @@ use crate::config::ProxyConfig;
 /// Client address from the forwarded-for chain, `None` when the chain is
 /// absent or shorter than the trusted hop count (the request bypassed the
 /// proxy, or the proxy is misconfigured).
-pub(crate) fn forwarded_client_ip(headers: &HeaderMap, trusted_hops: u8) -> Option<IpAddr> {
+pub fn forwarded_client_ip(headers: &HeaderMap, trusted_hops: u8) -> Option<IpAddr> {
     let hops: Vec<&str> = headers
         .get_all("x-forwarded-for")
         .iter()

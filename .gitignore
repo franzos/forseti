@@ -55,3 +55,9 @@ docs/book/
 # generated ssh keypair, regenerated each `make test-linux-host` run.
 infra/linux-test/.seed.env
 infra/linux-test/.seed-keys/
+
+# cargo-fuzz build tree, corpora, and crash artifacts
+fuzz/target/
+fuzz/corpus/
+fuzz/artifacts/
+fuzz/coverage/
