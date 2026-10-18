@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.2.12] - 2026-10-18
+
+### Fixed
+- claude.ai MCP connector rejected at CIMD validation over an extra grant type
+
 ## [0.2.11] - 2026-10-05
 
 ### Security
