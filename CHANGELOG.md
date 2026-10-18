@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.13] - 2026-10-18
+
+### Security
+- rustls 0.23.46 (RUSTSEC-2026-0346 to 0349)
+
+### Changed
+- Config CLI parses YAML with serde-saphyr instead of serde_yaml_ng
+
 ## [0.2.12] - 2026-10-18
 
 ### Fixed
