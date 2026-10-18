@@ -17,7 +17,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use serde_yaml_ng::Value;
+use serde_json::Value;
 use toml_edit::DocumentMut;
 
 use crate::cli::{CheckArgs, InitArgs, PathArgs};
@@ -547,7 +547,7 @@ fn run_oidc_enable(io: &mut MenuIo, paths: &PathArgs, provider: &str) {
 fn run_oidc_disable(io: &mut MenuIo, paths: &PathArgs, kratos_path: &Path, id: &str) {
     let admin_url = std::fs::read_to_string(kratos_path)
         .ok()
-        .and_then(|t| serde_yaml_ng::from_str::<Value>(&t).ok())
+        .and_then(|t| crate::config_cli::yamlutil::parse_yaml(&t).ok())
         .and_then(|r| dig_str(&r, &["serve", "admin", "base_url"]).map(str::to_string));
 
     let result = match build_menu_ctx(paths, io.output.clone(), io.input.clone()) {

@@ -10,7 +10,7 @@ use std::io::{ErrorKind, IsTerminal as _, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use serde_yaml_ng::{Mapping, Value};
+use serde_json::{Map, Value};
 use toml_edit::DocumentMut;
 
 use crate::cli::{AppleKeySourceArgs, OidcCmd, PathArgs, SecretSourceArgs, SmtpCmd};
@@ -240,15 +240,15 @@ pub(crate) struct AppleCreds {
 // ---------------------------------------------------------------------------
 
 fn mapping(pairs: Vec<(&str, Value)>) -> Value {
-    let mut m = Mapping::new();
+    let mut m = Map::new();
     for (k, v) in pairs {
-        m.insert(Value::String(k.to_string()), v);
+        m.insert(k.to_string(), v);
     }
-    Value::Mapping(m)
+    Value::Object(m)
 }
 
 fn string_seq(items: &[&str]) -> Value {
-    Value::Sequence(
+    Value::Array(
         items
             .iter()
             .map(|s| Value::String((*s).to_string()))
@@ -261,7 +261,7 @@ fn string_seq(items: &[&str]) -> Value {
 /// is optional (callers fall back to a bare `session` hook).
 fn first_web_hook_config(v: &Value) -> Option<Value> {
     match v {
-        Value::Mapping(map) => {
+        Value::Object(map) => {
             if dig_str(v, &["hook"]) == Some("web_hook")
                 && let Some(cfg) = v.get("config")
             {
@@ -269,7 +269,7 @@ fn first_web_hook_config(v: &Value) -> Option<Value> {
             }
             map.iter().find_map(|(_, val)| first_web_hook_config(val))
         }
-        Value::Sequence(seq) => seq.iter().find_map(first_web_hook_config),
+        Value::Array(seq) => seq.iter().find_map(first_web_hook_config),
         _ => None,
     }
 }
@@ -450,12 +450,10 @@ fn apply_oidc_enable(
         root,
         &["selfservice", "methods", "oidc", "config", "providers"],
     );
-    if !providers.is_sequence() {
-        *providers = Value::Sequence(Vec::new());
+    if !providers.is_array() {
+        *providers = Value::Array(Vec::new());
     }
-    let providers_seq = providers
-        .as_sequence_mut()
-        .expect("just ensured a sequence");
+    let providers_seq = providers.as_array_mut().expect("just ensured a sequence");
     providers_seq.retain(|p| dig_str(p, &["id"]) != Some(provider));
     providers_seq.push(entry);
 
@@ -474,11 +472,11 @@ fn apply_oidc_enable(
                     "oidc",
                     "hooks",
                 ],
-            ) = Value::Sequence(vec![session(), web_hook_entry(cfg, "registration.oidc")]);
+            ) = Value::Array(vec![session(), web_hook_entry(cfg, "registration.oidc")]);
             *dig_mut_or_insert(
                 root,
                 &["selfservice", "flows", "login", "after", "oidc", "hooks"],
-            ) = Value::Sequence(vec![web_hook_entry(cfg, "login.oidc")]);
+            ) = Value::Array(vec![web_hook_entry(cfg, "login.oidc")]);
         }
         None => {
             // Kratos's login flow doesn't accept the `session` hook (registration-only;
@@ -494,9 +492,9 @@ fn apply_oidc_enable(
                     "oidc",
                     "hooks",
                 ],
-            ) = Value::Sequence(vec![session()]);
+            ) = Value::Array(vec![session()]);
             if let Some(after) = dig_mut(root, &["selfservice", "flows", "login", "after"])
-                .and_then(Value::as_mapping_mut)
+                .and_then(Value::as_object_mut)
             {
                 after.remove("oidc");
             }
@@ -514,7 +512,7 @@ fn apply_oidc_disable(root: &mut Value, id: &str) -> Result<bool, String> {
         root,
         &["selfservice", "methods", "oidc", "config", "providers"],
     )
-    .and_then(Value::as_sequence_mut) else {
+    .and_then(Value::as_array_mut) else {
         return Err(format!(
             "no OIDC providers configured; nothing to disable for `{id}`"
         ));
@@ -531,7 +529,7 @@ fn apply_oidc_disable(root: &mut Value, id: &str) -> Result<bool, String> {
             Value::Bool(false);
         for flow in ["login", "registration"] {
             if let Some(after) = dig_mut(root, &["selfservice", "flows", flow, "after"])
-                .and_then(Value::as_mapping_mut)
+                .and_then(Value::as_object_mut)
             {
                 after.remove("oidc");
             }
@@ -558,7 +556,7 @@ pub(crate) fn rewrite_hook_tokens(root: &mut Value, new_token: &str) -> usize {
 }
 
 fn walk_rewrite_hook_tokens(value: &mut Value, new_token: &str, count: &mut usize) {
-    if value.is_mapping() {
+    if value.is_object() {
         let is_hook_token_node = dig_str(value, &["hook"]) == Some("web_hook")
             && dig_str(value, &["config", "auth", "type"]) == Some("api_key")
             && dig_str(value, &["config", "auth", "config", "name"]) == Some("Authorization");
@@ -570,12 +568,12 @@ fn walk_rewrite_hook_tokens(value: &mut Value, new_token: &str, count: &mut usiz
         }
     }
     match value {
-        Value::Mapping(map) => {
+        Value::Object(map) => {
             for (_, v) in map.iter_mut() {
                 walk_rewrite_hook_tokens(v, new_token, count);
             }
         }
-        Value::Sequence(seq) => {
+        Value::Array(seq) => {
             for v in seq.iter_mut() {
                 walk_rewrite_hook_tokens(v, new_token, count);
             }
@@ -675,7 +673,7 @@ fn harvest_client_secrets(root: &Value) -> Vec<String> {
         root,
         &["selfservice", "methods", "oidc", "config", "providers"],
     )
-    .and_then(Value::as_sequence)
+    .and_then(Value::as_array)
     .into_iter()
     .flatten()
     .filter_map(|p| dig_str(p, &["client_secret"]))
@@ -694,7 +692,7 @@ pub(crate) fn write_yaml(
     new_root: &Value,
     secrets: &[&str],
 ) -> anyhow::Result<WriteOutcome> {
-    let new_text = serde_yaml_ng::to_string(new_root)?;
+    let new_text = crate::config_cli::yamlutil::to_yaml(new_root)?;
     let label = target.path.display().to_string();
 
     // The diff must never leak a provider's client_secret, including ones the
@@ -702,7 +700,7 @@ pub(crate) fn write_yaml(
     // one being replaced on re-enable): harvest every client_secret from both
     // documents and union it with whatever the caller already knows about.
     let mut harvested: Vec<String> = secrets.iter().map(|s| (*s).to_string()).collect();
-    if let Ok(old_root) = serde_yaml_ng::from_str::<Value>(old_text) {
+    if let Ok(old_root) = crate::config_cli::yamlutil::parse_yaml(old_text) {
         harvested.extend(harvest_client_secrets(&old_root));
     }
     harvested.extend(harvest_client_secrets(new_root));
@@ -984,7 +982,7 @@ pub(crate) fn oidc_enable(ctx: &mut ModifyCtx, input: OidcEnableInput) -> anyhow
 
     let old_text = std::fs::read_to_string(&ctx.kratos.path)
         .map_err(|e| anyhow::anyhow!("{}: {e}", ctx.kratos.path.display()))?;
-    let mut root: Value = serde_yaml_ng::from_str(&old_text)
+    let mut root: Value = crate::config_cli::yamlutil::parse_yaml(&old_text)
         .map_err(|e| anyhow::anyhow!("{}: invalid YAML: {e}", ctx.kratos.path.display()))?;
 
     let config_dir = ctx
@@ -1118,7 +1116,7 @@ pub(crate) async fn oidc_disable(
 ) -> anyhow::Result<i32> {
     let old_text = std::fs::read_to_string(&ctx.kratos.path)
         .map_err(|e| anyhow::anyhow!("{}: {e}", ctx.kratos.path.display()))?;
-    let mut root: Value = serde_yaml_ng::from_str(&old_text)
+    let mut root: Value = crate::config_cli::yamlutil::parse_yaml(&old_text)
         .map_err(|e| anyhow::anyhow!("{}: invalid YAML: {e}", ctx.kratos.path.display()))?;
 
     match count_identities(kratos_admin_url, id).await {
@@ -1281,7 +1279,7 @@ fn bootstrap_config_toml(
 pub(crate) fn rotate_webhook_token(ctx: &mut ModifyCtx, interactive: bool) -> anyhow::Result<i32> {
     let kratos_old_text = std::fs::read_to_string(&ctx.kratos.path)
         .map_err(|e| anyhow::anyhow!("{}: {e}", ctx.kratos.path.display()))?;
-    let mut kratos_root: Value = serde_yaml_ng::from_str(&kratos_old_text)
+    let mut kratos_root: Value = crate::config_cli::yamlutil::parse_yaml(&kratos_old_text)
         .map_err(|e| anyhow::anyhow!("{}: invalid YAML: {e}", ctx.kratos.path.display()))?;
 
     let toml_target = forseti_toml_target(ctx)?;
@@ -1439,7 +1437,7 @@ pub(crate) fn rotate_webhook_token(ctx: &mut ModifyCtx, interactive: bool) -> an
 pub(crate) fn prune_webhook_token(ctx: &mut ModifyCtx) -> anyhow::Result<i32> {
     let kratos_text = std::fs::read_to_string(&ctx.kratos.path)
         .map_err(|e| anyhow::anyhow!("{}: {e}", ctx.kratos.path.display()))?;
-    let kratos_root: Value = serde_yaml_ng::from_str(&kratos_text)
+    let kratos_root: Value = crate::config_cli::yamlutil::parse_yaml(&kratos_text)
         .map_err(|e| anyhow::anyhow!("{}: invalid YAML: {e}", ctx.kratos.path.display()))?;
 
     let toml_target = forseti_toml_target(ctx)?;
@@ -1530,8 +1528,7 @@ pub(crate) fn rotate_secret_list(
         .map(str::to_string)
         .collect();
     entries.insert(0, new_secret);
-    *dig_mut_or_insert(root, path) =
-        Value::Sequence(entries.into_iter().map(Value::String).collect());
+    *dig_mut_or_insert(root, path) = Value::Array(entries.into_iter().map(Value::String).collect());
     Ok(())
 }
 
@@ -1553,7 +1550,7 @@ pub(crate) fn prune_secret_list(root: &mut Value, path: &[&str]) -> Result<(), S
     let Some(slot) = dig_mut(root, path) else {
         return Err(format!("{}: not found", path.join(".")));
     };
-    *slot = Value::Sequence(vec![Value::String(entries[0].clone())]);
+    *slot = Value::Array(vec![Value::String(entries[0].clone())]);
     Ok(())
 }
 
@@ -1574,7 +1571,7 @@ pub(crate) fn rotate_kratos_secrets(
 
     let old_text = std::fs::read_to_string(&ctx.kratos.path)
         .map_err(|e| anyhow::anyhow!("{}: {e}", ctx.kratos.path.display()))?;
-    let mut root: Value = serde_yaml_ng::from_str(&old_text)
+    let mut root: Value = crate::config_cli::yamlutil::parse_yaml(&old_text)
         .map_err(|e| anyhow::anyhow!("{}: invalid YAML: {e}", ctx.kratos.path.display()))?;
 
     let mut secret_pool: Vec<String> = secret_entries(&root, &["secrets", "cookie"])
@@ -1651,7 +1648,7 @@ pub(crate) fn prune_kratos_secrets(
 
     let old_text = std::fs::read_to_string(&ctx.kratos.path)
         .map_err(|e| anyhow::anyhow!("{}: {e}", ctx.kratos.path.display()))?;
-    let mut root: Value = serde_yaml_ng::from_str(&old_text)
+    let mut root: Value = crate::config_cli::yamlutil::parse_yaml(&old_text)
         .map_err(|e| anyhow::anyhow!("{}: invalid YAML: {e}", ctx.kratos.path.display()))?;
 
     let secret_pool: Vec<String> = secret_entries(&root, &["secrets", "cookie"])
@@ -1730,7 +1727,7 @@ pub(crate) fn prune_kratos_secrets(
 pub(crate) fn rotate_hydra_system(ctx: &mut ModifyCtx) -> anyhow::Result<i32> {
     let old_text = std::fs::read_to_string(&ctx.hydra.path)
         .map_err(|e| anyhow::anyhow!("{}: {e}", ctx.hydra.path.display()))?;
-    let mut root: Value = serde_yaml_ng::from_str(&old_text)
+    let mut root: Value = crate::config_cli::yamlutil::parse_yaml(&old_text)
         .map_err(|e| anyhow::anyhow!("{}: invalid YAML: {e}", ctx.hydra.path.display()))?;
 
     let mut secret_pool: Vec<String> = secret_entries(&root, &["secrets", "system"])
@@ -1782,7 +1779,7 @@ pub(crate) fn rotate_hydra_system(ctx: &mut ModifyCtx) -> anyhow::Result<i32> {
 pub(crate) fn prune_hydra_system(ctx: &mut ModifyCtx) -> anyhow::Result<i32> {
     let old_text = std::fs::read_to_string(&ctx.hydra.path)
         .map_err(|e| anyhow::anyhow!("{}: {e}", ctx.hydra.path.display()))?;
-    let mut root: Value = serde_yaml_ng::from_str(&old_text)
+    let mut root: Value = crate::config_cli::yamlutil::parse_yaml(&old_text)
         .map_err(|e| anyhow::anyhow!("{}: invalid YAML: {e}", ctx.hydra.path.display()))?;
 
     let secret_pool: Vec<String> = secret_entries(&root, &["secrets", "system"])
@@ -1877,7 +1874,7 @@ pub(crate) async fn rotate_pairwise_salt(
 ) -> anyhow::Result<i32> {
     let old_text = std::fs::read_to_string(&ctx.hydra.path)
         .map_err(|e| anyhow::anyhow!("{}: {e}", ctx.hydra.path.display()))?;
-    let mut root: Value = serde_yaml_ng::from_str(&old_text)
+    let mut root: Value = crate::config_cli::yamlutil::parse_yaml(&old_text)
         .map_err(|e| anyhow::anyhow!("{}: invalid YAML: {e}", ctx.hydra.path.display()))?;
 
     let old_salt =
@@ -1996,7 +1993,7 @@ pub(crate) fn smtp_set(
 
     let old_text = std::fs::read_to_string(&ctx.kratos.path)
         .map_err(|e| anyhow::anyhow!("{}: {e}", ctx.kratos.path.display()))?;
-    let mut root: Value = serde_yaml_ng::from_str(&old_text)
+    let mut root: Value = crate::config_cli::yamlutil::parse_yaml(&old_text)
         .map_err(|e| anyhow::anyhow!("{}: invalid YAML: {e}", ctx.kratos.path.display()))?;
 
     if let Some(u) = &uri {
@@ -2057,7 +2054,7 @@ fn backup_timestamp(path: &Path) -> Option<u64> {
 /// actions already treat as sensitive, so a restore diff redacts them the same
 /// way a normal write would.
 fn harvest_yaml_secrets(text: &str) -> Vec<String> {
-    let Ok(root) = serde_yaml_ng::from_str::<Value>(text) else {
+    let Ok(root) = crate::config_cli::yamlutil::parse_yaml(text) else {
         return Vec::new();
     };
     let mut out = harvest_client_secrets(&root);
@@ -2098,7 +2095,7 @@ fn harvest_restore_secrets(old_text: &str, new_text: &str) -> Vec<String> {
 
 /// Restore a single target from `backup_path`, verbatim: the backup's raw
 /// bytes are copied byte-for-byte, never re-serialized through
-/// `serde_yaml_ng`/`toml_edit`, so any comments or formatting the backup
+/// `serde-saphyr`/`toml_edit`, so any comments or formatting the backup
 /// carries survive intact. This is the deliberate opposite of `write_yaml`'s
 /// comment-drop behavior — restoring comments is the point, not a loss to
 /// confirm — so this bypasses `write_yaml`/`write_toml` entirely rather than
@@ -2495,7 +2492,7 @@ pub(crate) async fn run_oidc(cmd: OidcCmd, paths: &PathArgs) -> i32 {
             };
             let admin_url = std::fs::read_to_string(&ctx.kratos.path)
                 .ok()
-                .and_then(|t| serde_yaml_ng::from_str::<Value>(&t).ok())
+                .and_then(|t| crate::config_cli::yamlutil::parse_yaml(&t).ok())
                 .and_then(|r| dig_str(&r, &["serve", "admin", "base_url"]).map(str::to_string));
             match oidc_disable(&mut ctx, &id, admin_url.as_deref()).await {
                 Ok(code) => code,
@@ -2715,12 +2712,12 @@ mod tests {
 
     fn render_default_kratos() -> Value {
         let (k, _, _) = render_configs(&InitInputs::default());
-        serde_yaml_ng::from_str(&k).expect("kratos yaml parses")
+        crate::config_cli::yamlutil::parse_yaml(&k).expect("kratos yaml parses")
     }
 
     fn playground_kratos() -> Value {
         let text = std::fs::read_to_string("infra/kratos/kratos.yml").expect("playground kratos");
-        serde_yaml_ng::from_str(&text).expect("kratos yaml parses")
+        crate::config_cli::yamlutil::parse_yaml(&text).expect("kratos yaml parses")
     }
 
     fn enable_input(provider: &str, tenant: Option<&str>) -> OidcEnableInput {
@@ -2759,7 +2756,7 @@ mod tests {
             root,
             &["selfservice", "methods", "oidc", "config", "providers"],
         )
-        .and_then(Value::as_sequence)
+        .and_then(Value::as_array)
         .and_then(|s| s.first())
         .expect("a provider entry")
     }
@@ -2798,7 +2795,7 @@ mod tests {
                 "hooks",
             ],
         )
-        .and_then(Value::as_sequence)
+        .and_then(Value::as_array)
         .unwrap();
         assert_eq!(reg_hooks.len(), 1);
         assert_eq!(dig_str(&reg_hooks[0], &["hook"]), Some("session"));
@@ -2812,10 +2809,10 @@ mod tests {
             &root,
             &["selfservice", "methods", "oidc", "config", "providers"],
         )
-        .and_then(Value::as_sequence)
+        .and_then(Value::as_array)
         .and_then(|s| s.first())
         .and_then(|p| dig(p, &["scope"]))
-        .and_then(Value::as_sequence)
+        .and_then(Value::as_array)
         .unwrap();
         assert_eq!(scope.len(), 1);
         assert_eq!(scope[0].as_str(), Some("user:email"));
@@ -2856,7 +2853,7 @@ mod tests {
             "apple entry must not carry a client_secret"
         );
 
-        let scope = dig(p, &["scope"]).and_then(Value::as_sequence).unwrap();
+        let scope = dig(p, &["scope"]).and_then(Value::as_array).unwrap();
         assert_eq!(scope.len(), 1);
         assert_eq!(scope[0].as_str(), Some("email"));
 
@@ -2935,7 +2932,7 @@ mod tests {
             "file:///etc/config/kratos/oidc.apple.jsonnet",
         )
         .unwrap();
-        let new_text = serde_yaml_ng::to_string(&root).unwrap();
+        let new_text = crate::config_cli::yamlutil::to_yaml(&root).unwrap();
 
         let input = apple_input(TEST_P8);
         let targets = oidc_redaction_targets(&input);
@@ -3045,7 +3042,7 @@ mod tests {
                 "hooks",
             ],
         )
-        .and_then(Value::as_sequence)
+        .and_then(Value::as_array)
         .unwrap();
         // session + a cloned web_hook.
         assert_eq!(reg.len(), 2);
@@ -3171,7 +3168,7 @@ mod tests {
             &root,
             &["selfservice", "methods", "oidc", "config", "providers"],
         )
-        .and_then(Value::as_sequence)
+        .and_then(Value::as_array)
         .and_then(|s| s.first())
         .unwrap();
         assert_eq!(dig_str(provider, &["microsoft_tenant"]), Some("tenant-123"));
@@ -3199,7 +3196,7 @@ mod tests {
             &root,
             &["selfservice", "methods", "oidc", "config", "providers"],
         )
-        .and_then(Value::as_sequence)
+        .and_then(Value::as_array)
         .unwrap();
         assert_eq!(providers.len(), 1, "same id must replace, not duplicate");
         assert_eq!(dig_str(&providers[0], &["client_id"]), Some("cid2"));
@@ -3496,7 +3493,7 @@ mod tests {
         .unwrap();
         std::fs::write(
             dir.join("kratos.yml"),
-            serde_yaml_ng::to_string(&root).unwrap(),
+            crate::config_cli::yamlutil::to_yaml(&root).unwrap(),
         )
         .unwrap();
 
@@ -3534,7 +3531,7 @@ mod tests {
         .unwrap();
         std::fs::write(
             dir.join("kratos.yml"),
-            serde_yaml_ng::to_string(&root).unwrap(),
+            crate::config_cli::yamlutil::to_yaml(&root).unwrap(),
         )
         .unwrap();
 
@@ -3591,7 +3588,7 @@ mod tests {
         assert!(out.contains("docs/operator-guide.md"), "out: {out}");
 
         let written = std::fs::read_to_string(&kratos_path).unwrap();
-        let root: Value = serde_yaml_ng::from_str(&written).unwrap();
+        let root: Value = crate::config_cli::yamlutil::parse_yaml(&written).unwrap();
         let reg_hooks = dig(
             &root,
             &[
@@ -3603,7 +3600,7 @@ mod tests {
                 "hooks",
             ],
         )
-        .and_then(Value::as_sequence)
+        .and_then(Value::as_array)
         .unwrap();
         assert_eq!(reg_hooks.len(), 1);
         assert_eq!(dig_str(&reg_hooks[0], &["hook"]), Some("session"));
@@ -3814,7 +3811,8 @@ extra:
           value: "Bearer dev-playground-token-change-me"
 "#,
         );
-        let mut root: Value = serde_yaml_ng::from_str(&text).expect("fixture yaml parses");
+        let mut root: Value =
+            crate::config_cli::yamlutil::parse_yaml(&text).expect("fixture yaml parses");
 
         let n = rewrite_hook_tokens(&mut root, "brand-new-token-value");
         assert_eq!(
@@ -3822,7 +3820,7 @@ extra:
             "must rewrite exactly the real web_hook nodes"
         );
 
-        let rendered = serde_yaml_ng::to_string(&root).unwrap();
+        let rendered = crate::config_cli::yamlutil::to_yaml(&root).unwrap();
         assert_eq!(
             rendered.matches("brand-new-token-value").count(),
             hook_count,
@@ -4339,7 +4337,8 @@ oidc:
 
     #[test]
     fn rotate_secret_list_turns_scalar_cookie_into_two_entry_list_new_first() {
-        let mut root: Value = serde_yaml_ng::from_str(&kratos_scalar_secrets()).unwrap();
+        let mut root: Value =
+            crate::config_cli::yamlutil::parse_yaml(&kratos_scalar_secrets()).unwrap();
         rotate_secret_list(
             &mut root,
             &["secrets", "cookie"],
@@ -4352,7 +4351,8 @@ oidc:
 
     #[test]
     fn rotate_secret_list_accumulates_and_check_warns_past_three_entries() {
-        let mut root: Value = serde_yaml_ng::from_str(&kratos_scalar_secrets()).unwrap();
+        let mut root: Value =
+            crate::config_cli::yamlutil::parse_yaml(&kratos_scalar_secrets()).unwrap();
         rotate_secret_list(&mut root, &["secrets", "cookie"], random_secret(32)).unwrap();
         assert_eq!(secret_entries(&root, &["secrets", "cookie"]).len(), 2);
 
@@ -4377,7 +4377,8 @@ oidc:
 
     #[test]
     fn cipher_rotation_entries_all_pass_check_secret_lists() {
-        let mut root: Value = serde_yaml_ng::from_str(&kratos_scalar_secrets()).unwrap();
+        let mut root: Value =
+            crate::config_cli::yamlutil::parse_yaml(&kratos_scalar_secrets()).unwrap();
         rotate_secret_list(&mut root, &["secrets", "cipher"], random_secret(32)).unwrap();
         let findings = check_secret_lists(&root, false);
         let cipher_bad: Vec<_> = findings
@@ -4390,21 +4391,24 @@ oidc:
     #[test]
     fn prune_secret_list_keeps_only_first_entry() {
         let mut root: Value =
-            serde_yaml_ng::from_str("secrets:\n  cookie:\n    - new\n    - old\n").unwrap();
+            crate::config_cli::yamlutil::parse_yaml("secrets:\n  cookie:\n    - new\n    - old\n")
+                .unwrap();
         prune_secret_list(&mut root, &["secrets", "cookie"]).unwrap();
         assert_eq!(secret_entries(&root, &["secrets", "cookie"]), vec!["new"]);
     }
 
     #[test]
     fn prune_secret_list_errors_on_single_entry_list() {
-        let mut root: Value = serde_yaml_ng::from_str("secrets:\n  cookie:\n    - only\n").unwrap();
+        let mut root: Value =
+            crate::config_cli::yamlutil::parse_yaml("secrets:\n  cookie:\n    - only\n").unwrap();
         let err = prune_secret_list(&mut root, &["secrets", "cookie"]).unwrap_err();
         assert!(err.contains("nothing to prune"), "err: {err}");
     }
 
     #[test]
     fn prune_secret_list_errors_on_bare_scalar() {
-        let mut root: Value = serde_yaml_ng::from_str(&kratos_scalar_secrets()).unwrap();
+        let mut root: Value =
+            crate::config_cli::yamlutil::parse_yaml(&kratos_scalar_secrets()).unwrap();
         let err = prune_secret_list(&mut root, &["secrets", "cookie"]).unwrap_err();
         assert!(err.contains("nothing to prune"), "err: {err}");
     }
@@ -4416,16 +4420,20 @@ oidc:
         let dir = unique_tmp_dir("rotate-kratos-cookie-only");
         std::fs::create_dir_all(&dir).unwrap();
         let (kratos_path, hydra_path) = kratos_hydra_fixture(&dir);
-        let before: Value =
-            serde_yaml_ng::from_str(&std::fs::read_to_string(&kratos_path).unwrap()).unwrap();
+        let before: Value = crate::config_cli::yamlutil::parse_yaml(
+            &std::fs::read_to_string(&kratos_path).unwrap(),
+        )
+        .unwrap();
         let cipher_before = secret_entries(&before, &["secrets", "cipher"])[0].to_string();
 
         let (mut ctx, buf) = captured_ctx(kratos_path.clone(), hydra_path, false, true);
         let code = rotate_kratos_secrets(&mut ctx, true, false).expect("rotate succeeds");
         assert_eq!(code, 0);
 
-        let root: Value =
-            serde_yaml_ng::from_str(&std::fs::read_to_string(&kratos_path).unwrap()).unwrap();
+        let root: Value = crate::config_cli::yamlutil::parse_yaml(
+            &std::fs::read_to_string(&kratos_path).unwrap(),
+        )
+        .unwrap();
         let cookie = secret_entries(&root, &["secrets", "cookie"]);
         assert_eq!(cookie.len(), 2, "cookie must grow to 2 entries");
         assert_eq!(
@@ -4452,8 +4460,10 @@ oidc:
         let code = rotate_kratos_secrets(&mut ctx, false, false).expect("rotate succeeds");
         assert_eq!(code, 0);
 
-        let root: Value =
-            serde_yaml_ng::from_str(&std::fs::read_to_string(&kratos_path).unwrap()).unwrap();
+        let root: Value = crate::config_cli::yamlutil::parse_yaml(
+            &std::fs::read_to_string(&kratos_path).unwrap(),
+        )
+        .unwrap();
         assert_eq!(secret_entries(&root, &["secrets", "cookie"]).len(), 2);
         assert_eq!(secret_entries(&root, &["secrets", "cipher"]).len(), 2);
 
@@ -4512,8 +4522,10 @@ oidc:
         let code = prune_kratos_secrets(&mut ctx, false, false).expect("prune succeeds");
         assert_eq!(code, 0);
 
-        let after_prune: Value =
-            serde_yaml_ng::from_str(&std::fs::read_to_string(&kratos_path).unwrap()).unwrap();
+        let after_prune: Value = crate::config_cli::yamlutil::parse_yaml(
+            &std::fs::read_to_string(&kratos_path).unwrap(),
+        )
+        .unwrap();
         assert_eq!(
             secret_entries(&after_prune, &["secrets", "cookie"]),
             vec!["new-cookie-2222222222222222222"]
@@ -4538,7 +4550,8 @@ oidc:
         std::fs::create_dir_all(&dir).unwrap();
         let (kratos_path, hydra_path) = kratos_hydra_fixture(&dir);
         let before: Value =
-            serde_yaml_ng::from_str(&std::fs::read_to_string(&hydra_path).unwrap()).unwrap();
+            crate::config_cli::yamlutil::parse_yaml(&std::fs::read_to_string(&hydra_path).unwrap())
+                .unwrap();
         let system_before = secret_entries(&before, &["secrets", "system"])[0].to_string();
 
         let (mut ctx, buf) = captured_ctx(kratos_path, hydra_path.clone(), false, true);
@@ -4546,7 +4559,8 @@ oidc:
         assert_eq!(code, 0);
 
         let root: Value =
-            serde_yaml_ng::from_str(&std::fs::read_to_string(&hydra_path).unwrap()).unwrap();
+            crate::config_cli::yamlutil::parse_yaml(&std::fs::read_to_string(&hydra_path).unwrap())
+                .unwrap();
         let system = secret_entries(&root, &["secrets", "system"]);
         assert_eq!(system.len(), 2);
         assert_eq!(system[1], system_before);
@@ -4594,7 +4608,8 @@ oidc:
         assert_eq!(code, 0);
 
         let after_prune: Value =
-            serde_yaml_ng::from_str(&std::fs::read_to_string(&hydra_path).unwrap()).unwrap();
+            crate::config_cli::yamlutil::parse_yaml(&std::fs::read_to_string(&hydra_path).unwrap())
+                .unwrap();
         assert_eq!(
             secret_entries(&after_prune, &["secrets", "system"]),
             vec!["new-system-3333333333333333333"]
@@ -4654,7 +4669,8 @@ oidc:
         std::fs::create_dir_all(&dir).unwrap();
         let (kratos_path, hydra_path) = kratos_hydra_fixture(&dir);
         let before: Value =
-            serde_yaml_ng::from_str(&std::fs::read_to_string(&hydra_path).unwrap()).unwrap();
+            crate::config_cli::yamlutil::parse_yaml(&std::fs::read_to_string(&hydra_path).unwrap())
+                .unwrap();
         let salt_before = dig_str(
             &before,
             &["oidc", "subject_identifiers", "pairwise", "salt"],
@@ -4669,7 +4685,8 @@ oidc:
         assert_eq!(code, 0);
 
         let root: Value =
-            serde_yaml_ng::from_str(&std::fs::read_to_string(&hydra_path).unwrap()).unwrap();
+            crate::config_cli::yamlutil::parse_yaml(&std::fs::read_to_string(&hydra_path).unwrap())
+                .unwrap();
         let salt_node = dig(&root, &["oidc", "subject_identifiers", "pairwise", "salt"]).unwrap();
         assert!(
             salt_node.is_string(),
@@ -4751,8 +4768,10 @@ oidc:
         .unwrap();
         assert_eq!(code, 0);
 
-        let root: Value =
-            serde_yaml_ng::from_str(&std::fs::read_to_string(&kratos_path).unwrap()).unwrap();
+        let root: Value = crate::config_cli::yamlutil::parse_yaml(
+            &std::fs::read_to_string(&kratos_path).unwrap(),
+        )
+        .unwrap();
         assert_eq!(
             dig_str(&root, &["courier", "smtp", "connection_uri"]),
             Some("smtps://newuser:newpass@smtp.new.example.com:465")
@@ -4802,8 +4821,10 @@ oidc:
         let dir = unique_tmp_dir("smtp-set-from-only");
         std::fs::create_dir_all(&dir).unwrap();
         let (kratos_path, hydra_path) = kratos_hydra_fixture(&dir);
-        let before: Value =
-            serde_yaml_ng::from_str(&std::fs::read_to_string(&kratos_path).unwrap()).unwrap();
+        let before: Value = crate::config_cli::yamlutil::parse_yaml(
+            &std::fs::read_to_string(&kratos_path).unwrap(),
+        )
+        .unwrap();
 
         let (mut ctx, _buf) = captured_ctx(kratos_path.clone(), hydra_path, false, true);
         let code = smtp_set(
@@ -4815,8 +4836,10 @@ oidc:
         .unwrap();
         assert_eq!(code, 0);
 
-        let root: Value =
-            serde_yaml_ng::from_str(&std::fs::read_to_string(&kratos_path).unwrap()).unwrap();
+        let root: Value = crate::config_cli::yamlutil::parse_yaml(
+            &std::fs::read_to_string(&kratos_path).unwrap(),
+        )
+        .unwrap();
         assert_eq!(
             dig_str(&root, &["courier", "smtp", "connection_uri"]),
             dig_str(&before, &["courier", "smtp", "connection_uri"]),

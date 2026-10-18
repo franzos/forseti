@@ -487,7 +487,7 @@ pub(crate) fn init(args: &InitArgs) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_yaml_ng::Value;
+    use serde_json::Value;
 
     use crate::config_cli::check::{Severity, check_hydra, check_kratos};
     use crate::config_cli::yamlutil::dig_str;
@@ -513,8 +513,10 @@ mod tests {
             "full inputs should leave nothing missing"
         );
 
-        let kratos_v: Value = serde_yaml_ng::from_str(&kratos_yaml).expect("kratos yaml parses");
-        let hydra_v: Value = serde_yaml_ng::from_str(&hydra_yaml).expect("hydra yaml parses");
+        let kratos_v: Value =
+            crate::config_cli::yamlutil::parse_yaml(&kratos_yaml).expect("kratos yaml parses");
+        let hydra_v: Value =
+            crate::config_cli::yamlutil::parse_yaml(&hydra_yaml).expect("hydra yaml parses");
 
         let bad_k: Vec<_> = check_kratos(&kratos_v)
             .into_iter()
@@ -567,7 +569,7 @@ mod tests {
             from_address: None,
             from_name: None,
         });
-        let v: Value = serde_yaml_ng::from_str(&kratos).expect("yaml parses");
+        let v: Value = crate::config_cli::yamlutil::parse_yaml(&kratos).expect("yaml parses");
         assert_eq!(
             dig_str(&v, &["selfservice", "flows", "settings", "required_aal"]),
             Some("highest_available"),
@@ -636,7 +638,7 @@ mod tests {
             ..Default::default()
         };
         let (k, _, _) = render_configs(&inputs);
-        let root: Value = serde_yaml_ng::from_str(&k).unwrap();
+        let root: Value = crate::config_cli::yamlutil::parse_yaml(&k).unwrap();
         assert_eq!(
             dig_str(&root, &["courier", "smtp", "from_address"]),
             Some("no-reply@example.com")
@@ -650,7 +652,8 @@ mod tests {
             ..Default::default()
         };
         let (kratos_yaml, _hydra, _missing) = render_configs(&inputs);
-        let v: Value = serde_yaml_ng::from_str(&kratos_yaml).expect("kratos yaml parses");
+        let v: Value =
+            crate::config_cli::yamlutil::parse_yaml(&kratos_yaml).expect("kratos yaml parses");
         assert_eq!(
             dig_str(
                 &v,

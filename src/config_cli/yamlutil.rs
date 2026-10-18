@@ -2,7 +2,7 @@ use std::path::Path;
 
 use rand::RngExt;
 use rand::distr::Alphanumeric;
-use serde_yaml_ng::{Mapping, Value};
+use serde_json::{Map, Value};
 
 // ---------------------------------------------------------------------------
 // YAML navigation helpers (mirror how the codebase walks serde_json::Value).
@@ -29,7 +29,7 @@ pub(crate) fn dig_bool(root: &Value, path: &[&str]) -> Option<bool> {
 pub(crate) fn dig_mut<'a>(root: &'a mut Value, path: &[&str]) -> Option<&'a mut Value> {
     let mut cur = root;
     for key in path {
-        cur = cur.as_mapping_mut()?.get_mut(*key)?;
+        cur = cur.as_object_mut()?.get_mut(*key)?;
     }
     Some(cur)
 }
@@ -40,13 +40,11 @@ pub(crate) fn dig_mut<'a>(root: &'a mut Value, path: &[&str]) -> Option<&'a mut 
 pub(crate) fn dig_mut_or_insert<'a>(root: &'a mut Value, path: &[&str]) -> &'a mut Value {
     let mut cur = root;
     for key in path {
-        if !cur.is_mapping() {
-            *cur = Value::Mapping(Mapping::new());
+        if !cur.is_object() {
+            *cur = Value::Object(Map::new());
         }
-        let map = cur.as_mapping_mut().expect("just ensured a mapping");
-        cur = map
-            .entry(Value::String((*key).to_string()))
-            .or_insert(Value::Null);
+        let map = cur.as_object_mut().expect("just ensured a mapping");
+        cur = map.entry((*key).to_string()).or_insert(Value::Null);
     }
     cur
 }
@@ -78,23 +76,35 @@ pub(crate) fn is_placeholder(s: &str) -> bool {
 /// single-entry list) so callers don't need to special-case malformed input.
 pub(crate) fn secret_entries<'a>(root: &'a Value, path: &[&str]) -> Vec<&'a str> {
     match dig(root, path) {
-        Some(Value::Sequence(seq)) => seq.iter().filter_map(Value::as_str).collect(),
+        Some(Value::Array(seq)) => seq.iter().filter_map(Value::as_str).collect(),
         Some(Value::String(s)) => vec![s.as_str()],
         _ => Vec::new(),
     }
 }
 
+/// Strict booleans keep YAML 1.1 spellings like `yes`/`on` as strings, which
+/// is how Kratos and Hydra (YAML 1.2) read them.
+pub(crate) fn parse_yaml(text: &str) -> Result<Value, serde_saphyr::DeserializeError> {
+    serde_saphyr::from_str_with_options(text, serde_saphyr::options! { strict_booleans: true })
+}
+
+/// Long single-line scalars (DSNs, webhook URLs) stay plain instead of being
+/// folded into `>-` blocks; multi-line ones still get `|`.
+pub(crate) fn to_yaml(value: &Value) -> Result<String, serde_saphyr::SerializeError> {
+    let options = serde_saphyr::ser_options! { folded_wrap_chars: usize::MAX };
+    serde_saphyr::to_string_with_options(value, options)
+}
+
 pub(crate) fn load_yaml(path: &Path) -> anyhow::Result<Value> {
     let display = path.display();
     let text = std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("{display}: {e}"))?;
-    let value: Value = serde_yaml_ng::from_str(&text)
-        .map_err(|e| anyhow::anyhow!("{display}: invalid YAML: {e}"))?;
+    let value = parse_yaml(&text).map_err(|e| anyhow::anyhow!("{display}: invalid YAML: {e}"))?;
     Ok(value)
 }
 
 /// Quote an operator value as a safe single-line YAML double-quoted scalar so
 /// it can't break out of scalar position and inject sibling keys. Hand-rolled
-/// because serde_yaml_ng emits a multi-line block scalar for newline-bearing
+/// because the serializer emits a multi-line block scalar for newline-bearing
 /// strings, which would be invalid inline; `validate_inputs` rejects those
 /// anyway, but the escaping keeps this robust on its own.
 pub(crate) fn yaml_scalar(s: &str) -> String {

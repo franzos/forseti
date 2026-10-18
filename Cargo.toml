@@ -39,11 +39,11 @@ askama = "0.16"
 include_dir = "0.7"
 mime_guess = "2"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-# YAML parsing for the `config-check` operator subcommand (lint Kratos/Hydra
-# config files). `serde_yaml_ng` is the maintained fork — upstream
-# `serde_yaml` is archived.
-serde_yaml_ng = "0.10"
+# `preserve_order`: the config CLI edits Kratos/Hydra YAML as a
+# `serde_json::Value`, and rewritten files must keep their key order.
+serde_json = { version = "1", features = ["preserve_order"] }
+# YAML parsing for the `config-*` operator subcommands, in safe Rust.
+serde-saphyr = "2"
 # No `cookies` feature: every reqwest::Client in `src/` is a
 # server-to-server caller (Hydra admin, webhook delivery) where a
 # persistent cookie jar would let upstream `Set-Cookie` responses leak

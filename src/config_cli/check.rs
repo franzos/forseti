@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use serde_yaml_ng::Value;
+use serde_json::Value;
 use toml_edit::DocumentMut;
 
 use crate::cli::{CheckArgs, PathArgs};
@@ -102,7 +102,7 @@ const LOGIN_PRIMARY_METHODS: &[&str] = &["password", "passkey"];
 fn login_after_has_hook(root: &Value, method: &str, hook: &str) -> bool {
     let has = |path: &[&str]| {
         dig(root, path)
-            .and_then(Value::as_sequence)
+            .and_then(Value::as_array)
             .is_some_and(|hooks| {
                 hooks
                     .iter()
@@ -307,7 +307,7 @@ pub(crate) fn check_hydra(root: &Value) -> Vec<Finding> {
     }
 
     match dig(root, &["webfinger", "oidc_discovery", "supported_scope"]) {
-        Some(Value::Sequence(s)) if !s.is_empty() => findings.push(Finding::ok(
+        Some(Value::Array(s)) if !s.is_empty() => findings.push(Finding::ok(
             "webfinger.oidc_discovery.supported_scope",
             "<set>",
         )),
@@ -412,19 +412,18 @@ pub(crate) fn placeholder_findings(root: &Value, already: &[Finding]) -> Vec<Fin
 fn walk_placeholders(value: &Value, path: &mut String, emit: &mut impl FnMut(&str, &str)) {
     match value {
         Value::String(s) => emit(path, s),
-        Value::Mapping(map) => {
+        Value::Object(map) => {
             for (k, v) in map {
-                let Some(key) = k.as_str() else { continue };
                 let base = path.len();
                 if !path.is_empty() {
                     path.push('.');
                 }
-                path.push_str(key);
+                path.push_str(k);
                 walk_placeholders(v, path, emit);
                 path.truncate(base);
             }
         }
-        Value::Sequence(seq) => {
+        Value::Array(seq) => {
             for (i, v) in seq.iter().enumerate() {
                 let base = path.len();
                 use std::fmt::Write as _;
@@ -574,7 +573,7 @@ pub(crate) fn check_oidc_providers(root: &Value, config_dir: &Path) -> Vec<Findi
         root,
         &["selfservice", "methods", "oidc", "config", "providers"],
     )
-    .and_then(Value::as_sequence) else {
+    .and_then(Value::as_array) else {
         return findings;
     };
 
@@ -781,7 +780,7 @@ pub(crate) fn check_flow_hooks(root: &Value) -> Vec<Finding> {
             root,
             &["selfservice", "flows", flow, "after", "oidc", "hooks"],
         )
-        .and_then(Value::as_sequence)
+        .and_then(Value::as_array)
         .is_some_and(|seq| !seq.is_empty());
         if has_hooks {
             findings.push(Finding::ok(&key, "<configured>"));
@@ -817,7 +816,7 @@ fn collect_hook_tokens(root: &Value) -> Vec<(String, String)> {
 
 fn walk_hook_tokens(value: &Value, path: &mut String, out: &mut Vec<(String, String)>) {
     match value {
-        Value::Mapping(map) => {
+        Value::Object(map) => {
             if dig_str(value, &["auth", "type"]) == Some("api_key")
                 && dig_str(value, &["auth", "config", "name"]) == Some("Authorization")
                 && let Some(v) = dig_str(value, &["auth", "config", "value"])
@@ -831,17 +830,16 @@ fn walk_hook_tokens(value: &Value, path: &mut String, out: &mut Vec<(String, Str
                 path.truncate(base);
             }
             for (k, v) in map {
-                let Some(key) = k.as_str() else { continue };
                 let base = path.len();
                 if !path.is_empty() {
                     path.push('.');
                 }
-                path.push_str(key);
+                path.push_str(k);
                 walk_hook_tokens(v, path, out);
                 path.truncate(base);
             }
         }
-        Value::Sequence(seq) => {
+        Value::Array(seq) => {
             for (i, v) in seq.iter().enumerate() {
                 let base = path.len();
                 use std::fmt::Write as _;
@@ -1340,7 +1338,7 @@ mod tests {
     use super::*;
 
     fn parse(yaml: &str) -> Value {
-        serde_yaml_ng::from_str(yaml).expect("test yaml parses")
+        crate::config_cli::yamlutil::parse_yaml(yaml).expect("test yaml parses")
     }
 
     fn severity_of(findings: &[Finding], key: &str) -> Option<Severity> {
@@ -1640,7 +1638,7 @@ webfinger:
         let v = load_yaml(Path::new(DEFAULT_HYDRA)).expect("playground hydra.yml parses");
         let list = |key: &str| -> Vec<String> {
             dig(&v, &["webfinger", "oidc_discovery", key])
-                .and_then(Value::as_sequence)
+                .and_then(Value::as_array)
                 .expect(key)
                 .iter()
                 .filter_map(|x| x.as_str().map(str::to_string))
