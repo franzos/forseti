@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.2.14] - 2026-10-18
+
+### Added
+- Weekly cargo-fuzz campaign over the redirect, cookie, CSRF, locale and config parsers
+
 ## [0.2.13] - 2026-10-18
 
 ### Security
