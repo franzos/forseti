@@ -490,13 +490,9 @@ fn validate_doc(doc: &CimdDocument, url: &str) -> Result<(), String> {
     if doc.token_endpoint_auth_method != "none" {
         return Err("only token_endpoint_auth_method \"none\" is supported".to_string());
     }
-    let grants_ok = !doc.grant_types.is_empty()
-        && doc
-            .grant_types
-            .iter()
-            .all(|g| matches!(g.as_str(), "authorization_code" | "refresh_token"));
-    if !grants_ok {
-        return Err("grant_types must be a subset of authorization_code/refresh_token".to_string());
+    // claude.ai's document also lists jwt-bearer; unsupported grants are dropped, not fatal.
+    if !doc.grant_types.iter().any(|g| g == "authorization_code") {
+        return Err("grant_types must include authorization_code".to_string());
     }
     if !(doc.response_types.len() == 1 && doc.response_types[0] == "code") {
         return Err("response_types must be exactly [\"code\"]".to_string());
@@ -512,6 +508,14 @@ fn validate_doc(doc: &CimdDocument, url: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn supported_grant_types(requested: &[String]) -> Vec<String> {
+    requested
+        .iter()
+        .filter(|g| matches!(g.as_str(), "authorization_code" | "refresh_token"))
+        .cloned()
+        .collect()
 }
 
 fn is_loopback_host(host: &str) -> bool {
@@ -674,7 +678,7 @@ async fn upsert_hydra_client(
         .as_deref()
         .and_then(|u| crate::web::safe_external_uri(u, allow_private));
     c.token_endpoint_auth_method = Some("none".to_string());
-    c.grant_types = Some(doc.grant_types.clone());
+    c.grant_types = Some(supported_grant_types(&doc.grant_types));
     c.response_types = Some(doc.response_types.clone());
     c.scope = Some(scope);
     c.redirect_uris = Some(redirect_uris);
@@ -743,7 +747,7 @@ mod tests {
     use super::{
         CimdDocument, MAX_SCOPE_ENTRIES, RedirectMatch, host_policy_violation,
         is_acceptable_redirect_entry, match_redirect_uri, scope_union, scopes_already_on_row,
-        validate_doc,
+        supported_grant_types, validate_doc,
     };
 
     const DOC_URL: &str = "https://claude.ai/oauth/claude-code-client-metadata";
@@ -791,6 +795,21 @@ mod tests {
         let mut d = base_doc();
         d.grant_types = vec!["client_credentials".to_string()];
         assert!(validate_doc(&d, DOC_URL).is_err());
+    }
+
+    #[test]
+    fn extra_grant_types_tolerated_and_filtered() {
+        let mut d = base_doc();
+        d.grant_types
+            .push("urn:ietf:params:oauth:grant-type:jwt-bearer".to_string());
+        assert!(validate_doc(&d, DOC_URL).is_ok());
+        assert_eq!(
+            supported_grant_types(&d.grant_types),
+            vec![
+                "authorization_code".to_string(),
+                "refresh_token".to_string()
+            ]
+        );
     }
 
     #[test]
