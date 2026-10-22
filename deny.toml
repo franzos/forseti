@@ -6,4 +6,10 @@
 version = 2
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "warn"
-ignore = []
+ignore = [
+  # basic-toml is unmaintained with no successor. It reaches the tree only
+  # through askama_derive, which reads askama.toml at compile time, so it is
+  # not in the shipped binary and parses no untrusted input. Drops when
+  # askama releases a version that moves off it.
+  "RUSTSEC-2026-0374",
+]

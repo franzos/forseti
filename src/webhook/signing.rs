@@ -185,22 +185,35 @@ fn compute_kid(pub_bytes: &[u8]) -> String {
     b64.chars().take(16).collect()
 }
 
+/// The two issuer URLs a SET carries. They differ in a front-proxy
+/// deployment, and mixing them up is silent: the receiver just never matches
+/// the event, so keep them named rather than positional.
+#[derive(Clone, Copy)]
+pub struct SetIssuers<'a> {
+    /// Envelope `iss`: Forseti's own externally reachable URL. It issued the
+    /// SET, which is what RFC 8417 §2 asks the envelope `iss` to name, and it
+    /// is the value a receiver pins to verify against Forseti's webhook JWKS.
+    pub set: &'a str,
+    /// `iss` inside the `iss-sub` subject identifier: the OIDC issuer. An
+    /// RFC 9493 §3.2.1 `iss-sub` identifier has to name the issuer that minted
+    /// the `sub`, and receivers key their users on the `iss`/`sub` pair from
+    /// the id_token, which Hydra issues.
+    pub subject: &'a str,
+}
+
 /// Sign an `account-purged` SET targeting a single receiver. Returns the
 /// compact-serialised JWS that becomes the body of the webhook POST.
-///
-/// `iss` is Forseti's own externally reachable URL — matches the
-/// `iss` Hydra puts on id_tokens, so a receiver that already pins the
-/// Forseti as an issuer can apply the same rule here.
 pub fn sign_set(
     key: &SigningKey,
-    iss: &str,
+    issuers: SetIssuers<'_>,
     event_id: Uuid,
     subject_kratos_id: &str,
     audience_client_id: &str,
     issued_at: DateTime<Utc>,
 ) -> anyhow::Result<String> {
+    let SetIssuers { set, subject } = issuers;
     let claims = json!({
-        "iss": iss,
+        "iss": set,
         "aud": audience_client_id,
         "iat": issued_at.timestamp(),
         "jti": event_id.to_string(),
@@ -208,7 +221,7 @@ pub fn sign_set(
             event_type::ACCOUNT_PURGED: {
                 "subject": {
                     "subject_type": "iss-sub",
-                    "iss": iss,
+                    "iss": subject,
                     "sub": subject_kratos_id,
                 }
             }
@@ -243,6 +256,11 @@ pub(super) fn extract_subject_from_jws(compact: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    const ISSUERS: SetIssuers<'static> = SetIssuers {
+        set: "https://forseti.example.com",
+        subject: "https://forseti.example.com/hydra",
+    };
+
     fn test_key() -> SigningKey {
         use std::sync::OnceLock;
         static KEY: OnceLock<SigningKey> = OnceLock::new();
@@ -268,15 +286,7 @@ mod tests {
         let when = DateTime::parse_from_rfc3339("2026-05-21T10:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
-        let jws = sign_set(
-            &key,
-            "https://forseti.example.com",
-            evt,
-            "kratos-user-id",
-            "client-abc",
-            when,
-        )
-        .expect("sign");
+        let jws = sign_set(&key, ISSUERS, evt, "kratos-user-id", "client-abc", when).expect("sign");
         let segments: Vec<&str> = jws.split('.').collect();
         assert_eq!(segments.len(), 3, "compact JWS has three segments");
         assert!(!segments[0].is_empty());
@@ -289,15 +299,7 @@ mod tests {
         let key = test_key();
         let evt = Uuid::new_v4();
         let when = Utc::now();
-        let jws = sign_set(
-            &key,
-            "https://forseti.example.com",
-            evt,
-            "kratos-user-id",
-            "client-abc",
-            when,
-        )
-        .expect("sign");
+        let jws = sign_set(&key, ISSUERS, evt, "kratos-user-id", "client-abc", when).expect("sign");
         let header_b64 = jws.split('.').next().unwrap();
         let header_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(header_b64)
@@ -315,21 +317,24 @@ mod tests {
         let when = DateTime::parse_from_rfc3339("2026-05-21T10:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
-        let iss = "https://forseti.example.com";
-        let jws = sign_set(&key, iss, evt, "kratos-user-id", "client-abc", when).expect("sign");
+        let jws = sign_set(&key, ISSUERS, evt, "kratos-user-id", "client-abc", when).expect("sign");
         let payload_b64 = jws.split('.').nth(1).unwrap();
         let payload_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(payload_b64)
             .expect("base64url payload");
         let claims: serde_json::Value = serde_json::from_slice(&payload_bytes).expect("claims");
-        assert_eq!(claims["iss"], iss);
+        assert_eq!(claims["iss"], ISSUERS.set);
         assert_eq!(claims["aud"], "client-abc");
         assert_eq!(claims["jti"], "12345678-1234-1234-1234-1234567890ab");
         assert_eq!(claims["iat"], when.timestamp());
         let event = &claims["events"][event_type::ACCOUNT_PURGED];
         assert!(event.is_object(), "event object present at RISC URI key");
         assert_eq!(event["subject"]["subject_type"], "iss-sub");
-        assert_eq!(event["subject"]["iss"], iss);
+        assert_eq!(
+            event["subject"]["iss"], ISSUERS.subject,
+            "the iss-sub identifier names the OIDC issuer that minted the sub, \
+             not the SET issuer"
+        );
         assert_eq!(event["subject"]["sub"], "kratos-user-id");
     }
 
@@ -339,7 +344,7 @@ mod tests {
         let evt = Uuid::new_v4();
         let jws = sign_set(
             &key,
-            "https://forseti.example.com",
+            ISSUERS,
             evt,
             "kratos-user-42",
             "client-abc",

@@ -75,6 +75,10 @@ pub(crate) fn router(cfg: &crate::config::AppConfig) -> Router<AppState> {
             post(authorized_apps::settings_authorized_apps_revoke),
         )
         .route(
+            "/settings/offline-access",
+            get(offline_access::settings_offline_access),
+        )
+        .route(
             "/settings/offline-access/clear",
             post(offline_access::settings_offline_access_clear),
         )
@@ -86,15 +90,14 @@ pub(crate) fn router(cfg: &crate::config::AppConfig) -> Router<AppState> {
         .merge(offline_access_router(cfg))
 }
 
-/// The offline-passphrase surface on its own sub-router so its rate limit
+/// The offline-passphrase save on its own sub-router so its rate limit
 /// applies to nothing else. Each save runs Argon2id at m=64MiB/t=3, which is
 /// deliberately expensive and therefore a denial-of-service amplifier if
 /// anyone can call it in a loop.
 fn offline_access_router(cfg: &crate::config::AppConfig) -> Router<AppState> {
     let r = Router::new().route(
         "/settings/offline-access",
-        get(offline_access::settings_offline_access)
-            .post(offline_access::settings_offline_access_save),
+        post(offline_access::settings_offline_access_save),
     );
     crate::rate_limit::single_window(
         r,
@@ -157,9 +160,22 @@ pub(crate) enum SettingsSection {
     AccountOverview,
     /// Account self-deletion: uses the flow only as a privileged-session probe.
     Account,
+    /// Offline passphrase: same probe-only use as [`SettingsSection::Account`].
+    /// The verifier it mints authenticates on hosts that can't reach Forseti,
+    /// so it gets the same gate as any other credential change.
+    OfflineAccess,
 }
 
 impl SettingsSection {
+    /// Sections that use the settings flow only as a privileged-session probe
+    /// for a Forseti-owned action, so Kratos never sees a submit for them.
+    fn is_probe_only(self) -> bool {
+        matches!(
+            self,
+            SettingsSection::Account | SettingsSection::OfflineAccess
+        )
+    }
+
     fn as_slug(self) -> &'static str {
         match self {
             SettingsSection::Profile => "profile",
@@ -169,6 +185,7 @@ impl SettingsSection {
             SettingsSection::LinkedProviders => "linked-providers",
             SettingsSection::AccountOverview => "account",
             SettingsSection::Account => "account/delete",
+            SettingsSection::OfflineAccess => "offline-access",
         }
     }
     fn path(self) -> &'static str {
@@ -180,6 +197,7 @@ impl SettingsSection {
             SettingsSection::LinkedProviders => "/settings/linked-providers",
             SettingsSection::AccountOverview => "/settings/account",
             SettingsSection::Account => "/settings/account/delete",
+            SettingsSection::OfflineAccess => "/settings/offline-access",
         }
     }
 }
@@ -229,13 +247,23 @@ fn is_recovery_handoff(flow: &serde_json::Value) -> bool {
     false
 }
 
-/// Privileged-session deadline as RFC3339: flow `issued_at` plus Kratos's
-/// `privileged_session_max_age` (15m). `None` when `issued_at` is unparseable.
+/// Kratos's `selfservice.flows.settings.privileged_session_max_age`, as
+/// `config init` writes it. Kratos holds the real value and exposes no API
+/// for it, so Forseti mirrors the shipped default.
+const PRIVILEGED_WINDOW: chrono::Duration = chrono::Duration::minutes(15);
+
+/// Privileged-session deadline as RFC3339: flow `issued_at` plus
+/// [`PRIVILEGED_WINDOW`]. `None` when `issued_at` is unparseable.
 fn privileged_deadline_rfc3339(flow: &serde_json::Value) -> Option<String> {
     let issued = flow.get("issued_at").and_then(|v| v.as_str())?;
     let parsed = chrono::DateTime::parse_from_rfc3339(issued).ok()?;
-    let deadline = parsed + chrono::Duration::minutes(15);
+    let deadline = parsed + PRIVILEGED_WINDOW;
     Some(deadline.to_rfc3339())
+}
+
+/// Whether `session` signed in within [`PRIVILEGED_WINDOW`] of `now`.
+fn recently_authenticated(session: &ory::Session, now: chrono::DateTime<chrono::Utc>) -> bool {
+    crate::oauth::reauth::session_auth_time(session).is_some_and(|t| now - t <= PRIVILEGED_WINDOW)
 }
 
 fn settings_section_from_flow(flow: &serde_json::Value) -> SettingsSection {
@@ -272,6 +300,10 @@ fn settings_section_from_flow(flow: &serde_json::Value) -> SettingsSection {
     if decoded.ends_with("/settings/account/delete") {
         return SettingsSection::Account;
     }
+    // Same probe-only reuse as account delete.
+    if decoded.ends_with("/settings/offline-access") {
+        return SettingsSection::OfflineAccess;
+    }
     if decoded.ends_with("/settings/account") {
         return SettingsSection::AccountOverview;
     }
@@ -302,6 +334,58 @@ mod tests {
     use super::*;
     use crate::config::BrandConfig;
     use askama::Template;
+
+    fn flow_returning_to(path: &str) -> serde_json::Value {
+        let return_to =
+            url::form_urlencoded::byte_serialize(format!("http://localhost:3000{path}").as_bytes())
+                .collect::<String>();
+        serde_json::json!({
+            "request_url": format!(
+                "http://localhost:4433/self-service/settings/browser?return_to={return_to}"
+            )
+        })
+    }
+
+    /// Every probe-only section must route its flow back to itself, or the
+    /// privileged gate lands the user on an unrelated page.
+    #[test]
+    fn probe_sections_route_back_to_themselves() {
+        for section in [SettingsSection::Account, SettingsSection::OfflineAccess] {
+            assert!(section.is_probe_only());
+            let routed = settings_section_from_flow(&flow_returning_to(section.path()));
+            assert_eq!(routed.as_slug(), section.as_slug());
+        }
+    }
+
+    fn session_signed_in_at(rfc3339: &str) -> ory::Session {
+        let mut s = ory::Session::new("sess-1".to_string());
+        s.authenticated_at = Some(rfc3339.to_string());
+        s
+    }
+
+    fn at(rfc3339: &str) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339(rfc3339)
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+    }
+
+    #[test]
+    fn sign_in_inside_the_window_is_recent() {
+        let s = session_signed_in_at("2026-01-01T10:00:00Z");
+        assert!(recently_authenticated(&s, at("2026-01-01T10:14:59Z")));
+    }
+
+    #[test]
+    fn sign_in_outside_the_window_is_not_recent() {
+        let s = session_signed_in_at("2026-01-01T10:00:00Z");
+        assert!(!recently_authenticated(&s, at("2026-01-01T10:15:01Z")));
+    }
+
+    #[test]
+    fn session_without_a_timestamp_is_not_recent() {
+        let s = ory::Session::new("sess-1".to_string());
+        assert!(!recently_authenticated(&s, at("2026-01-01T10:00:00Z")));
+    }
 
     #[test]
     #[ignore]
@@ -371,6 +455,19 @@ pub(crate) async fn fetch_settings_subpage(
 
     match ory::kratos::resolve_flow(&state.ory, FlowKind::Settings, flow_id, &cookie).await {
         FlowOutcome::Init | FlowOutcome::Reinit => Err(Redirect::to(&init_url()).into_response()),
+        // Kratos checks only AAL when a flow is fetched; it enforces the
+        // privileged window on submit. Probe-only sections never submit, so
+        // they enforce it here.
+        FlowOutcome::Ready(_)
+            if section.is_probe_only()
+                && !recently_authenticated(&sess.session, chrono::Utc::now()) =>
+        {
+            Err(Redirect::to(&format!(
+                "/login?refresh=true&return_to={}",
+                ory_client::apis::urlencode(&return_to_full)
+            ))
+            .into_response())
+        }
         FlowOutcome::Ready(flow) => Ok((sess.session.clone(), flow)),
         FlowOutcome::Privileged(reason) => {
             // The two 403 reasons need different `/login` params: sending

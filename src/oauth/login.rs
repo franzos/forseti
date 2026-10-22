@@ -620,7 +620,7 @@ pub(crate) fn parse_organization_id_param(request_url: &str) -> Option<String> {
 /// Whether a remembered `sid` has lost the Kratos session it was recorded
 /// against. A `sid` without one (no row, or a row without a session) counts as
 /// abandoned, as before the table existed.
-async fn stale_sid_is_abandoned(
+pub(super) async fn stale_sid_is_abandoned(
     state: &AppState,
     sid: &str,
     subject: &str,

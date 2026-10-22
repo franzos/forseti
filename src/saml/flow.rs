@@ -447,9 +447,13 @@ pub async fn confirm(
     let codec = crate::saml::pending_link_cookie(state.cfg.self_.is_https());
     let clear = codec.clear_header();
 
-    let Some(pending) = codec
-        .decode(&state.cookie_secret, &headers, unix_seconds_now())
-        .and_then(|b| serde_json::from_slice::<PendingLink>(&b).ok())
+    let Some((minted_at, pending)) = codec
+        .decode_with_issued_at(&state.cookie_secret, &headers, unix_seconds_now())
+        .and_then(|(ts, b)| {
+            serde_json::from_slice::<PendingLink>(&b)
+                .ok()
+                .map(|p| (ts, p))
+        })
     else {
         // No pending link (expired, tampered, or a direct visit).
         let mut resp = neutral_unavailable(&state);
@@ -471,6 +475,25 @@ pub async fn confirm(
                 .with_ctx(&actx)
                 .metadata(audit_metadata!(
                     "reason" => "confirm_identity_mismatch",
+                    "org_id" => pending.o.as_str(),
+                )),
+        )
+        .await;
+        let mut resp = render_blocked(&state, &pending.e, BlockedReason::ConfirmFailed);
+        append_set_cookie(&mut resp, Some(clear));
+        return resp;
+    }
+
+    // Holding the session is not proof: it must come from the bounce itself.
+    // An older, ambient session would let a cross-site GET here write the link.
+    if !authenticated_since(session.ok(), minted_at) {
+        let _ = audit::log(
+            &state.db,
+            AuditEvent::new(action::SAML_LOGIN_FAILED)
+                .failed("credential confirmation was not fresh")
+                .with_ctx(&actx)
+                .metadata(audit_metadata!(
+                    "reason" => "confirm_not_fresh",
                     "org_id" => pending.o.as_str(),
                 )),
         )
@@ -903,6 +926,57 @@ async fn resolve_identity(
             block_reason: BlockedReason::Conflict,
             identity_id: None,
         }),
+    }
+}
+
+/// Slack for Kratos's clock running behind Forseti's when comparing the two.
+const CONFIRM_CLOCK_SKEW_SECS: i64 = 60;
+
+/// Whether `session` authenticated no earlier than `minted_at` (unix seconds).
+fn authenticated_since(session: Option<&crate::ory::Session>, minted_at: u64) -> bool {
+    let Ok(minted_at) = i64::try_from(minted_at) else {
+        return false;
+    };
+    session
+        .and_then(crate::oauth::reauth::session_auth_time)
+        .is_some_and(|t| t.timestamp().saturating_add(CONFIRM_CLOCK_SKEW_SECS) >= minted_at)
+}
+
+#[cfg(test)]
+mod confirm_freshness_tests {
+    use super::*;
+
+    fn session_at(rfc3339: Option<&str>) -> crate::ory::Session {
+        let mut s = crate::ory::Session::new("sess-1".to_string());
+        s.authenticated_at = rfc3339.map(str::to_string);
+        s
+    }
+
+    // 2026-01-01T10:00:00Z
+    const MINTED: u64 = 1_767_261_600;
+
+    #[test]
+    fn sign_in_after_the_bounce_counts() {
+        let s = session_at(Some("2026-01-01T10:00:30Z"));
+        assert!(authenticated_since(Some(&s), MINTED));
+    }
+
+    #[test]
+    fn ambient_session_from_before_the_bounce_is_refused() {
+        let s = session_at(Some("2026-01-01T09:00:00Z"));
+        assert!(!authenticated_since(Some(&s), MINTED));
+    }
+
+    #[test]
+    fn small_clock_skew_is_tolerated() {
+        let s = session_at(Some("2026-01-01T09:59:30Z"));
+        assert!(authenticated_since(Some(&s), MINTED));
+    }
+
+    #[test]
+    fn missing_session_or_timestamp_is_refused() {
+        assert!(!authenticated_since(None, MINTED));
+        assert!(!authenticated_since(Some(&session_at(None)), MINTED));
     }
 }
 

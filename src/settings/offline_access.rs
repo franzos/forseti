@@ -7,10 +7,11 @@
 
 use crate::csrf::CsrfForm;
 use askama::Template;
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
+use unic_langid::LanguageIdentifier;
 
 use crate::audit::{self, AuditCtx, AuditEvent, action, target_kind};
 use crate::audit_metadata;
@@ -18,12 +19,43 @@ use crate::flash;
 use crate::page_chrome::{PageChrome, ThemedChrome};
 use crate::posix::{db, offline};
 use crate::render::render;
+use crate::settings::{SettingsSection, fetch_settings_subpage};
 use crate::state::AppState;
+use crate::web::FlowQuery;
+
+/// Require a recent sign-in, at AAL2 where the identity has a second factor.
+/// The Kratos settings flow supplies the AAL check and the dispatcher the
+/// recency check; its nodes are unused because this page isn't a Kratos flow.
+/// Returns the flow id, which the page's forms carry back on submit.
+async fn privileged_gate(
+    state: &AppState,
+    headers: &HeaderMap,
+    query: &FlowQuery,
+    sess: &crate::extractors::RequireSession,
+    locale: &LanguageIdentifier,
+) -> Result<String, Response> {
+    let (_, flow) = fetch_settings_subpage(
+        state,
+        headers,
+        query,
+        SettingsSection::OfflineAccess,
+        sess,
+        locale,
+    )
+    .await?;
+    Ok(flow
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string())
+}
 
 #[derive(Template)]
 #[template(path = "settings_offline_access.html")]
 pub(crate) struct SettingsOfflineAccessTemplate {
     pub(crate) chrome: PageChrome,
+    /// Without it in the form actions, the POST bounces to a fresh Kratos init.
+    pub(crate) flow_id: String,
     pub(crate) has_secret: bool,
     pub(crate) min_len: usize,
     pub(crate) flash: String,
@@ -38,14 +70,22 @@ pub(crate) struct OfflinePassphraseForm {
 
 pub(crate) async fn settings_offline_access(
     State(state): State<AppState>,
+    Query(query): Query<FlowQuery>,
     headers: HeaderMap,
     sess: crate::extractors::RequireSession,
     banner: crate::handoff::ReferrerBanner,
+    crate::page_chrome::ReqLocale(locale): crate::page_chrome::ReqLocale,
     themed: ThemedChrome,
 ) -> Response {
     if !state.cfg.posix.offline_auth_enabled {
         return (axum::http::StatusCode::NOT_FOUND, "offline auth disabled").into_response();
     }
+
+    // Gate the page too, so the bounce can't eat a typed passphrase.
+    let flow_id = match privileged_gate(&state, &headers, &query, &sess, &locale).await {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
 
     let has_secret = match db::get_offline_secret(&state.db, &sess.identity_id).await {
         Ok(row) => row.is_some(),
@@ -58,6 +98,7 @@ pub(crate) async fn settings_offline_access(
     let (flash_msg, clear_flash) = state.take_flash(&headers, "/settings/offline-access");
     let body = render(&SettingsOfflineAccessTemplate {
         chrome: themed.chrome,
+        flow_id,
         has_secret,
         min_len: state.cfg.posix.offline_min_len,
         flash: flash_msg,
@@ -68,6 +109,8 @@ pub(crate) async fn settings_offline_access(
 
 pub(crate) async fn settings_offline_access_save(
     State(state): State<AppState>,
+    Query(query): Query<FlowQuery>,
+    headers: HeaderMap,
     sess: crate::extractors::RequireSession,
     actx: AuditCtx,
     crate::page_chrome::ReqLocale(locale): crate::page_chrome::ReqLocale,
@@ -75,6 +118,10 @@ pub(crate) async fn settings_offline_access_save(
 ) -> Response {
     if !state.cfg.posix.offline_auth_enabled {
         return (axum::http::StatusCode::NOT_FOUND, "offline auth disabled").into_response();
+    }
+
+    if let Err(resp) = privileged_gate(&state, &headers, &query, &sess, &locale).await {
+        return resp;
     }
 
     let min_len = state
@@ -154,6 +201,8 @@ pub(crate) async fn settings_offline_access_save(
 
 pub(crate) async fn settings_offline_access_clear(
     State(state): State<AppState>,
+    Query(query): Query<FlowQuery>,
+    headers: HeaderMap,
     sess: crate::extractors::RequireSession,
     actx: AuditCtx,
     crate::page_chrome::ReqLocale(locale): crate::page_chrome::ReqLocale,
@@ -161,6 +210,10 @@ pub(crate) async fn settings_offline_access_clear(
 ) -> Response {
     if !state.cfg.posix.offline_auth_enabled {
         return (axum::http::StatusCode::NOT_FOUND, "offline auth disabled").into_response();
+    }
+
+    if let Err(resp) = privileged_gate(&state, &headers, &query, &sess, &locale).await {
+        return resp;
     }
 
     let msg = match db::delete_offline_secret(&state.db, &sess.identity_id).await {
@@ -194,4 +247,43 @@ pub(crate) async fn settings_offline_access_clear(
 fn hash_semaphore(state: &AppState) -> &'static tokio::sync::Semaphore {
     static SEM: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
     SEM.get_or_init(|| tokio::sync::Semaphore::new(state.cfg.posix.offline_hash_concurrency.max(1)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::BrandConfig;
+
+    #[test]
+    fn both_forms_carry_the_flow_id() {
+        let brand = BrandConfig {
+            name: "Forseti".to_string(),
+            support_email: None,
+            logo_url: None,
+            consent_intro: String::new(),
+            theme_preset: None,
+            brand_primary: None,
+            brand_on_primary: None,
+            brand_secondary: None,
+            operator_trust_anchor: None,
+        };
+        let html = SettingsOfflineAccessTemplate {
+            chrome: PageChrome::from_brand_with_admin(
+                brand,
+                String::new(),
+                "csrf".to_string(),
+                false,
+                "en".parse().unwrap(),
+            ),
+            flow_id: "flow-123".to_string(),
+            has_secret: true,
+            min_len: 12,
+            flash: String::new(),
+            referrer_banner: None,
+        }
+        .render()
+        .unwrap();
+        assert!(html.contains(r#"action="/settings/offline-access?flow=flow-123""#));
+        assert!(html.contains(r#"action="/settings/offline-access/clear?flow=flow-123""#));
+    }
 }

@@ -35,7 +35,7 @@
         {% endif %}
 
         <form method="POST"
-              action="/settings/offline-access"
+              action="/settings/offline-access?flow={{ flow_id }}"
               class="flex flex-col gap-stack-md">
           <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
           <div class="flex flex-col gap-stack-sm">
@@ -75,7 +75,7 @@
           <h2 class="font-headline-sm text-headline-sm text-on-error-container mb-stack-sm">{{ chrome.t("settings-offline-remove-heading") }}</h2>
           <p class="font-body-md text-body-md text-on-error-container">{{ chrome.t("settings-offline-remove-body") }}</p>
           <form method="POST"
-                action="/settings/offline-access/clear"
+                action="/settings/offline-access/clear?flow={{ flow_id }}"
                 class="mt-stack-md">
             <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
             <button type="submit"

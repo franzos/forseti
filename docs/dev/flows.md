@@ -1314,7 +1314,7 @@ skips the screen. The admin list's "Self-registered" pill covers both
 `GET /oauth/logout?logout_challenge=...` — handler `oauth_logout`
 (`src/oauth/logout.rs:38`), template `templates/oauth_logout_confirm.html`.
 
-`POST /oauth/logout` — `oauth_logout_submit` (`src/oauth/logout.rs:73`).
+`POST /oauth/logout` — `oauth_logout_submit` (`src/oauth/logout.rs:69`).
 
 The GET handler used to tear down the session immediately, which meant a
 malicious link could sign someone out without their interaction. It now
@@ -1324,12 +1324,27 @@ confirmation page; the actual tear-down only happens on the POST.
 POST path:
 
 1. CSRF check.
-2. Best-effort Kratos session teardown — if the cookie's present, fetch
+2. Re-fetch the logout request and check that this browser may end it
+   (`caller_may_end`, `src/oauth/logout.rs:112`). Hydra skips its own
+   browser check for RP-initiated logout, so Forseti binds it here:
+   - A request without a subject is refused.
+   - A browser with a Kratos session may only end its own subject's
+     session.
+   - A browser without one may end an OP-initiated request (Hydra checks
+     its own cookie when the logout completes), and an RP-initiated one
+     only when the Kratos session recorded against the request's `sid` is
+     already gone - the same rule `/oauth/login` applies to a stale
+     remembered sid (`stale_sid_is_abandoned`, `src/oauth/login.rs:623`).
+     No `sid` → refused.
+
+   A refusal, a failed lookup, or an error in the check → 302 to `/error`,
+   and nothing is torn down.
+3. Best-effort Kratos session teardown — if the cookie's present, fetch
    the Kratos logout URL via `kratos::fetch_logout_url`
    (`src/ory/kratos.rs:453`) and hit it server-side. We don't follow Kratos's
    post-logout redirect because Hydra's redirect is authoritative for
    this flow.
-3. `hydra::accept_logout_request` → returns the RP-specified
+4. `hydra::accept_logout_request` → returns the RP-specified
    post-logout URL. 302 there. Hydra sends back-channel logout to every
    client of that login session.
 
@@ -1344,8 +1359,8 @@ Edge cases:
 - Stale / unknown `logout_challenge` → 302 to `/error` on the initial GET
   (better to surface the failure before the user clicks Sign out than
   after).
-- No Kratos cookie present → skip the Kratos teardown, accept the Hydra
-  challenge anyway (idempotent).
+- No Kratos cookie present → skip the Kratos teardown, and accept the
+  Hydra challenge when step 2 allows it.
 - Kratos logout failure → log and continue; Hydra's accept is still
   attempted.
 
@@ -1430,10 +1445,18 @@ the only entry point (SP-initiated only — no IdP-initiated flow in v1).
      - No match and an unproven domain → refused, so a tenant IdP cannot
        provision an arbitrary address it does not own.
 
-   `GET /sso/confirm` is the return leg. It links **only** when the live
-   Kratos session's identity id equals the one in the pending cookie —
-   that check is what makes the assertion unable to impersonate. It mints
-   no session of its own: the login the user just completed is the session.
+   `GET /sso/confirm` is the return leg (`confirm`,
+   `src/saml/flow.rs:441`). It links **only** when the live Kratos
+   session's identity id equals the one in the pending cookie, and that
+   session signed in no earlier than the cookie was minted
+   (`authenticated_since`, `src/saml/flow.rs:936`, with 60 s of slack for
+   clock skew). The first check is what makes the assertion unable to
+   impersonate. The second means a session the browser already held can't
+   complete the link on its own, so a cross-site GET to `/sso/confirm`
+   writes nothing. Either failure renders the blocked page and audits
+   `saml.login.failed` (`confirm_identity_mismatch` / `confirm_not_fresh`).
+   It mints no session of its own: the login the user just completed is
+   the session.
 5. Org membership ensured (`member` role; best-effort — a DB blip must
    not abort an otherwise valid login).
 6. Session establishment: `admin_create_recovery_link`
@@ -2549,8 +2572,18 @@ sequenceDiagram
 `/settings/offline-access` (`src/settings/offline_access.rs`) — a Forseti-owned
 POST surface modeled on `settings_profile_extended_save`, **not** a Kratos flow.
 `RequireSession` + `Csrf` + `verify_csrf_or_forbid`; GET renders, POST sets
-(`settings_offline_access_save:84`), POST clears
-(`settings_offline_access_clear:147`). The passphrase is never echoed, never put
+(`settings_offline_access_save:110`), POST clears
+(`settings_offline_access_clear:202`). All three run `privileged_gate`
+(`offline_access.rs:30`), which uses a Kratos settings flow only as a
+privileged-session probe, the same way account deletion does
+(`fetch_settings_subpage`, `src/settings/mod.rs:431`): the user must have
+signed in within the last 15 minutes, at AAL2 when Kratos asks for it, or
+gets bounced to `/login` first. Gating the GET too means the bounce happens
+before a passphrase is typed. The page carries the flow id into both form
+actions (`?flow=<id>`), so the POST re-runs the same check against the same
+flow. Only the save POST is rate-limited (`[posix].offline_saves_per_hour`
+per client, `offline_access_router`, `src/settings/mod.rs:97`), since it is
+the one that hashes. The passphrase is never echoed, never put
 in a redirect, never logged, never written to audit metadata — only the
 Argon2id verifier is stored. The page 404s when `[posix].offline_auth_enabled`
 is off. `mint_verifier` (`src/posix/offline.rs:44`) rejects anything under

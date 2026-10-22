@@ -738,18 +738,39 @@ impl WebhookTokens {
     /// Rejects an empty entry or a duplicate. Called from boot validation
     /// once `is_unset` has already passed. Error text never echoes the
     /// token value.
-    pub fn validate(&self) -> Result<(), String> {
+    ///
+    /// A placeholder is refused only on a production-shaped deployment: the
+    /// shipped dev and CI configs carry one on purpose, and `config check`
+    /// flags it everywhere.
+    pub fn validate(&self, self_url: &str) -> Result<(), String> {
         let entries = self.entries();
         if entries.iter().any(|t| t.is_empty()) {
             return Err("audit.webhook_token contains an empty entry".to_string());
         }
         let mut seen = std::collections::HashSet::with_capacity(entries.len());
-        for t in entries {
+        for t in entries.iter() {
             if !seen.insert(t) {
                 return Err("audit.webhook_token contains a duplicate entry".to_string());
             }
         }
+        if DatabaseConfig::looks_like_production(self_url)
+            && entries
+                .iter()
+                .any(|t| crate::config_cli::yamlutil::is_placeholder(t))
+        {
+            return Err(
+                "audit.webhook_token is a placeholder; generate a real secret \
+                 (`openssl rand -hex 32`) before serving on a public https URL"
+                    .to_string(),
+            );
+        }
         Ok(())
+    }
+
+    /// Entries shorter than this are warned about at boot, never refused:
+    /// refusing would break an existing deployment on upgrade.
+    pub fn weak_entries(&self) -> usize {
+        self.entries().iter().filter(|t| t.len() < 32).count()
     }
 }
 
@@ -2021,22 +2042,50 @@ mod tests {
         assert!(!WebhookTokens::Many(vec!["a".into()]).is_unset());
     }
 
+    /// A deployment shape `looks_like_production` says no to, so the
+    /// placeholder rule stays out of the way of the other assertions.
+    const DEV_URL: &str = "http://localhost:3000";
+    const PROD_URL: &str = "https://forseti.example.com";
+
     #[test]
     fn webhook_tokens_validate_rejects_empty_entry() {
         let t = WebhookTokens::Many(vec!["a".into(), String::new()]);
-        assert!(t.validate().is_err());
+        assert!(t.validate(DEV_URL).is_err());
     }
 
     #[test]
     fn webhook_tokens_validate_rejects_duplicate_entries() {
         let t = WebhookTokens::Many(vec!["a".into(), "a".into()]);
-        assert!(t.validate().is_err());
+        assert!(t.validate(DEV_URL).is_err());
     }
 
     #[test]
     fn webhook_tokens_validate_accepts_distinct_nonempty_entries() {
         let t = WebhookTokens::Many(vec!["a".into(), "b".into()]);
-        assert!(t.validate().is_ok());
-        assert!(WebhookTokens::One("a".into()).validate().is_ok());
+        assert!(t.validate(DEV_URL).is_ok());
+        assert!(WebhookTokens::One("a".into()).validate(DEV_URL).is_ok());
+    }
+
+    #[test]
+    fn webhook_tokens_placeholder_refused_only_on_production_shape() {
+        let t = WebhookTokens::One("dev-playground-token-change-me".into());
+        assert!(
+            t.validate(DEV_URL).is_ok(),
+            "the shipped dev/CI configs carry this on purpose"
+        );
+        assert!(t.validate(PROD_URL).is_err());
+    }
+
+    #[test]
+    fn webhook_tokens_real_secret_passes_on_production_shape() {
+        let t = WebhookTokens::One("f".repeat(64));
+        assert!(t.validate(PROD_URL).is_ok());
+    }
+
+    #[test]
+    fn webhook_tokens_short_entries_are_counted_not_refused() {
+        let t = WebhookTokens::Many(vec!["short".into(), "g".repeat(32)]);
+        assert_eq!(t.weak_entries(), 1);
+        assert!(t.validate(PROD_URL).is_ok());
     }
 }

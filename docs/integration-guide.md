@@ -980,7 +980,7 @@ Decoded claims:
     "https://schemas.openid.net/secevent/risc/event-type/account-purged": {
       "subject": {
         "subject_type": "iss-sub",
-        "iss": "https://portal.example.com",
+        "iss": "<your OIDC issuer, e.g. https://portal.example.com/hydra>",
         "sub": "<kratos identity id, matches `sub` in id_tokens>"
       }
     }
@@ -988,7 +988,9 @@ Decoded claims:
 }
 ```
 
-`iss` is Forseti's own externally reachable URL — same value Hydra puts on id_tokens for its issuer. `aud` is your client_id, so you can validate it with the same value you already pin for token verification.
+Two issuers appear here and they are not the same value when Forseti front-proxies Hydra. The top-level `iss` is Forseti's own externally reachable URL, because Forseti issued the SET and that is the identity you pin when verifying the signature. The `iss` inside `subject` is your OIDC issuer, the one on your id_tokens, because it names who minted the `sub`. Together they are the `(iss, sub)` pair you already store for a user, so you can look the account up directly.
+
+`aud` is your client_id, so you can validate it with the same value you already pin for token verification.
 
 ### Validating the SET
 
@@ -1000,7 +1002,7 @@ On each delivery:
    - `iss` equals Forseti's URL you've configured (pin this string; don't trust the JWT body to tell you who it's from).
    - `aud` equals your OAuth2 client_id.
    - `events` carries the key `https://schemas.openid.net/secevent/risc/event-type/account-purged`.
-   - `events[..].subject.sub` is the subject you want to purge.
+   - `events[..].subject.iss` equals your OIDC issuer, and `events[..].subject.sub` is the subject you want to purge. Match on the pair, not on `sub` alone.
 4. Dedupe on `jti` — it's the event id, stable across retries.
 
 ### Verifying the SET (Node example)

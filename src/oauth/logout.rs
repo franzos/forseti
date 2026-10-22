@@ -11,6 +11,7 @@ use serde::Deserialize;
 use crate::csrf::CsrfForm;
 
 use crate::cookies;
+use crate::extractors::OptionalSession;
 use crate::ory;
 use crate::page_chrome::{Chrome, PageChrome};
 use crate::render::render;
@@ -68,10 +69,30 @@ pub(crate) struct OAuthLogoutForm {
 pub(crate) async fn oauth_logout_submit(
     State(state): State<AppState>,
     headers: HeaderMap,
+    session: OptionalSession,
     crate::page_chrome::ReqLocale(locale): crate::page_chrome::ReqLocale,
     CsrfForm(form): CsrfForm<OAuthLogoutForm>,
 ) -> Response {
     let challenge = form.logout_challenge;
+
+    let req = match ory::hydra::get_logout_request(&state.ory, &challenge).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!(error = ?e, "hydra get_logout_request failed");
+            return Redirect::to("/error").into_response();
+        }
+    };
+    match caller_may_end(&state, &session, &req).await {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::warn!("refused a logout challenge for a session this browser doesn't hold");
+            return Redirect::to("/error").into_response();
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "checking a logout challenge's session failed");
+            return Redirect::to("/error").into_response();
+        }
+    }
 
     // Best-effort Kratos teardown; the user may already be signed out.
     let cookie = cookies::cookie_header(&headers);
@@ -83,5 +104,30 @@ pub(crate) async fn oauth_logout_submit(
             tracing::error!(error = ?e, "hydra accept_logout_request failed");
             Redirect::to("/error").into_response()
         }
+    }
+}
+
+/// Whether this browser may end the OP session `req` names. Hydra skips its
+/// own browser check for RP-initiated logout, so the binding happens here.
+async fn caller_may_end(
+    state: &AppState,
+    session: &OptionalSession,
+    req: &ory::OAuth2LogoutRequest,
+) -> anyhow::Result<bool> {
+    // Hydra copies the subject from a confirmed login session, so it's never empty.
+    let Some(subject) = req.subject.as_deref().filter(|s| !s.is_empty()) else {
+        return Ok(false);
+    };
+    if let Some(caller) = session.identity_id() {
+        return Ok(caller == subject);
+    }
+    if req.rp_initiated != Some(true) {
+        return Ok(true);
+    }
+    // No session here: only a sid whose own Kratos session is already gone,
+    // the same rule `/oauth/login` applies to a stale remembered sid.
+    match req.sid.as_deref().filter(|s| !s.is_empty()) {
+        Some(sid) => super::login::stale_sid_is_abandoned(state, sid, subject).await,
+        None => Ok(false),
     }
 }

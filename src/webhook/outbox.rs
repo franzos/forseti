@@ -29,7 +29,7 @@ use crate::db_interact;
 use crate::ory::OryClients;
 use crate::schema::webhook_outbox;
 
-use super::signing::{SigningKey, extract_subject_from_jws, sign_set};
+use super::signing::{SetIssuers, SigningKey, extract_subject_from_jws, sign_set};
 
 /// Outbox row state. Stored as a `TEXT` column so the strings are the
 /// source of truth — no `#[repr]` games across the diesel boundary.
@@ -89,7 +89,7 @@ struct NewOutboxRow {
 pub async fn enqueue_pending(
     db: &DbPool,
     key: &SigningKey,
-    iss: &str,
+    issuers: SetIssuers<'_>,
     event_id: Uuid,
     user_id: &str,
     deleted_at: DateTime<Utc>,
@@ -101,7 +101,14 @@ pub async fn enqueue_pending(
     let now = Utc::now().to_rfc3339();
     let mut rows = Vec::with_capacity(targets.len());
     for target in targets {
-        let payload = sign_set(key, iss, event_id, user_id, &target.client_id, deleted_at)?;
+        let payload = sign_set(
+            key,
+            issuers,
+            event_id,
+            user_id,
+            &target.client_id,
+            deleted_at,
+        )?;
         rows.push(NewOutboxRow {
             id: Uuid::new_v4().to_string(),
             event_id: event_id.to_string(),

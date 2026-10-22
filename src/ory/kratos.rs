@@ -488,9 +488,9 @@ pub async fn admin_set_identity_language(
     }
     let body = UpdateIdentityBody {
         credentials: None,
-        external_id: None,
-        metadata_admin: None,
-        metadata_public: None,
+        external_id: current.external_id,
+        metadata_admin: current.metadata_admin,
+        metadata_public: current.metadata_public,
         region: None,
         schema_id: current.schema_id,
         state: ory_client::models::update_identity_body::StateEnum::Active,
@@ -514,9 +514,9 @@ pub async fn admin_update_identity_state(
     let traits = current.traits.unwrap_or(serde_json::Value::Null);
     let body = UpdateIdentityBody {
         credentials: None,
-        external_id: None,
-        metadata_admin: None,
-        metadata_public: None,
+        external_id: current.external_id,
+        metadata_admin: current.metadata_admin,
+        metadata_public: current.metadata_public,
         region: None,
         schema_id: current.schema_id,
         state,

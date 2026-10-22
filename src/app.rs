@@ -94,9 +94,17 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         );
         std::process::exit(1);
     }
-    if let Err(msg) = cfg.audit.webhook_token.validate() {
+    if let Err(msg) = cfg.audit.webhook_token.validate(&cfg.self_.url) {
         eprintln!("config error: {msg}");
         std::process::exit(1);
+    }
+    let weak = cfg.audit.webhook_token.weak_entries();
+    if weak > 0 {
+        tracing::warn!(
+            count = weak,
+            "audit.webhook_token entries are shorter than 32 bytes; \
+             the endpoint authenticates audit writes and session revocation"
+        );
     }
 
     // Reject overlapping posix uid/gid bands at boot before a team gid can collide with a user gid on a host.

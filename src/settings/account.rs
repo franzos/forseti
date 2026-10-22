@@ -262,7 +262,10 @@ async fn run_delete_saga(
     if let Err(e) = webhook::enqueue_pending(
         &state.db,
         &state.signing_key,
-        &state.cfg.self_.url,
+        webhook::SetIssuers {
+            set: &state.cfg.self_.url,
+            subject: state.cfg.hydra.issuer_or_public(),
+        },
         event_id,
         &user_id,
         deleted_at,
