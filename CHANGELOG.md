@@ -1,21 +1,21 @@
 # Changelog
 
-## [Unreleased]
+## [0.2.16] - 2026-10-22
 
 ### Security
-- SAML account linking now requires the credential confirmation to happen after the request that asked for it, so an existing session can no longer link an account on its own
-- RP-initiated logout only ends a session the browser holds, or one whose sign-in has already ended
-- Setting or clearing the offline passphrase requires a recent sign-in, like every other credential change
+- SAML account linking requires a fresh sign-in
+- RP-initiated logout bound to the caller's session
+- Offline passphrase changes require a recent sign-in
 - rustls-webpki 0.103.16, webpki-roots and webpki-root-certs 1.0.10 (RUSTSEC-2026-0381, -0382, -0383)
-- Forseti refuses to start on a public https URL with a placeholder audit webhook token, and warns about a short one
-- Dependency advisories are re-checked weekly, not only when something is pushed
+- Placeholder audit webhook token refused on public https URLs
+- Weekly dependency advisory check
 
 ### Changed
-- Deleting your account requires a sign-in within the last 15 minutes
+- Account deletion requires a sign-in within 15 minutes
 
 ### Fixed
-- Changing your language, or an admin activating or deactivating an identity, no longer clears operator-managed metadata and the external id
-- Account-deletion webhooks name the OIDC issuer in the event subject, so receivers can match the user they already store
+- Language and identity state changes wiped operator metadata
+- Account-deletion webhooks named the wrong issuer in the subject
 
 ## [0.2.15] - 2026-10-18
 
