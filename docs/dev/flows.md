@@ -1351,8 +1351,8 @@ POST path:
 The confirmation page says an app asked to sign the user out only when the
 logout request names a client; a bare `/oauth2/sessions/logout` with no
 `id_token_hint` or `client_id` gets neutral copy. A logout with no
-registered `post_logout_redirect_uri` ends on Forseti's root (Hydra's
-`urls.post_logout_redirect`), not Hydra's unbranded fallback.
+registered `post_logout_redirect_uri` ends on Forseti's `/signed-out` page
+(Hydra's `urls.post_logout_redirect`), not Hydra's unbranded fallback.
 
 Edge cases:
 

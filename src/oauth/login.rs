@@ -244,8 +244,9 @@ pub(crate) async fn oauth_login(
         }
     }
 
-    // ACR / AAL step-up: if the client asks `acr_values=aal2` and the session
-    // is weaker, force a fresh login at the requested AAL before accepting.
+    // ACR / AAL step-up. `acr_values` is a preference list, so an `aal1`
+    // session already satisfies `aal1 aal2`; only a list the session meets
+    // nowhere, and that names `aal2`, forces a fresh login at AAL2.
     let requested_acrs: Vec<String> = req
         .oidc_context
         .as_ref()
@@ -253,10 +254,7 @@ pub(crate) async fn oauth_login(
         .unwrap_or_default();
     let session_is_aal2 = ory::kratos::session_satisfies_aal2(&session);
     let session_aal = ory::kratos::session_aal_string(&session);
-    if requested_acrs
-        .iter()
-        .any(|acr| acr == "aal2" && !session_is_aal2)
-    {
+    if acr_values_need_aal2_step_up(&requested_acrs, session_is_aal2) {
         if prompt_none {
             return reject(
                 &state,
@@ -660,9 +658,36 @@ async fn resolve_pin_action(db: &DbPool, subject: &str, raw: &str, skip_join: bo
     PinAction::Interstitial { slug: org.slug }
 }
 
+/// OIDC Core 3.1.2.1 lists `acr_values` in order of preference and lets the
+/// OP answer with whichever listed value it met. A session that satisfies any
+/// requested value needs no step-up; unknown values are ignored.
+fn acr_values_need_aal2_step_up(requested: &[String], session_is_aal2: bool) -> bool {
+    let satisfied = requested
+        .iter()
+        .any(|acr| acr == "aal1" || (acr == "aal2" && session_is_aal2));
+    !satisfied && requested.iter().any(|acr| acr == "aal2")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{anonymous_login_redirect_url, parse_organization_id_param, wants_profile};
+    use super::{
+        acr_values_need_aal2_step_up, anonymous_login_redirect_url, parse_organization_id_param,
+        wants_profile,
+    };
+
+    #[test]
+    fn acr_values_is_a_preference_list() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert!(acr_values_need_aal2_step_up(&s(&["aal2"]), false));
+        assert!(!acr_values_need_aal2_step_up(&s(&["aal2"]), true));
+        assert!(!acr_values_need_aal2_step_up(&s(&["aal1", "aal2"]), false));
+        assert!(!acr_values_need_aal2_step_up(&s(&["aal2", "aal1"]), false));
+        assert!(!acr_values_need_aal2_step_up(
+            &s(&["urn:example:other"]),
+            false
+        ));
+        assert!(!acr_values_need_aal2_step_up(&s(&[]), false));
+    }
 
     #[test]
     fn username_step_needs_the_profile_scope() {

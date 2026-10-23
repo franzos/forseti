@@ -84,3 +84,8 @@ error-saml-blocked-cta = Vai all'accesso
 error-saml-admin-allowlisted = Questo indirizzo appartiene a un account operatore e non può accedere tramite il provider di identità della tua organizzazione. Accedi direttamente.
 error-saml-unproven-domain = La tua organizzazione non ha ancora verificato questo dominio email. Chiedi al tuo amministratore di verificarlo, poi riprova.
 error-saml-confirm-failed = Per collegare questo account al provider di identità della tua organizzazione, accedi con l'account a cui appartiene questo indirizzo.
+
+signed-out-title = Sei uscito
+signed-out-subtitle = La tua sessione con { $brand } è terminata.
+signed-out-body = Puoi chiudere questa finestra o accedere di nuovo quando vuoi.
+signed-out-action-sign-in = Accedi

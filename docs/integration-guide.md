@@ -605,11 +605,11 @@ https://hydra.example.com/oauth2/auth
   &acr_values=aal2
 ```
 
-Forseti observes the `acr_values` request, looks at the user's current Kratos session, and:
+`acr_values` is a space-separated preference list, and Forseti treats it as one: a session that already meets any listed value is accepted as is, so `acr_values=aal1 aal2` never prompts. Only a list that names `aal2` and that the session meets nowhere, in practice `acr_values=aal2` alone, triggers the step-up. Values Forseti doesn't know are ignored. With `acr_values=aal2`:
 
 - If the session is already `aal2`, accepts immediately.
 - If the session is `aal1` and the user has a second factor enrolled, prompts for the second factor before accepting.
-- If the user has no second factor, returns an error (or, depending on the operator's `acr_values` strictness setting, accepts at `aal1` — check the returned id_token's `acr` claim).
+- If the user has no second factor, the step-up login cannot complete; under `prompt=none` the request fails with `login_required`.
 
 Your app must inspect the returned id_token's `acr` claim and reject `aal1` for the sensitive operation. Do not assume `acr_values=aal2` was honored; verify.
 

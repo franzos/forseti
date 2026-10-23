@@ -337,7 +337,7 @@ fn render_hydra(t: HydraTemplate) -> String {
     let forseti_login = yaml_scalar(&format!("{f}/oauth/login"));
     let forseti_logout = yaml_scalar(&format!("{f}/oauth/logout"));
     let forseti_error = yaml_scalar(&format!("{f}/error"));
-    let forseti_home = yaml_scalar(&format!("{f}/"));
+    let forseti_signed_out = yaml_scalar(&format!("{f}/signed-out"));
     let forseti_register = yaml_scalar(&format!("{f}/oauth/register"));
     let scopes = crate::oauth::consent::SUPPORTED_SCOPES.join(", ");
     let claims = crate::oauth::consent::SUPPORTED_CLAIMS.join(", ");
@@ -358,7 +358,7 @@ urls:
   login:   {forseti_login}
   logout:  {forseti_logout}
   error: {forseti_error}
-  post_logout_redirect: {forseti_home}
+  post_logout_redirect: {forseti_signed_out}
   registration: {forseti_register}
 
 secrets:

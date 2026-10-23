@@ -84,3 +84,8 @@ error-saml-blocked-cta = Zur Anmeldung
 error-saml-admin-allowlisted = Diese Adresse gehört zu einem Betreiberkonto und kann nicht über den Identitätsanbieter Ihrer Organisation angemeldet werden. Melden Sie sich stattdessen direkt an.
 error-saml-unproven-domain = Ihre Organisation hat diese E-Mail-Domain noch nicht bestätigt. Bitten Sie Ihren Administrator, sie zu bestätigen, und versuchen Sie es dann erneut.
 error-saml-confirm-failed = Um dieses Konto mit dem Identitätsanbieter Ihrer Organisation zu verknüpfen, melden Sie sich mit dem Konto an, dem diese Adresse gehört.
+
+signed-out-title = Sie sind abgemeldet
+signed-out-subtitle = Ihre Sitzung bei { $brand } wurde beendet.
+signed-out-body = Sie können dieses Fenster schließen oder sich jederzeit wieder anmelden.
+signed-out-action-sign-in = Anmelden

@@ -10,8 +10,24 @@ use crate::cookies;
 use crate::csrf;
 use crate::extractors::OptionalSession;
 use crate::ory;
+use crate::page_chrome::{Chrome, PageChrome};
+use crate::render::render;
 use crate::state::AppState;
 use crate::web::render_error_boundary;
+use askama::Template;
+
+#[derive(Template)]
+#[template(path = "signed_out.html")]
+struct SignedOutTemplate {
+    chrome: PageChrome,
+}
+
+/// `GET /signed-out`: the landing Hydra's `urls.post_logout_redirect` points
+/// at, so an RP-initiated logout without a `post_logout_redirect_uri` ends on
+/// a page that says so instead of the sign-in form.
+pub(crate) async fn signed_out(Chrome(chrome): Chrome) -> Response {
+    render(&SignedOutTemplate { chrome })
+}
 
 /// POST-only on purpose: link prefetchers, scanners, and pasted URLs must not
 /// be able to nuke a session.

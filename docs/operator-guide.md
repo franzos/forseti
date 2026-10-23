@@ -1382,7 +1382,7 @@ urls:
   consent: https://accounts.example.com/oauth/consent
   logout:  https://accounts.example.com/oauth/logout
   error:   https://accounts.example.com/error
-  post_logout_redirect: https://accounts.example.com/
+  post_logout_redirect: https://accounts.example.com/signed-out
   registration: https://accounts.example.com/oauth/register
 
 webfinger:

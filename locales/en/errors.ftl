@@ -84,3 +84,8 @@ error-saml-admin-allowlisted = This address is an operator account and can't be 
 error-saml-unproven-domain = Your organization hasn't verified this email domain yet. Ask your administrator to verify it, then try again.
 error-saml-confirm-failed = To link this account to your organization's identity provider, sign in with the account that owns this address.
 error-saml-blocked-cta = Go to sign in
+
+signed-out-title = You're signed out
+signed-out-subtitle = Your session with { $brand } has ended.
+signed-out-body = You can close this window, or sign in again whenever you like.
+signed-out-action-sign-in = Sign in

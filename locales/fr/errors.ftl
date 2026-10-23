@@ -84,3 +84,8 @@ error-saml-blocked-cta = Aller à la connexion
 error-saml-admin-allowlisted = Cette adresse appartient à un compte opérateur et ne peut pas se connecter via le fournisseur d'identité de votre organisation. Connectez-vous directement.
 error-saml-unproven-domain = Votre organisation n'a pas encore vérifié ce domaine de messagerie. Demandez à votre administrateur de le vérifier, puis réessayez.
 error-saml-confirm-failed = Pour associer ce compte au fournisseur d'identité de votre organisation, connectez-vous avec le compte propriétaire de cette adresse.
+
+signed-out-title = Vous êtes déconnecté
+signed-out-subtitle = Votre session avec { $brand } est terminée.
+signed-out-body = Vous pouvez fermer cette fenêtre ou vous reconnecter quand vous le souhaitez.
+signed-out-action-sign-in = Se connecter

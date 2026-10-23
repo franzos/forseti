@@ -78,6 +78,7 @@ pub(crate) fn router(proxy_cfg: &ProxyConfig, auth_cfg: &AuthConfig) -> Router<A
         .route("/verification", get(verification::verification))
         .route("/error", get(error::error_page))
         .route("/logout", post(logout::logout))
+        .route("/signed-out", get(logout::signed_out))
 }
 
 /// `GET /registration` under a paired per-IP + global rate limit. The browser

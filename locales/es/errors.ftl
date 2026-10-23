@@ -84,3 +84,8 @@ error-saml-blocked-cta = Ir al inicio de sesión
 error-saml-admin-allowlisted = Esta dirección pertenece a una cuenta de operador y no puede iniciar sesión mediante el proveedor de identidad de su organización. Inicie sesión directamente.
 error-saml-unproven-domain = Su organización aún no ha verificado este dominio de correo. Pida a su administrador que lo verifique y vuelva a intentarlo.
 error-saml-confirm-failed = Para vincular esta cuenta con el proveedor de identidad de su organización, inicie sesión con la cuenta propietaria de esta dirección.
+
+signed-out-title = Ha cerrado la sesión
+signed-out-subtitle = Su sesión con { $brand } ha finalizado.
+signed-out-body = Puede cerrar esta ventana o volver a iniciar sesión cuando quiera.
+signed-out-action-sign-in = Iniciar sesión

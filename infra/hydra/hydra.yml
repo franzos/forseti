@@ -22,7 +22,7 @@ urls:
   # logout without a registered post_logout_redirect_uri, and `prompt=create`
   # (the shim rewrites it to Hydra's `registration`).
   error: http://localhost:3000/error
-  post_logout_redirect: http://localhost:3000/
+  post_logout_redirect: http://localhost:3000/signed-out
   registration: http://localhost:3000/oauth/register
   # OAuth 2.0 Device Authorization Grant (RFC 8628). Nested under `device`
   # (NOT flat `device_verification`/`post_device_done`). The device grant

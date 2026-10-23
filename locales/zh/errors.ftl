@@ -84,3 +84,8 @@ error-saml-blocked-cta = 前往登录
 error-saml-admin-allowlisted = 此地址属于运营者账户，不能通过你组织的身份提供商登录。请直接登录。
 error-saml-unproven-domain = 你的组织尚未验证此电子邮件域名。请让管理员验证后再试。
 error-saml-confirm-failed = 要将此账户关联到你组织的身份提供商，请使用拥有此地址的账户登录。
+
+signed-out-title = 你已退出登录
+signed-out-subtitle = 你在 { $brand } 的会话已结束。
+signed-out-body = 你可以关闭此窗口，或随时重新登录。
+signed-out-action-sign-in = 登录

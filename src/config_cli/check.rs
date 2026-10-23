@@ -280,7 +280,7 @@ pub(crate) fn check_hydra(root: &Value) -> Vec<Finding> {
         .map(|u| u.origin());
     for (endpoint, target) in [
         ("error", "/error"),
-        ("post_logout_redirect", "/"),
+        ("post_logout_redirect", "/signed-out"),
         ("registration", "/oauth/register"),
     ] {
         let key = format!("urls.{endpoint}");
