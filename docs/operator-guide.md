@@ -484,7 +484,7 @@ The picker at `/admin/clients/new` is always the source of truth, but the bundle
 
 | Category | Apps |
 | --- | --- |
-| First-party | Stackpit, Formshive, Liwan |
+| First-party | Stackpit, Formshive, Kenning, Liwan |
 | Git, CI/CD & infrastructure | GitLab, Gitea, Forgejo, Jenkins, Argo CD, Harbor, Rancher, Portainer, Proxmox VE, NetBox |
 | Files, media & knowledge | Nextcloud, Seafile, Immich, Jellyfin, Audiobookshelf, Paperless-ngx, Outline, BookStack, HedgeDoc |
 | Collaboration & productivity | Matrix Synapse, Discourse, Rocket.Chat, Mattermost\*, OpenProject\*, Plane\*, Vikunja, Mealie, Penpot, WordPress |
