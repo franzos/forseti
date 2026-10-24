@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.2.18] - 2026-10-24
+
+### Security
+- tokio 1.54.1 and ctutils 0.4.5 (RUSTSEC-2026-0385, -0386)
+
 ## [0.2.17] - 2026-10-24
 
 ### Added
