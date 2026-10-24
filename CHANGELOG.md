@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.2.17] - 2026-10-24
+
+### Added
+- Self-service account data export
+- `forseti delete-identity` CLI subcommand
+- Kenning client template
+
+### Changed
+- Every deletion path removes the same rows and notifies consented apps
+- Objects created by a deleted identity are kept for their other members
+- Logouts land on a signed-out page; point Hydra's `post_logout_redirect` at `/signed-out`
+
+### Fixed
+- `acr_values` treated as a preference list, not a hard requirement
+
 ## [0.2.16] - 2026-10-22
 
 ### Security
