@@ -21,6 +21,9 @@ use crate::csrf::CsrfForm;
 use crate::extractors::{Csrf, RequireAdmin};
 use crate::flash::{self, SecretReveal, attach_set_cookie as attach_cookie_if_some};
 use crate::format::{humanise_timestamp, looks_like_uuid};
+use crate::identity::delete::{
+    DeleteActor, DeleteEnv, DeleteError, DeleteReason, DeleteRequest, delete_identity,
+};
 use crate::ory;
 use crate::page_chrome::PageChrome;
 use crate::render::render;
@@ -582,7 +585,8 @@ pub async fn disable(
     {
         Ok(_) => {
             crate::oauth::op_sessions::end_op_sessions_for_subject(
-                &state,
+                &state.db,
+                &state.ory,
                 &id,
                 None,
                 crate::oauth::op_sessions::GrantRevocation::Keep,
@@ -661,7 +665,7 @@ pub async fn delete_confirm(Path(id): Path<String>, admin: RequireAdmin, csrf: C
         chrome,
         admin_active: AdminSection::Identities,
         title: format!("Delete identity {id}?"),
-        body: "This permanently removes the identity, its credentials, and all active sessions. The action cannot be undone.".to_string(),
+        body: "This permanently removes the identity with its credentials, sessions, 2FA and recovery codes, profile and username, linked providers, SSH keys, POSIX account, offline passphrase, organization and team memberships, and invites to its email. Apps holding a copy of the data are told to delete it. Audit entries stay for the retention period; organizations, teams, hosts and domains it created stay with the name removed. The action cannot be undone.".to_string(),
         action_url,
         cancel_url,
         submit_label: "Delete identity",
@@ -681,20 +685,31 @@ pub async fn delete(
         return r;
     }
     let list_target = "/admin/identities";
-    match crate::admin::actions::delete_identity_audited(
-        &state,
-        &id,
-        crate::admin::actions::DeleteActor::Admin {
-            identity_id: &ctx.identity_id,
-            email: &ctx.email,
+    let env = DeleteEnv::from_state(&state);
+    let req = DeleteRequest {
+        identity_id: id.clone(),
+        reason: DeleteReason::Admin,
+        actor: DeleteActor::Admin {
+            id: ctx.identity_id.clone(),
+            email: ctx.email.clone(),
         },
-        crate::admin::actions::DeleteReason::AdminInitiated,
-        crate::audit::SafeMetadata::empty(),
-        Some(&actx),
-    )
-    .await
-    {
-        Ok(()) => Redirect::to(list_target).into_response(),
+        force: false,
+        ctx: Some(actx),
+        metadata: crate::audit::SafeMetadata::empty(),
+    };
+    match delete_identity(&env, req).await {
+        Ok(_) => Redirect::to(list_target).into_response(),
+        Err(DeleteError::SoleOwner(names)) => {
+            tracing::warn!(id, orgs = %names.join(", "), "admin: delete refused, sole owner");
+            render_admin_error(
+                &state,
+                &crate::i18n::lookup(&ctx.locale, "dialog-delete-failed-title"),
+                &format!(
+                    "Could not delete identity: it is the only owner of {} and other members remain. Transfer ownership first.",
+                    names.join(", ")
+                ),
+            )
+        }
         Err(e) => {
             tracing::error!(error = ?e, id, "admin: delete failed");
             render_admin_error(

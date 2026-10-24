@@ -48,6 +48,8 @@ error-boundary-account-delete-ownership-check-failed = Nous n'avons pas pu véri
 error-boundary-account-delete-consent-unreachable = Nous n'avons pas pu joindre le service de consentement pour notifier vos applications connectées. Rien n'a été modifié ; veuillez réessayer dans un instant.
 error-boundary-account-delete-notifications-failed = Nous n'avons pas pu préparer les notifications de suppression. Rien n'a été modifié ; veuillez réessayer.
 error-boundary-account-delete-failed = Nous n'avons pas pu supprimer votre compte. Veuillez réessayer dans un instant.
+error-boundary-account-export-title = Export indisponible
+error-boundary-account-export-failed = Nous n'avons pas pu assembler votre export car l'une des sources de données n'a pas répondu. Rien n'a été modifié ; veuillez réessayer dans un instant.
 
 # Limite d'erreur SAML (rendue avec la locale par défaut ; le callback ACS ne porte aucune locale de requête).
 error-boundary-sso-unavailable-title = Authentification unique indisponible

@@ -39,6 +39,9 @@ mod accounts;
 #[path = "integration/account_delete.rs"]
 mod account_delete;
 
+#[path = "integration/account_export.rs"]
+mod account_export;
+
 #[path = "integration/admin.rs"]
 mod admin;
 
@@ -50,6 +53,9 @@ mod bug_regressions;
 
 #[path = "integration/cimd.rs"]
 mod cimd;
+
+#[path = "integration/cli_delete.rs"]
+mod cli_delete;
 
 #[path = "integration/kratos_contracts.rs"]
 mod kratos_contracts;

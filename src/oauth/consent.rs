@@ -802,7 +802,8 @@ async fn switch_account(
         && let Some(ksid) = &kratos_session_id
     {
         super::op_sessions::end_op_sessions_for_browser(
-            state,
+            &state.db,
+            &state.ory,
             &subject,
             ksid,
             super::op_sessions::GrantRevocation::Keep,

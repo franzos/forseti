@@ -48,6 +48,8 @@ error-boundary-account-delete-ownership-check-failed = Wir konnten Ihre Organisa
 error-boundary-account-delete-consent-unreachable = Wir konnten den Zustimmungsdienst nicht erreichen, um Ihre verbundenen Apps zu benachrichtigen. Es wurde nichts geändert; bitte versuchen Sie es in einem Moment erneut.
 error-boundary-account-delete-notifications-failed = Wir konnten die Löschbenachrichtigungen nicht vorbereiten. Es wurde nichts geändert; bitte versuchen Sie es erneut.
 error-boundary-account-delete-failed = Wir konnten Ihr Konto nicht löschen. Bitte versuchen Sie es in einem Moment erneut.
+error-boundary-account-export-title = Export nicht verfügbar
+error-boundary-account-export-failed = Wir konnten Ihren Export nicht zusammenstellen, weil eine der Datenquellen nicht geantwortet hat. Es wurde nichts geändert; bitte versuchen Sie es in einem Moment erneut.
 
 # SAML-Fehlerseite (wird mit der Standardsprache gerendert; der ACS-Callback trägt keine Anfragesprache).
 error-boundary-sso-unavailable-title = Single Sign-on nicht verfügbar

@@ -27,6 +27,7 @@ use crate::{FlowQuery, render_error_boundary};
 
 pub(crate) mod account;
 pub(crate) mod authorized_apps;
+pub(crate) mod export;
 pub(crate) mod linked_providers;
 pub(crate) mod offline_access;
 pub(crate) mod oidc_links_db;
@@ -86,6 +87,10 @@ pub(crate) fn router(cfg: &crate::config::AppConfig) -> Router<AppState> {
         .route(
             "/settings/account/delete",
             get(account::settings_account_delete).post(account::settings_account_delete_submit),
+        )
+        .route(
+            "/settings/account/export",
+            get(export::settings_account_export),
         )
         .merge(offline_access_router(cfg))
 }
@@ -164,6 +169,9 @@ pub(crate) enum SettingsSection {
     /// The verifier it mints authenticates on hosts that can't reach Forseti,
     /// so it gets the same gate as any other credential change.
     OfflineAccess,
+    /// Account export: a bulk read of everything held about the person, so
+    /// it gets the same probe-only gate as the delete.
+    Export,
 }
 
 impl SettingsSection {
@@ -172,7 +180,7 @@ impl SettingsSection {
     fn is_probe_only(self) -> bool {
         matches!(
             self,
-            SettingsSection::Account | SettingsSection::OfflineAccess
+            SettingsSection::Account | SettingsSection::OfflineAccess | SettingsSection::Export
         )
     }
 
@@ -186,6 +194,7 @@ impl SettingsSection {
             SettingsSection::AccountOverview => "account",
             SettingsSection::Account => "account/delete",
             SettingsSection::OfflineAccess => "offline-access",
+            SettingsSection::Export => "account/export",
         }
     }
     fn path(self) -> &'static str {
@@ -198,6 +207,7 @@ impl SettingsSection {
             SettingsSection::AccountOverview => "/settings/account",
             SettingsSection::Account => "/settings/account/delete",
             SettingsSection::OfflineAccess => "/settings/offline-access",
+            SettingsSection::Export => "/settings/account/export",
         }
     }
 }
@@ -304,6 +314,9 @@ fn settings_section_from_flow(flow: &serde_json::Value) -> SettingsSection {
     if decoded.ends_with("/settings/offline-access") {
         return SettingsSection::OfflineAccess;
     }
+    if decoded.ends_with("/settings/account/export") {
+        return SettingsSection::Export;
+    }
     if decoded.ends_with("/settings/account") {
         return SettingsSection::AccountOverview;
     }
@@ -350,7 +363,11 @@ mod tests {
     /// privileged gate lands the user on an unrelated page.
     #[test]
     fn probe_sections_route_back_to_themselves() {
-        for section in [SettingsSection::Account, SettingsSection::OfflineAccess] {
+        for section in [
+            SettingsSection::Account,
+            SettingsSection::OfflineAccess,
+            SettingsSection::Export,
+        ] {
             assert!(section.is_probe_only());
             let routed = settings_section_from_flow(&flow_returning_to(section.path()));
             assert_eq!(routed.as_slug(), section.as_slug());

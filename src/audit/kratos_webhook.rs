@@ -274,7 +274,8 @@ async fn end_other_browsers_after_password_change(state: &AppState, payload: &Kr
         return;
     };
     crate::oauth::op_sessions::end_op_sessions_for_subject(
-        state,
+        &state.db,
+        &state.ory,
         identity_id,
         Some(ksid),
         crate::oauth::op_sessions::GrantRevocation::Revoke,

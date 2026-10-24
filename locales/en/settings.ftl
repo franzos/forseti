@@ -68,8 +68,11 @@ settings-password-back = Back to settings
 settings-account-heading = Account
 settings-account-subtitle = Permanent changes to your account.
 settings-account-delete-section-heading = Delete account
-settings-account-delete-body = Permanently delete your account, every active session, and all 2FA / recovery state. Apps that hold copies of your data are notified so they can clear their side. This cannot be undone.
+settings-account-delete-body = Permanently delete your account. This removes your login, sessions, 2FA and recovery codes, profile and username, linked providers, SSH keys, POSIX account, offline passphrase, organization and team memberships, and invites sent to your email. Apps that hold a copy of your data are told to delete it. This cannot be undone.
 settings-account-delete-action = Delete my account
+settings-account-export-section-heading = Export your data
+settings-account-export-body = Download everything we hold about you as one JSON file: your account, addresses and credential types, sessions with device details, audit entries, authorized apps, organization and team memberships, invites, profile and username history, linked providers, SSH keys, POSIX account, host logins and whether an offline passphrase is set. Password hashes, tokens and other secrets are never included.
+settings-account-export-action = Download my data
 
 # Account delete confirmation page
 settings-account-delete-page-title = Confirm delete
@@ -77,8 +80,10 @@ settings-account-delete-confirm-heading = Delete your account?
 settings-account-delete-confirm-subtitle-prefix = This permanently removes
 settings-account-delete-confirm-subtitle-suffix = and every session, recovery code, and credential attached to it.
 settings-account-delete-apps-heading = These apps will be told you're gone
-settings-account-delete-apps-note = Apps copy data they need (profile, settings) and keep it linked to your account ID. We notify them via the deletion webhook they registered so they can clear their copy.
+settings-account-delete-apps-note = Apps copy data they need (profile, settings) and keep it linked to your account ID. We notify them via the deletion webhook they registered so they can clear their copy. We can notify them; we can't force them to delete.
 settings-account-delete-no-apps = No third-party apps have copies of your data right now. Nothing to notify.
+settings-account-delete-left-heading = What we keep
+settings-account-delete-left-body = Audit entries that name your account stay for { $days } days and are then removed. Organizations, teams, hosts and domains you created stay, with your name removed. Apps keep what they hold until they act on the notification.
 settings-account-delete-confirm-label = To confirm, type your email below:
 settings-account-delete-confirm-placeholder = Type your email to confirm
 settings-account-delete-confirm-submit = Yes, delete my account

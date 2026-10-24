@@ -210,7 +210,8 @@ pub async fn revoke(
         Ok(()) => {
             if let Some(identity_id) = &identity_id {
                 crate::oauth::op_sessions::end_op_sessions_for_browser(
-                    &state,
+                    &state.db,
+                    &state.ory,
                     identity_id,
                     &id,
                     crate::oauth::op_sessions::GrantRevocation::Revoke,

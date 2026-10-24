@@ -7,7 +7,7 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use diesel::prelude::*;
 use serde::Serialize;
 
-use crate::db::DbPool;
+use crate::db::{DbPool, lower};
 use crate::db_interact;
 use crate::schema::{
     host_allowed_groups, org_allowed_domains, org_logos, org_team_members, org_teams,
@@ -822,9 +822,7 @@ pub async fn remove_member_everywhere(db: &DbPool, identity_id: &str) -> anyhow:
             Ok(n)
         })
     })?;
-    if let Err(e) = super::teams::remove_identity_from_all_teams(db, identity_id).await {
-        tracing::error!(error = ?e, identity_id, "failed to purge org-team membership on identity delete");
-    }
+    super::teams::remove_identity_from_all_teams(db, identity_id).await?;
     Ok(affected)
 }
 
@@ -1034,6 +1032,50 @@ pub async fn list_org_invites(db: &DbPool, org_id: &str) -> anyhow::Result<Vec<O
             .load(conn)
     })?;
     Ok(rows)
+}
+
+/// An invite addressed to an email, without the token column.
+#[derive(Queryable, Selectable, Debug, Clone, Serialize)]
+#[diesel(table_name = organization_invites)]
+pub struct InviteSummary {
+    pub org_id: String,
+    pub email: String,
+    pub role: String,
+    pub invited_by: Option<String>,
+    pub created_at: String,
+    pub expires_at: String,
+    pub accepted_at: Option<String>,
+}
+
+/// Every invite addressed to one of `emails`, matched lowercased on both
+/// sides. Uncapped: the account export reads it.
+pub async fn invites_for_emails(
+    db: &DbPool,
+    emails: &[String],
+) -> anyhow::Result<Vec<InviteSummary>> {
+    let emails: Vec<String> = emails.iter().map(|e| e.to_lowercase()).collect();
+    let rows: Vec<InviteSummary> = db_interact!(db, |conn| {
+        organization_invites::table
+            .filter(lower(organization_invites::email.nullable()).eq_any(&emails))
+            .order(organization_invites::created_at.asc())
+            .select(InviteSummary::as_select())
+            .load(conn)
+    })?;
+    Ok(rows)
+}
+
+/// Delete every invite addressed to one of `emails`, matched lowercased on
+/// both sides. Returns the rows removed; idempotent.
+pub async fn delete_invites_for_emails(db: &DbPool, emails: &[String]) -> anyhow::Result<usize> {
+    let emails: Vec<String> = emails.iter().map(|e| e.to_lowercase()).collect();
+    let n: usize = db_interact!(db, |conn| {
+        diesel::delete(
+            organization_invites::table
+                .filter(lower(organization_invites::email.nullable()).eq_any(&emails)),
+        )
+        .execute(conn)
+    })?;
+    Ok(n)
 }
 
 /// Outcome of [`finalize_invite_txn`].
@@ -1816,5 +1858,54 @@ mod tests {
             crate::orgs::org_role(&db, "ident-1", DEFAULT_ORG_ID).await,
             Some(Role::Owner)
         );
+    }
+
+    #[tokio::test]
+    async fn invites_by_email_match_lowercased_and_delete_only_those() {
+        let db = test_pool().await;
+        create_org(&db, "org-i", "org-i", "Org I", None)
+            .await
+            .unwrap();
+        insert_invite(
+            &db,
+            "t1",
+            "org-i",
+            "Alice@Example.com",
+            Role::Member,
+            None,
+            7,
+        )
+        .await
+        .unwrap();
+        insert_invite(
+            &db,
+            "t2",
+            "org-i",
+            "alice@example.com",
+            Role::Owner,
+            Some("inviter"),
+            7,
+        )
+        .await
+        .unwrap();
+        insert_invite(&db, "t3", "org-i", "bob@example.com", Role::Member, None, 7)
+            .await
+            .unwrap();
+
+        let emails = vec!["ALICE@example.com".to_string()];
+        let found = invites_for_emails(&db, &emails).await.unwrap();
+        assert_eq!(found.len(), 2);
+        assert!(found.iter().all(|i| i.org_id == "org-i"));
+        assert!(
+            found
+                .iter()
+                .any(|i| i.invited_by.as_deref() == Some("inviter"))
+        );
+        assert!(invites_for_emails(&db, &[]).await.unwrap().is_empty());
+
+        assert_eq!(delete_invites_for_emails(&db, &emails).await.unwrap(), 2);
+        assert!(invites_for_emails(&db, &emails).await.unwrap().is_empty());
+        assert_eq!(list_org_invites(&db, "org-i").await.unwrap().len(), 1);
+        assert_eq!(delete_invites_for_emails(&db, &emails).await.unwrap(), 0);
     }
 }

@@ -137,7 +137,7 @@ pub async fn list(
                     .unwrap_or_default(),
                 created_at_pretty: humanise_timestamp(&ctx.locale, &created_at),
                 created_at,
-                created_by: r.created_by,
+                created_by: r.created_by.unwrap_or_default(),
                 can_recheck: has_fetchable_host(&r.resource),
                 toggle_url: with_org(&format!("/admin/resources/{}/toggle", r.id), &scope),
                 recheck_url: with_org(&format!("/admin/resources/{}/recheck", r.id), &scope),

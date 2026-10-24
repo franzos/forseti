@@ -30,7 +30,6 @@ use crate::render::render;
 use crate::state::AppState;
 pub(crate) use crate::web::FORSETI_VERSION;
 
-pub mod actions;
 pub mod audit;
 pub mod clients;
 pub mod configuration;

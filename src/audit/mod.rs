@@ -68,7 +68,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::config::AppConfig;
-use crate::db::DbPool;
+use crate::db::{DbPool, lower};
 use crate::db_interact;
 use crate::schema::audit_events;
 use crate::state::AppState;
@@ -145,6 +145,8 @@ pub mod action {
     /// `critical` severity because it's a destructive identity-deletion
     /// initiated outside the admin surface.
     pub const IDENTITY_RECLAIMED: &str = "identity.reclaimed";
+    /// `unverified-prune` deleted an identity whose addresses were never verified.
+    pub const IDENTITY_PRUNED: &str = "identity.pruned";
     pub const ADMIN_SESSION_REVOKED: &str = "admin.session.revoked";
     // posix host enrollment (`src/admin/hosts.rs`)
     pub const HOST_ENROLLED: &str = "host.enrolled";
@@ -203,6 +205,7 @@ pub mod action {
     pub const ORG_DOMAIN_REMOVED: &str = "org.domain.removed";
     // account-self (#1)
     pub const ACCOUNT_SELF_DELETED: &str = "account.self_deleted";
+    pub const ACCOUNT_EXPORTED: &str = "account.exported";
     pub const ACCOUNT_SWITCHED: &str = "account.switched";
     // commercial license (`src/commercial/`)
     pub const LICENSE_ACTIVATED: &str = "license.activated";
@@ -301,6 +304,15 @@ impl SafeMetadata {
             out.insert(k, v);
         }
         Self(serde_json::Value::Object(out))
+    }
+
+    /// Union of two screened objects; keys in `other` win.
+    pub fn merge(mut self, other: SafeMetadata) -> Self {
+        if let (serde_json::Value::Object(a), serde_json::Value::Object(b)) = (&mut self.0, other.0)
+        {
+            a.extend(b);
+        }
+        self
     }
 
     fn into_value(self) -> serde_json::Value {
@@ -580,6 +592,14 @@ impl AuditEvent {
     /// without a special-case render path.
     pub fn actor_webhook(mut self, source: impl Into<String>) -> Self {
         self.actor_kind = actor_kind::WEBHOOK;
+        self.actor_email = Some(source.into());
+        self
+    }
+
+    /// Unattended process (e.g. `"cli"`, `"unverified-prune"`), recorded into
+    /// `actor_email` for display like [`actor_webhook`](Self::actor_webhook).
+    pub fn actor_system(mut self, source: impl Into<String>) -> Self {
+        self.actor_kind = actor_kind::SYSTEM;
         self.actor_email = Some(source.into());
         self
     }
@@ -980,15 +1000,6 @@ pub struct AuditFilter {
     pub offset: i64,
 }
 
-// SQL `LOWER()` over a nullable text column. Declared here rather than
-// imported wholesale because the only call site is the audit-email
-// filter below — keeps the surface small. `LOWER(NULL)` is `NULL`, which
-// `LIKE` correctly evaluates to NULL (i.e. filtered out), so rows with a
-// `NULL` actor_email don't match an email filter.
-diesel::define_sql_function! {
-    fn lower(x: diesel::sql_types::Nullable<diesel::sql_types::Text>) -> diesel::sql_types::Nullable<diesel::sql_types::Text>
-}
-
 /// Backslash-escape the SQL LIKE metacharacters (`\`, `%`, `_`) in a
 /// user-supplied substring so it matches literally under an `ESCAPE '\'`
 /// clause. The backslash itself is escaped first to avoid double-escaping.
@@ -1088,7 +1099,7 @@ pub async fn query(db: &DbPool, filter: AuditFilter) -> anyhow::Result<(Vec<Audi
             .get_result(conn)?;
 
         let rows: Vec<AuditRow> = apply_filters!(a::audit_events.into_boxed(), &f)
-            .order(a::created_at.desc())
+            .order((a::created_at.desc(), a::id.desc()))
             .limit(limit)
             .offset(offset)
             .select(AuditRow::as_select())

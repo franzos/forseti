@@ -749,7 +749,7 @@ pub async fn list_consent_sessions_by_subject(
 /// Parse `Link: <…?page_token=XYZ&…>; rel="next"` and return the
 /// `page_token` value. Hydra emits the standard RFC 5988 shape; we
 /// only care about the `next` relation.
-fn next_link(headers: &reqwest::header::HeaderMap) -> Option<String> {
+pub(crate) fn next_link(headers: &reqwest::header::HeaderMap) -> Option<String> {
     let raw = headers.get("link").and_then(|v| v.to_str().ok())?;
     for part in raw.split(',') {
         let part = part.trim();

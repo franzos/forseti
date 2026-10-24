@@ -628,15 +628,19 @@ regular password page:
 
 Danger zone for the signed-in user — permanent identity removal plus a
 signed webhook fan-out to every OAuth2 client that registered a
-deletion endpoint. Handlers in `src/settings/account.rs`; saga state
-in `src/webhook.rs`; the outbox is `webhook_outbox`. Payloads are
+deletion endpoint. Handlers in `src/settings/account.rs`; the deletion
+itself is `identity::delete::delete_identity` (`src/identity/delete.rs`),
+shared with the admin page, the `delete-identity` CLI, email reclaim and
+`unverified-prune` (see [Identity deletion](#identity-deletion)); saga
+state in `src/webhook/`; the outbox is `webhook_outbox`. Payloads are
 RFC 8417 Security Event Tokens signed EdDSA (Ed25519) by the Forseti-owned
 key at `[webhook].signing_key_path` and published as JWKS at
 `/.well-known/webhook-jwks.json`.
 
 Direction is one-way: **Forseti → apps**. Apps can clear their local
 copy of user data, but they can't initiate identity deletion — that's
-gated to the user (or an operator via `/admin/identities`).
+gated to the user (or an operator via `/admin/identities` or
+`forseti delete-identity`).
 
 `GET /settings/account` — handler `settings_account`
 (`src/settings/account.rs:60`), template `templates/settings_account.html`.
@@ -668,6 +672,7 @@ sequenceDiagram
 
     User->>Forseti: POST /settings/account/delete (CSRF + confirm_email)
     Forseti->>Forseti: verify CSRF, privileged session, email match
+    Forseti->>DB: sole-owner guard (orgs_where_sole_owner_with_other_members)
     Forseti->>Hydra: list_consent_sessions_by_subject(user_id)
     alt Hydra reachable
         Hydra-->>Forseti: clients + metadata.forseti.account_deletion_url
@@ -676,11 +681,12 @@ sequenceDiagram
         Forseti-->>User: error page; identity untouched, no outbox rows
     end
     Forseti->>DB: enqueue PENDING outbox row per (client, URL) with EdDSA-signed SET as payload
+    Forseti->>Hydra: end the subject's OP sessions (best-effort)
     Forseti->>Kratos: admin_delete_identity(user_id)
     alt Kratos delete OK
-        Forseti->>Hydra: revoke login + consent sessions for user_id (best-effort)
         Forseti->>DB: PENDING → CONFIRMED for event_id
-        Forseti->>DB: audit::log_critical(ACCOUNT_SELF_DELETED) (audit_fallback stderr on Err)
+        Forseti->>DB: delete memberships, POSIX, profile, OIDC links, invites; NULL created_by/added_by references (best-effort, orphans reported)
+        Forseti->>DB: audit row account.self_deleted, critical (audit_fallback stderr on Err)
         Forseti-->>User: 303 /login?msg=account_deleted + Set-Cookie clearing ory_kratos_session
         Worker->>DB: drain CONFIRMED rows where next_attempt_at ≤ now
         Worker->>App: POST <url> with compact JWS body (application/secevent+jwt) + X-Forseti-Event header
@@ -1701,6 +1707,14 @@ non-endpoint client values.
 
 Templates: `identities_list.html`, `identity_show.html`, `confirm.html`.
 
+`delete` (POST) calls `identity::delete::delete_identity` with
+`DeleteReason::Admin` and the admin as actor (see [Identity
+deletion](#identity-deletion)): consented apps are notified through the
+outbox, Forseti-owned rows are removed, references are nulled, and the
+`admin.identity.deleted` audit row carries `reason = admin`. The sole-owner
+guard applies; a refusal renders the admin error page naming the
+organizations.
+
 Ory calls (all `kratos::*`):
 
 - `list_identities(limit=50, page_token, filter_email)` — `src/ory/kratos.rs:288`
@@ -1709,7 +1723,8 @@ Ory calls (all `kratos::*`):
   in the show view)
 - `admin_create_recovery_code(id)` — `src/ory/kratos.rs:367`
 - `admin_update_identity_state(id, Active|Inactive)` — `src/ory/kratos.rs:334`
-- `admin_delete_identity(id)` — `src/ory/kratos.rs:358`
+- `admin_delete_identity(id)` — `src/ory/kratos.rs:358`, called from
+  inside `delete_identity`
 
 The show view aggregates: traits (pretty-printed JSON), enrolled
 credentials (`password`, `oidc`, `totp`, `webauthn`, `lookup_secret` —
@@ -2184,12 +2199,12 @@ sequenceDiagram
         Forseti-->>User: confirm form
         User->>Forseti: POST /claim-email/confirm (code, token)
         Forseti->>Forseti: validate code (constant-time)
-        Forseti->>Kratos: admin_delete_identity(target)
+        Forseti->>Forseti: delete_identity(target, DeleteReason::Reclaim)
         Forseti-->>User: 303 /registration
     end
 ```
 
-The reveal row is consumed on first read (`flash::take_secret_reveal`); a stale token returns the "code expired" error.
+The reveal row is consumed on first read (`flash::take_secret_reveal`); a stale token returns the "code expired" error. The delete is the shared `identity::delete::delete_identity` (see [Identity deletion](#identity-deletion)) with `DeleteReason::Reclaim`: no sole-owner guard, and invites addressed to the email plus the email-matched references are kept for the person registering next.
 
 ### Org-scoped admin
 
@@ -2661,11 +2676,27 @@ from the host's queued events via `/posix/v1/offline_audit` and written with
 only `host_id` + `username` + a coarse `reason`. The `SafeMetadata` deny-list
 blocks `passphrase`, `verifier`, `pepper`, and `verify_tag` regardless.
 
+## Identity deletion
+
+One function, `identity::delete::delete_identity` (`src/identity/delete.rs`), deletes an identity for every entry point. It takes a `DeleteEnv` (db, ory, webhook signing key, self url, issuer; `DeleteEnv::from_state` in the server, built from config in the CLIs) and a `DeleteRequest` (identity id, `DeleteReason`, `DeleteActor`, `force`, optional `AuditCtx`, extra audit metadata) and returns a `DeletionReport` or a `DeleteError`.
+
+| Entry point | Reason | Actor | Sole-owner guard | Email-matched rows |
+| --- | --- | --- | --- | --- |
+| `POST /settings/account/delete` | `SelfService` | `User` | yes | removed |
+| `POST /admin/identities/{id}/delete` | `Admin` | `Admin` | yes | removed |
+| `forseti delete-identity <id>` | `Cli` | `System { source: "delete-identity" }` | yes, `--force` bypasses | removed |
+| `POST /claim-email/confirm` | `Reclaim` | `User` (the deleted identity, with the claimed email) | no | kept |
+| `forseti unverified-prune` | `Prune` | `System { source: "unverified-prune" }` | no | kept |
+
+Order: the sole-owner guard (`orgs::db::orgs_where_sole_owner_with_other_members`); the reads (consented clients with an `account_deletion_url`, the identity's verified addresses); the outbox rows as PENDING; end the subject's OP sessions; `admin_delete_identity` (the point of no return; the outbox is confirmed, or aborted on failure); then best-effort removal of the rows the Kratos cascade never reaches (`orgs::db::remove_member_everywhere`, `posix::db::delete_account_rows`, `profiles::delete_for_identity`, `settings::oidc_links_db::delete_for_identity`, `oauth::op_sessions::forget_subject`, `orgs::db::delete_invites_for_emails`) and `identity::pseudonymise::null_references`, which sets `created_by`/`added_by`/`invited_by`/`accepted_by`/`verified_by` columns pointing at the identity (by id, and by verified email where the column holds an email) to NULL; one audit row at critical severity. A step failing after the Kratos delete is reported in `DeletionReport.orphans` and the audit metadata, not returned as an error. Errors before the Kratos delete (`DeleteError::SoleOwner`, `Guard`, `Collect`, `Outbox`, `Kratos`) leave the identity intact.
+
+`forseti delete-identity <id> [--yes] [--force]` (`src/identity/mod.rs::delete_identity_cli`, dispatched from `src/lib.rs::run_cli`): without `--yes` on a terminal it looks the identity up with `admin_get_identity_full_optional`, prints the verified email and requires the id or that email typed back; off a terminal without `--yes` it exits 2. `--force` passes the sole-owner guard and prints `left without an owner: <name>` per organization (`DeletionReport.orgs_left_without_owner`). It prints `removed: ...` (`Removed::summary`) and `left as orphans: ...`; exit 0 on success, 1 on refusal or failure.
+
 ## Unverified-account reaper
 
-`forseti unverified-prune` (`src/identity/mod.rs::prune_unverified_cli`) walks Kratos's identity list and deletes anyone with at least one unverified verifiable address AND `created_at < now - identity.unverified_ttl_days` (default 7).
+`forseti unverified-prune` (`src/identity/mod.rs::prune_unverified_cli`) walks Kratos's identity list and deletes anyone with at least one unverified verifiable address AND `created_at < now - identity.unverified_ttl_days` (default 7). Each hit goes through `delete_identity` with `DeleteReason::Prune` (see [Identity deletion](#identity-deletion)); the run reports the identities whose best-effort steps left rows behind.
 
-CLI dispatch lives in `src/main.rs` next to `audit-prune`:
+CLI dispatch lives in `src/lib.rs::run_cli` next to `audit-prune`:
 
 ```
 forseti unverified-prune

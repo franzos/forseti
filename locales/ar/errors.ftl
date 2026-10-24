@@ -48,6 +48,8 @@ error-boundary-account-delete-ownership-check-failed = تعذّر علينا ا�
 error-boundary-account-delete-consent-unreachable = تعذّر علينا الوصول إلى خدمة الموافقة لإخطار تطبيقاتك المتصلة. لم يتغير شيء؛ يُرجى المحاولة مرة أخرى بعد لحظة.
 error-boundary-account-delete-notifications-failed = تعذّر علينا تجهيز إشعارات الحذف. لم يتغير شيء؛ يُرجى المحاولة مرة أخرى.
 error-boundary-account-delete-failed = تعذّر علينا حذف حسابك. يُرجى المحاولة مرة أخرى بعد لحظة.
+error-boundary-account-export-title = التصدير غير متاح
+error-boundary-account-export-failed = تعذّر علينا تجميع ملف التصدير لأن أحد مصادر البيانات لم يستجب. لم يتغيّر شيء؛ يُرجى المحاولة مرة أخرى بعد لحظة.
 
 # حدود أخطاء SAML (تُعرَض تحت اللغة الافتراضية؛ استدعاء ACS لا يحمل لغة الطلب).
 error-boundary-sso-unavailable-title = الدخول الموحّد غير متاح

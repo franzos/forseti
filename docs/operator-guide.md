@@ -460,7 +460,7 @@ The two-tier code lives at `src/admin/mod.rs::require_admin` (Tier 1) and `src/a
 | `/admin/clients/new`                  | Create a new OAuth2 client. Returns to the show page with a one-time secret + registration access token reveal. |
 | `/admin/clients/{id}`                 | View / edit a client. Rotate-secret and delete confirm pages live under here.                   |
 | `/admin/identities`                   | List Kratos identities, filter by email (Kratos `credentials_identifier`).                       |
-| `/admin/identities/{id}`              | View identity traits, credentials, verifiable addresses, and recent sessions. Trigger recovery codes, disable / enable, or delete from here. |
+| `/admin/identities/{id}`              | View identity traits, credentials, verifiable addresses, and recent sessions. Trigger recovery codes, disable / enable, or delete from here. Delete runs the same deletion as the settings page and `forseti delete-identity` (see [Deleting an identity](#deleting-an-identity)). |
 | `/admin/sessions`                     | List every active session across all identities. Toggle "active only" and revoke individual sessions. |
 | `/admin/audit`                        | Append-only audit event log. Filter by email substring, action prefix, severity, and `since` timestamp. Backed by the Forseti-owned `audit_events` table (sqlite or Postgres); retention is operator-configured via `[audit].audit_retention_days` and pruning runs through the `forseti audit-prune` CLI subcommand (not auto-run inside the HTTP server). |
 | `/admin/audit/{id}`                   | Full detail page for a single audit row — actor, target, metadata, IP hash, user agent.        |
@@ -728,7 +728,7 @@ On the account page (`/admin/posix/{id}`):
 
 - **Add SSH keys** — paste a public key (`/admin/posix/{id}/keys`). The resolver serves these to sshd's `AuthorizedKeysCommand`. Remove a key from the same page (`/admin/posix/{id}/keys/{key_id}/delete`).
 - **Disable / enable** — toggle the account (`/admin/posix/{id}/disable`, `/admin/posix/{id}/enable`). A disabled account stops resolving (no login, no keys) but its row, uid/gid, and keys are retained, so enabling it again restores the same identifiers. **Disabling frees a seat** — a disabled account doesn't count against the cap.
-- **Delete** (`/admin/posix/{id}/delete`) — remove the account and its POSIX rows outright. Deleting the underlying Kratos identity also purges its POSIX rows at every delete path (admin delete, self-service account deletion, the unverified-prune reaper), and an hourly reconcile sweep catches identities deleted out-of-band via the Kratos admin API — so an orphaned POSIX account can't keep a deleted identity's login alive.
+- **Delete** (`/admin/posix/{id}/delete`) — remove the account and its POSIX rows outright. Deleting the underlying Kratos identity also purges its POSIX rows at every delete path (the settings page, the admin page, `forseti delete-identity`, email reclaim, `unverified-prune`; see [Deleting an identity](#deleting-an-identity)), and an hourly reconcile sweep catches identities deleted out-of-band via the Kratos admin API — so an orphaned POSIX account can't keep a deleted identity's login alive.
 
 ### Seat cap
 
@@ -2189,6 +2189,28 @@ ExecStart=/opt/forseti/forseti unverified-prune
 ```
 
 The reaper, together with the per-invite verified-only check and the hand-rolled claim-email flow at `/claim-email`, closes the unverified-email-squatting gap left by Kratos's default registration.
+
+### Deleting an identity
+
+```bash
+forseti delete-identity <id>            # asks for confirmation on a terminal
+forseti delete-identity <id> --yes      # no prompt; required when stdin is not a terminal
+forseti delete-identity <id> --force    # delete a sole organization owner anyway
+```
+
+`<id>` is the Kratos identity id (shown on `/admin/identities/{id}`). On a terminal the command prints the identity's verified email and waits for the id or that email to be typed back; a mismatch exits 1 without deleting. Off a terminal (cron, CI, a pipe) the prompt is refused with exit 2 unless `--yes` is given. Exit 0 means the identity is gone; exit 1 means the deletion was refused or failed before the Kratos delete, and the identity is intact.
+
+The command reads the same `config.toml` as the server, runs migrations idempotently, and uses the webhook signing key at `[webhook].signing_key_path`; if the file is missing it generates one and says so, the same as the server does on boot.
+
+Deletion refuses an identity that is the only owner of an organization with other members, for the settings page, the admin page and this command alike. Transfer ownership first, or pass `--force`: the identity is deleted, the organization keeps no owner, and the command prints one `left without an owner: <name>` line per organization (also recorded in the audit row as `orgs_left_without_owner`).
+
+**What deletion removes and what it leaves.** Every entry point (the settings page, `/admin/identities/{id}/delete`, this command, the email-reclaim flow and `unverified-prune`) runs one deletion function, so the outcome is the same regardless of who triggered it:
+
+- Removed: the Kratos identity with its credentials and sessions; Hydra login and consent sessions; organization and team memberships; the POSIX account, SSH keys, offline secret and device sessions; the member profile and username history; linked-provider and SAML link rows; invites addressed to the identity's verified addresses (settings page, admin page and CLI only; reclaim and prune keep them for the address's next owner).
+- Left in place: audit rows naming the identity, which age out under `[audit].audit_retention_days`; organizations, teams, hosts, domains, SAML connections, resources and client verifications the identity created or added, with the `created_by`/`added_by`/`verified_by` reference set to NULL so the objects stay usable by their other members.
+- Notified, not forced: every OAuth2 client the identity consented to that registered an `account_deletion_url` receives a signed `account-purged` event through the outbox (see [`[webhook]`](#webhook)). Receivers delete their own copy; Forseti never reaches into them.
+
+The output lists what was removed (`removed: ...`) and, when a step after the Kratos delete failed, which steps left rows behind (`left as orphans: ...`). The audit row is `admin.identity.deleted` at critical severity with actor kind `system`, source `delete-identity`, and `reason = cli`.
 
 ### Re-claim flow safety rails
 

@@ -14,7 +14,7 @@ pub struct SamlConnection {
     pub org_id: String,
     pub enabled: i32,
     pub display_name: String,
-    pub created_by: String,
+    pub created_by: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -221,6 +221,29 @@ pub async fn upsert_link(
     Ok(())
 }
 
+#[derive(Queryable, Selectable, Debug, Clone, Serialize)]
+#[diesel(table_name = saml_links)]
+pub struct SamlLink {
+    pub org_id: String,
+    pub email: String,
+    pub idp_subject: Option<String>,
+    pub created_at: String,
+}
+
+/// Every SAML link of an identity across orgs, oldest first. Uncapped: the
+/// account export reads it.
+pub async fn links_for_identity(db: &DbPool, identity_id: &str) -> anyhow::Result<Vec<SamlLink>> {
+    let i = identity_id.to_string();
+    let rows: Vec<SamlLink> = db_interact!(db, |conn| {
+        saml_links::table
+            .filter(saml_links::identity_id.eq(&i))
+            .order(saml_links::created_at.asc())
+            .select(SamlLink::as_select())
+            .load(conn)
+    })?;
+    Ok(rows)
+}
+
 /// Stale-link cleanup when the Kratos identity behind a link is gone.
 pub async fn delete_link(db: &DbPool, org_id: &str, email: &str) -> anyhow::Result<()> {
     let o = org_id.to_string();
@@ -235,4 +258,38 @@ pub async fn delete_link(db: &DbPool, org_id: &str, email: &str) -> anyhow::Resu
         .map(|_| ())
     })?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::orgs::db::test_pool;
+
+    #[tokio::test]
+    async fn connection_without_created_by_round_trips() {
+        let db = test_pool().await;
+        crate::orgs::db::create_org(&db, "org-s", "org-s", "Org S", None)
+            .await
+            .unwrap();
+        let now = Utc::now().to_rfc3339();
+        let inserted: anyhow::Result<usize> = async {
+            Ok(db_interact!(db, |conn| {
+                diesel::insert_into(saml_connections::table)
+                    .values((
+                        saml_connections::org_id.eq("org-s"),
+                        saml_connections::enabled.eq(1),
+                        saml_connections::display_name.eq("idp"),
+                        saml_connections::created_by.eq(None::<String>),
+                        saml_connections::created_at.eq(&now),
+                        saml_connections::updated_at.eq(&now),
+                    ))
+                    .execute(conn)
+            })?)
+        }
+        .await;
+        assert_eq!(inserted.unwrap(), 1);
+        let row = get_connection(&db, "org-s").await.unwrap().unwrap();
+        assert_eq!(row.created_by, None);
+        assert!(row.is_enabled());
+    }
 }

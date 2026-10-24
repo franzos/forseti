@@ -39,7 +39,7 @@ pub struct Row {
     pub enabled: bool,
     pub corroboration: String,
     pub corroborated_at: Option<NaiveDateTime>,
-    pub created_by: String,
+    pub created_by: Option<String>,
     pub created_at: NaiveDateTime,
 }
 
@@ -216,7 +216,7 @@ mod tests {
         assert_eq!(a.corroboration, corroboration::UNCHECKED);
         assert!(a.corroborated_at.is_none());
         assert_eq!(a.org_id, "default");
-        assert_eq!(a.created_by, "test@example.com");
+        assert_eq!(a.created_by.as_deref(), Some("test@example.com"));
 
         assert_eq!(
             list_enabled(&db).await.expect("list_enabled"),
@@ -310,5 +310,29 @@ mod tests {
         assert!(list_enabled(&db).await.expect("list_enabled").is_empty());
 
         delete(&db, id).await.expect("delete unknown id");
+    }
+
+    #[tokio::test]
+    async fn row_without_created_by_round_trips() {
+        let db = crate::orgs::db::test_pool().await;
+        let inserted: anyhow::Result<usize> = async {
+            Ok(db_interact!(db, |conn| {
+                diesel::insert_into(rr::table)
+                    .values((
+                        rr::resource.eq("https://anon.example.com/mcp"),
+                        rr::display_name.eq("anon"),
+                        rr::org_id.eq("default"),
+                        rr::created_by.eq(None::<String>),
+                    ))
+                    .execute(conn)
+            })?)
+        }
+        .await;
+        assert_eq!(inserted.unwrap(), 1);
+        let rows = list_all(&db).await.expect("list_all");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].created_by, None);
+        assert_eq!(rows[0].resource, "https://anon.example.com/mcp");
+        assert!(rows[0].enabled);
     }
 }

@@ -320,3 +320,442 @@ async fn webhook_jwks_endpoint_serves_well_formed_ed25519_key() {
 /// lands.
 #[allow(dead_code)]
 fn _todo_webhook_fanout_test() {}
+
+/// One row in every table the Kratos cascade never reaches and one value in
+/// every reference column, seeded for one user so each deletion step has
+/// something to remove or null.
+struct Fixture {
+    org_id: String,
+    team_id: String,
+    host_id: String,
+    resource: String,
+    client_id: String,
+    invite_own: String,
+    invite_other: String,
+    other_email: String,
+    gid: i64,
+}
+
+fn seed_fixture(user: &RegisteredUser) -> Fixture {
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let digits = format!("{seed}");
+    let short = digits[digits.len() - 10..].to_string();
+    let id = user.identity_id.as_str();
+    let email = user.email.as_str();
+    let org_id = format!("org-del-{short}");
+    let team_id = format!("team-del-{short}");
+    let host_id = format!("host-del-{short}");
+    let resource = format!("https://del-{short}.example.test");
+    let client_id = format!("client-del-{short}");
+    let invite_own = format!("del-invite-own-{short}");
+    let invite_other = format!("del-invite-other-{short}");
+    let other_email = format!("other-{short}@example.test");
+    let gid = 800_000 + (seed % 90_000) as i64;
+
+    seed_profile_username(id, &format!("del-{short}"), &format!("old-{short}"));
+    seed_offline_secret(id, &format!("verifier-{short}"));
+    seed_oidc_link(id, "github");
+    seed_posix_account(id, &format!("deluser{short}"), gid, gid);
+    seed_organization(&org_id, &org_id, "Delete Test Org", "all");
+    set_reference_column("organizations", "created_by", "id", &org_id, id);
+    seed_org_membership(&org_id, id, "member");
+    set_reference_column("organization_members", "added_by", "org_id", &org_id, id);
+    seed_team(&team_id, &org_id, "Delete Team", &team_id, None);
+    set_reference_column("org_teams", "created_by", "id", &team_id, id);
+    add_team_member(&team_id, id);
+    seed_allowed_domain(&org_id, &format!("del-{short}.example.test"), id);
+    seed_saml_connection(&org_id, id);
+    seed_saml_link(&org_id, email, id, &format!("idp-{short}"));
+    seed_host_enrollment(&host_id, &format!("{host_id}.example.test"), "s", &org_id);
+    set_reference_column("host_enrollments", "created_by", "id", &host_id, email);
+    seed_host_account_login(&host_id, id);
+    seed_device_session(
+        &format!("dc-{short}"),
+        &format!("UC{short}"),
+        &host_id,
+        "deluser",
+        id,
+        &format!("cch-{short}"),
+    );
+    seed_hydra_op_rows(id, &format!("sid-{short}"), &client_id);
+    seed_registry_resource(&resource);
+    set_reference_column(
+        "resource_registry",
+        "created_by",
+        "resource",
+        &resource,
+        email,
+    );
+    seed_cimd_metadata_row(&client_id);
+    set_reference_column(
+        "oauth_client_metadata",
+        "verified_by",
+        "client_id",
+        &client_id,
+        id,
+    );
+    set_reference_column(
+        "oauth_client_metadata",
+        "verification_revoked_by",
+        "client_id",
+        &client_id,
+        email,
+    );
+    seed_org_invite(&invite_own, email, Some(id));
+    seed_org_invite(&invite_other, &other_email, Some(id));
+    set_reference_column(
+        "organization_invites",
+        "accepted_by",
+        "token",
+        &invite_other,
+        id,
+    );
+    Fixture {
+        org_id,
+        team_id,
+        host_id,
+        resource,
+        client_id,
+        invite_own,
+        invite_other,
+        other_email,
+        gid,
+    }
+}
+
+impl Fixture {
+    fn cleanup(&self, email: &str) {
+        delete_team(&self.team_id);
+        delete_host_account_logins(&self.host_id);
+        delete_device_sessions_for_host(&self.host_id);
+        delete_host_enrollment(&self.host_id);
+        delete_org_rows(&self.org_id);
+        delete_registry_resource(&self.resource);
+        delete_client_metadata(&self.client_id);
+        delete_invites_for_email(email);
+        delete_invites_for_email(&self.other_email);
+        delete_posix_group_members(self.gid);
+        delete_posix_group(self.gid);
+    }
+}
+
+/// Everything a deletion must have done regardless of entry point: the
+/// id-matched rows and columns, the other person's invite kept with its
+/// provenance nulled, and the critical audit row.
+fn assert_common_outcome(fx: &Fixture, user: &RegisteredUser, action: &str, actor_kind: &str) {
+    let left = rows_referencing(&user.identity_id, "");
+    assert!(left.is_empty(), "rows left after {action}: {left:?}");
+    assert_eq!(
+        count_invites_with_token(&fx.invite_other),
+        1,
+        "the invite to another address survives"
+    );
+    assert_eq!(
+        reference_column_value(
+            "organization_invites",
+            "invited_by",
+            "token",
+            &fx.invite_other
+        ),
+        None,
+        "invited_by nulled on the surviving invite"
+    );
+    assert_eq!(
+        reference_column_value(
+            "organization_invites",
+            "accepted_by",
+            "token",
+            &fx.invite_other
+        ),
+        None,
+        "accepted_by nulled on the surviving invite"
+    );
+    let row = latest_audit_event(action, &user.identity_id)
+        .unwrap_or_else(|| panic!("audit row {action} for {}", user.identity_id));
+    assert_eq!(row.severity, "critical");
+    assert_eq!(row.actor_kind, actor_kind);
+    assert!(
+        row.metadata["event_id"]
+            .as_str()
+            .is_some_and(|e| !e.is_empty()),
+        "metadata.event_id: {}",
+        row.metadata
+    );
+    assert_eq!(
+        row.metadata["orphan_count"], 0,
+        "metadata: {}",
+        row.metadata
+    );
+    assert_eq!(
+        row.metadata["webhook_targets"], 0,
+        "metadata: {}",
+        row.metadata
+    );
+}
+
+/// Drive the self-service confirm page and POST; returns the final URL and body.
+async fn self_delete(user: &RegisteredUser) -> (String, String) {
+    let res = user
+        .client
+        .get(format!("{PORTAL}/settings/account/delete"))
+        .send()
+        .await
+        .expect("GET /settings/account/delete");
+    assert!(res.status().is_success(), "confirm page: {}", res.status());
+    let post_url = res.url().clone();
+    let body = res.text().await.expect("confirm body");
+    assert!(
+        body.contains("What we keep"),
+        "confirm page should carry the retention card"
+    );
+    let csrf = extract_form_csrf(&body).expect("_csrf on confirm page");
+    let res = user
+        .client
+        .post(post_url)
+        .form(&[
+            ("_csrf", csrf.as_str()),
+            ("confirm_email", user.email.as_str()),
+        ])
+        .send()
+        .await
+        .expect("POST /settings/account/delete");
+    let url = res.url().to_string();
+    (url, res.text().await.unwrap_or_default())
+}
+
+async fn warm_up(user: &RegisteredUser) {
+    let _ = user
+        .client
+        .get(format!("{PORTAL}/"))
+        .send()
+        .await
+        .expect("warm-up");
+}
+
+/// A verified address: the invite to it goes and the email-matched
+/// provenance columns are nulled.
+#[tokio::test]
+async fn account_delete_leaves_no_referencing_rows() {
+    assert!(portal_reachable().await);
+    let user = register_test_user("acct-delete-refs").await;
+    warm_up(&user).await;
+    mark_identity_verified(&user.identity_id).await;
+    let fx = seed_fixture(&user);
+    assert!(
+        rows_referencing(&user.identity_id, &user.email).len() >= 20,
+        "precondition: every seeded table and column should reference the user"
+    );
+
+    let (final_url, _) = self_delete(&user).await;
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        assert!(final_url.contains("/login"), "landed on {final_url}");
+        assert_common_outcome(&fx, &user, "account.self_deleted", "user");
+        let left = rows_referencing(&user.identity_id, &user.email);
+        assert!(left.is_empty(), "email-matched rows left: {left:?}");
+        assert_eq!(count_invites_with_token(&fx.invite_own), 0);
+        let row = latest_audit_event("account.self_deleted", &user.identity_id).expect("audit");
+        assert_eq!(row.metadata["reason"], "self_service");
+    }));
+    fx.cleanup(&user.email);
+    if let Err(e) = outcome {
+        std::panic::resume_unwind(e);
+    }
+    assert!(identity_id_by_email(&user.email).await.is_none());
+}
+
+/// An unverified address: the invite to it and the email-matched provenance
+/// survive, because the address may belong to someone else.
+#[tokio::test]
+async fn admin_delete_leaves_no_referencing_rows() {
+    assert!(portal_reachable().await);
+    let Some(admin) = try_admin_signed_in_client().await else {
+        eprintln!("Skipping admin_delete_leaves_no_referencing_rows: admin env not set");
+        return;
+    };
+    let target = register_test_user("admin-delete-refs").await;
+    warm_up(&target).await;
+    let fx = seed_fixture(&target);
+    let id = target.identity_id.clone();
+
+    let res = admin
+        .get(format!("{PORTAL}/admin/identities/{id}/delete"))
+        .send()
+        .await
+        .expect("GET admin delete-confirm");
+    assert_eq!(res.status().as_u16(), 200, "delete-confirm status");
+    let body = res.text().await.unwrap_or_default();
+    assert!(
+        body.contains("Apps holding a copy of the data are told to delete it."),
+        "admin confirm text should list what deletion does"
+    );
+    let csrf = extract_form_csrf(&body).expect("_csrf in admin delete confirm");
+    let res = admin
+        .post(format!("{PORTAL}/admin/identities/{id}/delete"))
+        .form(&[("_csrf", csrf.as_str()), ("confirm", "yes")])
+        .send()
+        .await
+        .expect("POST admin delete");
+    let status = res.status();
+
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        assert!(
+            status.is_success() || status.as_u16() == 303,
+            "admin delete status: {status}"
+        );
+        assert_common_outcome(&fx, &target, "admin.identity.deleted", "admin");
+        let row = latest_audit_event("admin.identity.deleted", &id).expect("audit");
+        assert_eq!(row.metadata["reason"], "admin");
+        assert_eq!(
+            count_invites_with_token(&fx.invite_own),
+            1,
+            "an invite to the unverified trait email survives"
+        );
+        assert_eq!(
+            reference_column_value("host_enrollments", "created_by", "id", &fx.host_id).as_deref(),
+            Some(target.email.as_str()),
+            "email-matched provenance survives for an unverified address"
+        );
+    }));
+    fx.cleanup(&target.email);
+    if let Err(e) = outcome {
+        std::panic::resume_unwind(e);
+    }
+    assert!(identity_id_by_email(&target.email).await.is_none());
+}
+
+/// Reclaiming an unverified address deletes the identity's own rows but keeps
+/// the invites addressed to the email and the email-matched provenance: the
+/// person registering next needs them.
+#[tokio::test]
+async fn reclaim_delete_leaves_no_referencing_rows_and_keeps_invites() {
+    assert!(portal_reachable().await);
+    let user = register_test_user("reclaim-refs").await;
+    warm_up(&user).await;
+    let fx = seed_fixture(&user);
+    let id = user.identity_id.clone();
+    let email = user.email.clone();
+
+    let claimer = manual_redirect_client();
+    for _ in 0..2 {
+        claimer
+            .get(format!("{PORTAL}/claim-email"))
+            .send()
+            .await
+            .expect("GET /claim-email");
+    }
+    let body = claimer
+        .get(format!("{PORTAL}/claim-email"))
+        .send()
+        .await
+        .expect("GET /claim-email")
+        .text()
+        .await
+        .expect("claim form");
+    let csrf = extract_form_csrf(&body).expect("_csrf in claim form");
+    let res = claimer
+        .post(format!("{PORTAL}/claim-email"))
+        .form(&[("_csrf", csrf.as_str()), ("email", email.as_str())])
+        .send()
+        .await
+        .expect("POST /claim-email");
+    assert_eq!(res.status().as_u16(), 303, "claim mint");
+    let loc = res
+        .headers()
+        .get("location")
+        .and_then(|h| h.to_str().ok())
+        .expect("Location on claim 303")
+        .to_string();
+    let mail = wait_for_mailcrab(
+        &email,
+        "Confirm your email",
+        std::time::Duration::from_secs(15),
+    )
+    .await
+    .expect("claim code email");
+    let code = extract_code_from_email(&mail.body).expect("six-digit code");
+    let body = claimer
+        .get(format!("{PORTAL}{loc}"))
+        .send()
+        .await
+        .expect("GET confirm")
+        .text()
+        .await
+        .expect("confirm body");
+    let csrf = extract_form_csrf(&body).expect("_csrf in confirm form");
+    let token = extract_input_value(&body, "token").expect("token input");
+    let res = claimer
+        .post(format!("{PORTAL}/claim-email/confirm"))
+        .form(&[
+            ("_csrf", csrf.as_str()),
+            ("token", token.as_str()),
+            ("code", code.as_str()),
+        ])
+        .send()
+        .await
+        .expect("POST confirm");
+    let status = res.status();
+
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        assert_eq!(status.as_u16(), 303, "claim confirm should 303");
+        assert_common_outcome(&fx, &user, "identity.reclaimed", "user");
+        let row = latest_audit_event("identity.reclaimed", &id).expect("audit");
+        assert_eq!(row.metadata["reason"], "reclaim");
+        assert_eq!(row.metadata["reclaim_email"], email.as_str());
+        assert_eq!(
+            count_invites_with_token(&fx.invite_own),
+            1,
+            "the invite to the reclaimed address survives"
+        );
+        assert_eq!(
+            reference_column_value("host_enrollments", "created_by", "id", &fx.host_id).as_deref(),
+            Some(email.as_str()),
+            "email-matched provenance survives on reclaim"
+        );
+    }));
+    fx.cleanup(&email);
+    if let Err(e) = outcome {
+        std::panic::resume_unwind(e);
+    }
+    assert!(identity_id_by_email(&email).await.is_none());
+}
+
+/// The only owner of an org with other members is refused before anything
+/// is touched.
+#[tokio::test]
+async fn account_delete_refused_for_sole_owner_with_other_members() {
+    assert!(portal_reachable().await);
+    let user = register_test_user("acct-delete-sole-owner").await;
+    warm_up(&user).await;
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let org_id = format!("org-sole-{}", seed % 10_000_000_000);
+    seed_organization(&org_id, &org_id, "Sole Owner Org", "all");
+    seed_org_membership(&org_id, &user.identity_id, "owner");
+    seed_org_membership(&org_id, &format!("other-{seed}"), "member");
+
+    let (final_url, body) = self_delete(&user).await;
+    delete_org_rows(&org_id);
+    assert!(
+        !final_url.contains("/login"),
+        "refusal must not sign the user out; got {final_url}"
+    );
+    assert!(
+        body.contains("only owner of") && body.contains("Sole Owner Org"),
+        "refusal names the org"
+    );
+    assert!(
+        identity_id_by_email(&user.email).await.is_some(),
+        "identity must still exist"
+    );
+    assert_eq!(
+        count_audit_events_for_target("account.self_deleted", &user.identity_id),
+        0,
+        "no audit row for a refused deletion"
+    );
+    user.cleanup().await;
+}

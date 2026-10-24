@@ -48,6 +48,8 @@ error-boundary-account-delete-ownership-check-failed = 无法核实你的组织�
 error-boundary-account-delete-consent-unreachable = 无法连接授权服务以通知你已连接的应用。未做任何更改；请稍后重试。
 error-boundary-account-delete-notifications-failed = 无法准备删除通知。未做任何更改；请重试。
 error-boundary-account-delete-failed = 无法删除你的账号。请稍后重试。
+error-boundary-account-export-title = 导出不可用
+error-boundary-account-export-failed = 由于某个数据源没有响应，我们无法生成你的导出文件。未做任何更改，请稍后重试。
 
 # SAML error boundary (rendered under the default locale; the ACS callback carries no request locale).
 error-boundary-sso-unavailable-title = 单点登录不可用

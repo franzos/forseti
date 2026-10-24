@@ -68,8 +68,11 @@ settings-password-back = 返回设置
 settings-account-heading = 账号
 settings-account-subtitle = 对你账号的不可逆更改。
 settings-account-delete-section-heading = 删除账号
-settings-account-delete-body = 永久删除你的账号、所有活跃会话，以及全部两步验证和恢复状态。持有你数据副本的应用会收到通知，以便清除它们那一侧的数据。此操作无法撤销。
+settings-account-delete-body = 永久删除你的账号。这会移除你的登录、会话、两步验证和恢复码、资料和用户名、关联的登录方式、SSH 密钥、POSIX 账号、离线口令、组织和团队成员身份，以及发送到你邮箱的邀请。持有你数据副本的应用会被告知删除。此操作无法撤销。
 settings-account-delete-action = 删除我的账号
+settings-account-export-section-heading = 导出你的数据
+settings-account-export-body = 将我们保存的关于你的全部数据下载为一个 JSON 文件：账号、地址与登录方式、含设备详情的会话、审计记录、已授权应用、组织与团队成员资格、邀请、个人资料与用户名历史、已关联的提供方、SSH 密钥、POSIX 账户、主机登录记录，以及是否设置了离线口令。密码哈希、令牌及其他机密绝不会包含在内。
+settings-account-export-action = 下载我的数据
 
 # Account delete confirmation page
 settings-account-delete-page-title = 确认删除
@@ -77,8 +80,10 @@ settings-account-delete-confirm-heading = 要删除你的账号吗？
 settings-account-delete-confirm-subtitle-prefix = 这将永久移除
 settings-account-delete-confirm-subtitle-suffix = 以及与之关联的每一个会话、恢复代码和凭据。
 settings-account-delete-apps-heading = 以下应用会收到你已注销的通知
-settings-account-delete-apps-note = 应用会复制它们所需的数据（资料、设置）并与你的账号 ID 关联。我们会通过它们注册的删除 webhook 通知它们，以便清除其副本。
+settings-account-delete-apps-note = 应用会复制它们所需的数据（资料、设置）并与你的账号 ID 关联。我们会通过它们注册的删除 webhook 通知它们，以便清除其副本。我们可以通知它们，但无法强制它们删除。
 settings-account-delete-no-apps = 目前没有第三方应用持有你的数据副本。无需通知。
+settings-account-delete-left-heading = 我们保留的内容
+settings-account-delete-left-body = 提及你账号的审计记录保留 { $days } 天后删除。你创建的组织、团队、主机和域名会保留，但去掉你的名字。应用在处理通知之前会继续保留其持有的数据。
 settings-account-delete-confirm-label = 请在下方输入你的邮箱以确认：
 settings-account-delete-confirm-placeholder = 输入你的邮箱以确认
 settings-account-delete-confirm-submit = 是的，删除我的账号

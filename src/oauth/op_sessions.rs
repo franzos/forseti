@@ -5,11 +5,12 @@
 
 use diesel::prelude::*;
 
+use serde::Serialize;
+
 use crate::db::DbPool;
 use crate::db_interact;
-use crate::ory;
+use crate::ory::{self, OryClients};
 use crate::schema::{hydra_consent_grants, hydra_login_sessions};
-use crate::state::AppState;
 
 /// Rows outlive Hydra's remembered login by this much before pruning.
 const PRUNE_MARGIN_SECS: i64 = 24 * 60 * 60;
@@ -235,8 +236,8 @@ async fn forget(db: &DbPool, sid: &str) -> anyhow::Result<()> {
 /// The consent request ids granted under `sid`: the recorded ones, else the
 /// consents Hydra lists for the login session. Empty when neither lookup
 /// works.
-async fn grant_ids_for_sid(state: &AppState, sid: &str) -> Vec<String> {
-    match consent_grants_for_sid(&state.db, sid).await {
+async fn grant_ids_for_sid(db: &DbPool, ory: &OryClients, sid: &str) -> Vec<String> {
+    match consent_grants_for_sid(db, sid).await {
         Ok(recorded) if !recorded.is_empty() => return recorded,
         Ok(_) => {}
         Err(e) => {
@@ -244,7 +245,7 @@ async fn grant_ids_for_sid(state: &AppState, sid: &str) -> Vec<String> {
             return Vec::new();
         }
     }
-    let subject = match subject_for_sid(&state.db, sid).await {
+    let subject = match subject_for_sid(db, sid).await {
         Ok(Some(s)) => s,
         Ok(None) => return Vec::new(),
         Err(e) => {
@@ -252,7 +253,7 @@ async fn grant_ids_for_sid(state: &AppState, sid: &str) -> Vec<String> {
             return Vec::new();
         }
     };
-    match ory::hydra::list_consent_sessions_by_login_session(&state.ory, &subject, sid).await {
+    match ory::hydra::list_consent_sessions_by_login_session(ory, &subject, sid).await {
         Ok(sessions) => sessions
             .into_iter()
             .filter_map(|s| s.consent_request_id)
@@ -271,31 +272,32 @@ async fn grant_ids_for_sid(state: &AppState, sid: &str) -> Vec<String> {
 /// revoking those first would silence the back-channel. On failure the row
 /// stays so a later logout can retry it.
 pub(crate) async fn end_sid(
-    state: &AppState,
+    db: &DbPool,
+    ory: &OryClients,
     sid: &str,
     grants: GrantRevocation,
 ) -> anyhow::Result<()> {
     let grant_ids = match grants {
-        GrantRevocation::Revoke => grant_ids_for_sid(state, sid).await,
+        GrantRevocation::Revoke => grant_ids_for_sid(db, ory, sid).await,
         GrantRevocation::Keep => Vec::new(),
     };
-    ory::hydra::revoke_login_session_by_sid(&state.ory, sid).await?;
+    ory::hydra::revoke_login_session_by_sid(ory, sid).await?;
     for consent_request_id in grant_ids {
         if let Err(e) =
-            ory::hydra::revoke_consent_sessions_by_request_id(&state.ory, &consent_request_id).await
+            ory::hydra::revoke_consent_sessions_by_request_id(ory, &consent_request_id).await
         {
             tracing::warn!(error = %e, "hydra consent revoke by request id failed");
         }
     }
-    if let Err(e) = forget(&state.db, sid).await {
+    if let Err(e) = forget(db, sid).await {
         tracing::warn!(error = %e, "hydra login session row delete failed");
     }
     Ok(())
 }
 
-async fn revoke_sids(state: &AppState, sids: Vec<String>, grants: GrantRevocation) {
+async fn revoke_sids(db: &DbPool, ory: &OryClients, sids: Vec<String>, grants: GrantRevocation) {
     for sid in sids {
-        if let Err(e) = end_sid(state, &sid, grants).await {
+        if let Err(e) = end_sid(db, ory, &sid, grants).await {
             tracing::warn!(error = %e, "hydra login-session revoke by sid failed");
         }
     }
@@ -305,13 +307,14 @@ async fn revoke_sids(state: &AppState, sids: Vec<String>, grants: GrantRevocatio
 /// subject's sessions in other browsers stay, and so do its grants unless
 /// `grants` says otherwise.
 pub(crate) async fn end_op_sessions_for_browser(
-    state: &AppState,
+    db: &DbPool,
+    ory: &OryClients,
     subject: &str,
     kratos_session_id: &str,
     grants: GrantRevocation,
 ) {
-    match sids_for_browser(&state.db, subject, kratos_session_id).await {
-        Ok(sids) => revoke_sids(state, sids, grants).await,
+    match sids_for_browser(db, subject, kratos_session_id).await {
+        Ok(sids) => revoke_sids(db, ory, sids, grants).await,
         Err(e) => tracing::warn!(error = %e, "hydra login session lookup failed"),
     }
 }
@@ -319,8 +322,8 @@ pub(crate) async fn end_op_sessions_for_browser(
 /// End the subject's `sid`s whose recorded Kratos session is no longer active,
 /// such as one a browser rotated away from. Grants stay, as on logout. A
 /// failed Kratos lookup skips the sweep.
-pub(crate) async fn sweep_dead_browser_sessions(state: &AppState, subject: &str) {
-    let recorded = match sids_with_kratos_session_for_subject(&state.db, subject).await {
+pub(crate) async fn sweep_dead_browser_sessions(db: &DbPool, ory: &OryClients, subject: &str) {
+    let recorded = match sids_with_kratos_session_for_subject(db, subject).await {
         Ok(r) if !r.is_empty() => r,
         Ok(_) => return,
         Err(e) => {
@@ -328,7 +331,7 @@ pub(crate) async fn sweep_dead_browser_sessions(state: &AppState, subject: &str)
             return;
         }
     };
-    let active = match ory::kratos::active_session_ids(&state.ory, subject).await {
+    let active = match ory::kratos::active_session_ids(ory, subject).await {
         Ok(a) => a,
         Err(e) => {
             tracing::warn!(error = %e, "kratos session lookup failed; skipping the sid sweep");
@@ -340,7 +343,7 @@ pub(crate) async fn sweep_dead_browser_sessions(state: &AppState, subject: &str)
         .filter(|(_, ksid)| !active.contains(ksid))
         .map(|(sid, _)| sid)
         .collect();
-    revoke_sids(state, dead, GrantRevocation::Keep).await;
+    revoke_sids(db, ory, dead, GrantRevocation::Keep).await;
 }
 
 /// End every app session of a subject, optionally sparing one browser's
@@ -348,24 +351,92 @@ pub(crate) async fn sweep_dead_browser_sessions(state: &AppState, subject: &str)
 /// backstop for sessions recorded before this table existed; those fire no
 /// back-channel logout but kill the grants.
 pub(crate) async fn end_op_sessions_for_subject(
-    state: &AppState,
+    db: &DbPool,
+    ory: &OryClients,
     subject: &str,
     except_kratos_session: Option<&str>,
     grants: GrantRevocation,
 ) {
-    match sids_for_subject(&state.db, subject, except_kratos_session).await {
-        Ok(sids) => revoke_sids(state, sids, grants).await,
+    match sids_for_subject(db, subject, except_kratos_session).await {
+        Ok(sids) => revoke_sids(db, ory, sids, grants).await,
         Err(e) => tracing::warn!(error = %e, "hydra login session lookup failed"),
     }
     if except_kratos_session.is_some() {
         return;
     }
-    if let Err(e) = ory::hydra::revoke_login_sessions_for_subject(&state.ory, subject).await {
+    if let Err(e) = ory::hydra::revoke_login_sessions_for_subject(ory, subject).await {
         tracing::warn!(error = %e, "hydra login-session revoke failed");
     }
-    if let Err(e) = ory::hydra::revoke_consent_sessions_for_subject(&state.ory, subject).await {
+    if let Err(e) = ory::hydra::revoke_consent_sessions_for_subject(ory, subject).await {
         tracing::warn!(error = %e, "hydra consent-session revoke failed");
     }
+}
+
+/// A recorded Hydra login session of a subject.
+#[derive(Queryable, Selectable, Debug, Clone, PartialEq, Eq, Serialize)]
+#[diesel(table_name = hydra_login_sessions)]
+pub(crate) struct LoginSessionRow {
+    pub sid: String,
+    pub kratos_session_id: Option<String>,
+    pub created_at: String,
+}
+
+/// A recorded consent grant of a subject.
+#[derive(Queryable, Selectable, Debug, Clone, PartialEq, Eq, Serialize)]
+#[diesel(table_name = hydra_consent_grants)]
+pub(crate) struct ConsentGrantRow {
+    pub consent_request_id: String,
+    pub sid: String,
+    pub client_id: String,
+    pub created_at: String,
+}
+
+/// Everything recorded locally for a subject.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct SubjectRows {
+    pub login_sessions: Vec<LoginSessionRow>,
+    pub consent_grants: Vec<ConsentGrantRow>,
+}
+
+pub(crate) async fn rows_for_subject(db: &DbPool, subject: &str) -> anyhow::Result<SubjectRows> {
+    let subject = subject.to_string();
+    let (login_sessions, consent_grants) = db_interact!(db, |conn| {
+        let sessions = hydra_login_sessions::table
+            .filter(hydra_login_sessions::subject.eq(&subject))
+            .order(hydra_login_sessions::created_at.asc())
+            .select(LoginSessionRow::as_select())
+            .load(conn)?;
+        let grants = hydra_consent_grants::table
+            .filter(hydra_consent_grants::subject.eq(&subject))
+            .order(hydra_consent_grants::created_at.asc())
+            .select(ConsentGrantRow::as_select())
+            .load(conn)?;
+        Ok::<_, diesel::result::Error>((sessions, grants))
+    })?;
+    Ok(SubjectRows {
+        login_sessions,
+        consent_grants,
+    })
+}
+
+/// Drop every recorded login session and consent grant of a subject. The
+/// Hydra side is revoked by [`end_op_sessions_for_subject`]; this only
+/// clears the local rows. Idempotent.
+pub(crate) async fn forget_subject(db: &DbPool, subject: &str) -> anyhow::Result<()> {
+    let subject = subject.to_string();
+    db_interact!(db, |conn| {
+        conn.transaction::<_, diesel::result::Error, _>(|c| {
+            diesel::delete(
+                hydra_consent_grants::table.filter(hydra_consent_grants::subject.eq(&subject)),
+            )
+            .execute(c)?;
+            diesel::delete(
+                hydra_login_sessions::table.filter(hydra_login_sessions::subject.eq(&subject)),
+            )
+            .execute(c)
+        })
+    })?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -558,5 +629,41 @@ mod tests {
                 .unwrap(),
             vec![("sid-1".to_string(), "ks-1".to_string())]
         );
+    }
+
+    #[tokio::test]
+    async fn rows_for_subject_lists_and_forget_subject_clears_only_that_subject() {
+        let db = crate::orgs::db::test_pool().await;
+        record(&db, "sid-1", "user-a", "ks-1", 86400).await.unwrap();
+        record(&db, "sid-2", "user-a", "ks-2", 86400).await.unwrap();
+        record(&db, "sid-3", "user-b", "ks-3", 86400).await.unwrap();
+        record_consent(&db, "cr-1", "sid-1", "user-a", "app-1")
+            .await
+            .unwrap();
+        record_consent(&db, "cr-3", "sid-3", "user-b", "app-1")
+            .await
+            .unwrap();
+
+        let rows = rows_for_subject(&db, "user-a").await.unwrap();
+        let sids: Vec<&str> = rows.login_sessions.iter().map(|r| r.sid.as_str()).collect();
+        assert_eq!(sids, vec!["sid-1", "sid-2"]);
+        assert_eq!(
+            rows.login_sessions[0].kratos_session_id.as_deref(),
+            Some("ks-1")
+        );
+        assert_eq!(rows.consent_grants.len(), 1);
+        assert_eq!(rows.consent_grants[0].consent_request_id, "cr-1");
+        assert_eq!(rows.consent_grants[0].client_id, "app-1");
+
+        forget_subject(&db, "user-a").await.unwrap();
+        let gone = rows_for_subject(&db, "user-a").await.unwrap();
+        assert!(gone.login_sessions.is_empty());
+        assert!(gone.consent_grants.is_empty());
+        assert_eq!(
+            sids_for_subject(&db, "user-b", None).await.unwrap(),
+            vec!["sid-3"]
+        );
+        assert_eq!(consent_ids(&db, "sid-3").await, vec!["cr-3"]);
+        forget_subject(&db, "user-a").await.unwrap();
     }
 }

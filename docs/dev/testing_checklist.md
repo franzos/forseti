@@ -152,13 +152,21 @@ Run these first. If any of them fail, stop and triage before touching the browse
 
 ### 4.7 Account / danger zone (`/settings/account` + `/settings/account/delete`)
 
-- [ ] Landing page renders without privileged-session check
-- [ ] Confirm page lists `notified_apps` — every client the user has OAuth-consented to
+- [ ] Landing page renders without privileged-session check: an "Export your data" card above the "Delete account" card
+- [ ] **Export:** click "Download my data" → the browser follows the Kratos settings-flow init and saves `forseti-export-YYYY-MM-DD.json` (`Content-Disposition: attachment`, `Cache-Control: no-store`)
+- [ ] Export parses as JSON with `format: "gofranz-account-export"`, `format_version: 1`, `product: "forseti"`, and the top-level keys `exported_at`, `account`, `identities`, `sessions`, `billing` (null), `audit`, `data`
+- [ ] `data` carries `hydra_consents`, `hydra_local`, `orgs`, `profile`, `username_history`, `oidc_links`, `saml_links`, `posix`, `offline_secret`; no password hash, TOTP secret, token or client secret anywhere in the file (`grep -i 'hashed_password\|totp_url\|secret'`)
+- [ ] Audit row: `account.exported`
+- [ ] Anonymous `GET /settings/account/export` → redirected to `/login`
+- [ ] Delete card text lists what goes: login, sessions, 2FA and recovery codes, profile and username, linked providers, SSH keys, POSIX account, offline passphrase, org and team memberships, invites to the email, apps told to delete their copy
+- [ ] Confirm page lists `notified_apps` — every client the user has OAuth-consented to — with the note that apps are notified but can't be forced to delete
 - [ ] User without any consent grants → "No third-party apps have copies of your data"
+- [ ] Confirm page shows the "What we keep" card: audit entries for `[audit].audit_retention_days` days, created organizations/teams/hosts/domains stay with the name removed, apps keep what they hold until they act
 - [ ] Privileged-session refresh enforced before delete proceeds
 - [ ] Self-delete → Kratos identity gone, `webhook_outbox` rows inserted in `PENDING`, worker drains to `CONFIRMED` with `attempts=1` + `delivered_at` set
-- [ ] Audit row: `account.self_deleted` with `webhook_targets: N` matching the consent-grant count
-- [ ] Lands on a "your account is gone" page (or `/login`)
+- [ ] Self-delete leaves no rows for the identity in `member_profiles`, `oidc_links`, `offline_secrets`, `device_sessions`, `posix_accounts`, `organization_members`, `org_team_members`, and no pending `organization_invites` to its email; `created_by`/`added_by`/`invited_by` columns that pointed at it are NULL
+- [ ] Audit row: `account.self_deleted` (critical) with `webhook_targets: N` matching the consent-grant count, `event_id`, `orphan_count`
+- [ ] Lands on `/login` with `ory_kratos_session` cleared (DevTools → Application → Cookies)
 
 ## 5. OAuth2 / OIDC bridge
 
@@ -322,7 +330,8 @@ All admin pages require AAL2 + Forseti-admin allowlist or org ownership.
 - [ ] Disable identity → user can't log in (session whoami fails)
 - [ ] **Live session bounce on disable:** log the target user in via a second browser, then disable from `/admin/identities` → their next request to any protected route → bounced to `/login`, not silently served from a cached session
 - [ ] Enable identity → user can log in again
-- [ ] Delete identity (throwaway user, NOT admin) → cascaded out of Hydra grants + webhook outbox row(s)
+- [ ] Delete identity (throwaway user, NOT admin): the confirm page spells out what is removed (credentials, sessions, 2FA and recovery codes, profile and username, linked providers, SSH keys, POSIX account, offline passphrase, org and team memberships, invites to its email), that apps holding a copy are told to delete it, and what stays (audit entries for the retention period; created organizations, teams, hosts and domains with the name removed)
+- [ ] Delete identity → cascaded out of Hydra grants + webhook outbox row(s); same row cleanup as the self-delete in §4.7; sole owner of an organization → refused with an error page, not deleted
 - [ ] Confirm pages render and reject without `confirm=yes`
 - [ ] Audit rows: `identity.recovered`, `.disabled`, `.enabled`, `.deleted`
 

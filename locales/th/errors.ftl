@@ -48,6 +48,8 @@ error-boundary-account-delete-ownership-check-failed = เราไม่สา�
 error-boundary-account-delete-consent-unreachable = เราไม่สามารถเข้าถึงบริการให้ความยินยอมเพื่อแจ้งเตือนแอปที่เชื่อมต่อของคุณได้ ไม่มีการเปลี่ยนแปลงใด ๆ โปรดลองอีกครั้งในอีกสักครู่
 error-boundary-account-delete-notifications-failed = เราไม่สามารถเตรียมการแจ้งเตือนการลบได้ ไม่มีการเปลี่ยนแปลงใด ๆ โปรดลองอีกครั้ง
 error-boundary-account-delete-failed = เราไม่สามารถลบบัญชีของคุณได้ โปรดลองอีกครั้งในอีกสักครู่
+error-boundary-account-export-title = ไม่สามารถส่งออกได้
+error-boundary-account-export-failed = เราไม่สามารถรวบรวมข้อมูลส่งออกของคุณได้ เนื่องจากแหล่งข้อมูลแห่งหนึ่งไม่ตอบสนอง ไม่มีการเปลี่ยนแปลงใด ๆ โปรดลองอีกครั้งในอีกสักครู่
 
 # ขอบเขตข้อผิดพลาด SAML (แสดงภายใต้ภาษาท้องถิ่นเริ่มต้น การเรียกกลับ ACS ไม่มีภาษาท้องถิ่นของคำขอ)
 error-boundary-sso-unavailable-title = การลงชื่อเข้าใช้ครั้งเดียวไม่พร้อมใช้งาน

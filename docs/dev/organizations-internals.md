@@ -76,14 +76,14 @@ The invariant is maintained by every join and leave path, not just the middlewar
 
 - **Every non-default join** goes through `join_org_race_safe(db, identity_id, org_id, role, drop_default)` (`src/orgs/db.rs`): one serialized transaction that inserts the tenant row, then (for non-allowlisted identities only) deletes the Default row, insert-before-delete so a concurrent floor-add can't strand the user in both. Callers: org creation, invite finalize, the domain-join prompt, `/join/confirm`, and SAML SSO JIT-join (`src/saml/flow.rs`).
 - **Genuine single leave** (`members_remove`, `src/orgs/settings_page/members.rs`) re-adds Default as member when a non-allowlisted identity drops to zero non-default orgs.
-- **Identity deletion** (`remove_member_everywhere`, `src/orgs/db.rs`) is *not* a floor transition — it strips all rows and must leave no Default row (re-adding one would recreate a ghost membership for a deleted identity).
+- **Identity deletion** (`remove_member_everywhere`, `src/orgs/db.rs`, called from `identity::delete::delete_identity`) is *not* a floor transition — it strips all rows and must leave no Default row (re-adding one would recreate a ghost membership for a deleted identity).
 - **Org deletion** (`delete_org`) relies on the lazy floor to re-home affected members on their next request.
 
 ### Removing members / changing roles
 
 Both live in `src/orgs/settings_page/members.rs`, owner-gated and license-gated. There's a **last-owner guard**: the app refuses to demote or remove the sole owner of any org. Note this guard is application-layer, not a DB constraint — nothing stops a direct `DELETE` of the final owner row.
 
-When an identity is deleted, `remove_member_everywhere()` (`src/orgs/db.rs`) strips all of its memberships so no dangling rows survive.
+Identity deletion (`identity::delete::delete_identity`, `src/identity/delete.rs`) applies the same guard up front through `orgs_where_sole_owner_with_other_members()` (`src/orgs/db.rs`): the settings page, the admin page and `forseti delete-identity` refuse to delete the sole owner of an org that still has other members, naming the orgs. `forseti delete-identity --force` proceeds anyway; the org is left with no owner and the names land in the output and in the audit row's `orgs_left_without_owner`. Email reclaim and `unverified-prune` skip the guard (an unverified identity owns nothing). After the Kratos delete, `remove_member_everywhere()` strips all of the identity's memberships and team memberships, and `identity::pseudonymise::null_references()` sets `organizations.created_by`, `org_teams.created_by`, `organization_members.added_by`, `org_allowed_domains.added_by` and the invite `invited_by`/`accepted_by` columns pointing at it to NULL; the orgs, teams, domains and other members' invites themselves stay.
 
 ## Active org
 

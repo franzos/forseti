@@ -260,6 +260,28 @@ pub async fn teams_for_identity_any_org(
     Ok(rows)
 }
 
+/// Every team of the identity with its membership row's `source` and
+/// `added_at`, ordered by name. Uncapped: the account export reads it.
+pub async fn team_memberships_for_identity(
+    db: &DbPool,
+    identity_id: &str,
+) -> anyhow::Result<Vec<(Team, String, String)>> {
+    let id = identity_id.to_string();
+    let rows = db_interact!(db, |conn| {
+        org_teams::table
+            .inner_join(org_team_members::table.on(org_team_members::team_id.eq(org_teams::id)))
+            .filter(org_team_members::identity_id.eq(&id))
+            .order(org_teams::name.asc())
+            .select((
+                Team::as_select(),
+                org_team_members::source,
+                org_team_members::added_at,
+            ))
+            .load(conn)
+    })?;
+    Ok(rows)
+}
+
 /// Slugs of the subject's teams in one org, slug-sorted, for the OIDC `groups`
 /// claim. Fetches up to `GROUPS_CLAIM_CAP + 1` rows so the caller can detect
 /// overflow past the cap.

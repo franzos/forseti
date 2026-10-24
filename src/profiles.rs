@@ -417,6 +417,43 @@ pub async fn set_username(db: &DbPool, identity_id: &str, username: &str) -> Res
     }
 }
 
+/// Released handles of `identity_id` as `(username_lc, released_at)`, oldest
+/// first.
+pub async fn username_history(db: &DbPool, identity_id: &str) -> Result<Vec<(String, String)>> {
+    let id = identity_id.to_string();
+    let rows: Vec<(String, String)> = db_interact!(db, |conn| {
+        member_username_history::table
+            .filter(member_username_history::identity_id.eq(&id))
+            .order(member_username_history::released_at.asc())
+            .select((
+                member_username_history::username_lc,
+                member_username_history::released_at,
+            ))
+            .load(conn)
+    })?;
+    Ok(rows)
+}
+
+/// Remove the profile row and the username tombstones of `identity_id`.
+/// Returns whether a profile row existed and how many history rows went.
+/// Idempotent.
+pub async fn delete_for_identity(db: &DbPool, identity_id: &str) -> Result<(bool, usize)> {
+    let id = identity_id.to_string();
+    let (profiles, history) = db_interact!(db, |conn| {
+        conn.transaction::<_, diesel::result::Error, _>(|c| {
+            let profiles =
+                diesel::delete(member_profiles::table.filter(member_profiles::identity_id.eq(&id)))
+                    .execute(c)?;
+            let history = diesel::delete(
+                member_username_history::table.filter(member_username_history::identity_id.eq(&id)),
+            )
+            .execute(c)?;
+            Ok((profiles, history))
+        })
+    })?;
+    Ok((profiles > 0, history))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -619,5 +656,26 @@ mod tests {
         assert_eq!(p.username.as_deref(), Some("franz"));
         assert_eq!(p.updated_at, "2026-07-31T10:00:00+00:00");
         assert!(p.bio.is_none() && p.website.is_none() && p.avatar_url.is_none());
+    }
+
+    #[tokio::test]
+    async fn delete_for_identity_drops_profile_and_username_history() {
+        let db = test_pool().await;
+        set_username(&db, "id-del", "first").await.unwrap();
+        set_username(&db, "id-del", "second").await.unwrap();
+        set_username(&db, "id-other", "other").await.unwrap();
+
+        assert_eq!(delete_for_identity(&db, "id-del").await.unwrap(), (true, 1));
+        assert!(fetch(&db, "id-del").await.unwrap().username.is_none());
+        // The released handle is free again once the tombstone is gone.
+        set_username(&db, "id-third", "first").await.unwrap();
+        assert_eq!(
+            fetch(&db, "id-other").await.unwrap().username.as_deref(),
+            Some("other")
+        );
+        assert_eq!(
+            delete_for_identity(&db, "id-del").await.unwrap(),
+            (false, 0)
+        );
     }
 }

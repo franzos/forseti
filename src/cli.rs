@@ -19,6 +19,17 @@ pub enum Cmd {
     AuditPrune,
     /// Delete identities older than [identity].unverified_ttl_days that still have an unverified address
     UnverifiedPrune,
+    /// Delete one identity: notify consented apps, remove its rows, clear references to it
+    DeleteIdentity {
+        /// Kratos identity id
+        id: String,
+        /// Skip the confirmation prompt (required when stdin is not a terminal)
+        #[arg(long)]
+        yes: bool,
+        /// Delete even if the identity is the only owner of an organization with other members
+        #[arg(long)]
+        force: bool,
+    },
     /// Drop POSIX accounts, offline secrets and device sessions whose Kratos identity is gone
     PosixReconcile,
     /// Create the Hydra OAuth2 client the POSIX/PAM device flow logs in with

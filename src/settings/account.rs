@@ -1,7 +1,7 @@
 //! `/settings/account` — danger zone (account self-deletion).
 //!
-//! The deletion is a saga over the Forseti-owned webhook outbox: every app
-//! the user has consent grants with gets a signed delete notification.
+//! The deletion itself is `identity::delete::delete_identity`; this module
+//! owns the confirm page, the typed-email check and the error rendering.
 //!
 //! Privileged-session enforcement reuses the `?refresh=true` gate from
 //! `/settings/password` (a Kratos settings flow as a "is this session
@@ -12,21 +12,21 @@ use axum::extract::{Query, State};
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum_extra::extract::cookie::{Cookie, SameSite};
-use chrono::Utc;
 use serde::Deserialize;
-use uuid::Uuid;
 
 use crate::FlowQuery;
-use crate::audit::{self, AuditCtx, AuditEvent, action, target_kind};
-use crate::audit_metadata;
+use crate::audit::{AuditCtx, SafeMetadata};
 use crate::csrf;
 use crate::flow_view::session_email;
+use crate::identity::delete::{
+    CollectStep, DeleteActor, DeleteEnv, DeleteError, DeleteReason, DeleteRequest, delete_identity,
+    notified_clients,
+};
 use crate::locale::LanguageIdentifier;
 use crate::ory;
 use crate::page_chrome::{PageChrome, ThemedChrome};
 use crate::render::render;
 use crate::state::AppState;
-use crate::webhook;
 
 use super::{SettingsSection, fetch_settings_subpage};
 
@@ -52,6 +52,8 @@ struct SettingsAccountDeleteConfirmTemplate {
     /// privileged-session check; without it the POST bounces through a fresh
     /// Kratos init and loses the form body.
     flow_id: String,
+    /// `[audit].audit_retention_days`, shown on the "what we keep" card.
+    retention_days: String,
     referrer_banner: Option<crate::handoff::ReferrerBannerView>,
 }
 
@@ -108,6 +110,7 @@ pub(crate) async fn settings_account_delete(
         chrome: themed.chrome,
         notified_apps,
         flow_id,
+        retention_days: state.cfg.audit.audit_retention_days.to_string(),
         referrer_banner: banner.0,
     })
 }
@@ -178,168 +181,21 @@ async fn run_delete_saga(
     };
     let user_id = identity.id.clone();
     let actor_email = session_email(session);
-    let event_id = Uuid::new_v4();
-    let deleted_at = Utc::now();
 
-    tracing::info!(
-        action = "account.self_delete.start",
-        actor = %actor_email,
-        event_id = %event_id,
-        user_id = %user_id,
-        "account self-delete: saga starting"
-    );
-
-    // Before anything destructive: refuse to orphan an org whose only owner is
-    // leaving while other members remain. Solo orgs delete normally.
-    match crate::orgs::db::orgs_where_sole_owner_with_other_members(&state.db, &user_id).await {
-        Ok(blocking) if !blocking.is_empty() => {
-            let names = blocking
-                .iter()
-                .map(|(_, name)| name.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
-            tracing::warn!(
-                actor = %actor_email,
-                user_id = %user_id,
-                orgs = %names,
-                "account self-delete blocked: sole owner of org(s) with other members"
-            );
-            let mut args: std::collections::HashMap<
-                std::borrow::Cow<'static, str>,
-                fluent_templates::fluent_bundle::FluentValue,
-            > = std::collections::HashMap::new();
-            args.insert(std::borrow::Cow::Borrowed("names"), names.clone().into());
-            return render_delete_failure(
-                state,
-                locale,
-                &crate::i18n::lookup_args(
-                    locale,
-                    "error-boundary-account-delete-sole-owner",
-                    &args,
-                ),
-            );
-        }
-        Ok(_) => {}
-        Err(e) => {
-            tracing::error!(
-                error = %e,
-                user_id = %user_id,
-                "sole-owner check failed; aborting before destructive call"
-            );
-            return render_delete_failure(
-                state,
-                locale,
-                &crate::i18n::lookup(
-                    locale,
-                    "error-boundary-account-delete-ownership-check-failed",
-                ),
-            );
-        }
-    }
-
-    // Bail BEFORE the destructive call if Hydra is unreachable: proceeding with
-    // an empty target list would destroy the identity while leaving every
-    // integrator with a stale copy and no notification.
-    let targets = match collect_webhook_targets(state, &user_id).await {
-        Ok(t) => t,
-        Err(e) => {
-            tracing::error!(
-                error = %e,
-                event_id = %event_id,
-                user_id = %user_id,
-                "consent-session enumeration failed; aborting before destructive call"
-            );
-            return render_delete_failure(
-                state,
-                locale,
-                &crate::i18n::lookup(locale, "error-boundary-account-delete-consent-unreachable"),
-            );
-        }
-    };
-    let target_count = targets.len();
-
-    // Enqueue PENDING rows (empty `targets` writes nothing).
-    if let Err(e) = webhook::enqueue_pending(
-        &state.db,
-        &state.signing_key,
-        webhook::SetIssuers {
-            set: &state.cfg.self_.url,
-            subject: state.cfg.hydra.issuer_or_public(),
+    let env = DeleteEnv::from_state(state);
+    let req = DeleteRequest {
+        identity_id: user_id.clone(),
+        reason: DeleteReason::SelfService,
+        actor: DeleteActor::User {
+            id: user_id.clone(),
+            email: actor_email.clone(),
         },
-        event_id,
-        &user_id,
-        deleted_at,
-        &targets,
-    )
-    .await
-    {
-        tracing::error!(error = %e, event_id = %event_id, "outbox write failed; aborting saga");
-        return render_delete_failure(
-            state,
-            locale,
-            &crate::i18n::lookup(locale, "error-boundary-account-delete-notifications-failed"),
-        );
-    }
-
-    // The destructive call. On failure, flip the outbox to ABORTED so the
-    // worker never sends.
-    match ory::kratos::admin_delete_identity(&state.ory, &user_id).await {
-        Ok(()) => {
-            crate::oauth::op_sessions::end_op_sessions_for_subject(
-                state,
-                &user_id,
-                None,
-                crate::oauth::op_sessions::GrantRevocation::Keep,
-            )
-            .await;
-            // Cascade: drop org memberships so neither delete route leaves
-            // ghost rows on the members page.
-            match crate::orgs::db::remove_member_everywhere(&state.db, &user_id).await {
-                Ok(n) if n > 0 => tracing::info!(
-                    user_id = %user_id,
-                    removed = n,
-                    "self-delete: removed org memberships",
-                ),
-                Ok(_) => {}
-                Err(e) => tracing::warn!(
-                    error = ?e,
-                    user_id = %user_id,
-                    "self-delete: org_members cleanup failed",
-                ),
-            }
-            // Cascade: purge POSIX rows, else an orphan leaves a usable login
-            // for a deleted identity. Best-effort.
-            if let Err(e) = crate::posix::db::delete_account_rows(&state.db, &user_id).await {
-                tracing::error!(error = ?e, identity_id = %user_id, "failed to purge posix rows on identity delete");
-            }
-            if let Err(e) = webhook::confirm_event(&state.db, event_id).await {
-                tracing::error!(error = %e, event_id = %event_id, "outbox confirm failed; rows stay PENDING and will be reconciled at startup");
-            }
-            // Compliance-critical audit trail. The identity is already gone so
-            // we can't unwind on Err; `audit::log` emits an `audit_fallback`
-            // stderr line, and we log loudly here for the primary stream.
-            if let Err(e) = audit::log(
-                &state.db,
-                AuditEvent::new(action::ACCOUNT_SELF_DELETED)
-                    .actor_user(&user_id, &actor_email)
-                    .target(target_kind::IDENTITY, user_id.clone())
-                    .with_ctx(actx)
-                    .critical()
-                    .metadata(audit_metadata!(
-                        "event_id" => event_id.to_string(),
-                        "webhook_targets" => target_count,
-                    )),
-            )
-            .await
-            {
-                tracing::error!(
-                    error = %e,
-                    event_id = %event_id,
-                    user_id = %user_id,
-                    actor = %actor_email,
-                    "CRITICAL audit row for account.self_deleted failed to persist; recover from audit_fallback stderr event"
-                );
-            }
+        force: false,
+        ctx: Some(actx.clone()),
+        metadata: SafeMetadata::empty(),
+    };
+    let failure_key = match delete_identity(&env, req).await {
+        Ok(_) => {
             // Clear the now-stale Kratos session cookie the browser still
             // holds, so it isn't carried back to a surface that hasn't yet
             // observed the 401.
@@ -356,119 +212,68 @@ async fn run_delete_saga(
                     .headers_mut()
                     .append(axum::http::header::SET_COOKIE, hv);
             }
-            response
+            return response;
         }
-        Err(e) => {
-            tracing::error!(
-                error = %e,
+        Err(DeleteError::SoleOwner(names)) => {
+            let names = names.join(", ");
+            tracing::warn!(
                 actor = %actor_email,
-                event_id = %event_id,
                 user_id = %user_id,
-                "kratos admin delete failed; aborting outbox"
+                orgs = %names,
+                "account self-delete blocked: sole owner of org(s) with other members"
             );
-            if let Err(e2) = webhook::abort_event(&state.db, event_id).await {
-                tracing::error!(error = %e2, event_id = %event_id, "outbox abort failed");
-            }
-            render_delete_failure(
+            let mut args: std::collections::HashMap<
+                std::borrow::Cow<'static, str>,
+                fluent_templates::fluent_bundle::FluentValue,
+            > = std::collections::HashMap::new();
+            args.insert(std::borrow::Cow::Borrowed("names"), names.into());
+            return render_delete_failure(
                 state,
                 locale,
-                &crate::i18n::lookup(locale, "error-boundary-account-delete-failed"),
-            )
-        }
-    }
-}
-
-/// One webhook target per (client_id, account_deletion_url) consent grant.
-///
-/// `Err` (Hydra lookup failure) is fatal to the saga: proceeding with an empty
-/// target list would delete the identity while integrators never learn the user
-/// is gone. `list_apps_to_notify` swallows the same failure because its
-/// read-only screen tolerates an incomplete list; the write path doesn't.
-async fn collect_webhook_targets(
-    state: &AppState,
-    user_id: &str,
-) -> anyhow::Result<Vec<webhook::WebhookTarget>> {
-    let sessions = ory::hydra::list_consent_sessions_by_subject(&state.ory, user_id).await?;
-
-    // De-duplicate by client_id (many consent sessions per client).
-    let mut seen: std::collections::HashSet<String> = Default::default();
-    let mut targets = Vec::new();
-    for sess in sessions {
-        let Some(req) = sess.consent_request else {
-            continue;
-        };
-        let Some(client) = req.client else { continue };
-        let Some(client_id) = client.client_id else {
-            continue;
-        };
-        if !seen.insert(client_id.clone()) {
-            continue;
-        }
-        let Some(url) = deletion_url_from_metadata(client.metadata.as_ref()) else {
-            continue;
-        };
-        // Hydra's RFC 7592 client-configuration endpoint writes this metadata
-        // without going through the admin form, so the save-time guard has to
-        // be re-applied here.
-        if let Err(reason) = webhook::validate_webhook_url(&url) {
-            tracing::warn!(
-                client_id = %client_id,
-                reason = %reason,
-                "skipping account-deletion webhook target: unsafe URL"
+                &crate::i18n::lookup_args(
+                    locale,
+                    "error-boundary-account-delete-sole-owner",
+                    &args,
+                ),
             );
-            continue;
         }
-        targets.push(webhook::WebhookTarget { client_id, url });
-    }
-    Ok(targets)
-}
-
-/// For the confirm-page card list (names only, no secrets needed).
-async fn list_apps_to_notify(state: &AppState, user_id: &str) -> Vec<NotifiedApp> {
-    let sessions = match ory::hydra::list_consent_sessions_by_subject(&state.ory, user_id).await {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!(error = %e, user_id, "could not list consent sessions");
-            return Vec::new();
+        Err(e @ DeleteError::Guard(_)) => {
+            tracing::error!(error = %e, user_id = %user_id, "self-delete aborted before destructive call");
+            "error-boundary-account-delete-ownership-check-failed"
+        }
+        Err(e @ DeleteError::Collect(CollectStep::Consents, _)) => {
+            tracing::error!(error = %e, user_id = %user_id, "self-delete aborted before destructive call");
+            "error-boundary-account-delete-consent-unreachable"
+        }
+        Err(e @ DeleteError::Collect(CollectStep::Identity, _)) => {
+            tracing::error!(error = %e, user_id = %user_id, "self-delete aborted before destructive call");
+            "error-boundary-account-delete-failed"
+        }
+        Err(e @ DeleteError::Outbox(_)) => {
+            tracing::error!(error = %e, user_id = %user_id, "self-delete aborted before destructive call");
+            "error-boundary-account-delete-notifications-failed"
+        }
+        Err(e @ DeleteError::Kratos(_)) => {
+            tracing::error!(error = %e, actor = %actor_email, user_id = %user_id, "kratos admin delete failed");
+            "error-boundary-account-delete-failed"
         }
     };
-    let mut seen: std::collections::HashSet<String> = Default::default();
-    let mut apps = Vec::new();
-    for sess in sessions {
-        let Some(req) = sess.consent_request else {
-            continue;
-        };
-        let Some(client) = req.client else { continue };
-        let Some(client_id) = client.client_id else {
-            continue;
-        };
-        if !seen.insert(client_id.clone()) {
-            continue;
-        }
-        // Same guard as `collect_webhook_targets`, so the card doesn't promise
-        // a notification the saga will drop.
-        let Some(url) = deletion_url_from_metadata(client.metadata.as_ref()) else {
-            continue;
-        };
-        if webhook::validate_webhook_url(&url).is_err() {
-            continue;
-        }
-        apps.push(NotifiedApp {
-            name: client.client_name.unwrap_or(client_id),
-        });
-    }
-    apps
+    render_delete_failure(state, locale, &crate::i18n::lookup(locale, failure_key))
 }
 
-/// `metadata.forseti.account_deletion_url` from a Hydra client. Namespaced
-/// under `forseti` to avoid colliding with other tooling's metadata.
-fn deletion_url_from_metadata(metadata: Option<&serde_json::Value>) -> Option<String> {
-    metadata?
-        .get("forseti")?
-        .get("account_deletion_url")?
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
+/// For the confirm-page card list (names only). A Hydra failure yields an
+/// empty list here; the write path refuses instead.
+async fn list_apps_to_notify(state: &AppState, user_id: &str) -> Vec<NotifiedApp> {
+    match notified_clients(&state.ory, user_id).await {
+        Ok(clients) => clients
+            .into_iter()
+            .map(|c| NotifiedApp { name: c.name })
+            .collect(),
+        Err(e) => {
+            tracing::warn!(error = %e, user_id, "could not list consent sessions");
+            Vec::new()
+        }
+    }
 }
 
 fn render_delete_failure(state: &AppState, locale: &LanguageIdentifier, body: &str) -> Response {

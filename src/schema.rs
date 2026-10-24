@@ -182,7 +182,7 @@ diesel::table! {
         org_id -> Text,
         enabled -> Integer,
         display_name -> Text,
-        created_by -> Text,
+        created_by -> Nullable<Text>,
         created_at -> Text,
         updated_at -> Text,
     }
@@ -380,7 +380,7 @@ diesel::table! {
         enabled -> Bool,
         corroboration -> Text,
         corroborated_at -> Nullable<Timestamp>,
-        created_by -> Text,
+        created_by -> Nullable<Text>,
         created_at -> Timestamp,
     }
 }

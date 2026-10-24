@@ -24,7 +24,7 @@ use axum::routing::get;
 use rand::RngExt;
 use serde::Deserialize;
 
-use crate::admin::actions::{DeleteActor, DeleteReason, delete_identity_audited};
+use super::delete::{DeleteActor, DeleteEnv, DeleteReason, DeleteRequest, delete_identity};
 use crate::audit_metadata;
 use crate::config::{ClaimEmailConfig, ProxyConfig};
 use crate::csrf::CsrfForm;
@@ -398,25 +398,23 @@ async fn confirm_post(
         );
     }
 
-    // Code matched. Delete the unverified identity (+ critical audit row)
-    // via the shared admin action so the recipe lives in one place.
     let metadata = audit_metadata!(
         "reclaim_email" => target_email.clone(),
         "deleted_identity_id" => target_identity.clone(),
     );
-    if let Err(e) = delete_identity_audited(
-        &state,
-        &target_identity,
-        DeleteActor::User {
-            identity_id: &target_identity,
-            email: &target_email,
+    let env = DeleteEnv::from_state(&state);
+    let req = DeleteRequest {
+        identity_id: target_identity.clone(),
+        reason: DeleteReason::Reclaim,
+        actor: DeleteActor::User {
+            id: target_identity.clone(),
+            email: target_email.clone(),
         },
-        DeleteReason::EmailReclaim,
+        force: false,
+        ctx: None,
         metadata,
-        None,
-    )
-    .await
-    {
+    };
+    if let Err(e) = delete_identity(&env, req).await {
         tracing::error!(error = ?e, "claim-email: delete identity failed");
         return render_claim_confirm_error(
             &state,

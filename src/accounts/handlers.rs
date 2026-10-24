@@ -70,7 +70,8 @@ pub(crate) async fn switch(
 
     if !actor_id.is_empty() {
         crate::oauth::op_sessions::end_op_sessions_for_browser(
-            &state,
+            &state.db,
+            &state.ory,
             &actor_id,
             &kratos_session_id,
             crate::oauth::op_sessions::GrantRevocation::Keep,

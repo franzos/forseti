@@ -117,7 +117,8 @@ pub(crate) async fn settings_sessions_revoke(
     };
     if ok {
         crate::oauth::op_sessions::end_op_sessions_for_browser(
-            &state,
+            &state.db,
+            &state.ory,
             &actor_id,
             &session_id,
             crate::oauth::op_sessions::GrantRevocation::Revoke,
@@ -155,7 +156,8 @@ pub(crate) async fn settings_sessions_revoke_others(
     {
         Ok(n) => {
             crate::oauth::op_sessions::end_op_sessions_for_subject(
-                &state,
+                &state.db,
+                &state.ory,
                 &actor_id,
                 Some(&sess.session.id),
                 crate::oauth::op_sessions::GrantRevocation::Revoke,

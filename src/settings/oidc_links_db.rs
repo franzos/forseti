@@ -62,6 +62,16 @@ pub(crate) async fn list_for_identity(
     Ok(rows)
 }
 
+/// Drop every provider link of `identity_id`. Returns the rows removed;
+/// idempotent.
+pub(crate) async fn delete_for_identity(db: &DbPool, identity_id: &str) -> anyhow::Result<usize> {
+    let ident = identity_id.to_string();
+    let n: usize = db_interact!(db, |conn| {
+        diesel::delete(oidc_links::table.filter(oidc_links::identity_id.eq(&ident))).execute(conn)
+    })?;
+    Ok(n)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -78,5 +88,18 @@ mod tests {
         let rows = list_for_identity(&db, "ident-1").await.unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0], ("github".to_string(), first));
+    }
+
+    #[tokio::test]
+    async fn delete_for_identity_removes_only_that_identitys_links() {
+        let db = test_pool().await;
+        upsert_seen(&db, "ident-1", "github").await.unwrap();
+        upsert_seen(&db, "ident-1", "google").await.unwrap();
+        upsert_seen(&db, "ident-2", "github").await.unwrap();
+
+        assert_eq!(delete_for_identity(&db, "ident-1").await.unwrap(), 2);
+        assert!(list_for_identity(&db, "ident-1").await.unwrap().is_empty());
+        assert_eq!(list_for_identity(&db, "ident-2").await.unwrap().len(), 1);
+        assert_eq!(delete_for_identity(&db, "ident-1").await.unwrap(), 0);
     }
 }

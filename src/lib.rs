@@ -80,6 +80,13 @@ pub async fn run_cli() -> anyhow::Result<()> {
             let code = identity::prune_unverified_cli(&cfg, &db, &ory).await;
             std::process::exit(code);
         }
+        Some(Cmd::DeleteIdentity { id, yes, force }) => {
+            let cfg = config::AppConfig::load()?;
+            let ory = ory::OryClients::from_config(&cfg);
+            let db = bootstrap_db(&cfg).await?;
+            let code = identity::delete_identity_cli(&cfg, &db, &ory, &id, yes, force).await;
+            std::process::exit(code);
+        }
         Some(Cmd::PosixReconcile) => {
             let cfg = config::AppConfig::load()?;
             let db = bootstrap_db(&cfg).await?;

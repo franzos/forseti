@@ -115,9 +115,13 @@ pub(crate) async fn oauth_login(
                 .await;
             }
         }
-        if let Err(e) =
-            super::op_sessions::end_sid(&state, sid, super::op_sessions::GrantRevocation::Keep)
-                .await
+        if let Err(e) = super::op_sessions::end_sid(
+            &state.db,
+            &state.ory,
+            sid,
+            super::op_sessions::GrantRevocation::Keep,
+        )
+        .await
         {
             tracing::error!(error = %e, "ending a stale hydra login session failed");
             return reject(

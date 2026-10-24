@@ -48,6 +48,8 @@ error-boundary-account-delete-ownership-check-failed = Não foi possível verifi
 error-boundary-account-delete-consent-unreachable = Não foi possível contactar o serviço de consentimento para notificar as suas aplicações ligadas. Nada foi alterado; tente novamente dentro de instantes.
 error-boundary-account-delete-notifications-failed = Não foi possível preparar as notificações de eliminação. Nada foi alterado; tente novamente.
 error-boundary-account-delete-failed = Não foi possível eliminar a sua conta. Tente novamente dentro de instantes.
+error-boundary-account-export-title = Exportação indisponível
+error-boundary-account-export-failed = Não foi possível preparar a sua exportação porque uma das fontes de dados não respondeu. Nada foi alterado; tente novamente dentro de instantes.
 
 # Limite de erro SAML (apresentado no locale predefinido; o callback ACS não transporta o locale do pedido).
 error-boundary-sso-unavailable-title = Início de sessão único indisponível

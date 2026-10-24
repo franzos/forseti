@@ -68,8 +68,11 @@ settings-password-back = العودة إلى الإعدادات
 settings-account-heading = الحساب
 settings-account-subtitle = تغييرات دائمة على حسابك.
 settings-account-delete-section-heading = حذف الحساب
-settings-account-delete-body = احذف حسابك نهائيًا، وكل جلسة نشطة، وجميع حالة المصادقة الثنائية / الاسترداد. تُخطَر التطبيقات التي تحتفظ بنسخ من بياناتك لتتمكّن من مسح جانبها. لا يمكن التراجع عن هذا.
+settings-account-delete-body = احذف حسابك نهائيًا. يُزال تسجيل الدخول والجلسات والمصادقة الثنائية ورموز الاسترداد والملف الشخصي واسم المستخدم والمزوّدون المرتبطون ومفاتيح SSH وحساب POSIX وعبارة المرور دون اتصال وعضويات المؤسسات والفرق والدعوات المرسلة إلى بريدك الإلكتروني. تُطلَب التطبيقات التي تحتفظ بنسخة من بياناتك بحذفها. لا يمكن التراجع عن هذا.
 settings-account-delete-action = حذف حسابي
+settings-account-export-section-heading = تصدير بياناتك
+settings-account-export-body = نزّل كل ما نحتفظ به عنك في ملف JSON واحد: حسابك وعناوينك وطرق تسجيل الدخول، والجلسات مع تفاصيل الأجهزة، وسجلات التدقيق، والتطبيقات المصرّح لها، وعضويات المؤسسات والفرق، والدعوات، والملف الشخصي وسجل أسماء المستخدم، ومزوّدي الهوية المرتبطين، ومفاتيح SSH، وحساب POSIX، وتسجيلات الدخول إلى المضيفين، وما إذا كانت عبارة المرور دون اتصال مضبوطة. لا تُضمَّن أبدًا تجزئات كلمات المرور أو الرموز أو أي أسرار أخرى.
+settings-account-export-action = تنزيل بياناتي
 
 # صفحة تأكيد حذف الحساب
 settings-account-delete-page-title = تأكيد الحذف
@@ -77,8 +80,10 @@ settings-account-delete-confirm-heading = هل تريد حذف حسابك؟
 settings-account-delete-confirm-subtitle-prefix = هذا يزيل نهائيًا
 settings-account-delete-confirm-subtitle-suffix = وكل جلسة ورمز استرداد وبيانات اعتماد مرتبطة به.
 settings-account-delete-apps-heading = ستُبلَّغ هذه التطبيقات بأنك رحلت
-settings-account-delete-apps-note = تنسخ التطبيقات البيانات التي تحتاجها (الملف الشخصي، الإعدادات) وتربطها بمعرّف حسابك. نُخطرها عبر خطاف الحذف (webhook) الذي سجّلته لتتمكّن من مسح نسختها.
+settings-account-delete-apps-note = تنسخ التطبيقات البيانات التي تحتاجها (الملف الشخصي، الإعدادات) وتربطها بمعرّف حسابك. نُخطرها عبر خطاف الحذف (webhook) الذي سجّلته لتتمكّن من مسح نسختها. يمكننا إخطارها، لكن لا يمكننا إجبارها على الحذف.
 settings-account-delete-no-apps = لا تملك أي تطبيقات من جهات خارجية نسخًا من بياناتك حاليًا. لا شيء لإخطاره.
+settings-account-delete-left-heading = ما نحتفظ به
+settings-account-delete-left-body = تبقى سجلات التدقيق التي تذكر حسابك لمدة { $days } يومًا ثم تُزال. تبقى المؤسسات والفرق والمضيفات والنطاقات التي أنشأتها، مع إزالة اسمك. تحتفظ التطبيقات بما لديها حتى تتصرّف بناءً على الإخطار.
 settings-account-delete-confirm-label = للتأكيد، اكتب بريدك الإلكتروني أدناه:
 settings-account-delete-confirm-placeholder = اكتب بريدك الإلكتروني للتأكيد
 settings-account-delete-confirm-submit = نعم، احذف حسابي

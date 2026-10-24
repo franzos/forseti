@@ -21,6 +21,15 @@
         <p class="font-body-md text-body-md text-on-surface-variant mt-1">{{ chrome.t("settings-account-subtitle") }}</p>
       </header>
 
+      <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-6 mb-stack-lg">
+        <h2 class="font-headline-md text-headline-md text-on-surface mb-stack-sm">{{ chrome.t("settings-account-export-section-heading") }}</h2>
+        <p class="font-body-md text-body-md text-on-surface-variant">{{ chrome.t("settings-account-export-body") }}</p>
+        <a href="/settings/account/export"
+           class="mt-stack-md inline-flex items-center justify-center gap-2 bg-primary text-on-primary hover:bg-primary/90 px-5 py-3 rounded-xl font-label-lg text-label-lg font-semibold">
+          {{ chrome.t("settings-account-export-action") }}
+        </a>
+      </div>
+
       <div class="bg-error-container border border-error rounded-xl p-6">
         <h2 class="font-headline-md text-headline-md text-on-error-container mb-stack-sm">{{ chrome.t("settings-account-delete-section-heading") }}</h2>
         <p class="font-body-md text-body-md text-on-error-container">{{ chrome.t("settings-account-delete-body") }}</p>

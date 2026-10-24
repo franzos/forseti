@@ -68,8 +68,11 @@ settings-password-back = Retour aux paramètres
 settings-account-heading = Compte
 settings-account-subtitle = Modifications permanentes de votre compte.
 settings-account-delete-section-heading = Supprimer le compte
-settings-account-delete-body = Supprimez définitivement votre compte, chaque session active et tout l'état 2FA / récupération. Les applications qui détiennent des copies de vos données sont notifiées afin qu'elles puissent nettoyer leur côté. Cette action est irréversible.
+settings-account-delete-body = Supprimez définitivement votre compte. Cela retire votre identifiant de connexion, les sessions, le 2FA et les codes de récupération, le profil et le nom d'utilisateur, les fournisseurs liés, les clés SSH, le compte POSIX, la phrase secrète hors ligne, les appartenances aux organisations et aux équipes, ainsi que les invitations envoyées à votre e-mail. Les applications qui détiennent une copie de vos données sont invitées à la supprimer. Cette action est irréversible.
 settings-account-delete-action = Supprimer mon compte
+settings-account-export-section-heading = Exporter vos données
+settings-account-export-body = Téléchargez tout ce que nous détenons sur vous dans un seul fichier JSON : votre compte, vos adresses et méthodes de connexion, vos sessions avec les détails des appareils, les entrées d'audit, les applications autorisées, vos appartenances aux organisations et aux équipes, les invitations, votre profil et l'historique de vos noms d'utilisateur, les fournisseurs liés, les clés SSH, le compte POSIX, les connexions aux hôtes et si une phrase secrète hors ligne est définie. Les hachages de mots de passe, les jetons et autres secrets ne sont jamais inclus.
+settings-account-export-action = Télécharger mes données
 
 # Page de confirmation de suppression de compte
 settings-account-delete-page-title = Confirmer la suppression
@@ -77,8 +80,10 @@ settings-account-delete-confirm-heading = Supprimer votre compte ?
 settings-account-delete-confirm-subtitle-prefix = Cela supprime définitivement
 settings-account-delete-confirm-subtitle-suffix = ainsi que chaque session, code de récupération et identifiant qui y est rattaché.
 settings-account-delete-apps-heading = Ces applications seront informées de votre départ
-settings-account-delete-apps-note = Les applications copient les données dont elles ont besoin (profil, paramètres) et les conservent liées à l'ID de votre compte. Nous les notifions via le webhook de suppression qu'elles ont enregistré afin qu'elles puissent nettoyer leur copie.
+settings-account-delete-apps-note = Les applications copient les données dont elles ont besoin (profil, paramètres) et les conservent liées à l'ID de votre compte. Nous les notifions via le webhook de suppression qu'elles ont enregistré afin qu'elles puissent nettoyer leur copie. Nous pouvons les notifier, pas les forcer à supprimer.
 settings-account-delete-no-apps = Aucune application tierce ne détient de copie de vos données pour le moment. Personne à notifier.
+settings-account-delete-left-heading = Ce que nous conservons
+settings-account-delete-left-body = Les entrées d'audit qui mentionnent votre compte sont conservées { $days } jours, puis supprimées. Les organisations, équipes, hôtes et domaines que vous avez créés restent, sans votre nom. Les applications gardent ce qu'elles détiennent jusqu'à ce qu'elles donnent suite à la notification.
 settings-account-delete-confirm-label = Pour confirmer, saisissez votre adresse e-mail ci-dessous :
 settings-account-delete-confirm-placeholder = Saisissez votre e-mail pour confirmer
 settings-account-delete-confirm-submit = Oui, supprimer mon compte

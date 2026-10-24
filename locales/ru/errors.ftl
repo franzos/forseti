@@ -48,6 +48,8 @@ error-boundary-account-delete-ownership-check-failed = Не удалось пр�
 error-boundary-account-delete-consent-unreachable = Не удалось связаться со службой согласия, чтобы уведомить ваши подключённые приложения. Ничего не изменено; пожалуйста, повторите попытку через мгновение.
 error-boundary-account-delete-notifications-failed = Не удалось подготовить уведомления об удалении. Ничего не изменено; пожалуйста, повторите попытку.
 error-boundary-account-delete-failed = Не удалось удалить ваш аккаунт. Пожалуйста, повторите попытку через мгновение.
+error-boundary-account-export-title = Экспорт недоступен
+error-boundary-account-export-failed = Не удалось собрать ваш экспорт, потому что один из источников данных не ответил. Ничего не изменено; пожалуйста, повторите попытку через мгновение.
 
 # Граница ошибок SAML (отображается под локалью по умолчанию; обратный вызов ACS не несёт локали запроса).
 error-boundary-sso-unavailable-title = Единый вход недоступен

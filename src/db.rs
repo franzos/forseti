@@ -32,6 +32,11 @@ const fn fnv1a_64(s: &str) -> u64 {
 
 use crate::config::{DatabaseBackend, DatabaseConfig};
 
+diesel::define_sql_function! {
+    /// SQL `LOWER()` over a nullable text column; `LOWER(NULL)` is `NULL`.
+    fn lower(x: diesel::sql_types::Nullable<diesel::sql_types::Text>) -> diesel::sql_types::Nullable<diesel::sql_types::Text>
+}
+
 /// Migrations live in two parallel folders so each backend can carry its own
 /// dialect-specific SQL (sqlite's `WITHOUT ROWID`, postgres's `JSONB` /
 /// triggers, etc). The Rust API is identical via diesel's query DSL.

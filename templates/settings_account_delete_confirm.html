@@ -41,6 +41,15 @@
         </div>
       {% endif %}
 
+      <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-5 mb-stack-md">
+        <h2 class="font-label-md text-label-md text-on-surface-variant uppercase tracking-widest mb-stack-sm">
+          {{ chrome.t("settings-account-delete-left-heading") }}
+        </h2>
+        <p class="font-body-md text-body-md text-on-surface">
+          {{ chrome.tv1("settings-account-delete-left-body", "days", &retention_days) }}
+        </p>
+      </div>
+
       <form method="post"
             action="/settings/account/delete?flow={{ flow_id }}"
             class="bg-error-container border border-error rounded-xl p-6">

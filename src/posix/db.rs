@@ -801,13 +801,124 @@ pub async fn is_member(db: &DbPool, gid: u32, identity_id: &str) -> anyhow::Resu
 }
 
 pub async fn authorized_keys_for(db: &DbPool, identity_id: &str) -> anyhow::Result<Vec<SshKey>> {
+    authorized_keys(db, identity_id, Some(MAX_ROWS_PER_LIST)).await
+}
+
+/// [`authorized_keys_for`] without the row cap, for the account export.
+pub async fn all_authorized_keys_for(
+    db: &DbPool,
+    identity_id: &str,
+) -> anyhow::Result<Vec<SshKey>> {
+    authorized_keys(db, identity_id, None).await
+}
+
+async fn authorized_keys(
+    db: &DbPool,
+    identity_id: &str,
+    limit: Option<i64>,
+) -> anyhow::Result<Vec<SshKey>> {
     let id = identity_id.to_string();
     let rows: Vec<SshKey> = db_interact!(db, |conn| {
-        ssh_authorized_keys::table
+        let mut q = ssh_authorized_keys::table
             .filter(ssh_authorized_keys::identity_id.eq(&id))
             .order(ssh_authorized_keys::created_at.asc())
-            .limit(MAX_ROWS_PER_LIST)
-            .select(SshKey::as_select())
+            .into_boxed();
+        if let Some(limit) = limit {
+            q = q.limit(limit);
+        }
+        q.select(SshKey::as_select()).load(conn)
+    })?;
+    Ok(rows)
+}
+
+/// The identity's `posix_group_members` rows as `(gid, added_at)`, oldest
+/// first. Uncapped: the account export reads it.
+pub async fn group_memberships_for_identity(
+    db: &DbPool,
+    identity_id: &str,
+) -> anyhow::Result<Vec<(i32, String)>> {
+    let id = identity_id.to_string();
+    let rows: Vec<(i32, String)> = db_interact!(db, |conn| {
+        posix_group_members::table
+            .filter(posix_group_members::identity_id.eq(&id))
+            .order(posix_group_members::added_at.asc())
+            .select((posix_group_members::gid, posix_group_members::added_at))
+            .load(conn)
+    })?;
+    Ok(rows)
+}
+
+/// One `host_account_logins` row with the host's name resolved.
+#[derive(Debug, Clone, Serialize)]
+pub struct HostLogin {
+    pub host_id: String,
+    pub hostname: String,
+    pub last_login_at: String,
+}
+
+/// Per-host last-login records of an identity, oldest first. A host that
+/// was since revoked keeps its id with an empty hostname. Uncapped: the
+/// account export reads it.
+pub async fn host_logins_for_identity(
+    db: &DbPool,
+    identity_id: &str,
+) -> anyhow::Result<Vec<HostLogin>> {
+    let id = identity_id.to_string();
+    let logins: Vec<(String, String)> = db_interact!(db, |conn| {
+        host_account_logins::table
+            .filter(host_account_logins::identity_id.eq(&id))
+            .order(host_account_logins::last_login_at.asc())
+            .select((
+                host_account_logins::host_id,
+                host_account_logins::last_login_at,
+            ))
+            .load(conn)
+    })?;
+    if logins.is_empty() {
+        return Ok(Vec::new());
+    }
+    let host_ids: Vec<String> = logins.iter().map(|(h, _)| h.clone()).collect();
+    let names: std::collections::HashMap<String, String> = db_interact!(db, |conn| {
+        host_enrollments::table
+            .filter(host_enrollments::id.eq_any(&host_ids))
+            .select((host_enrollments::id, host_enrollments::hostname))
+            .load::<(String, String)>(conn)
+    })?
+    .into_iter()
+    .collect();
+    Ok(logins
+        .into_iter()
+        .map(|(host_id, last_login_at)| HostLogin {
+            hostname: names.get(&host_id).cloned().unwrap_or_default(),
+            host_id,
+            last_login_at,
+        })
+        .collect())
+}
+
+/// A device session without its codes.
+#[derive(Queryable, Selectable, Debug, Clone, Serialize)]
+#[diesel(table_name = device_sessions)]
+pub struct DeviceSessionSummary {
+    pub host_id: String,
+    pub requested_username: String,
+    pub status: String,
+    pub created_at: String,
+    pub expires_at: String,
+}
+
+/// Device sessions decided by an identity, oldest first. Uncapped: the
+/// account export reads it.
+pub async fn device_sessions_for_identity(
+    db: &DbPool,
+    identity_id: &str,
+) -> anyhow::Result<Vec<DeviceSessionSummary>> {
+    let id = identity_id.to_string();
+    let rows: Vec<DeviceSessionSummary> = db_interact!(db, |conn| {
+        device_sessions::table
+            .filter(device_sessions::identity_id.eq(&id))
+            .order(device_sessions::created_at.asc())
+            .select(DeviceSessionSummary::as_select())
             .load(conn)
     })?;
     Ok(rows)
@@ -976,8 +1087,8 @@ pub async fn set_account_enabled(
 }
 
 /// Cascade-delete every POSIX row tied to `identity_id`: keys, memberships,
-/// per-host login records, the account's primary (user-kind) group, and the
-/// account itself. Idempotent.
+/// per-host login records, the offline verifier, device sessions, the
+/// account's primary (user-kind) group, and the account itself. Idempotent.
 pub async fn delete_account_rows(db: &DbPool, identity_id: &str) -> anyhow::Result<()> {
     let id = identity_id.to_string();
     db_interact!(db, |conn| {
@@ -986,6 +1097,10 @@ pub async fn delete_account_rows(db: &DbPool, identity_id: &str) -> anyhow::Resu
                 ssh_authorized_keys::table.filter(ssh_authorized_keys::identity_id.eq(&id)),
             )
             .execute(c)?;
+            diesel::delete(offline_secrets::table.filter(offline_secrets::identity_id.eq(&id)))
+                .execute(c)?;
+            diesel::delete(device_sessions::table.filter(device_sessions::identity_id.eq(&id)))
+                .execute(c)?;
             diesel::delete(
                 posix_group_members::table.filter(posix_group_members::identity_id.eq(&id)),
             )
@@ -1689,6 +1804,29 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn deleting_an_account_drops_its_offline_secret_and_device_sessions() {
+        let db = temp_pool().await;
+        provision(&db, "alice", "alice").await;
+        provision(&db, "bob", "bob").await;
+        insert_host(&db, "h-1", "one.example", "x", "orgA", false, None)
+            .await
+            .unwrap();
+        upsert_offline_secret(&db, "alice", "v", 1).await.unwrap();
+        upsert_offline_secret(&db, "bob", "v", 1).await.unwrap();
+        pending_session(&db, "dc-a", "h-1", "alice").await;
+        assert!(approve_device_session(&db, "dc-a", "alice").await.unwrap());
+        pending_session(&db, "dc-b", "h-1", "bob").await;
+        assert!(approve_device_session(&db, "dc-b", "bob").await.unwrap());
+
+        delete_account_rows(&db, "alice").await.unwrap();
+        assert!(get_offline_secret(&db, "alice").await.unwrap().is_none());
+        assert!(device_session_by_code(&db, "dc-a").await.unwrap().is_none());
+        assert!(get_offline_secret(&db, "bob").await.unwrap().is_some());
+        assert!(device_session_by_code(&db, "dc-b").await.unwrap().is_some());
+        delete_account_rows(&db, "alice").await.unwrap();
     }
 
     #[tokio::test]

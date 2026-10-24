@@ -346,6 +346,63 @@ pub async fn list_identity_sessions(
     .map_err(|e| anyhow::anyhow!("kratos admin list_identity_sessions failed: {e}"))
 }
 
+const SESSION_LIST_PAGE_SIZE: i64 = 250;
+const SESSION_LIST_MAX_PAGES: usize = 50;
+
+/// Every session of an identity, following `Link: rel="next"` until
+/// exhausted. The SDK helper drops the Link header, so this goes through the
+/// raw client like [`super::hydra::list_consent_sessions_by_subject`].
+pub async fn list_identity_sessions_all(
+    clients: &OryClients,
+    identity_id: &str,
+) -> Result<Vec<Session>> {
+    let cfg = &clients.kratos_admin;
+    let base = format!(
+        "{}/admin/identities/{}/sessions",
+        cfg.base_path.trim_end_matches('/'),
+        ory_client::apis::urlencode(identity_id)
+    );
+    let mut out: Vec<Session> = Vec::new();
+    let mut page_token: Option<String> = None;
+    for _ in 0..SESSION_LIST_MAX_PAGES {
+        let mut req = cfg
+            .client
+            .get(&base)
+            .query(&[("page_size", SESSION_LIST_PAGE_SIZE.to_string())]);
+        if let Some(tok) = page_token.as_deref() {
+            req = req.query(&[("page_token", tok)]);
+        }
+        if let Some(token) = cfg.bearer_access_token.as_ref() {
+            req = req.bearer_auth(token);
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("kratos list_identity_sessions transport: {e}"))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!(
+                "kratos list_identity_sessions returned {status}: {body}"
+            ));
+        }
+        let next = super::hydra::next_link(resp.headers());
+        let batch: Vec<Session> = resp
+            .json()
+            .await
+            .map_err(|e| anyhow::anyhow!("kratos list_identity_sessions decode: {e}"))?;
+        let batch_empty = batch.is_empty();
+        out.extend(batch);
+        match next {
+            Some(tok) if !batch_empty => page_token = Some(tok),
+            _ => return Ok(out),
+        }
+    }
+    Err(anyhow::anyhow!(
+        "kratos session listing exceeded {SESSION_LIST_MAX_PAGES} pages"
+    ))
+}
+
 /// The ids of the identity's active, unexpired sessions. Kratos applies the
 /// expiry in its `active` filter.
 pub async fn active_session_ids(
@@ -454,19 +511,33 @@ async fn admin_list_identities_by_ids_inner(
 /// Like [`admin_get_identity`] but asks Kratos to include the identity's
 /// credentials in the response (passwords stay hashed/redacted; this surfaces which methods are configured, not the secrets).
 pub async fn admin_get_identity_full(clients: &OryClients, id: &str) -> Result<Identity> {
-    identity_api::get_identity(
-        &clients.kratos_admin,
-        id,
-        Some(vec![
-            "password".to_string(),
-            "totp".to_string(),
-            "webauthn".to_string(),
-            "lookup_secret".to_string(),
-            "oidc".to_string(),
-        ]),
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("kratos admin get_identity_full failed: {e}"))
+    identity_api::get_identity(&clients.kratos_admin, id, Some(full_credential_types()))
+        .await
+        .map_err(|e| anyhow::anyhow!("kratos admin get_identity_full failed: {e}"))
+}
+
+/// [`admin_get_identity_full`] with a typed 404 mapped to `Ok(None)`.
+pub async fn admin_get_identity_full_optional(
+    clients: &OryClients,
+    id: &str,
+) -> Result<Option<Identity>> {
+    match identity_api::get_identity(&clients.kratos_admin, id, Some(full_credential_types())).await
+    {
+        Ok(identity) => Ok(Some(identity)),
+        Err(OryError::ResponseError(resp)) if resp.status == reqwest::StatusCode::NOT_FOUND => {
+            Ok(None)
+        }
+        Err(e) => Err(anyhow::anyhow!(
+            "kratos admin get_identity_full failed: {e}"
+        )),
+    }
+}
+
+fn full_credential_types() -> Vec<String> {
+    ["password", "totp", "webauthn", "lookup_secret", "oidc"]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect()
 }
 
 /// Set the `preferred_language` trait on an identity without clobbering other

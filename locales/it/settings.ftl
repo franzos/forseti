@@ -68,8 +68,11 @@ settings-password-back = Torna alle impostazioni
 settings-account-heading = Account
 settings-account-subtitle = Modifiche permanenti al tuo account.
 settings-account-delete-section-heading = Elimina account
-settings-account-delete-body = Elimina definitivamente il tuo account, ogni sessione attiva e tutti i dati di 2FA / recupero. Le app che detengono copie dei tuoi dati vengono notificate per poter ripulire la loro parte. L'operazione non può essere annullata.
+settings-account-delete-body = Elimina definitivamente il tuo account. Vengono rimossi il tuo accesso, le sessioni, il 2FA e i codici di recupero, il profilo e il nome utente, i provider collegati, le chiavi SSH, l'account POSIX, la passphrase offline, le appartenenze a organizzazioni e team e gli inviti inviati alla tua email. Alle app che detengono una copia dei tuoi dati viene chiesto di eliminarla. L'operazione non può essere annullata.
 settings-account-delete-action = Elimina il mio account
+settings-account-export-section-heading = Esporta i tuoi dati
+settings-account-export-body = Scarica tutto ciò che conserviamo su di te in un unico file JSON: il tuo account, gli indirizzi e i metodi di accesso, le sessioni con i dettagli dei dispositivi, le voci di audit, le app autorizzate, le appartenenze a organizzazioni e team, gli inviti, il profilo e la cronologia dei nomi utente, i provider collegati, le chiavi SSH, l'account POSIX, gli accessi agli host e se è impostata una passphrase offline. Hash delle password, token e altri segreti non sono mai inclusi.
+settings-account-export-action = Scarica i miei dati
 
 # Pagina di conferma eliminazione account
 settings-account-delete-page-title = Conferma eliminazione
@@ -77,8 +80,10 @@ settings-account-delete-confirm-heading = Eliminare il tuo account?
 settings-account-delete-confirm-subtitle-prefix = Questo rimuove definitivamente
 settings-account-delete-confirm-subtitle-suffix = e ogni sessione, codice di recupero e credenziale ad esso associati.
 settings-account-delete-apps-heading = Queste app riceveranno la notifica della tua eliminazione
-settings-account-delete-apps-note = Le app copiano i dati di cui hanno bisogno (profilo, impostazioni) e li mantengono collegati al tuo ID account. Le notifichiamo tramite il webhook di eliminazione che hanno registrato in modo che possano ripulire la loro copia.
+settings-account-delete-apps-note = Le app copiano i dati di cui hanno bisogno (profilo, impostazioni) e li mantengono collegati al tuo ID account. Le notifichiamo tramite il webhook di eliminazione che hanno registrato in modo che possano ripulire la loro copia. Possiamo notificarle, non obbligarle a eliminare.
 settings-account-delete-no-apps = Al momento nessuna app di terze parti ha copie dei tuoi dati. Nessuno da notificare.
+settings-account-delete-left-heading = Cosa conserviamo
+settings-account-delete-left-body = Le voci di audit che riguardano il tuo account restano per { $days } giorni e poi vengono rimosse. Organizzazioni, team, host e domini che hai creato restano, senza il tuo nome. Le app conservano ciò che hanno finché non agiscono sulla notifica.
 settings-account-delete-confirm-label = Per confermare, digita la tua email qui sotto:
 settings-account-delete-confirm-placeholder = Digita la tua email per confermare
 settings-account-delete-confirm-submit = Sì, elimina il mio account

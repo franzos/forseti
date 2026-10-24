@@ -68,8 +68,11 @@ settings-password-back = Zurück zu den Einstellungen
 settings-account-heading = Konto
 settings-account-subtitle = Dauerhafte Änderungen an Ihrem Konto.
 settings-account-delete-section-heading = Konto löschen
-settings-account-delete-body = Löschen Sie Ihr Konto dauerhaft, jede aktive Sitzung und alle 2FA-/Wiederherstellungsdaten. Apps, die Kopien Ihrer Daten besitzen, werden benachrichtigt, damit sie ihre Seite bereinigen können. Dies kann nicht rückgängig gemacht werden.
+settings-account-delete-body = Löschen Sie Ihr Konto dauerhaft. Entfernt werden Ihr Login, Sitzungen, 2FA und Wiederherstellungscodes, Profil und Benutzername, verknüpfte Anbieter, SSH-Schlüssel, POSIX-Konto, Offline-Passphrase, Organisations- und Team-Mitgliedschaften sowie Einladungen an Ihre E-Mail-Adresse. Apps, die eine Kopie Ihrer Daten halten, werden aufgefordert, sie zu löschen. Dies kann nicht rückgängig gemacht werden.
 settings-account-delete-action = Mein Konto löschen
+settings-account-export-section-heading = Ihre Daten exportieren
+settings-account-export-body = Laden Sie alles, was wir über Sie gespeichert haben, als eine JSON-Datei herunter: Ihr Konto, Adressen und Anmeldemethoden, Sitzungen mit Gerätedetails, Audit-Einträge, autorisierte Apps, Organisations- und Team-Mitgliedschaften, Einladungen, Profil und Benutzernamen-Verlauf, verknüpfte Anbieter, SSH-Schlüssel, POSIX-Konto, Host-Anmeldungen und ob eine Offline-Passphrase gesetzt ist. Passwort-Hashes, Tokens und andere Geheimnisse sind nie enthalten.
+settings-account-export-action = Meine Daten herunterladen
 
 # Konto-Löschbestätigungsseite
 settings-account-delete-page-title = Löschung bestätigen
@@ -77,8 +80,10 @@ settings-account-delete-confirm-heading = Möchten Sie Ihr Konto löschen?
 settings-account-delete-confirm-subtitle-prefix = Dies entfernt dauerhaft
 settings-account-delete-confirm-subtitle-suffix = sowie alle zugehörigen Sitzungen, Wiederherstellungscodes und Anmeldedaten.
 settings-account-delete-apps-heading = Diese Apps werden über die Löschung Ihres Kontos informiert
-settings-account-delete-apps-note = Apps kopieren die Daten, die sie benötigen (Profil, Einstellungen) und verknüpfen sie mit Ihrer Konto-ID. Wir benachrichtigen sie über den von ihnen registrierten Lösch-Webhook, damit sie ihre Kopie bereinigen können.
+settings-account-delete-apps-note = Apps kopieren die Daten, die sie benötigen (Profil, Einstellungen) und verknüpfen sie mit Ihrer Konto-ID. Wir benachrichtigen sie über den von ihnen registrierten Lösch-Webhook, damit sie ihre Kopie bereinigen können. Wir können sie benachrichtigen, aber nicht zum Löschen zwingen.
 settings-account-delete-no-apps = Aktuell haben keine Drittanbieter-Apps Kopien Ihrer Daten. Es gibt niemanden zu benachrichtigen.
+settings-account-delete-left-heading = Was wir behalten
+settings-account-delete-left-body = Audit-Einträge, die Ihr Konto nennen, bleiben { $days } Tage erhalten und werden dann entfernt. Organisationen, Teams, Hosts und Domains, die Sie angelegt haben, bleiben bestehen, ohne Ihren Namen. Apps behalten, was sie haben, bis sie auf die Benachrichtigung reagieren.
 settings-account-delete-confirm-label = Zur Bestätigung geben Sie Ihre E-Mail-Adresse ein:
 settings-account-delete-confirm-placeholder = E-Mail-Adresse zur Bestätigung eingeben
 settings-account-delete-confirm-submit = Ja, mein Konto löschen

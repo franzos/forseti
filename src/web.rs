@@ -2,7 +2,7 @@
 //! (version constant, return-to validation, `FlowQuery`, error-boundary template, cookie helpers).
 
 use askama::Template;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 
 use crate::config::AppConfig;
@@ -99,6 +99,28 @@ pub(crate) fn append_set_cookie(resp: &mut Response, cookie: Option<String>) {
         resp.headers_mut()
             .append(axum::http::header::SET_COOKIE, hv);
     }
+}
+
+/// Serve `value` as a JSON file download named `filename`.
+pub(crate) fn download_json(filename: &str, value: &serde_json::Value) -> Response {
+    use axum::http::header;
+    let body = serde_json::to_vec_pretty(value).unwrap_or_default();
+    (
+        [
+            (
+                header::CONTENT_TYPE,
+                "application/json; charset=utf-8".to_string(),
+            ),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{filename}\""),
+            ),
+            (header::CACHE_CONTROL, "no-store".to_string()),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
+        ],
+        body,
+    )
+        .into_response()
 }
 
 pub(crate) fn render_error_boundary(

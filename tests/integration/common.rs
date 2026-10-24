@@ -3082,3 +3082,285 @@ pub async fn kratos_change_password(client: &Client, new_password: &str) {
         "submit password change: status {status} body {body}"
     );
 }
+
+/// Rows that still point at a deleted identity: a count per table the Kratos
+/// cascade never reaches, invites addressed to `email`, and reference columns
+/// that should have been set to NULL. Empty when nothing is left.
+pub fn rows_referencing(identity_id: &str, email: &str) -> Vec<String> {
+    let conn = forseti_db_conn();
+    let email_lc = email.to_lowercase();
+    let mut left = Vec::new();
+    let count = |sql: &str, arg: &str| -> i64 {
+        conn.query_row(sql, params![arg], |r| r.get(0))
+            .unwrap_or_else(|e| panic!("`{sql}`: {e}"))
+    };
+    for (table, column) in [
+        ("member_profiles", "identity_id"),
+        ("member_username_history", "identity_id"),
+        ("oidc_links", "identity_id"),
+        ("offline_secrets", "identity_id"),
+        ("device_sessions", "identity_id"),
+        ("posix_accounts", "identity_id"),
+        ("ssh_authorized_keys", "identity_id"),
+        ("posix_group_members", "identity_id"),
+        ("host_account_logins", "identity_id"),
+        ("organization_members", "identity_id"),
+        ("org_team_members", "identity_id"),
+        ("saml_links", "identity_id"),
+        ("hydra_login_sessions", "subject"),
+        ("hydra_consent_grants", "subject"),
+    ] {
+        let n = count(
+            &format!("SELECT COUNT(*) FROM {table} WHERE {column} = ?1"),
+            identity_id,
+        );
+        if n > 0 {
+            left.push(format!("{table}: {n} row(s)"));
+        }
+    }
+    if !email_lc.is_empty() {
+        let n = count(
+            "SELECT COUNT(*) FROM organization_invites WHERE LOWER(email) = ?1",
+            &email_lc,
+        );
+        if n > 0 {
+            left.push(format!("organization_invites: {n} row(s)"));
+        }
+    }
+    for (table, column) in [
+        ("organizations", "created_by"),
+        ("org_teams", "created_by"),
+        ("organization_members", "added_by"),
+        ("org_allowed_domains", "added_by"),
+        ("organization_invites", "invited_by"),
+        ("organization_invites", "accepted_by"),
+        ("saml_connections", "created_by"),
+        ("host_enrollments", "created_by"),
+        ("resource_registry", "created_by"),
+        ("oauth_client_metadata", "verified_by"),
+        ("oauth_client_metadata", "verification_revoked_by"),
+    ] {
+        let mut n = count(
+            &format!("SELECT COUNT(*) FROM {table} WHERE {column} = ?1"),
+            identity_id,
+        );
+        if !email_lc.is_empty() {
+            n += count(
+                &format!("SELECT COUNT(*) FROM {table} WHERE LOWER({column}) = ?1"),
+                &email_lc,
+            );
+        }
+        if n > 0 {
+            left.push(format!("{table}.{column}: {n} reference(s)"));
+        }
+    }
+    left
+}
+
+/// A profile row with a username plus one released-username tombstone.
+pub fn seed_profile_username(identity_id: &str, username: &str, released_username: &str) {
+    let now = chrono::Utc::now().to_rfc3339();
+    let conn = forseti_db_conn();
+    conn.execute(
+        "INSERT OR REPLACE INTO member_profiles \
+            (identity_id, bio, updated_at, username, username_lc) \
+         VALUES (?1, 'seeded', ?2, ?3, ?4)",
+        params![identity_id, now, username, username.to_lowercase()],
+    )
+    .unwrap_or_else(|e| panic!("seed member_profiles: {e}"));
+    conn.execute(
+        "INSERT OR REPLACE INTO member_username_history (username_lc, identity_id, released_at) \
+         VALUES (?1, ?2, ?3)",
+        params![released_username.to_lowercase(), identity_id, now],
+    )
+    .unwrap_or_else(|e| panic!("seed member_username_history: {e}"));
+}
+
+pub fn seed_oidc_link(identity_id: &str, provider: &str) {
+    let now = chrono::Utc::now().to_rfc3339();
+    let conn = forseti_db_conn();
+    conn.execute(
+        "INSERT OR REPLACE INTO oidc_links (identity_id, provider, first_seen_at) VALUES (?1, ?2, ?3)",
+        params![identity_id, provider, now],
+    )
+    .unwrap_or_else(|e| panic!("seed oidc_links: {e}"));
+}
+
+/// A pending invite to `email` into the default org.
+pub fn seed_org_invite(token: &str, email: &str, invited_by: Option<&str>) {
+    let now = chrono::Utc::now();
+    let conn = forseti_db_conn();
+    conn.execute(
+        "INSERT INTO organization_invites \
+            (token, org_id, email, role, invited_by, created_at, expires_at, accepted_at, accepted_by) \
+         VALUES (?1, 'default', ?2, 'member', ?3, ?4, ?5, NULL, NULL)",
+        params![
+            token,
+            email,
+            invited_by,
+            now.to_rfc3339(),
+            (now + chrono::Duration::days(7)).to_rfc3339()
+        ],
+    )
+    .unwrap_or_else(|e| panic!("seed organization_invites: {e}"));
+}
+
+/// Stamp an identity id or email into a reference column so a deletion has
+/// something to pseudonymise. `key_column = key` selects the row.
+pub fn set_reference_column(table: &str, column: &str, key_column: &str, key: &str, value: &str) {
+    let conn = forseti_db_conn();
+    conn.execute(
+        &format!("UPDATE {table} SET {column} = ?1 WHERE {key_column} = ?2"),
+        params![value, key],
+    )
+    .unwrap_or_else(|e| panic!("set {table}.{column}: {e}"));
+}
+
+/// Read one reference column; `None` when the row is missing or the value is NULL.
+pub fn reference_column_value(
+    table: &str,
+    column: &str,
+    key_column: &str,
+    key: &str,
+) -> Option<String> {
+    let conn = forseti_db_conn();
+    conn.query_row(
+        &format!("SELECT {column} FROM {table} WHERE {key_column} = ?1"),
+        params![key],
+        |r| r.get::<_, Option<String>>(0),
+    )
+    .ok()
+    .flatten()
+}
+
+pub fn seed_saml_link(org_id: &str, email: &str, identity_id: &str, idp_subject: &str) {
+    let now = chrono::Utc::now().to_rfc3339();
+    let conn = forseti_db_conn();
+    conn.execute(
+        "INSERT OR REPLACE INTO saml_links (org_id, email, identity_id, created_at, idp_subject) \
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![org_id, email.to_lowercase(), identity_id, now, idp_subject],
+    )
+    .unwrap_or_else(|e| panic!("seed saml_links: {e}"));
+}
+
+/// An approved device session for `identity_id` on `host_id`.
+pub fn seed_device_session(
+    device_code: &str,
+    user_code: &str,
+    host_id: &str,
+    requested_username: &str,
+    identity_id: &str,
+    client_code_hash: &str,
+) {
+    let now = chrono::Utc::now();
+    let conn = forseti_db_conn();
+    conn.execute(
+        "INSERT INTO device_sessions \
+            (device_code, user_code, host_id, requested_username, status, identity_id, \
+             created_at, expires_at, client_code_hash) \
+         VALUES (?1, ?2, ?3, ?4, 'approved', ?5, ?6, ?7, ?8)",
+        params![
+            device_code,
+            user_code,
+            host_id,
+            requested_username,
+            identity_id,
+            now.to_rfc3339(),
+            (now + chrono::Duration::minutes(10)).to_rfc3339(),
+            client_code_hash
+        ],
+    )
+    .unwrap_or_else(|e| panic!("seed device_sessions: {e}"));
+}
+
+/// One recorded Hydra login session plus one consent grant for `subject`.
+pub fn seed_hydra_op_rows(subject: &str, sid: &str, client_id: &str) {
+    let now = chrono::Utc::now().to_rfc3339();
+    let conn = forseti_db_conn();
+    conn.execute(
+        "INSERT OR REPLACE INTO hydra_login_sessions (sid, subject, kratos_session_id, created_at) \
+         VALUES (?1, ?2, NULL, ?3)",
+        params![sid, subject, now],
+    )
+    .unwrap_or_else(|e| panic!("seed hydra_login_sessions: {e}"));
+    conn.execute(
+        "INSERT OR REPLACE INTO hydra_consent_grants \
+            (consent_request_id, sid, subject, client_id, created_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![format!("cr-{sid}"), sid, subject, client_id, now],
+    )
+    .unwrap_or_else(|e| panic!("seed hydra_consent_grants: {e}"));
+}
+
+pub fn seed_allowed_domain(org_id: &str, domain: &str, added_by: &str) {
+    let now = chrono::Utc::now().to_rfc3339();
+    let conn = forseti_db_conn();
+    conn.execute(
+        "INSERT OR REPLACE INTO org_allowed_domains \
+            (org_id, domain, method, verification_token, verified_at, added_by, added_at) \
+         VALUES (?1, ?2, 'dns_txt', ?3, ?4, ?5, ?4)",
+        params![org_id, domain, format!("tok-{domain}"), now, added_by],
+    )
+    .unwrap_or_else(|e| panic!("seed org_allowed_domains: {e}"));
+}
+
+pub fn seed_saml_connection(org_id: &str, created_by: &str) {
+    let now = chrono::Utc::now().to_rfc3339();
+    let conn = forseti_db_conn();
+    conn.execute(
+        "INSERT OR REPLACE INTO saml_connections \
+            (org_id, enabled, display_name, created_by, created_at, updated_at) \
+         VALUES (?1, 0, 'Seeded IdP', ?2, ?3, ?3)",
+        params![org_id, created_by, now],
+    )
+    .unwrap_or_else(|e| panic!("seed saml_connections: {e}"));
+}
+
+/// Remove a seeded org with its memberships, domains, SAML connection and
+/// SAML links (test cleanup). Teams and hosts are deleted by their own helpers.
+pub fn delete_org_rows(org_id: &str) {
+    let conn = forseti_db_conn();
+    for table in [
+        "organization_members",
+        "org_allowed_domains",
+        "saml_connections",
+        "saml_links",
+        "organizations",
+    ] {
+        let key = if table == "organizations" {
+            "id"
+        } else {
+            "org_id"
+        };
+        conn.execute(
+            &format!("DELETE FROM {table} WHERE {key} = ?1"),
+            params![org_id],
+        )
+        .unwrap_or_else(|e| panic!("delete {table}: {e}"));
+    }
+}
+
+/// The newest audit row for `(action, target_id)`.
+pub struct AuditEventLite {
+    pub severity: String,
+    pub actor_kind: String,
+    pub metadata: Value,
+}
+
+pub fn latest_audit_event(action: &str, target_id: &str) -> Option<AuditEventLite> {
+    let conn = forseti_db_conn();
+    conn.query_row(
+        "SELECT severity, actor_kind, metadata FROM audit_events \
+         WHERE action = ?1 AND target_id = ?2 ORDER BY created_at DESC, id DESC LIMIT 1",
+        params![action, target_id],
+        |r| {
+            Ok(AuditEventLite {
+                severity: r.get(0)?,
+                actor_kind: r.get(1)?,
+                metadata: serde_json::from_str(&r.get::<_, String>(2)?).unwrap_or(Value::Null),
+            })
+        },
+    )
+    .ok()
+}
