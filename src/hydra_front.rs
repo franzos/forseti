@@ -171,7 +171,8 @@ pub(crate) async fn augmented_discovery(state: &AppState) -> Response {
     let Some(raw) = state.openid_configuration_raw().await else {
         return (StatusCode::BAD_GATEWAY, "hydra discovery unavailable").into_response();
     };
-    let Some(doc) = augment_discovery_doc(&raw, state.cfg.hydra.issuer_path()) else {
+    let providers = state.idp_provider_ids().await;
+    let Some(doc) = augment_discovery_doc(&raw, state.cfg.hydra.issuer_path(), &providers) else {
         return (StatusCode::BAD_GATEWAY, "hydra discovery unavailable").into_response();
     };
     (
@@ -189,11 +190,13 @@ pub(crate) async fn augmented_discovery(state: &AppState) -> Response {
 /// advertise CIMD support, point `authorization_endpoint` at the Forseti
 /// shim, drop `registration_endpoint` (no anonymous registration surface),
 /// advertise only the code flow, S256 and signed tokens, and add the
-/// `prompt`/`acr` values Forseti handles. `issuer` and the remaining
-/// endpoints pass through untouched. `None` when the doc is not a JSON object.
+/// `prompt`/`acr` values Forseti handles, and list the upstream providers an
+/// `idp_hint` can name. `issuer` and the remaining endpoints pass through
+/// untouched. `None` when the doc is not a JSON object.
 fn augment_discovery_doc(
     raw: &serde_json::Value,
     issuer_path: Option<&str>,
+    idp_provider_ids: &[String],
 ) -> Option<serde_json::Value> {
     let mut doc = raw.as_object()?.clone();
     doc.insert(
@@ -237,6 +240,21 @@ fn augment_discovery_doc(
         "acr_values_supported".to_string(),
         serde_json::json!(["aal1", "aal2"]),
     );
+    if !idp_provider_ids.is_empty() {
+        let hints: Vec<serde_json::Value> = idp_provider_ids
+            .iter()
+            .map(|id| {
+                serde_json::json!({
+                    "id": id,
+                    "name": crate::oidc_providers::display_name(id),
+                })
+            })
+            .collect();
+        doc.insert(
+            "idp_hints_supported".to_string(),
+            serde_json::Value::Array(hints),
+        );
+    }
     Some(serde_json::Value::Object(doc))
 }
 
@@ -263,7 +281,7 @@ mod tests {
             "credentials_endpoint_draft_00": "http://host.containers.internal:3000/hydra/credentials",
             "credentials_supported_draft_00": [{"format": "jwt_vc_json"}],
         });
-        let out = augment_discovery_doc(&raw, Some("hydra")).expect("object doc");
+        let out = augment_discovery_doc(&raw, Some("hydra"), &[]).expect("object doc");
 
         assert_eq!(out["client_id_metadata_document_supported"], true);
         assert_eq!(
@@ -307,6 +325,7 @@ mod tests {
             "credentials_endpoint_draft_00",
             "credentials_supported_draft_00",
         ];
+        assert!(out.get("idp_hints_supported").is_none());
         let (raw, out) = (raw.as_object().unwrap(), out.as_object().unwrap());
         for (key, value) in raw {
             if rewritten.contains(&key.as_str()) {
@@ -323,7 +342,7 @@ mod tests {
     #[test]
     fn augmentation_without_issuer_path_uses_issuer_origin() {
         let raw = serde_json::json!({ "issuer": "http://localhost:4444" });
-        let out = augment_discovery_doc(&raw, None).expect("object doc");
+        let out = augment_discovery_doc(&raw, None, &[]).expect("object doc");
         assert_eq!(
             out["authorization_endpoint"],
             "http://localhost:4444/oauth2/authorize"
@@ -332,7 +351,28 @@ mod tests {
     }
 
     #[test]
+    fn augmentation_lists_idp_hints_and_keeps_other_keys() {
+        let raw = serde_json::json!({
+            "issuer": "http://localhost:4444",
+            "scopes_supported": ["openid"],
+        });
+        let ids = ["github".to_string(), "playground".to_string()];
+        let out = augment_discovery_doc(&raw, None, &ids).expect("object doc");
+        assert_eq!(
+            out["idp_hints_supported"],
+            serde_json::json!([
+                { "id": "github", "name": "GitHub" },
+                { "id": "playground", "name": "Playground" },
+            ])
+        );
+        let without = augment_discovery_doc(&raw, None, &[]).expect("object doc");
+        let mut with = out.as_object().unwrap().clone();
+        with.remove("idp_hints_supported");
+        assert_eq!(&with, without.as_object().unwrap());
+    }
+
+    #[test]
     fn augmentation_rejects_non_object_doc() {
-        assert!(augment_discovery_doc(&serde_json::json!([1, 2]), Some("hydra")).is_none());
+        assert!(augment_discovery_doc(&serde_json::json!([1, 2]), Some("hydra"), &[]).is_none());
     }
 }

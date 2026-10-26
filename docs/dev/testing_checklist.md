@@ -138,7 +138,7 @@ Run these first. If any of them fail, stop and triage before touching the browse
 
 ### 4.5 Linked providers (`/settings/linked-providers`)
 
-- [ ] Page renders empty state when no OIDC providers configured
+- [ ] Page renders empty state when no OIDC providers configured (the playground enables `playground` through `infra/kratos/kratos.idp-test.yml`, so this needs that overlay dropped)
 - [ ] (If a provider is enabled in `kratos.yml`) link/unlink round-trip
 
 ### 4.6 Authorized apps (`/settings/authorized-apps`) — NEW
@@ -221,6 +221,20 @@ These are the classic spec-violation bugs custom IdPs ship. Drive each via Chrom
 - [ ] CIMD client's self-written Hydra `audience` never grants (registry rows only)
 - [ ] Rate limit: 11th shim request in a minute from one IP → 429 with a clean error body
 - [ ] Audit rows: `oauth.client.cimd_seen` / `oauth.client.cimd_rejected`
+
+### 5.6 Upstream provider hint (`idp_hint`)
+
+The playground's `playground` provider signs in at the mock on `:8092` (any username).
+
+- [ ] Discovery lists `idp_hints_supported: [{"id": "playground", "name": "Playground"}]`, the same ids as the provider buttons on `/login`
+- [ ] Signed out, `/oauth2/authorize?...&idp_hint=playground` → one "Continuing to Playground" page that submits itself → the mock's sign-in page; no Forseti sign-in page in between
+- [ ] Completing the mock sign-in returns to the app (consent first for an unvouched client)
+- [ ] Same with JavaScript disabled: the page shows a "Sign in with Playground" button that does the same
+- [ ] `prompt=create&idp_hint=playground` → hand-off from `/registration`
+- [ ] `idp_hint=nope` → normal sign-in page; the Forseti log has `idp_hint not in cached provider list` and `idp_hint not offered by this flow; showing sign-in`
+- [ ] Signed in, `idp_hint=playground` → straight to consent or the app, the mock never loads
+- [ ] `acr_values=aal2` or `prompt=login` with a session and `idp_hint=playground` → the usual step-up / re-auth page, no hand-off
+- [ ] A custom provider without `[security].extra_form_action` stays on the hand-off page (CSP `form-action` violation in the console)
 
 ## 6. Organizations (commercial-gated, OSS Default works)
 

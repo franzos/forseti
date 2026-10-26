@@ -909,7 +909,11 @@ Behaviour:
 4. No session → 302 to `/login?return_to=/oauth/login?login_challenge=...`
    so the user lands here again post-auth. An email-shaped `login_hint` rides
    along as `&login_hint=` and prefills the identifier (and the sign-up email
-   when the visitor switches to Create account).
+   when the visitor switches to Create account). A syntactically valid
+   `idp_hint` (`[A-Za-z0-9._-]{1,64}`, `parse_idp_hint_param`) rides along as
+   `&idp_hint=` (see [Upstream provider hand-off](#upstream-provider-hand-off-idp_hint)).
+   One missing from the cached provider list logs a warning and is still
+   forwarded; the flow's own provider nodes decide.
 5. ACR step-up: if the challenge's `oidc_context.acr_values` contains
    `aal2` and the session's AAL is below that, 302 to
    `/login?aal=aal2&return_to=...`. Kratos demands a second factor and
@@ -947,9 +951,73 @@ resolve lands on `/error`.
 rewrites `prompt=create` (Initiating User Registration 1.0) to Hydra's
 `prompt=registration`, and Hydra sends the challenge here. A signed-out
 visitor goes to `/registration` with the challenge as `return_to` (and the
-`login_hint` prefilled); registration, verification and Continue return to
-`/oauth/login`, which finishes the flow. A signed-in visitor goes straight
-to `/oauth/login`.
+`login_hint` prefilled, and the `idp_hint` forwarded as in step 4);
+registration, verification and Continue return to `/oauth/login`, which
+finishes the flow. A signed-in visitor goes straight to `/oauth/login`.
+
+#### Upstream provider hand-off (`idp_hint`)
+
+`src/auth/idp_hint.rs`. A relying party names a Kratos OIDC provider id on
+the authorization request and an anonymous user goes straight to it.
+
+1. `/oauth/login` (no session, after the `prompt=none` rejection) and
+   `/oauth/register` forward `&idp_hint=` to `/login` or `/registration`.
+2. `Init` arm of `/login` and `/registration`: Kratos's init hop drops the
+   query, so `idp_hint::init_cookie` sets the one-shot `forseti_idp_hint`
+   cookie (HttpOnly, 600s, path `/login` or `/registration`), unless `aal`
+   or `refresh` is on the query.
+3. `Ready` arm: the hint comes from the query, else the cookie
+   (`idp_hint::Requested`). `idp_hint::matching_provider` takes it only when
+   the flow's own `oidc` `provider` submit nodes offer it and the flow is
+   neither `requested_aal == "aal2"` nor `refresh == true`. A match renders
+   `templates/idp_handoff.html` (`render_handoff`, `Cache-Control: no-store`):
+   a form posting the flow's hidden inputs (`csrf_token`) plus hidden
+   `method=oidc` and `provider=<id>` straight at Kratos, submitted by an inline
+   script, with a visible button for no-JS browsers. A miss logs
+   `idp_hint not offered by this flow; showing sign-in` and renders the normal
+   page. Either way the cookie is cleared, so a failed provider round trip
+   lands on the normal page instead of looping.
+4. Kratos 303s to the provider; `form-action` admits it through
+   `flow_auth_origins` (built-in providers) or `[security].extra_form_action`.
+
+```mermaid
+sequenceDiagram
+    participant RP as Relying party
+    participant B as Browser
+    participant F as Forseti
+    participant H as Hydra
+    participant K as Kratos
+    participant U as Upstream IdP
+    RP->>B: /oauth2/authorize?...&idp_hint=github
+    B->>H: /oauth2/auth (via the shim)
+    H->>B: 302 /oauth/login?login_challenge=...
+    B->>F: GET /oauth/login (no session)
+    F->>B: 302 /login?return_to=...&idp_hint=github
+    B->>F: GET /login
+    F->>B: 303 Kratos /self-service/login/browser + Set-Cookie forseti_idp_hint
+    B->>K: init flow
+    K->>B: 303 /login?flow=<id>
+    B->>F: GET /login?flow=<id> (cookie)
+    F->>K: get flow
+    F->>B: 200 hand-off page, clears forseti_idp_hint
+    B->>K: POST flow form (csrf_token, method=oidc, provider=github)
+    K->>B: 303 upstream authorize
+    B->>U: sign in
+    U->>B: 302 Kratos callback
+    B->>K: callback, session issued
+    K->>B: 303 /oauth/login?login_challenge=...
+    B->>F: GET /oauth/login (session) -> accept login, consent
+```
+
+The provider list in discovery: `AppState::idp_provider_ids` (`src/state.rs`)
+probes Kratos's `/self-service/login/api` without cookies
+(`ory::kratos::probe_oidc_provider_ids`, `flow_view::oidc_provider_ids`) and
+caches the ids for an hour, serving the last good list while Kratos is down
+and an empty one (retried after 30s) on a cold failure.
+`hydra_front::augment_discovery_doc` adds them as
+`idp_hints_supported: [{id, name}]`, names from `oidc_providers::display_name`
+(a custom id gets its first letter capitalised), and leaves the key out when
+the list is empty.
 
 ### Consent
 

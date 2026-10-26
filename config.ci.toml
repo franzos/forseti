@@ -19,6 +19,10 @@ issuer = "http://host.containers.internal:3000/hydra"
 [self]
 url = "http://localhost:3000"
 
+[security]
+# The `playground` upstream provider (infra/kratos/kratos.idp-test.yml).
+extra_form_action = ["http://host.containers.internal:8092"]
+
 [brand]
 name          = "Forseti CI"
 support_email = "support@example.com"

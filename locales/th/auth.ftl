@@ -14,6 +14,8 @@ auth-login-create-account = สร้างบัญชี
 auth-or-continue-with = หรือดำเนินการต่อด้วย
 auth-oidc-signin = เข้าสู่ระบบด้วย { $provider }
 auth-oidc-email-needed = { $provider } ไม่ได้แชร์อีเมลที่ยืนยันแล้ว กรอกอีเมลที่คุณต้องการใช้กับบัญชีนี้
+auth-idp-handoff-title = กำลังไปที่ { $provider }
+auth-idp-handoff-body = กำลังพาคุณไปที่ { $provider } เพื่อเข้าสู่ระบบ หากไม่มีอะไรเกิดขึ้น ให้ใช้ปุ่มด้านล่าง
 
 # หน้าลงทะเบียน
 auth-registration-page-title = สร้างบัญชี

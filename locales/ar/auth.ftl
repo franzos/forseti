@@ -14,6 +14,8 @@ auth-login-create-account = إنشاء حساب
 auth-or-continue-with = أو تابع باستخدام
 auth-oidc-signin = تسجيل الدخول باستخدام { $provider }
 auth-oidc-email-needed = لم يشارك { $provider } عنوان بريد إلكتروني مُتحقَّقًا منه. أدخل العنوان الذي تريد استخدامه لهذا الحساب.
+auth-idp-handoff-title = جارٍ الانتقال إلى { $provider }
+auth-idp-handoff-body = جارٍ نقلك إلى { $provider } لتسجيل الدخول. إذا لم يحدث شيء، فاستخدم الزر أدناه.
 
 # صفحة التسجيل
 auth-registration-page-title = إنشاء حساب

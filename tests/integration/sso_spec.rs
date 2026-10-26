@@ -1092,3 +1092,305 @@ async fn non_cimd_authorize_is_not_rate_limited() {
     // `[oauth.cimd]` limits to 1000/min so the CIMD suite can run.
     hydra_delete_client(&id).await;
 }
+
+// --- `idp_hint`: hand off to an upstream provider ----------------------------
+
+/// The `playground` provider's mock upstream (infra/kratos/kratos.idp-test.yml).
+const MOCK_IDP_ORIGIN: &str = "http://host.containers.internal:8092";
+
+/// Follow `url` hop by hop on a redirect-less `client`, returning every URL
+/// visited and the final response's body.
+async fn chase_all(client: &reqwest::Client, url: &str) -> (Vec<reqwest::Url>, String) {
+    let mut resp = client.get(url).send().await.expect("first hop");
+    let mut visited = vec![resp.url().clone()];
+    for _ in 0..20 {
+        let next = if resp.status().is_redirection() {
+            next_hop(resp).await
+        } else {
+            let base = resp.url().clone();
+            let body = resp.text().await.unwrap_or_default();
+            match continue_target(&body, &base) {
+                Some(next) => Some(next),
+                None => return (visited, body),
+            }
+        };
+        let Some(next) = next else {
+            return (visited, String::new());
+        };
+        visited.push(next.clone());
+        resp = client.get(next).send().await.expect("hop");
+    }
+    panic!("redirect chain too long: {visited:?}");
+}
+
+/// The hand-off form's `action` and fields, unescaped.
+fn handoff_form(body: &str) -> (String, Vec<(String, String)>) {
+    let form = body
+        .split_once("id=\"idp-handoff\"")
+        .expect("hand-off form")
+        .1;
+    let unescape = |s: &str| s.replace("&#38;", "&").replace("&amp;", "&");
+    let action = extract_attr(form, "action")
+        .map(|a| unescape(&a))
+        .expect("action");
+    let fields = ["csrf_token", "method", "provider"]
+        .into_iter()
+        .map(|name| {
+            let value = extract_input_value(form, name).unwrap_or_else(|| panic!("{name} input"));
+            (name.to_string(), unescape(&value))
+        })
+        .collect();
+    (action, fields)
+}
+
+fn extract_attr(html: &str, attr: &str) -> Option<String> {
+    let rest = html.split_once(&format!("{attr}=\""))?.1;
+    Some(rest[..rest.find('"')?].to_string())
+}
+
+/// POST the hand-off form like the page's script would; returns the 303's target.
+async fn submit_handoff(manual: &reqwest::Client, body: &str) -> reqwest::Url {
+    let (action, fields) = handoff_form(body);
+    let resp = manual
+        .post(&action)
+        .form(&fields)
+        .send()
+        .await
+        .expect("POST hand-off form");
+    assert_eq!(
+        resp.status().as_u16(),
+        303,
+        "Kratos answers the OIDC POST with a 303"
+    );
+    next_hop(resp).await.expect("Location")
+}
+
+#[tokio::test]
+async fn discovery_lists_idp_hints_supported() {
+    assert!(portal_reachable().await);
+    let doc: serde_json::Value = browser_client()
+        .get("http://host.containers.internal:3000/hydra/.well-known/openid-configuration")
+        .send()
+        .await
+        .expect("discovery transport")
+        .json()
+        .await
+        .expect("discovery json");
+    let mut advertised: Vec<String> = doc["idp_hints_supported"]
+        .as_array()
+        .expect("idp_hints_supported")
+        .iter()
+        .map(|h| h["id"].as_str().expect("id").to_string())
+        .collect();
+
+    let login = browser_client()
+        .get(format!("{PORTAL}/login"))
+        .send()
+        .await
+        .expect("login page")
+        .text()
+        .await
+        .unwrap();
+    let mut on_page: Vec<String> = Vec::new();
+    let mut rest = login.as_str();
+    while let Some((_, after)) = rest.split_once("name=\"provider\"") {
+        let elem = &after[..after.find('>').unwrap_or(after.len())];
+        if let Some(v) = extract_attr(elem, "value")
+            && !on_page.contains(&v)
+        {
+            on_page.push(v);
+        }
+        rest = after;
+    }
+    advertised.sort();
+    on_page.sort();
+    assert_eq!(
+        advertised, on_page,
+        "discovery matches the login page's provider buttons"
+    );
+    assert!(
+        advertised.iter().any(|p| p == "playground"),
+        "{advertised:?}"
+    );
+}
+
+#[tokio::test]
+async fn idp_hint_full_round_trip() {
+    assert!(portal_reachable().await);
+    let (id, secret, redirect) = hydra_create_test_client(&["openid"]).await;
+    let manual = manual_redirect_client();
+
+    let (visited, body) =
+        chase_all(&manual, &shim_url(&id, &redirect, "&idp_hint=playground")).await;
+    let last = visited.last().unwrap();
+    assert_eq!(last.path(), "/login", "{visited:?}");
+    assert!(
+        body.contains("id=\"idp-handoff\""),
+        "no hand-off page:\n{body}"
+    );
+
+    // The form-action allowlist must admit the upstream, or the browser drops the hop.
+    let csp = manual
+        .get(last.clone())
+        .send()
+        .await
+        .expect("re-render")
+        .headers()
+        .get("content-security-policy")
+        .and_then(|h| h.to_str().ok())
+        .map(str::to_string)
+        .expect("CSP");
+    let form_action = csp
+        .split(';')
+        .find(|d| d.trim_start().starts_with("form-action"))
+        .expect("form-action directive");
+    assert!(form_action.contains(MOCK_IDP_ORIGIN), "{form_action}");
+
+    let upstream = submit_handoff(&manual, &body).await;
+    assert!(
+        upstream
+            .as_str()
+            .starts_with(&format!("{MOCK_IDP_ORIGIN}/default/authorize")),
+        "{upstream}"
+    );
+
+    // Sign in at the mock as a fresh subject; Kratos registers the identity.
+    let username = unique_email("idp-hint").replace('@', "-at-");
+    let resp = manual
+        .post(upstream.clone())
+        .form(&[("username", username.as_str()), ("claims", "{}")])
+        .send()
+        .await
+        .expect("mock sign-in");
+    let back = next_hop(resp).await.expect("mock redirects back to Kratos");
+    assert!(
+        back.as_str()
+            .starts_with("http://localhost:4433/self-service/methods/oidc/callback/playground"),
+        "{back}"
+    );
+
+    let (visited, body) = chase_all(&manual, back.as_str()).await;
+    assert!(
+        visited.iter().any(|u| u.path() == "/oauth/login"),
+        "Kratos returns to Forseti's /oauth/login: {visited:?}"
+    );
+    let last = visited.last().unwrap().clone();
+    let code = if last.path() == "/oauth/consent" {
+        let challenge = extract_input_value(&body, "consent_challenge").expect("consent_challenge");
+        let csrf = extract_input_value(&body, "_csrf").expect("_csrf");
+        consent_accept_chase_code(&manual, &csrf, &challenge, &["openid"], false)
+            .await
+            .expect("code after consent")
+    } else {
+        assert!(
+            last.as_str().starts_with(&redirect),
+            "ends at consent or the client: {visited:?}"
+        );
+        extract_query_param(last.as_str(), "code").expect("code")
+    };
+    let tokens = exchange_code_for_tokens(&id, &secret, &redirect, &code).await;
+    let sub = decode_jwt_claims(tokens["id_token"].as_str().expect("id_token"))["sub"]
+        .as_str()
+        .expect("sub")
+        .to_string();
+
+    hydra_delete_client(&id).await;
+    let _ = delete_test_identity(&sub).await;
+}
+
+#[tokio::test]
+async fn idp_hint_with_prompt_create_hands_off_from_registration() {
+    assert!(portal_reachable().await);
+    let (id, _secret, redirect) = hydra_create_test_client(&["openid"]).await;
+    let manual = manual_redirect_client();
+
+    let (visited, body) = chase_all(
+        &manual,
+        &shim_url(&id, &redirect, "&prompt=create&idp_hint=playground"),
+    )
+    .await;
+    assert_eq!(
+        visited.last().unwrap().path(),
+        "/registration",
+        "{visited:?}"
+    );
+    assert!(
+        body.contains("id=\"idp-handoff\""),
+        "no hand-off page:\n{body}"
+    );
+    let upstream = submit_handoff(&manual, &body).await;
+    assert!(
+        upstream
+            .as_str()
+            .starts_with(&format!("{MOCK_IDP_ORIGIN}/default/authorize")),
+        "{upstream}"
+    );
+
+    hydra_delete_client(&id).await;
+}
+
+#[tokio::test]
+async fn unknown_idp_hint_shows_normal_login() {
+    assert!(portal_reachable().await);
+    let (id, _secret, redirect) = hydra_create_test_client(&["openid"]).await;
+
+    let (_, known) = chase_all(
+        &manual_redirect_client(),
+        &shim_url(&id, &redirect, "&idp_hint=playground"),
+    )
+    .await;
+    assert!(
+        known.contains("id=\"idp-handoff\""),
+        "positive control: a known hint hands off"
+    );
+
+    let (visited, unknown) = chase_all(
+        &manual_redirect_client(),
+        &shim_url(&id, &redirect, "&idp_hint=nope"),
+    )
+    .await;
+    assert_eq!(visited.last().unwrap().path(), "/login", "{visited:?}");
+    assert!(
+        !unknown.contains("idp-handoff"),
+        "an unknown hint shows the normal page"
+    );
+    assert!(
+        unknown.contains("name=\"identifier\""),
+        "the normal sign-in form renders"
+    );
+
+    hydra_delete_client(&id).await;
+}
+
+#[tokio::test]
+async fn idp_hint_ignored_with_session() {
+    assert!(portal_reachable().await);
+    let user = register_test_user("idp-hint-session").await;
+    mark_identity_verified(&user.identity_id).await;
+    let (id, _secret, redirect) = hydra_create_test_client(&["openid"]).await;
+
+    let (visited, body) = chase_all(
+        &user.manual_client,
+        &shim_url(&id, &redirect, "&idp_hint=playground"),
+    )
+    .await;
+    assert_eq!(
+        visited.last().unwrap().path(),
+        "/oauth/consent",
+        "{visited:?}"
+    );
+    assert!(!body.contains("idp-handoff"));
+    assert!(
+        !visited
+            .iter()
+            .any(|u| u.as_str().starts_with(MOCK_IDP_ORIGIN)),
+        "a signed-in user never reaches the upstream: {visited:?}"
+    );
+    assert!(
+        !visited.iter().any(|u| u.path() == "/login"),
+        "no sign-in page in the chain: {visited:?}"
+    );
+
+    hydra_delete_client(&id).await;
+    user.cleanup().await;
+}

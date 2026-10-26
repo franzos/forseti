@@ -110,6 +110,10 @@ pub(crate) async fn registration(
                     )),
                 );
             }
+            crate::web::append_set_cookie(
+                &mut resp,
+                crate::auth::idp_hint::init_cookie(&query, &headers, "/registration", secure),
+            );
             resp
         }
         FlowOutcome::Ready(flow) => {
@@ -132,13 +136,22 @@ pub(crate) async fn registration(
                 query.return_to.as_deref().or_else(|| flow_return_to(&flow)),
             )
             .await;
-            let mut resp = render_registration(
-                chrome,
-                &flow,
-                query.return_to.as_deref(),
-                prefill_email.as_deref(),
-                app,
-            );
+            let idp =
+                crate::auth::idp_hint::Requested::from_request(&headers, query.idp_hint.as_deref());
+            let mut resp =
+                match crate::auth::idp_hint::matching_provider(&flow, idp.hint.as_deref()) {
+                    Some(provider) => {
+                        crate::auth::idp_hint::render_handoff(chrome, &flow, &provider)
+                    }
+                    None => render_registration(
+                        chrome,
+                        &flow,
+                        query.return_to.as_deref(),
+                        prefill_email.as_deref(),
+                        app,
+                    ),
+                };
+            idp.clear_cookie(&mut resp, "/registration", secure);
             if prefill_email.is_some() {
                 attach_prefill_clear_cookie(&mut resp, secure);
             }

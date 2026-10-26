@@ -9,6 +9,7 @@ use crate::rate_limit;
 use crate::state::AppState;
 
 pub(crate) mod error;
+pub(crate) mod idp_hint;
 pub(crate) mod login;
 pub(crate) mod logout;
 pub(crate) mod recovery;

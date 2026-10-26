@@ -14,6 +14,8 @@ auth-login-create-account = 创建账号
 auth-or-continue-with = 或使用以下方式继续
 auth-oidc-signin = 使用 { $provider } 登录
 auth-oidc-email-needed = { $provider } 未提供已验证的电子邮件地址。请输入你想用于此账户的地址。
+auth-idp-handoff-title = 正在前往 { $provider }
+auth-idp-handoff-body = 正在跳转到 { $provider } 进行登录。如果没有反应，请使用下面的按钮。
 
 # Registration page
 auth-registration-page-title = 创建账号

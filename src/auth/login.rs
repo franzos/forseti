@@ -110,6 +110,10 @@ pub(crate) async fn login(
                     )),
                 );
             }
+            crate::web::append_set_cookie(
+                &mut resp,
+                crate::auth::idp_hint::init_cookie(&query, &headers, "/login", secure),
+            );
             resp
         }
         FlowOutcome::Ready(flow) => {
@@ -124,13 +128,25 @@ pub(crate) async fn login(
                     .as_deref()
                     .and_then(crate::auth::decode_hint_cookie)
             });
-            let mut resp = render_login(
-                chrome,
-                &flow,
-                query.return_to.as_deref(),
-                app,
-                hint.as_deref(),
-            );
+            let idp =
+                crate::auth::idp_hint::Requested::from_request(&headers, query.idp_hint.as_deref());
+            // A signed-in user is never sent upstream, whatever flow they hold.
+            let handoff = session
+                .ok()
+                .is_none()
+                .then(|| crate::auth::idp_hint::matching_provider(&flow, idp.hint.as_deref()))
+                .flatten();
+            let mut resp = match handoff {
+                Some(provider) => crate::auth::idp_hint::render_handoff(chrome, &flow, &provider),
+                None => render_login(
+                    chrome,
+                    &flow,
+                    query.return_to.as_deref(),
+                    app,
+                    hint.as_deref(),
+                ),
+            };
+            idp.clear_cookie(&mut resp, "/login", secure);
             if cookie_hint.is_some() {
                 crate::web::append_set_cookie(
                     &mut resp,

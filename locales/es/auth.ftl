@@ -14,6 +14,8 @@ auth-login-create-account = Crear cuenta
 auth-or-continue-with = O continúe con
 auth-oidc-signin = Iniciar sesión con { $provider }
 auth-oidc-email-needed = { $provider } no compartió una dirección de correo verificada. Introduzca la que quiera usar para esta cuenta.
+auth-idp-handoff-title = Continuando a { $provider }
+auth-idp-handoff-body = Le llevamos a { $provider } para iniciar sesión. Si no ocurre nada, use el botón de abajo.
 
 # Página de registro
 auth-registration-page-title = Crear cuenta

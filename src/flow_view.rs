@@ -328,6 +328,22 @@ pub(crate) fn collect_input_nodes(flow: &serde_json::Value, group: &str) -> Vec<
     out
 }
 
+/// Upstream provider ids a flow offers: the `oidc` group's `provider` submit
+/// nodes, deduped in order.
+pub(crate) fn oidc_provider_ids(flow: &serde_json::Value) -> Vec<String> {
+    let mut ids: Vec<String> = Vec::new();
+    for node in collect_input_nodes(flow, "oidc") {
+        if node.name == "provider"
+            && node.input_type == "submit"
+            && !node.value.is_empty()
+            && !ids.contains(&node.value)
+        {
+            ids.push(node.value);
+        }
+    }
+    ids
+}
+
 /// Collect every `script`-type node from a specific group. Kratos uses this
 /// in the webauthn / passkey groups to point at its served-by-Kratos helper
 /// (`/.well-known/ory/webauthn.js`), version-matched to the running instance.
@@ -687,6 +703,41 @@ pub(crate) fn session_needs_verification(session: &ory::Session) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oidc_provider_ids_lists_provider_submits_in_order() {
+        let submit = |group: &str, name: &str, value: &str| {
+            serde_json::json!({
+                "type": "input",
+                "group": group,
+                "attributes": { "name": name, "type": "submit", "value": value },
+            })
+        };
+        let flow = serde_json::json!({ "ui": { "nodes": [
+            submit("default", "csrf_token", "tok"),
+            submit("oidc", "provider", "github"),
+            submit("oidc", "provider", "playground"),
+            submit("oidc", "provider", "github"),
+            submit("oidc", "link", "google"),
+            submit("password", "provider", "nope"),
+            { "type": "input", "group": "oidc",
+              "attributes": { "name": "provider", "type": "hidden", "value": "hidden-one" } },
+        ] } });
+        assert_eq!(
+            super::oidc_provider_ids(&flow),
+            vec!["github", "playground"]
+        );
+    }
+
+    #[test]
+    fn oidc_provider_ids_is_empty_without_oidc_nodes() {
+        let flow = serde_json::json!({ "ui": { "nodes": [
+            { "type": "input", "group": "password",
+              "attributes": { "name": "method", "type": "submit", "value": "password" } },
+        ] } });
+        assert!(super::oidc_provider_ids(&flow).is_empty());
+        assert!(super::oidc_provider_ids(&serde_json::json!({})).is_empty());
+    }
     use serde_json::json;
 
     fn input_node(

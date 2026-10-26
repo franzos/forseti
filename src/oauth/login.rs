@@ -182,12 +182,14 @@ pub(crate) async fn oauth_login(
             .await;
         }
         OptionalSession::None => {
+            let idp_hint = idp_hint(&state, &req).await;
             let url = anonymous_login_redirect_url(
                 "/login",
                 &self_login_url,
                 login_locale.language.as_str(),
                 req.request_url.as_str(),
                 login_hint(&req),
+                idp_hint.as_deref(),
             );
             return Redirect::to(&url).into_response();
         }
@@ -490,16 +492,29 @@ fn login_hint(req: &ory::OAuth2LoginRequest) -> Option<&str> {
         .and_then(crate::auth::email_login_hint)
 }
 
+/// The request's `idp_hint`. One missing from the cached provider list is
+/// still forwarded: the flow's own provider nodes decide, so a newly enabled
+/// provider works before the cache refreshes.
+async fn idp_hint(state: &AppState, req: &ory::OAuth2LoginRequest) -> Option<String> {
+    let hint = parse_idp_hint_param(req.request_url.as_str())?;
+    if !state.idp_provider_ids().await.contains(&hint) {
+        let client_id = req.client.client_id.as_deref().unwrap_or_default();
+        tracing::warn!(client_id, hint, "idp_hint not in cached provider list");
+    }
+    Some(hint)
+}
+
 /// Build the `/login` (or `/registration`) redirect for an anonymous visitor,
 /// forwarding `organization_id` (if present on the original `/oauth2/auth`
-/// request) so the page can theme itself from the org's public branding, and
-/// an email `login_hint` to prefill.
+/// request) so the page can theme itself from the org's public branding, an
+/// email `login_hint` to prefill, and the `idp_hint` to hand off to.
 fn anonymous_login_redirect_url(
     page: &str,
     self_login_url: &str,
     lang: &str,
     request_url: &str,
     login_hint: Option<&str>,
+    idp_hint: Option<&str>,
 ) -> String {
     let org_q = parse_organization_id_param(request_url)
         .filter(|id: &String| !id.is_empty())
@@ -508,12 +523,16 @@ fn anonymous_login_redirect_url(
     let hint_q = login_hint
         .map(|h| format!("&login_hint={}", ory_client::apis::urlencode(h)))
         .unwrap_or_default();
+    let idp_q = idp_hint
+        .map(|h| format!("&idp_hint={}", ory_client::apis::urlencode(h)))
+        .unwrap_or_default();
     format!(
-        "{page}?return_to={}&lang={}{}{}",
+        "{page}?return_to={}&lang={}{}{}{}",
         ory_client::apis::urlencode(self_login_url),
         lang,
         org_q,
         hint_q,
+        idp_q,
     )
 }
 
@@ -557,12 +576,14 @@ pub(crate) async fn oauth_register(
         p.headers = headers;
         crate::page_chrome::resolve_locale_for_flow(&p, &session, ui_locales.as_deref())
     };
+    let idp_hint = idp_hint(&state, &req).await;
     Redirect::to(&anonymous_login_redirect_url(
         "/registration",
         &self_login_url,
         locale.language.as_str(),
         req.request_url.as_str(),
         login_hint(&req),
+        idp_hint.as_deref(),
     ))
     .into_response()
 }
@@ -612,10 +633,20 @@ fn amr_values(kratos_method: &str) -> Vec<String> {
 /// Pull `organization_id=<id>` out of Hydra's `request_url` (the verbatim
 /// `/oauth2/auth` URL the downstream app called).
 pub(crate) fn parse_organization_id_param(request_url: &str) -> Option<String> {
+    request_url_param(request_url, "organization_id")
+}
+
+/// A syntactically valid `idp_hint=<provider id>` from Hydra's `request_url`.
+pub(crate) fn parse_idp_hint_param(request_url: &str) -> Option<String> {
+    request_url_param(request_url, "idp_hint").filter(|h| crate::auth::idp_hint::parse(h).is_some())
+}
+
+/// The first `key=<value>` in `request_url`'s query, percent-decoded.
+pub(crate) fn request_url_param(request_url: &str, key: &str) -> Option<String> {
     url::Url::parse(request_url)
         .ok()?
         .query_pairs()
-        .find(|(k, _)| k == "organization_id")
+        .find(|(k, _)| k == key)
         .map(|(_, v)| v.into_owned())
 }
 
@@ -675,8 +706,8 @@ fn acr_values_need_aal2_step_up(requested: &[String], session_is_aal2: bool) -> 
 #[cfg(test)]
 mod tests {
     use super::{
-        acr_values_need_aal2_step_up, anonymous_login_redirect_url, parse_organization_id_param,
-        wants_profile,
+        acr_values_need_aal2_step_up, anonymous_login_redirect_url, parse_idp_hint_param,
+        parse_organization_id_param, request_url_param, wants_profile,
     };
 
     #[test]
@@ -717,6 +748,31 @@ mod tests {
     fn invalid_url_returns_none() {
         assert_eq!(parse_organization_id_param("not a url"), None);
         assert_eq!(parse_organization_id_param(""), None);
+    }
+
+    #[test]
+    fn request_url_param_takes_the_first_decoded_value() {
+        let url = "https://h.example/oauth2/auth?a=1&b=x%20y&a=2";
+        assert_eq!(request_url_param(url, "a").as_deref(), Some("1"));
+        assert_eq!(request_url_param(url, "b").as_deref(), Some("x y"));
+        assert_eq!(request_url_param(url, "c"), None);
+        assert_eq!(request_url_param("not a url", "a"), None);
+    }
+
+    #[test]
+    fn parses_idp_hint_and_drops_malformed_values() {
+        let base = "https://h.example/oauth2/auth?client_id=x&idp_hint=";
+        assert_eq!(
+            parse_idp_hint_param(&format!("{base}playground")).as_deref(),
+            Some("playground")
+        );
+        assert_eq!(parse_idp_hint_param(&format!("{base}git%20hub")), None);
+        assert_eq!(parse_idp_hint_param(base), None);
+        assert_eq!(
+            parse_idp_hint_param(&format!("{base}{}", "x".repeat(65))),
+            None
+        );
+        assert_eq!(parse_idp_hint_param("https://h.example/oauth2/auth"), None);
     }
 
     #[test]
@@ -796,6 +852,7 @@ mod tests {
             "en",
             request_url,
             None,
+            None,
         );
         assert!(url.starts_with("/login?return_to="));
         assert!(url.contains("organization_id=acme-id"));
@@ -810,6 +867,7 @@ mod tests {
             "en",
             request_url,
             Some("a+b@example.com"),
+            None,
         );
         assert!(url.starts_with("/registration?return_to="));
         assert!(url.ends_with("&login_hint=a%2Bb%40example.com"));
@@ -828,6 +886,29 @@ mod tests {
     }
 
     #[test]
+    fn anonymous_redirect_forwards_the_idp_hint_only_when_given() {
+        let request_url = "https://hydra.example.com/oauth2/auth?client_id=x";
+        let url = anonymous_login_redirect_url(
+            "/login",
+            "https://self/oauth/login",
+            "en",
+            request_url,
+            None,
+            Some("playground"),
+        );
+        assert!(url.ends_with("&idp_hint=playground"));
+        let url = anonymous_login_redirect_url(
+            "/login",
+            "https://self/oauth/login",
+            "en",
+            request_url,
+            None,
+            None,
+        );
+        assert!(!url.contains("idp_hint"));
+    }
+
+    #[test]
     fn anonymous_redirect_omits_organization_id_when_absent() {
         let request_url = "https://hydra.example.com/oauth2/auth?client_id=x";
         let url = anonymous_login_redirect_url(
@@ -835,6 +916,7 @@ mod tests {
             "https://self/oauth/login",
             "en",
             request_url,
+            None,
             None,
         );
         assert!(!url.contains("organization_id"));

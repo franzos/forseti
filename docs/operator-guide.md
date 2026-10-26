@@ -100,6 +100,7 @@ The authoritative schema is `src/config.rs`. The example file is `config.example
 | `cookie_secret`    | string | ephemeral per-boot | Seeds the HMAC keys for every Forseti-signed cookie. Long random secret. |
 | `frame_ancestors`  | string | `"'self'"`         | CSP `frame-ancestors` on every public_app response. `"'none'"` blocks framing entirely. |
 | `x_frame_options`  | bool   | `true`             | Also emit `X-Frame-Options: SAMEORIGIN` for older browsers.            |
+| `extra_form_action` | list of strings | `[]`      | Extra origins for the CSP `form-action` directive. Needed for an upstream OIDC provider added to `kratos.yml` by hand, or a host a provider bounces through. |
 
 `cookie_secret` is the root key behind the HMAC for Forseti's signed cookies (one-shot flash, `active_org` switcher, `forseti_app_referrer` handoff, CSRF double-submit). Each cookie derives its own key from this secret plus a per-use domain-separation salt (see `src/flash.rs`, `src/orgs/cookie.rs`, `src/handoff/cookie.rs`).
 
@@ -1218,6 +1219,10 @@ selfservice:
 The mapper CLI-writes at `oidc.google.jsonnet` gates the `email` trait on `claims.email_verified`: copying `email` without that gate is an account-takeover vector (anyone who controls an unverified alias at the provider could claim the matching Forseti account). Don't hand-edit the mapper unless you understand that invariant; `forseti config check` warns if a provider's mapper doesn't match Forseti's reviewed pinned body.
 
 Note the leading `local claims = { email_verified: false } + std.extVar('claims');` on every pinned body. Kratos serializes the claim with `omitempty`, so an upstream `false` reaches the mapper as a *missing* field, and jsonnet raises `Field does not exist: email_verified` rather than treating it as false. Without the default, an unverified upstream address fails the sign-in outright instead of falling through to Forseti's own verification flow.
+
+**Custom providers need `[security].extra_form_action`.** A provider button, and the `idp_hint` hand-off page, POST the Kratos form, and Kratos answers with a redirect to the provider. The browser enforces `form-action` across that redirect, and Forseti only knows the origins of the four providers `forseti config oidc enable` supports. For any other provider id in `kratos.yml`, add its authorization origin (for example `extra_form_action = ["https://idp.example.com"]`), or the button does nothing and the hand-off page stays where it is.
+
+Every enabled provider is also listed in Forseti's OpenID discovery as `idp_hints_supported`, so relying parties can render their own "Continue with X" buttons and send `idp_hint=<id>` (see the integration guide). Forseti reads the list off a Kratos login flow and caches it for an hour, so a newly enabled provider shows up in discovery within that window.
 
 #### Which providers' verification Forseti trusts
 

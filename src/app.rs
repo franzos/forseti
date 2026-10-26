@@ -206,6 +206,7 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         cookie_secret,
         ip_salt,
         discovery: crate::state::DiscoveryCache::default(),
+        idp_providers: crate::state::ProviderCache::default(),
         logo_cache: Arc::new(tokio::sync::Mutex::new(
             crate::logo_cache::LogoCache::default(),
         )),

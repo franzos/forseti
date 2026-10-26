@@ -35,6 +35,17 @@ struct CachedDiscovery {
 #[derive(Clone, Default)]
 pub struct DiscoveryCache(Arc<Mutex<Option<CachedDiscovery>>>);
 
+#[derive(Clone)]
+struct CachedProviders {
+    next_refresh_at: Instant,
+    ids: Arc<[String]>,
+}
+
+/// TTL'd cache of the upstream provider ids Kratos offers, probed on the
+/// same schedule as [`DiscoveryCache`].
+#[derive(Clone, Default)]
+pub struct ProviderCache(Arc<Mutex<Option<CachedProviders>>>);
+
 /// Shared application state passed to every handler via `State<AppState>`.
 #[derive(Clone)]
 pub struct AppState {
@@ -53,6 +64,8 @@ pub struct AppState {
     pub ip_salt: Arc<str>,
     /// Cached Hydra OIDC discovery doc; lazily fetched, falls back to config-derived paths on error.
     pub discovery: DiscoveryCache,
+    /// Cached upstream provider ids offered by Kratos; see [`AppState::idp_provider_ids`].
+    pub idp_providers: ProviderCache,
     /// Bounded in-process cache of served org logo blobs; see [`crate::logo_cache`].
     pub logo_cache: Arc<Mutex<LogoCache>>,
     /// Prometheus render handle backing `/metrics`; see [`crate::metrics`].
@@ -114,6 +127,45 @@ impl AppState {
                     }
                     None => None,
                 }
+            }
+        }
+    }
+
+    /// Upstream provider ids Kratos offers, refreshing if stale. One caller
+    /// probes while the others get the stale list; the last good list is kept
+    /// while Kratos is down, and a cold failure gives an empty one, both
+    /// retried after `DISCOVERY_RETRY`.
+    pub async fn idp_provider_ids(&self) -> Arc<[String]> {
+        {
+            let mut guard = self.idp_providers.0.lock().await;
+            if let Some(c) = guard.as_mut() {
+                if Instant::now() < c.next_refresh_at {
+                    return c.ids.clone();
+                }
+                // Claim the refresh: concurrent callers get the stale list
+                // instead of each waiting on their own probe.
+                c.next_refresh_at = Instant::now() + DISCOVERY_RETRY;
+            }
+        }
+        let fetched = crate::ory::kratos::probe_oidc_provider_ids(&self.ory).await;
+        let mut guard = self.idp_providers.0.lock().await;
+        match fetched {
+            Ok(ids) => {
+                let ids: Arc<[String]> = ids.into();
+                *guard = Some(CachedProviders {
+                    next_refresh_at: Instant::now() + DISCOVERY_TTL,
+                    ids: ids.clone(),
+                });
+                ids
+            }
+            Err(e) => {
+                tracing::warn!(error = ?e, "kratos provider probe failed");
+                let cached = guard.get_or_insert_with(|| CachedProviders {
+                    next_refresh_at: Instant::now(),
+                    ids: Arc::from(Vec::new()),
+                });
+                cached.next_refresh_at = Instant::now() + DISCOVERY_RETRY;
+                cached.ids.clone()
             }
         }
     }

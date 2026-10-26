@@ -1,0 +1,59 @@
+# Test overlay, loaded after kratos.yml (`-c kratos.yml -c kratos.idp-test.yml`).
+# Enables one generic upstream provider backed by the `mock-oidc` compose
+# service, so the upstream-provider flows run end to end without real secrets.
+# Kept out of kratos.yml because the config-CLI tests lint that file.
+selfservice:
+  methods:
+    oidc:
+      enabled: true
+      config:
+        providers:
+          - id: playground
+            provider: generic
+            label: Playground
+            issuer_url: http://host.containers.internal:8092/default
+            client_id: forseti-playground
+            client_secret: playground-secret
+            mapper_url: file:///etc/config/kratos/oidc.playground.jsonnet
+            scope:
+              - openid
+              - email
+              - profile
+
+  flows:
+    login:
+      after:
+        oidc:
+          hooks:
+            - hook: web_hook
+              config:
+                url: http://host.docker.internal:8081/internal/audit/kratos?action=auth.login
+                method: POST
+                body: file:///etc/config/kratos/audit_event.jsonnet
+                response:
+                  ignore: true
+                auth:
+                  type: api_key
+                  config:
+                    name: Authorization
+                    value: "Bearer dev-playground-token-change-me"
+                    in: header
+
+    registration:
+      after:
+        oidc:
+          hooks:
+            - hook: session
+            - hook: web_hook
+              config:
+                url: http://host.docker.internal:8081/internal/audit/kratos?action=identity.created
+                method: POST
+                body: file:///etc/config/kratos/audit_event.jsonnet
+                response:
+                  ignore: true
+                auth:
+                  type: api_key
+                  config:
+                    name: Authorization
+                    value: "Bearer dev-playground-token-change-me"
+                    in: header

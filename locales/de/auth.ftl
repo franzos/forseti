@@ -14,6 +14,8 @@ auth-login-create-account = Konto erstellen
 auth-or-continue-with = Oder weiter mit
 auth-oidc-signin = Mit { $provider } anmelden
 auth-oidc-email-needed = { $provider } hat keine bestätigte E-Mail-Adresse übermittelt. Geben Sie die Adresse ein, die Sie für dieses Konto verwenden möchten.
+auth-idp-handoff-title = Weiter zu { $provider }
+auth-idp-handoff-body = Sie werden zur Anmeldung zu { $provider } weitergeleitet. Falls nichts passiert, nutzen Sie die Schaltfläche unten.
 
 # Registrierungsseite
 auth-registration-page-title = Konto erstellen

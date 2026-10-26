@@ -14,6 +14,8 @@ auth-login-create-account = Создать аккаунт
 auth-or-continue-with = Или продолжить через
 auth-oidc-signin = Войти через { $provider }
 auth-oidc-email-needed = { $provider } не передал подтверждённый адрес электронной почты. Укажите адрес, который хотите использовать для этого аккаунта.
+auth-idp-handoff-title = Переход к { $provider }
+auth-idp-handoff-body = Перенаправляем вас в { $provider } для входа. Если ничего не происходит, нажмите кнопку ниже.
 
 # Страница регистрации
 auth-registration-page-title = Создать аккаунт

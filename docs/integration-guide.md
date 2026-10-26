@@ -141,6 +141,7 @@ https://hydra.example.com/oauth2/auth
 - `nonce` is optional but recommended; binds the id_token to this specific flow. Store and compare on callback.
 - `prompt=login` forces re-authentication even if the user has an active Forseti session. Forseti sends the user through a Kratos login with `refresh=true` and only continues once they have actually presented a credential; it does not treat an existing session as sufficient.
 - `acr_values=aal2` requests a second-factor step-up (see [AAL step-up](#aal-step-up)).
+- `idp_hint=<provider id>` sends a signed-out user straight to that upstream provider (see [Upstream provider buttons](#upstream-provider-buttons-idp_hint)).
 - `max_age=<seconds>` requires the user to have authenticated within the window; otherwise Forseti re-prompts. The window is measured against the Kratos session's own authentication time, not against when the token happens to be issued — so a long-lived session does not satisfy a short `max_age`. `max_age=0` always re-authenticates.
 
 Both are enforced by Forseti rather than by Hydra. Hydra stamps `auth_time` at the moment the login is accepted, so an authorization server that simply forwarded these parameters would hand you a token claiming a fresh authentication that never happened. If your app relies on `auth_time` for a step-up decision, that is the behaviour you want.
@@ -614,6 +615,40 @@ https://hydra.example.com/oauth2/auth
 Your app must inspect the returned id_token's `acr` claim and reject `aal1` for the sensitive operation. Do not assume `acr_values=aal2` was honored; verify.
 
 **Note on enrolled users.** When the operator enforces 2FA (the recommended config — `session.whoami.required_aal: highest_available` in Kratos), any user who has a second factor enrolled is forced through the step-up on *every* login through Forseti, even when your app didn't send `acr_values=aal2`. So for those users the returned `acr` is `aal2` regardless. You can't rely on the *absence* of a step-up to mean a user has no second factor — only that they hadn't enrolled one, or the operator hasn't enabled enforcement. Still verify the `acr` claim when you need AAL2; don't infer it from the flow's behavior.
+
+## Upstream provider buttons (`idp_hint`)
+
+If your sign-in page wants its own "Continue with GitHub" button, send the upstream provider's id on the authorization request:
+
+```
+https://hydra.example.com/oauth2/auth
+  ?client_id=<your client_id>
+  &response_type=code
+  &scope=openid+email
+  &redirect_uri=https://yourapp.com/auth/callback
+  &state=<random>
+  &idp_hint=github
+```
+
+A user without a Forseti session skips Forseti's sign-in page: they see a short "Continuing to GitHub" page that submits itself, then land on GitHub. `prompt=create&idp_hint=github` does the same from the sign-up flow. The name is Forseti's own, modelled on Keycloak's `kc_idp_hint`; there's no standard OIDC parameter for this.
+
+The hint is ignored, and the user gets the usual pages, when:
+
+- the user already has a Forseti session (normal SSO, no provider round trip);
+- the request is a re-authentication (`prompt=login` with a session, `max_age`) or an AAL2 step-up, so a known user is never sent upstream to sign in as someone else;
+- `prompt=none` is set (no page is ever shown);
+- the provider isn't enabled. The user sees Forseti's normal sign-in page and Forseti logs a warning.
+
+Which ids are valid? Forseti lists them in its OpenID discovery document:
+
+```json
+"idp_hints_supported": [
+  { "id": "github", "name": "GitHub" },
+  { "id": "google", "name": "Google" }
+]
+```
+
+The key is left out when no upstream provider is enabled. Render one button per entry, using `name` as the label, and check a hint against this list before you put it in the authorize URL. Forseti refreshes the list from its Kratos config hourly, so a provider the operator just enabled or disabled can take up to an hour to appear or disappear here (Forseti itself honours a newly enabled provider straight away). `oidc-relying-party` 0.3 parses it into `Discovery::idp_hints_supported` and checks a hint with `Discovery::supports_idp_hint`.
 
 ## Enterprise SSO (SAML)
 

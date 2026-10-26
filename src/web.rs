@@ -78,6 +78,9 @@ pub(crate) struct FlowQuery {
     /// OIDC `login_hint` forwarded from `/oauth/login`; shown only when
     /// email-shaped ([`crate::auth::email_login_hint`]).
     pub(crate) login_hint: Option<String>,
+    /// Upstream provider to hand off to, forwarded from `/oauth/login`; see
+    /// [`crate::auth::idp_hint`].
+    pub(crate) idp_hint: Option<String>,
 }
 
 /// Coerce bare query strings (`true`/`1`/`yes`/`on`) to `Option<bool>`, since the default

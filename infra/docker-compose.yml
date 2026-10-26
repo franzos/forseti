@@ -44,11 +44,14 @@ services:
     # (not in compose). `host.docker.internal` resolves to the host
     # gateway on Docker Desktop natively, and the `extra_hosts` line
     # extends that to Docker Engine on Linux.
+    # `host.containers.internal` reaches the `mock-oidc` upstream through its
+    # published port, under the same issuer URL the browser uses.
     extra_hosts:
       - "host.docker.internal:host-gateway"
+      - "host.containers.internal:host-gateway"
     volumes:
       - ./kratos:/etc/config/kratos
-    command: serve -c /etc/config/kratos/kratos.yml --dev --watch-courier
+    command: serve -c /etc/config/kratos/kratos.yml -c /etc/config/kratos/kratos.idp-test.yml --dev --watch-courier
     restart: unless-stopped
     networks:
       - ory
@@ -106,6 +109,20 @@ services:
     # Back-channel logout URIs point at the host; Docker Engine doesn't define this name.
     extra_hosts:
       - "host.containers.internal:host-gateway"
+    networks:
+      - ory
+
+  # Upstream OIDC provider for the `playground` Kratos provider
+  # (kratos.idp-test.yml). Accepts any client, renders its own login page.
+  # Issuer: http://host.containers.internal:8092/default
+  mock-oidc:
+    image: ghcr.io/navikt/mock-oauth2-server:2.1.10
+    ports:
+      - "8092:8092"
+    environment:
+      - SERVER_PORT=8092
+      - JSON_CONFIG={"interactiveLogin":true}
+    restart: unless-stopped
     networks:
       - ory
 

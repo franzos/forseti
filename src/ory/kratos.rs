@@ -118,6 +118,35 @@ pub async fn get_flow(
     Ok(FlowFetch::Ok(Box::new(value)))
 }
 
+/// Kratos path whose API flow carries the `oidc` provider nodes; probed
+/// without cookies, so it never touches a browser session.
+const OIDC_PROVIDER_PROBE_PATH: &str = "/self-service/login/api";
+
+/// Upstream provider ids Kratos offers, read off a fresh API login flow
+/// (Kratos has no endpoint that lists them). Each call creates one flow.
+pub async fn probe_oidc_provider_ids(clients: &OryClients) -> Result<Vec<String>> {
+    let url = format!(
+        "{}{OIDC_PROVIDER_PROBE_PATH}",
+        clients.kratos_public.base_path.trim_end_matches('/'),
+    );
+    let resp = clients
+        .kratos_public
+        .client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("kratos provider probe transport error: {e}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(anyhow::anyhow!("kratos provider probe returned {status}"));
+    }
+    let flow: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| anyhow::anyhow!("kratos provider probe body decode failed: {e}"))?;
+    Ok(crate::flow_view::oidc_provider_ids(&flow))
+}
+
 /// Classified result of resolving a self-service flow from the request's
 /// `?flow=` id. Lets the four self-service handlers (login, registration,
 /// recovery, verification) and the settings sub-page gate share the

@@ -1,0 +1,25 @@
+{% extends "card.html" %}
+
+{% block title %}{{ chrome.tv1("auth-idp-handoff-title", "provider", provider_name.as_str()) }} &middot; {{ chrome.brand.name }}{% endblock %}
+{% block card_title %}{{ chrome.tv1("auth-idp-handoff-title", "provider", provider_name.as_str()) }}{% endblock %}
+
+{% block card_body %}
+  <form id="idp-handoff"
+        method="{{ form_method }}"
+        action="{{ form_action }}"
+        class="flex flex-col gap-stack-md">
+    {% for (name, value) in hidden %}
+      <input type="hidden" name="{{ name }}" value="{{ value }}">
+    {% endfor %}
+    <input type="hidden" name="method" value="oidc">
+    <input type="hidden" name="provider" value="{{ provider_id }}">
+    <p class="font-body-sm text-body-sm text-on-surface-variant">
+      {{ chrome.tv1("auth-idp-handoff-body", "provider", provider_name.as_str()) }}
+    </p>
+    <button type="submit"
+            class="w-full bg-primary text-on-primary font-label-md text-label-md font-bold py-stack-md px-stack-lg rounded-lg hover:opacity-90 transition-opacity focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2">
+      {{ chrome.tv1("auth-oidc-signin", "provider", provider_name.as_str()) }}
+    </button>
+  </form>
+  <script>document.getElementById('idp-handoff').submit();</script>
+{% endblock %}

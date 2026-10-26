@@ -130,7 +130,7 @@ async fn settings_sessions_shows_current_indicator() {
 }
 
 #[tokio::test]
-async fn settings_linked_providers_renders_empty_state() {
+async fn settings_linked_providers_offers_the_playground_link() {
     assert!(portal_reachable().await);
     let user = register_test_user("settings-linked").await;
 
@@ -146,14 +146,10 @@ async fn settings_linked_providers_renders_empty_state() {
         res.status()
     );
     let body = res.text().await.expect("body");
-    // No OIDC configured in the playground → either a "no providers
-    // configured" message or simply no `provider` form inputs.
-    let has_no_providers = !body.contains("name=\"provider\"")
-        || body.to_lowercase().contains("no")
-        || body.to_lowercase().contains("none");
+    // The test overlay (infra/kratos/kratos.idp-test.yml) enables one provider.
     assert!(
-        has_no_providers,
-        "linked-providers should render empty state without OIDC configured"
+        body.contains("name=\"link\"") && body.contains("value=\"playground\""),
+        "linked-providers should offer a link button for the playground provider"
     );
 
     user.cleanup().await;
