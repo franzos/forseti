@@ -15,9 +15,9 @@ Forseti
   /.well-known/webhook-jwks.json
   /.well-known/oauth-authorization-server/hydra       (augmented AS discovery, RFC 8414 path insertion)
   /.well-known/openid-configuration/hydra             (augmented, OIDC path insertion)
+  /hydra/.well-known/openid-configuration             (the same augmented doc; the proxy rewrites it to the path above)
 
 Hydra                    (iss = https://accounts.example.com/hydra)
-  /hydra/.well-known/openid-configuration
   /hydra/.well-known/jwks.json
   /hydra/oauth2/auth
   /hydra/oauth2/token
@@ -34,7 +34,7 @@ Kratos                   (server-to-server from Forseti; browser hits webauthn.j
 
 Proxy must rewrite `/hydra/*` and `/kratos/*` to the upstream root path — Hydra and Kratos do not honour subpath mounting ([hydra#352](https://github.com/ory/hydra/issues/352), [kratos#1152](https://github.com/ory/kratos/issues/1152)).
 
-**Issuer fronting (CIMD / MCP).** The two path-insertion well-known URLs and `/oauth2/authorize` carry no `/hydra/` prefix, so a `path_beg /hydra/` ACL naturally leaves them on the Forseti backend — which is exactly right: Forseti serves the augmented discovery document (`client_id_metadata_document_supported: true`, `authorization_endpoint` → the shim, no `registration_endpoint`) and the CIMD shim there. Do not add ACLs that capture them for Hydra. Set `[hydra].issuer = "https://accounts.example.com/hydra"` in Forseti's config so those routes mount under the right path segment. Alternative for single-binary deployments without haproxy: set `[hydra].front_proxy = true` and Forseti itself reverse-proxies `/hydra/{path}` to Hydra (cookie-preserving, non-redirect-following); with haproxy in place, leave it `false`. See [Fronting the issuer](./operator-guide.md#fronting-the-issuer-front-proxy-vs-haproxy) in the operator guide.
+**Issuer fronting (CIMD / MCP).** The two path-insertion well-known URLs and `/oauth2/authorize` carry no `/hydra/` prefix, so a `path_beg /hydra/` ACL naturally leaves them on the Forseti backend — which is exactly right: Forseti serves the augmented discovery document (`client_id_metadata_document_supported: true`, `authorization_endpoint` → the shim, no `registration_endpoint`) and the CIMD shim there. Do not add ACLs that capture them for Hydra. `{issuer}/.well-known/openid-configuration` (`/hydra/.well-known/openid-configuration`) is where OIDC clients look (OIDC Discovery 1.0 §4), so route it to Forseti's `/.well-known/openid-configuration/hydra` as well (the `set-path` rule in the sketch below). Otherwise those clients get Hydra's raw document, without `idp_hints_supported` and with capabilities Forseti doesn't accept. Set `[hydra].issuer = "https://accounts.example.com/hydra"` in Forseti's config so those routes mount under the right path segment. Alternative for single-binary deployments without haproxy: set `[hydra].front_proxy = true` and Forseti itself reverse-proxies `/hydra/{path}` to Hydra (cookie-preserving, non-redirect-following); with haproxy in place, leave it `false`. See [Fronting the issuer](./operator-guide.md#fronting-the-issuer-front-proxy-vs-haproxy) in the operator guide.
 
 ### Example (2) — Forseti at root, Hydra/Kratos on subdomains
 
@@ -206,6 +206,11 @@ frontend fe_accounts
     http-request set-header X-Forwarded-Host  %[req.hdr(host)]
     http-request set-header X-Real-IP         %[src]
     http-request set-header X-Forwarded-For   %[src]
+
+    # The issuer's OIDC discovery doc is Forseti's augmented one, not Hydra's
+    # verbatim. Rewritten before is_hydra is evaluated, so it lands on Forseti.
+    acl is_issuer_oidc path /hydra/.well-known/openid-configuration
+    http-request set-path /.well-known/openid-configuration/hydra if is_issuer_oidc
 
     acl is_hydra  path_beg /hydra/
     acl is_kratos path_beg /kratos/

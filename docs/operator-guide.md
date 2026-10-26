@@ -1693,7 +1693,7 @@ Expected:
 - `registration_endpoint` **absent** (DCR retired).
 - `code_challenge_methods_supported` includes `"S256"`; `token_endpoint_auth_methods_supported` includes `"none"`.
 
-The same document must come back from `/.well-known/openid-configuration/hydra` and — when `front_proxy = true` — from `{issuer}/.well-known/openid-configuration`. Hydra does not advertise `resource_indicators_supported` (no RFC 8707 yet); spec-strict MCP clients haven't been observed to reject it for that omission.
+The same document must come back from `/.well-known/openid-configuration/hydra` and from `{issuer}/.well-known/openid-configuration`. With `front_proxy = true` Forseti serves both; behind haproxy the proxy has to rewrite `/hydra/.well-known/openid-configuration` to Forseti's path-insertion route (see [`operator-guide-proxy.md`](./operator-guide-proxy.md)). Hydra does not advertise `resource_indicators_supported` (no RFC 8707 yet); spec-strict MCP clients haven't been observed to reject it for that omission.
 
 #### State parameter
 
