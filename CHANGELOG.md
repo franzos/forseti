@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.2.19] - 2026-10-26
+
+### Added
+- `idp_hint` sends signed-out users straight to an upstream provider
+- Upstream providers listed in OpenID discovery as `idp_hints_supported`
+
 ## [0.2.18] - 2026-10-24
 
 ### Security
