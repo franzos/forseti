@@ -1,3 +1,3 @@
 legal-privacy-title = Datenschutzerklärung
-legal-terms-title = Allgemeine Geschäftsbedingungen
+legal-terms-title = Nutzungsbedingungen
 legal-imprint-title = Impressum

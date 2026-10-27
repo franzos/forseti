@@ -149,6 +149,13 @@
 {% endif %}
 </form>
 
+<p class="font-body-sm text-body-sm text-on-surface-variant text-center mt-stack-sm">
+  {{ chrome.t("auth-registration-legal-before") }}
+  <a href="/terms" class="text-primary hover:underline">{{ chrome.t("legal-terms-title") }}</a>
+  {{ chrome.t("auth-registration-legal-middle") }}
+  <a href="/privacy" class="text-primary hover:underline">{{ chrome.t("legal-privacy-title") }}</a>{{ chrome.t("auth-registration-legal-after") }}
+</p>
+
 <div class="text-center mt-stack-sm">
   <p class="font-body-sm text-body-sm text-on-surface-variant">
     {{ chrome.t("auth-registration-have-account") }}

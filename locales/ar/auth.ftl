@@ -23,6 +23,9 @@ auth-registration-card-title = إنشاء حساب
 auth-registration-card-subtitle = سجّل لإدارة هويتك بأمان.
 auth-registration-have-account = لديك حساب بالفعل؟
 auth-registration-sign-in-link = تسجيل الدخول
+auth-registration-legal-before = بإنشاء حساب، فإنك توافق على
+auth-registration-legal-middle = وتؤكد أنك قرأت
+auth-registration-legal-after = .
 auth-registration-claim-body = إذا كان هذا بريدك الإلكتروني ولم تُكمل التسجيل قط،
 auth-registration-claim-link = طالِب به
 

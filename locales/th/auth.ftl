@@ -23,6 +23,9 @@ auth-registration-card-title = สร้างบัญชี
 auth-registration-card-subtitle = ลงทะเบียนเพื่อจัดการตัวตนของคุณอย่างปลอดภัย
 auth-registration-have-account = มีบัญชีอยู่แล้วใช่หรือไม่
 auth-registration-sign-in-link = เข้าสู่ระบบ
+auth-registration-legal-before = การสร้างบัญชีถือว่าคุณยอมรับ
+auth-registration-legal-middle = และยืนยันว่าได้อ่าน
+auth-registration-legal-after = { " " }แล้ว
 auth-registration-claim-body = หากนี่คืออีเมลของคุณและคุณยังลงทะเบียนไม่เสร็จ
 auth-registration-claim-link = ขอสิทธิ์ครอบครอง
 

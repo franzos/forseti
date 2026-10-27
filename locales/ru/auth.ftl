@@ -23,6 +23,9 @@ auth-registration-card-title = Создание аккаунта
 auth-registration-card-subtitle = Зарегистрируйтесь, чтобы безопасно управлять своей учётной записью.
 auth-registration-have-account = Уже есть аккаунт?
 auth-registration-sign-in-link = Войти
+auth-registration-legal-before = Создавая учётную запись, вы принимаете
+auth-registration-legal-middle = и подтверждаете, что прочитали документ
+auth-registration-legal-after = .
 auth-registration-claim-body = Если это ваша почта и вы так и не завершили регистрацию,
 auth-registration-claim-link = подтвердите право на неё
 

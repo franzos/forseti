@@ -1,3 +1,3 @@
 legal-privacy-title = سياسة الخصوصية
-legal-terms-title = الشروط والأحكام
+legal-terms-title = شروط الخدمة
 legal-imprint-title = بيان الناشر

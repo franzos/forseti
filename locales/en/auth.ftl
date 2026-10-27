@@ -23,6 +23,9 @@ auth-registration-card-title = Create an account
 auth-registration-card-subtitle = Sign up to manage your identity securely.
 auth-registration-have-account = Already have an account?
 auth-registration-sign-in-link = Sign in
+auth-registration-legal-before = By creating an account, you accept the
+auth-registration-legal-middle = and confirm you've read the
+auth-registration-legal-after = .
 auth-registration-claim-body = If this is your email and you never finished signing up,
 auth-registration-claim-link = claim it
 

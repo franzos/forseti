@@ -23,6 +23,9 @@ auth-registration-card-title = Créer un compte
 auth-registration-card-subtitle = Inscrivez-vous pour gérer votre identité en toute sécurité.
 auth-registration-have-account = Vous avez déjà un compte ?
 auth-registration-sign-in-link = Se connecter
+auth-registration-legal-before = En créant un compte, vous acceptez les
+auth-registration-legal-middle = et confirmez avoir lu la
+auth-registration-legal-after = .
 auth-registration-claim-body = Si c'est votre adresse e-mail et que vous n'avez jamais terminé votre inscription,
 auth-registration-claim-link = revendiquez-la
 

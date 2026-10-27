@@ -23,6 +23,9 @@ auth-registration-card-title = 创建一个账号
 auth-registration-card-subtitle = 注册以安全地管理你的身份。
 auth-registration-have-account = 已有账号？
 auth-registration-sign-in-link = 登录
+auth-registration-legal-before = 创建账户即表示你接受
+auth-registration-legal-middle = 并确认已阅读
+auth-registration-legal-after = 。
 auth-registration-claim-body = 如果这是你的邮箱而你从未完成注册，
 auth-registration-claim-link = 可以认领它
 
