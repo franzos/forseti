@@ -82,7 +82,7 @@ The authoritative schema is `src/config.rs`. The example file is `config.example
 
 | Key          | Type   | Default | Description                              |
 |--------------|--------|---------|------------------------------------------|
-| `public_url` | string | —       | Hydra's public URL as reachable from Forseti (token endpoint, JWKS, OAuth2 endpoints). |
+| `public_url` | string | —       | Hydra's public URL as reachable from Forseti (token endpoint, JWKS, OAuth2 endpoints). Forseti fetches Hydra's discovery document from here, so when the proxy routes `{issuer}/.well-known/openid-configuration` to Forseti, point this at Hydra directly (e.g. `http://hydra:4444`) and set `issuer` to the browser-facing URL. Through the proxy, the fetch lands on Forseti itself and recurses until it runs out of file descriptors. |
 | `admin_url`  | string | —       | Server-only Hydra admin URL. Used to fetch and accept login/consent/logout challenges. |
 | `issuer`     | string | unset (falls back to `public_url`) | Hydra's advertised issuer (`urls.self.issuer` in `hydra.yml`) when it differs from `public_url` — the normal case behind a front proxy, e.g. `https://accounts.example.com/hydra`. Drives the CSP `form-action` origin, the path-insertion well-known discovery routes, and the CIMD shim's redirect base. See [Fronting the issuer](#fronting-the-issuer-front-proxy-vs-haproxy). |
 | `front_proxy`| bool   | `false` | Reverse-proxy `GET/POST /hydra/{path}` on Forseti's public listener to `public_url`, so Forseti itself owns the issuer origin (single-binary deployments, the dev playground). Keep `false` when an external proxy (haproxy) already routes `/hydra/` to Hydra. |
@@ -1611,7 +1611,7 @@ For all of this to work, the issuer's origin must route three things to the righ
 
 Two ways to arrange that:
 
-- **External proxy (haproxy, prod).** haproxy routes `path_beg /hydra/` to Hydra (stripping the prefix) and everything else — including the well-knowns and the shim — to Forseti. No Forseti config beyond `[hydra].issuer`. See [`operator-guide-proxy.md`](./operator-guide-proxy.md).
+- **External proxy (haproxy, prod).** haproxy routes `path_beg /hydra/` to Hydra (stripping the prefix) and everything else — including the well-knowns and the shim — to Forseti. Forseti needs `[hydra].issuer` set to the browser-facing issuer and `[hydra].public_url` pointed at Hydra directly, not through haproxy, because haproxy routes the issuer's discovery URL back to Forseti. See [`operator-guide-proxy.md`](./operator-guide-proxy.md).
 - **Front proxy (`[hydra].front_proxy = true`, single binary / dev).** Forseti itself reverse-proxies `GET/POST /hydra/{path}` to `[hydra].public_url`, so Forseti owns the whole issuer origin. The passthrough forwards `Cookie` and multi-valued `Set-Cookie` both ways (Hydra's login/consent CSRF cookies) and never follows Hydra's redirects — those belong to the browser. Bodies are buffered under a 2 MiB cap. `GET /hydra/.well-known/openid-configuration` through the passthrough is served augmented too, never verbatim.
 
 Set `[hydra].issuer` to the browser-facing issuer in both cases. It drives three things: the path segment the well-known routes mount under, the CIMD shim's redirect base (a *relative* `/hydra/oauth2/auth` redirect, so the browser stays on the issuer origin and Hydra's host-scoped CSRF cookies survive), and the CSP `form-action` origin.
