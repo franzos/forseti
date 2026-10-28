@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.20] - 2026-10-28
+
+### Added
+- Terms and privacy notice on the registration page
+
+### Changed
+- Footer link reads "Terms of Service", matching the page
+
 ## [0.2.19] - 2026-10-26
 
 ### Added
