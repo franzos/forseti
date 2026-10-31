@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.2.22] - 2026-10-31
+
+### Fixed
+- Revoking access for apps with a URL client ID returned 404
+- Admin client pages broke for apps with a URL client ID
+- Revoking another user's session id reported success and was audited
+- Internal Hydra address no longer listed in the CSP `form-action`
+
+### Changed
+- Proxy guide: throttle password logins, block `/kratos/admin`, correct `X-Real-IP` note
+
 ## [0.2.21] - 2026-10-31
 
 ### Changed
