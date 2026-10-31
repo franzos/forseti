@@ -633,7 +633,7 @@ async fn unverified_allowlisted_email_is_not_an_admin() {
         let _ = delete_test_identity(&existing).await;
     }
 
-    let user = register_test_user_with_email(UNREGISTERED_ALLOWLISTED_EMAIL).await;
+    let user = register_test_user_with_email_unverified(UNREGISTERED_ALLOWLISTED_EMAIL).await;
     // First authenticated request writes the Default floor row.
     let _ = user.client.get(PORTAL).send().await;
 

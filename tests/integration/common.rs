@@ -217,6 +217,11 @@ pub async fn register_test_user_unverified(prefix: &str) -> RegisteredUser {
     register_inner(&unique_email(prefix), true, false).await
 }
 
+/// [`register_test_user_with_email`] with the address left unverified.
+pub async fn register_test_user_with_email_unverified(email: &str) -> RegisteredUser {
+    register_inner(email, true, false).await
+}
+
 /// [`register_test_user`] without skipping the new-account username step.
 pub async fn register_test_user_with_username_step(prefix: &str) -> RegisteredUser {
     register_inner(&unique_email(prefix), false, true).await
