@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.2.21] - 2026-10-31
+
+### Changed
+- OAuth login asks for email verification before signing into an app that reads the email
+
 ## [0.2.20] - 2026-10-28
 
 ### Added
