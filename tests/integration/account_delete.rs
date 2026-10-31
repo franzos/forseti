@@ -575,7 +575,7 @@ async fn admin_delete_leaves_no_referencing_rows() {
         eprintln!("Skipping admin_delete_leaves_no_referencing_rows: admin env not set");
         return;
     };
-    let target = register_test_user("admin-delete-refs").await;
+    let target = register_test_user_unverified("admin-delete-refs").await;
     warm_up(&target).await;
     let fx = seed_fixture(&target);
     let id = target.identity_id.clone();
@@ -632,7 +632,7 @@ async fn admin_delete_leaves_no_referencing_rows() {
 #[tokio::test]
 async fn reclaim_delete_leaves_no_referencing_rows_and_keeps_invites() {
     assert!(portal_reachable().await);
-    let user = register_test_user("reclaim-refs").await;
+    let user = register_test_user_unverified("reclaim-refs").await;
     warm_up(&user).await;
     let fx = seed_fixture(&user);
     let id = user.identity_id.clone();

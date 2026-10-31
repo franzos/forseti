@@ -248,7 +248,7 @@ async fn claim_email_confirm_redirects_to_registration_with_prefill() {
     }
     // 1. Register a brand-new identity. Don't verify — the claim-email
     //    flow refuses on a verified address.
-    let user = register_test_user("claim-prefill").await;
+    let user = register_test_user_unverified("claim-prefill").await;
     let target_email = user.email.clone();
 
     // 2. Drive the claim-email POST from a *fresh* browser jar (the
@@ -411,7 +411,7 @@ async fn verification_sent_email_shows_recent_email_hint() {
         eprintln!("portal not reachable; skipping");
         return;
     }
-    let user = register_test_user("verify-hint").await;
+    let user = register_test_user_unverified("verify-hint").await;
 
     // Kratos drops a /verification flow id into the post-registration
     // session hook. Hit /verification directly — the portal initialises

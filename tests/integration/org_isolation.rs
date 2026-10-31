@@ -333,7 +333,7 @@ async fn self_serve_join_requires_a_verified_address() {
     let slug = format!("c14-{}", &org_id[..8]);
     seed_organization(&org_id, &slug, "C14", "all");
     open_org_signup(&org_id);
-    let user = register_test_user("join-unverified").await;
+    let user = register_test_user_unverified("join-unverified").await;
 
     let join = |client: reqwest::Client, slug: String| async move {
         let body = client

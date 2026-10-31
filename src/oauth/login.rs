@@ -357,6 +357,30 @@ pub(crate) async fn oauth_login(
         }
     }
 
+    // An app that asked for `email` gets `email_verified: false` for an
+    // unproven address and has to drop it, so the user verifies here first and
+    // comes back; the alternative is an account the app cannot match by email.
+    let email = crate::flow_view::session_email(&session);
+    if wants_email(req.requested_scope.as_deref())
+        && !email.is_empty()
+        && !ory::address_is_verified(ory::session_addresses(&session), &email)
+    {
+        if prompt_none {
+            return reject(
+                &state,
+                &challenge,
+                "interaction_required",
+                "Verifying the email address needs the user.",
+            )
+            .await;
+        }
+        return Redirect::to(&format!(
+            "/verification?return_to={}",
+            ory_client::apis::urlencode(&self_login_url)
+        ))
+        .into_response();
+    }
+
     // A new account on its way into an app that reads `preferred_username`
     // gets one chance to pick a handle first; otherwise apps like Forgejo ask
     // for one themselves. A skip is remembered for the account on this
@@ -478,6 +502,10 @@ async fn reject(state: &AppState, challenge: &str, error: &str, description: &st
 /// would never reach the app, so there's nothing to ask for.
 fn wants_profile(scopes: Option<&[String]>) -> bool {
     scopes.is_some_and(|s| s.iter().any(|x| x == "profile"))
+}
+
+fn wants_email(scopes: Option<&[String]>) -> bool {
+    scopes.is_some_and(|s| s.iter().any(|x| x == "email"))
 }
 
 /// Identity that skipped the username step on this browser. Lives as long as
@@ -707,7 +735,7 @@ fn acr_values_need_aal2_step_up(requested: &[String], session_is_aal2: bool) -> 
 mod tests {
     use super::{
         acr_values_need_aal2_step_up, anonymous_login_redirect_url, parse_idp_hint_param,
-        parse_organization_id_param, request_url_param, wants_profile,
+        parse_organization_id_param, request_url_param, wants_email, wants_profile,
     };
 
     #[test]
@@ -730,6 +758,14 @@ mod tests {
         assert!(wants_profile(Some(&s(&["openid", "profile"]))));
         assert!(!wants_profile(Some(&s(&["openid", "email"]))));
         assert!(!wants_profile(None));
+    }
+
+    #[test]
+    fn verification_step_needs_the_email_scope() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert!(wants_email(Some(&s(&["openid", "email"]))));
+        assert!(!wants_email(Some(&s(&["openid", "profile"]))));
+        assert!(!wants_email(None));
     }
 
     #[test]

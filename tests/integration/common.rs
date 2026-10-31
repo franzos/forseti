@@ -210,19 +210,28 @@ pub async fn register_test_user(prefix: &str) -> RegisteredUser {
     register_test_user_with_email(&unique_email(prefix)).await
 }
 
+/// [`register_test_user`] with the address left unverified, as registration
+/// leaves it: for tests of what an unproven address may not do. `/oauth/login`
+/// sends such a session to `/verification` when the client asks for `email`.
+pub async fn register_test_user_unverified(prefix: &str) -> RegisteredUser {
+    register_inner(&unique_email(prefix), true, false).await
+}
+
 /// [`register_test_user`] without skipping the new-account username step.
 pub async fn register_test_user_with_username_step(prefix: &str) -> RegisteredUser {
-    register_inner(&unique_email(prefix), false).await
+    register_inner(&unique_email(prefix), false, true).await
 }
 
 /// [`register_test_user`] at a caller-chosen address, for tests that need a
 /// specific email (e.g. one the running Forseti has in `[admin].allowed_emails`).
 /// The address must not already be a Kratos identifier.
 pub async fn register_test_user_with_email(email: &str) -> RegisteredUser {
-    register_inner(email, true).await
+    register_inner(email, true, true).await
 }
 
-async fn register_inner(email: &str, skip_username: bool) -> RegisteredUser {
+/// `verified` marks the address verified afterwards, as a user who followed
+/// the verification mail would be.
+async fn register_inner(email: &str, skip_username: bool, verified: bool) -> RegisteredUser {
     let (client, manual_client, jar) = paired_clients();
     let email = email.to_string();
     let password = "Sup3rSecret-Test-Password!";
@@ -323,6 +332,9 @@ async fn register_inner(email: &str, skip_username: bool) -> RegisteredUser {
         skip_username_step(&jar, &identity_id);
     }
 
+    if verified {
+        mark_identity_verified(&identity_id).await;
+    }
     RegisteredUser {
         client,
         manual_client,

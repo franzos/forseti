@@ -12,6 +12,7 @@
 import { test, expect } from '@playwright/test';
 import { adminCredsFromEnv, signInAdminAal2 } from '../../helpers/admin';
 import { logout, registerUser } from '../../helpers/register';
+import { markEmailVerified } from '../../helpers/orgs';
 import { decodeJwtClaims, generatePkcePair } from '../../helpers/oauth';
 
 // Use the issuer hostname so Hydra's CSRF cookie scopes correctly. The
@@ -77,6 +78,7 @@ test('OAuth authorize → consent → token exchange end-to-end', async ({ page,
   await logout(page);
 
   const endUser = await registerUser(page, 'playwright-oauth-user');
+  await markEmailVerified(page.request, endUser.email);
 
   // 3. Drive the authorize URL. Hydra prompts login (we already have a
   //    session — Kratos accepts), then consent (we click Allow), then

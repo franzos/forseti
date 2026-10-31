@@ -13,6 +13,7 @@
 import { test, expect } from '@playwright/test';
 import { adminCredsFromEnv, signInAdminAal2 } from '../../helpers/admin';
 import { logout, registerUser } from '../../helpers/register';
+import { markEmailVerified } from '../../helpers/orgs';
 import { createOAuthClient } from '../../helpers/clients';
 import { generatePkcePair } from '../../helpers/oauth';
 
@@ -47,7 +48,8 @@ test('RP-initiated logout clears the session and redirects to post_logout_redire
   //    authorize → consent → token exchange so we have an `id_token` to
   //    use as the `id_token_hint`.
   await logout(page);
-  await registerUser(page, 'playwright-rp-logout-user');
+  const rpUser = await registerUser(page, 'playwright-rp-logout-user');
+  await markEmailVerified(page.request, rpUser.email);
 
   const pkce = generatePkcePair();
   const state = `e2e-state-${Date.now()}`;

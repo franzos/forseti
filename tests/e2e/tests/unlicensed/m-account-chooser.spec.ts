@@ -14,6 +14,7 @@ import { test, expect } from '@playwright/test';
 import { adminCredsFromEnv, signInAdminAal2 } from '../../helpers/admin';
 import { createOAuthClient } from '../../helpers/clients';
 import { logout, registerUser } from '../../helpers/register';
+import { markEmailVerified } from '../../helpers/orgs';
 import { generatePkcePair } from '../../helpers/oauth';
 
 // Same issuer hostname constants as Scenario B — Hydra's CSRF cookie is scoped
@@ -58,6 +59,7 @@ test('account chooser: remember opt-in renders + switch restarts flow', async ({
   // 2. Register user A, drive authorize → consent, tick "Remember this account
   //    on this device", click Allow, capture the callback code.
   const aUser = await registerUser(page, 'pw-chooser-a');
+  await markEmailVerified(page.request, aUser.email);
 
   const pkceA = generatePkcePair();
   const stateA = `e2e-chooser-a-${Date.now()}`;
@@ -99,6 +101,7 @@ test('account chooser: remember opt-in renders + switch restarts flow', async ({
   //    this device, the consent page offers A in the "Switch account" chooser.
   await logout(page);
   const bUser = await registerUser(page, 'pw-chooser-b');
+  await markEmailVerified(page.request, bUser.email);
 
   const pkceB = generatePkcePair();
   const stateB = `e2e-chooser-b-${Date.now()}`;

@@ -15,6 +15,7 @@
 import { test, expect } from '@playwright/test';
 import { adminCredsFromEnv, signInAdminAal2 } from '../../helpers/admin';
 import { logout, registerUser } from '../../helpers/register';
+import { markEmailVerified } from '../../helpers/orgs';
 import { createOAuthClient } from '../../helpers/clients';
 import { generatePkcePair } from '../../helpers/oauth';
 
@@ -50,6 +51,7 @@ test('self-delete confirm page lists granted apps, enforces email confirm, and d
   //    the user's subject.
   await logout(page);
   const endUser = await registerUser(page, 'playwright-selfdelete-user');
+  await markEmailVerified(page.request, endUser.email);
 
   const pkce = generatePkcePair();
   const authUrl = new URL(HYDRA_AUTHORIZE);
