@@ -96,13 +96,21 @@ pub(crate) async fn settings_sessions_revoke(
     let actor_id = sess.identity_id;
     let actor_email = sess.email;
 
-    let (msg, ok) = match ory::kratos::revoke_session(
-        &state.ory,
-        &session_id,
-        (!cookie.is_empty()).then_some(cookie.as_str()),
-    )
-    .await
-    {
+    // Kratos answers 204 for another identity's session id without revoking it.
+    let owned = ory::kratos::is_session_active(&state.ory, &actor_id, &session_id).await;
+    let revoked = match owned {
+        Ok(true) => {
+            ory::kratos::revoke_session(
+                &state.ory,
+                &session_id,
+                (!cookie.is_empty()).then_some(cookie.as_str()),
+            )
+            .await
+        }
+        Ok(false) => Err(anyhow::anyhow!("session is not one of the actor's")),
+        Err(e) => Err(e),
+    };
+    let (msg, ok) = match revoked {
         Ok(()) => (
             crate::i18n::lookup(&locale, "flash-session-signed-out"),
             true,

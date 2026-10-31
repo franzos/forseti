@@ -68,7 +68,7 @@
               <td class="px-4 py-3 font-body-md text-body-md text-on-surface">
                 <div class="flex items-center gap-stack-xs flex-wrap">
                   {% if r.logo.is_some() %}<span class="flex items-center justify-center w-8 h-8 rounded-lg bg-surface-container-high shrink-0">{{ logo_macro::app_logo(r.logo, r.logo_dark) }}</span>{% endif %}
-                  <a href="/admin/clients/{{ r.id }}"
+                  <a href="/admin/clients/{{ r.id|urlencode_strict }}"
                      class="text-primary font-bold hover:underline"
                      title="{{ r.id }}"><bdi>{{ r.name }}</bdi></a>
                   {% if r.verified %}

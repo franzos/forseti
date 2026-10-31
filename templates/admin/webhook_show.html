@@ -44,7 +44,7 @@
         <dt class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-webhook-field-client") }}</dt>
         <dd class="font-body-md text-body-md mt-1">
           {% if row.client_exists %}
-            <a href="/admin/clients/{{ row.client_id }}"
+            <a href="/admin/clients/{{ row.client_id|urlencode_strict }}"
                class="text-primary font-bold hover:underline">{{ row.client_name }}</a>
             <p class="font-label-sm text-label-sm text-outline mt-1 font-mono">{{ row.client_id }}</p>
           {% else %}

@@ -31,7 +31,7 @@
             <tr class="border-t border-outline-variant hover:bg-surface-container-low">
               <td class="px-4 py-3">
                 {% if r.client_exists %}
-                  <a href="/admin/clients/{{ r.client_id }}"
+                  <a href="/admin/clients/{{ r.client_id|urlencode_strict }}"
                      class="font-body-md text-body-md text-primary font-bold hover:underline"
                      title="{{ r.client_id }}">{{ r.client_name }}</a>
                 {% else %}

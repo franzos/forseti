@@ -45,7 +45,7 @@
   {% endif %}
 
   <form method="POST"
-        action="{% if id.is_empty() %}/admin/clients{% else %}/admin/clients/{{ id }}{% endif %}"
+        action="{% if id.is_empty() %}/admin/clients{% else %}/admin/clients/{{ id|urlencode_strict }}{% endif %}"
         class="flex flex-col gap-stack-md max-w-2xl">
     <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
     <input type="hidden" name="client_type" value="{{ preset_slug }}">

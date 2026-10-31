@@ -184,9 +184,11 @@ Fine — it's a navigation, not an XHR. Token/userinfo CORS is per-client via `a
 
 ## haproxy sketches
 
-**Append `X-Forwarded-For`; tell Forseti how many proxies there are.** Forseti's per-IP rate limiters and the audit middleware default to keying on the TCP peer IP (`proxy.trust_forwarded_for = false`) — secure but, behind a proxy, every caller shares one bucket. To restore per-real-client buckets, set `proxy.trust_forwarded_for = true` and `proxy.trusted_hops` to the number of proxies in the chain (default `1`). Forseti reads the entry `trusted_hops` from the *right* of `X-Forwarded-For`, which is the address your innermost proxy accepted the connection from; the leftmost entries are caller-supplied and ignored, so a forged `X-Forwarded-For: <random>` never becomes the key. Stripping the inbound header at the proxy (as the sketches below do) is still good hygiene, since it keeps caller-supplied junk out of your logs, but it's no longer load-bearing. What is load-bearing: the proxy must *append* (haproxy `set-header ... %[src]` after a `del-header`, nginx `$proxy_add_x_forwarded_for`), and if it sets `X-Real-IP` it must overwrite it, because Forseti falls back to that header when the chain is shorter than `trusted_hops`.
+**Append `X-Forwarded-For`; tell Forseti how many proxies there are.** Forseti's per-IP rate limiters and the audit middleware default to keying on the TCP peer IP (`proxy.trust_forwarded_for = false`) — secure but, behind a proxy, every caller shares one bucket. To restore per-real-client buckets, set `proxy.trust_forwarded_for = true` and `proxy.trusted_hops` to the number of proxies in the chain (default `1`). Forseti reads the entry `trusted_hops` from the *right* of `X-Forwarded-For`, which is the address your innermost proxy accepted the connection from; the leftmost entries are caller-supplied and ignored, so a forged `X-Forwarded-For: <random>` never becomes the key. Stripping the inbound header at the proxy (as the sketches below do) is still good hygiene, since it keeps caller-supplied junk out of your logs, but it's no longer load-bearing. What is load-bearing: the proxy must *append* (haproxy `set-header ... %[src]` after a `del-header`, nginx `$proxy_add_x_forwarded_for`), and if it sets `X-Real-IP` it should overwrite it, since other upstreams may read it. Forseti itself ignores `X-Real-IP`; a chain shorter than `trusted_hops` falls back to the TCP peer.
 
 **And keep the listener unreachable except through that proxy.** Forseti has no trusted-proxy allowlist: whoever opens the TCP connection is treated as the last proxy. A caller who reaches the listener directly appends nothing, so their own header is the whole chain and they pick both the client IP written to the audit log and the key for every per-IP rate-limit bucket; rotating the value per request gives them an unlimited supply of fresh buckets, leaving only the global limits in the way. So the flag is only safe while Forseti's own listener refuses direct connections — bind it to loopback or a private interface, or firewall the port to the proxy's address. Leave `trust_forwarded_for = false` (the default) until that holds.
+
+**Throttle password logins at the proxy.** The login form posts straight to Kratos, so none of Forseti's limiters see it, and Kratos has no brute-force protection of its own. Cap `POST /kratos/self-service/login` per client IP at the proxy, as the Shape (1) sketch does. The same sketch answers `/kratos/admin/*` with a 404: Kratos's public port redirects admin paths to its internal admin URL, which leaks that hostname.
 
 ### Shape (1) — path-prefixed
 
@@ -211,9 +213,19 @@ frontend fe_accounts
     # verbatim. Rewritten before is_hydra is evaluated, so it lands on Forseti.
     acl is_issuer_oidc path /hydra/.well-known/openid-configuration
     http-request set-path /.well-known/openid-configuration/hydra if is_issuer_oidc
+    acl is_issuer_as path /hydra/.well-known/oauth-authorization-server
+    http-request set-path /.well-known/oauth-authorization-server/hydra if is_issuer_as
 
     acl is_hydra  path_beg /hydra/
     acl is_kratos path_beg /kratos/
+
+    # Kratos's public port redirects /admin/* to its internal admin URL.
+    http-request deny deny_status 404 if { path_beg /kratos/admin }
+
+    # Kratos doesn't throttle password attempts; 10 submissions per IP per minute.
+    acl is_login_submit path_beg /kratos/self-service/login
+    http-request track-sc1 src table st_login if is_login_submit METH_POST
+    http-request deny deny_status 429 if is_login_submit METH_POST { sc1_http_req_rate(st_login) gt 10 }
 
     # Strip the prefix BEFORE upstream sees it. Hydra/Kratos serve at root.
     http-request replace-path ^/hydra/?(.*)  /\1 if is_hydra
@@ -225,6 +237,9 @@ frontend fe_accounts
     # path-insertion well-knowns /.well-known/oauth-authorization-server/hydra
     # + /.well-known/openid-configuration/hydra — must land on Forseti.
     default_backend be_forseti
+
+backend st_login
+    stick-table type ip size 100k expire 10m store http_req_rate(1m)
 
 backend be_forseti
     server forseti 127.0.0.1:3000 check

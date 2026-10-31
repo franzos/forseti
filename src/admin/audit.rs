@@ -440,7 +440,9 @@ fn target_admin_link(target_kind: &str, target_id: &str) -> String {
     }
     match target_kind {
         audit::target_kind::IDENTITY => format!("/admin/identities/{target_id}"),
-        audit::target_kind::OAUTH_CLIENT => format!("/admin/clients/{target_id}"),
+        audit::target_kind::OAUTH_CLIENT => {
+            format!("/admin/clients/{}", ory_client::apis::urlencode(target_id))
+        }
         audit::target_kind::WEBHOOK_OUTBOX => format!("/admin/webhooks/{target_id}"),
         // sessions/system have no detail page
         _ => String::new(),

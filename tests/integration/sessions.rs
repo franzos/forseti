@@ -121,3 +121,50 @@ async fn revoke_single_session_by_id() {
 
     user.cleanup().await;
 }
+
+/// Another identity's session id must not be revocable, nor reported or
+/// audited as revoked.
+#[tokio::test]
+async fn revoke_foreign_session_by_id_is_refused() {
+    assert!(portal_reachable().await);
+
+    let attacker = register_test_user("sess-revoke-foreign-a").await;
+    let victim = register_test_user("sess-revoke-foreign-v").await;
+    let victim_session = whoami_session_id(&victim.client)
+        .await
+        .expect("victim session has an id");
+
+    let page = attacker
+        .client
+        .get(format!("{PORTAL}/settings/sessions"))
+        .send()
+        .await
+        .expect("GET /settings/sessions");
+    let body = page.text().await.unwrap_or_default();
+    let csrf = extract_input_value(&body, "_csrf").expect("_csrf on sessions page");
+
+    // The client follows the flash redirect back to the sessions page.
+    let after = attacker
+        .client
+        .post(format!(
+            "{PORTAL}/settings/sessions/{victim_session}/revoke"
+        ))
+        .form(&[("_csrf", csrf.as_str())])
+        .send()
+        .await
+        .expect("POST revoke foreign session")
+        .text()
+        .await
+        .unwrap_or_default();
+    assert!(
+        after.contains("Could not sign out that session"),
+        "a foreign session must not be reported as signed out"
+    );
+    assert!(
+        whoami_is_active(&victim.client).await,
+        "the victim's session must stay active"
+    );
+
+    attacker.cleanup().await;
+    victim.cleanup().await;
+}

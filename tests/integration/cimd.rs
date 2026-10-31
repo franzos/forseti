@@ -385,6 +385,72 @@ async fn cimd_consent_always_rendered_and_shows_host() {
     user.cleanup().await;
 }
 
+/// A CIMD client_id is a URL, so the authorized-apps revoke form has to carry
+/// it as one encoded path segment; posting the action as rendered revokes.
+#[tokio::test]
+async fn cimd_grant_revokes_from_the_rendered_authorized_apps_form() {
+    assert!(portal_reachable().await);
+
+    let url = serve_cimd_doc(|_| {}).await;
+    let redirect = "http://127.0.0.1:43377/callback";
+    let user = register_test_user("cimd-revoke-form").await;
+
+    let (consent_challenge, csrf, _body) = drive_to_consent(
+        &user.client,
+        &shim_auth_url(&url, redirect, "cimd-revoke-1"),
+    )
+    .await;
+    let code = consent_accept_chase_code(
+        &user.manual_client,
+        &csrf,
+        &consent_challenge,
+        &["openid", "offline"],
+        true,
+    )
+    .await;
+    assert!(code.is_some(), "remember=true accept must yield a code");
+
+    let page = |client: reqwest::Client| async move {
+        client
+            .get(format!("{PORTAL}/settings/authorized-apps"))
+            .send()
+            .await
+            .expect("GET /settings/authorized-apps")
+            .text()
+            .await
+            .unwrap_or_default()
+    };
+    let body = page(user.client.clone()).await;
+    let prefix = "action=\"/settings/authorized-apps/";
+    let start = body.find(prefix).expect("a revoke form for the cimd grant") + "action=\"".len();
+    let action = &body[start..start + body[start..].find('"').expect("closing quote")];
+    assert!(
+        !action.contains("://"),
+        "client_id must be percent-encoded in the action: {action}"
+    );
+    let csrf = extract_input_value(&body, "_csrf").expect("_csrf on authorized-apps page");
+
+    let res = user
+        .client
+        .post(format!("{PORTAL}{action}"))
+        .form(&[("_csrf", csrf.as_str())])
+        .send()
+        .await
+        .expect("POST rendered revoke action");
+    assert!(
+        res.status().is_success() || res.status().is_redirection(),
+        "revoke as rendered: {}",
+        res.status()
+    );
+    assert!(
+        !page(user.client.clone()).await.contains(prefix),
+        "the cimd grant must be gone after revoke"
+    );
+
+    cleanup_cimd_client(&url).await;
+    user.cleanup().await;
+}
+
 /// Warm path: a second identical flow (same cached document, redirect_uri
 /// already on the row) must skip the Hydra admin write entirely. An
 /// out-of-band `client_name` canary distinguishes skip from an idempotent

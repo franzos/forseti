@@ -297,9 +297,10 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         .clone()
         .or_else(|| state.cfg.posix.hydra_issuer.clone())
         .unwrap_or_else(|| state.cfg.hydra.public_url.clone());
+    // With [hydra].issuer set, public_url is server-to-server only (e.g. `http://hydra:4444`).
     let form_action = csp_form_action(
         &state.cfg.kratos.public_url,
-        &state.cfg.hydra.public_url,
+        state.cfg.hydra.issuer_or_public(),
         &hydra_issuer,
         &state.cfg.security.extra_form_action,
     );

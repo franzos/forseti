@@ -106,7 +106,7 @@
               </div>
 
               <form method="POST"
-                    action="/settings/authorized-apps/{{ app.client_id }}/revoke"
+                    action="/settings/authorized-apps/{{ app.client_id|urlencode_strict }}/revoke"
                     class="shrink-0">
                 <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
                 <button type="submit"

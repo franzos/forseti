@@ -180,7 +180,7 @@ pub async fn show(
         None => None,
     };
 
-    let show_path = format!("/admin/clients/{id}");
+    let show_path = format!("/admin/clients/{}", ory_client::apis::urlencode(&id));
     let (flash_msg, clear_flash) = state.take_flash(&headers, &show_path);
 
     let has_logo = crate::client_logo::exists(&state.db, &id)
