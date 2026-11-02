@@ -731,12 +731,12 @@ fn check_mapper_url(provider: &Value, id: &str, base: &str, config_dir: &Path) -
                 ));
             }
             if super::modify::known_pinned_provider(id) && !is_pinned {
-                if super::modify::is_superseded_mapper(&content) {
+                if super::modify::is_superseded_mapper(id, &content) {
                     findings.push(Finding::warn(
                         &format!("{mapper_key}.pinned"),
                         "matches an older Forseti pinned mapper",
                         &format!("regenerate with `forseti config oidc enable {id}`"),
-                        "this is Forseti's own pinned body from an earlier release, not a hand-rolled mapper: it still gates the `email` trait on `email_verified`, but an unverified upstream hard-fails the sign-in instead of falling back to Forseti's verification flow.",
+                        "this is Forseti's own pinned body from an earlier release, not a hand-rolled mapper: it still gates the `email` trait on `email_verified`, but misses later fixes (an unverified upstream may hard-fail the sign-in, and Google's may carry over verification for addresses Google isn't authoritative for).",
                     ));
                 } else {
                     findings.push(Finding::warn(

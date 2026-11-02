@@ -1,8 +1,9 @@
 //! The guarded write pipeline (`write_yaml`) plus `config oidc enable/disable`.
 //! The mapper bodies here are pinned and reviewed: they only ever emit an
 //! `email` trait when the upstream marks it verified, which is what stops the
-//! unverified-email account-takeover class, and only Google and Apple carry
-//! that verification into Kratos. `write_yaml` re-serializes the whole
+//! unverified-email account-takeover class, and only Apple, and Google for the
+//! addresses it is authoritative for, carry that verification into Kratos.
+//! `write_yaml` re-serializes the whole
 //! document, so it confirms before dropping comments and always prints a
 //! secret-redacted diff.
 
@@ -93,7 +94,29 @@ local name = {
 }
 "#;
 
-pub(crate) const MAPPER_GOOGLE: &str = MAPPER_CARRYOVER;
+/// Google's carry-over, narrowed to the addresses Google is authoritative for:
+/// Gmail and Workspace accounts (`hd` set). Any other address on a Google
+/// account was verified once at signup and never re-checked, so it gets the
+/// trait but still goes through Forseti's verification mail. Google's own
+/// guidance for `email_verified` draws the same line.
+pub(crate) const MAPPER_GOOGLE: &str = r#"local claims = { email_verified: false } + std.extVar('claims');
+local verified = 'email' in claims && claims.email_verified;
+local authoritative = verified && (std.endsWith(std.asciiLower(claims.email), '@gmail.com') || 'hd' in claims);
+local name = {
+  [if 'given_name' in claims then 'first' else null]: claims.given_name,
+  [if 'family_name' in claims then 'last' else null]: claims.family_name,
+};
+{
+  identity: {
+    traits: {
+      [if verified then 'email' else null]: claims.email,
+      [if std.length(name) > 0 then 'name' else null]: name,
+    },
+    verified_addresses: if authoritative then [{ value: claims.email, via: 'email' }] else [],
+  },
+}
+"#;
+
 pub(crate) const MAPPER_APPLE: &str = MAPPER_CARRYOVER;
 pub(crate) const MAPPER_GITHUB: &str = MAPPER_GATE_ONLY;
 pub(crate) const MAPPER_MICROSOFT: &str = MAPPER_GATE_ONLY;
@@ -149,10 +172,13 @@ pub(crate) fn pinned_mapper(provider: &str) -> &'static str {
     }
 }
 
-/// Whether `body` is a pinned mapper Forseti shipped in an earlier release.
-pub(crate) fn is_superseded_mapper(body: &str) -> bool {
+/// Whether `body` is a pinned mapper Forseti shipped for `provider` in an
+/// earlier release. Google's previous body is still Apple's current one, so
+/// that match is per provider rather than in the shared list.
+pub(crate) fn is_superseded_mapper(provider: &str, body: &str) -> bool {
     let fp = fingerprint(body);
     SUPERSEDED_MAPPERS.iter().any(|m| fingerprint(m) == fp)
+        || (provider == "google" && fingerprint(MAPPER_CARRYOVER) == fp)
 }
 
 /// Whether `provider` is one Forseti ships a pinned mapper for. Used by the
@@ -868,7 +894,7 @@ fn write_toml(
 /// Whether this provider's pinned mapper carries the upstream verification
 /// into Kratos, rather than only gating the `email` trait on it.
 fn carries_verification(provider: &str) -> bool {
-    pinned_mapper(provider) == MAPPER_CARRYOVER
+    pinned_mapper(provider).contains("verified_addresses")
 }
 
 /// Write a pinned mapper, honouring `--dry-run`. `verb` distinguishes a first
@@ -916,28 +942,28 @@ fn handle_mapper(
                     "mapper {} already matches Forseti's pinned body; leaving it.",
                     mapper_file.display()
                 )?;
-            } else if is_superseded_mapper(&existing) {
+            } else if is_superseded_mapper(provider, &existing) {
                 // Forseti's own output from an earlier release: safe to
                 // replace, and refusing here would strand every upgrade.
                 if keep_mapper {
                     writeln!(
                         ctx.out,
                         "note: mapper {} is Forseti's pinned body from an earlier release; keeping \
-                         it (--keep-mapper). It still gates the `email` trait on `email_verified`, \
-                         but an unverified upstream hard-fails the sign-in instead of falling back \
-                         to Forseti's verification flow. Drop --keep-mapper to regenerate.",
+                         it (--keep-mapper). It gates the `email` trait on `email_verified` but \
+                         misses later fixes: an unverified upstream may hard-fail the sign-in, and \
+                         Google's may carry over verification for addresses Google isn't \
+                         authoritative for. Drop --keep-mapper to regenerate.",
                         mapper_file.display()
                     )?;
                 } else {
                     write_mapper(ctx, mapper_file, pinned, "regenerated")?;
                     writeln!(
                         ctx.out,
-                        "note: replaced Forseti's pinned mapper from an earlier release. It now \
-                         defaults `email_verified` (an unverified upstream falls back to Forseti's \
-                         verification flow instead of failing the sign-in){}.",
+                        "note: replaced Forseti's pinned mapper from an earlier release. An \
+                         unverified upstream falls back to Forseti's verification flow{}.",
                         if carries_verification(provider) {
-                            ", and a verified upstream address is stored already-verified rather \
-                             than triggering Forseti's verification mail"
+                            ", and an address the provider is authoritative for is stored \
+                             already-verified rather than triggering Forseti's verification mail"
                         } else {
                             ""
                         }
@@ -3005,17 +3031,38 @@ mod tests {
             !body.contains("verified_addresses: [{"),
             "verified_addresses must never be emitted unconditionally"
         );
+
+        // Google's narrower carry-over sits behind the same gate.
+        let google = MAPPER_GOOGLE;
+        assert!(google.contains("local verified = 'email' in claims && claims.email_verified;"));
+        assert!(google.contains("local authoritative = verified && ("));
+        assert!(google.contains("verified_addresses: if authoritative then"));
+        assert!(google.contains("else [],"));
+        assert!(!google.contains("verified_addresses: [{"));
+    }
+
+    #[test]
+    fn google_carries_over_only_gmail_and_workspace_addresses() {
+        let google = MAPPER_GOOGLE;
+        assert!(google.contains("std.endsWith(std.asciiLower(claims.email), '@gmail.com')"));
+        assert!(google.contains("'hd' in claims"));
+        assert_ne!(google, MAPPER_CARRYOVER);
     }
 
     #[test]
     fn superseded_mappers_are_recognised_but_current_ones_are_not() {
         let old_google = "local claims = std.extVar('claims');\n{\n  identity: {\n    traits: {\n      [if 'email' in claims && claims.email_verified then 'email' else null]: claims.email,\n    },\n  },\n}\n";
-        assert!(is_superseded_mapper(old_google));
+        assert!(is_superseded_mapper("google", old_google));
         let email_only = "local claims = { email_verified: false } + std.extVar('claims');\n{\n  identity: {\n    traits: {\n      [if 'email' in claims && claims.email_verified then 'email' else null]: claims.email,\n    },\n  },\n}\n";
-        assert!(is_superseded_mapper(email_only));
-        assert!(!is_superseded_mapper(MAPPER_GATE_ONLY));
-        assert!(!is_superseded_mapper(MAPPER_CARRYOVER));
+        assert!(is_superseded_mapper("github", email_only));
+        assert!(!is_superseded_mapper("github", MAPPER_GATE_ONLY));
+        assert!(!is_superseded_mapper("google", MAPPER_GOOGLE));
+        // Google's previous body is Apple's current one: superseded for Google only.
+        assert!(is_superseded_mapper("google", MAPPER_CARRYOVER));
+        assert!(!is_superseded_mapper("apple", MAPPER_CARRYOVER));
+        assert!(!is_superseded_mapper("github", MAPPER_CARRYOVER));
         assert!(!is_superseded_mapper(
+            "google",
             "local claims = std.extVar('claims'); {}"
         ));
     }
@@ -3375,7 +3422,21 @@ mod tests {
         let mut ctx = mapper_ctx(&dir);
         handle_mapper(&mut ctx, &mapper, "google", false).unwrap();
 
-        assert_eq!(std::fs::read_to_string(&mapper).unwrap(), MAPPER_CARRYOVER);
+        assert_eq!(std::fs::read_to_string(&mapper).unwrap(), MAPPER_GOOGLE);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn upgrade_narrows_googles_previous_carry_over_mapper() {
+        let dir = unique_tmp_dir("mapper-upgrade-google");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mapper = dir.join("oidc.google.jsonnet");
+        std::fs::write(&mapper, MAPPER_CARRYOVER).unwrap();
+
+        let mut ctx = mapper_ctx(&dir);
+        handle_mapper(&mut ctx, &mapper, "google", false).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&mapper).unwrap(), MAPPER_GOOGLE);
         std::fs::remove_dir_all(&dir).ok();
     }
 
