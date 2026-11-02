@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.2.23] - 2026-11-02
+
+### Changed
+- Google sign-in trusts verification only for Gmail and Workspace addresses
+
 ## [0.2.22] - 2026-10-31
 
 ### Fixed
