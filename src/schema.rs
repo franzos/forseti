@@ -382,6 +382,7 @@ diesel::table! {
         corroborated_at -> Nullable<Timestamp>,
         created_by -> Nullable<Text>,
         created_at -> Timestamp,
+        access_token_claims -> Text,
     }
 }
 

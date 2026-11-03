@@ -1135,3 +1135,136 @@ async fn an_approved_registry_resource_is_registered_for_the_refresh_grant() {
     delete_registry_resource(resource);
     user.cleanup().await;
 }
+
+/// Run one confidential auth-code flow for `resource` and return the tokens.
+async fn registry_claims_flow(
+    user: &RegisteredUser,
+    resource: &str,
+) -> (serde_json::Value, String, String) {
+    let (client_id, client_secret, redirect_uri) =
+        hydra_create_test_client(&["openid", "offline"]).await;
+    mark_client_verified(&client_id);
+    let auth_url = oauth_auth_url(
+        &client_id,
+        &redirect_uri,
+        "openid offline",
+        &format!("&resource={}", form_urlencode(resource)),
+    );
+    let (consent_challenge, csrf, _body) = drive_to_consent(&user.client, &auth_url).await;
+    let code = consent_accept_chase_code(
+        &user.manual_client,
+        &csrf,
+        &consent_challenge,
+        &["openid", "offline"],
+        false,
+    )
+    .await
+    .expect("authorization code on callback URL");
+    let tokens = exchange_code_for_tokens(&client_id, &client_secret, &redirect_uri, &code).await;
+    (tokens, client_id, client_secret)
+}
+
+/// A registry row's access-token claims reach tokens for that resource only,
+/// at the top level (the playground's Hydra lists `forgejo_aud` in
+/// `allowed_top_level_claims`), and survive the refresh grant. Other
+/// `metadata_admin` keys, other resources and disabled rows contribute nothing.
+#[tokio::test]
+async fn registry_access_token_claims_follow_the_granted_resource() {
+    assert!(portal_reachable().await);
+
+    let with_claims = "https://claims-resource.example.com/mcp";
+    let without_claims = "https://no-claims-resource.example.com/mcp";
+    for r in [with_claims, without_claims] {
+        delete_registry_resource(r);
+        seed_registry_resource(r);
+    }
+    set_registry_resource_claims(with_claims, "forgejo_aud");
+
+    let user = register_test_user("registry-claims").await;
+    kratos_set_metadata_admin(
+        &user.identity_id,
+        serde_json::json!({"forgejo_aud": "u:7:integration", "note": "operator only"}),
+    )
+    .await;
+
+    // Granted resource with claims: top level and under ext, nothing else copied.
+    let (tokens, client_id, client_secret) = registry_claims_flow(&user, with_claims).await;
+    let claims = decode_jwt_claims(tokens["access_token"].as_str().expect("access_token"));
+    assert_eq!(
+        claims["forgejo_aud"], "u:7:integration",
+        "top-level claim; got {claims}"
+    );
+    assert_eq!(
+        claims["ext"]["forgejo_aud"], "u:7:integration",
+        "ext claim; got {claims}"
+    );
+    assert!(claims.get("note").is_none() && claims["ext"].get("note").is_none());
+    assert!(
+        claims["aud"]
+            .as_array()
+            .is_some_and(|a| a.iter().any(|v| v == with_claims)),
+        "aud must carry the resource; got {claims}"
+    );
+    let id_claims = decode_jwt_claims(tokens["id_token"].as_str().expect("id_token"));
+    assert!(
+        id_claims.get("forgejo_aud").is_none(),
+        "never in the id_token; got {id_claims}"
+    );
+
+    let refreshed = refresh_tokens(
+        &client_id,
+        &client_secret,
+        tokens["refresh_token"].as_str().expect("refresh_token"),
+    )
+    .await
+    .expect("refresh grant");
+    let claims = decode_jwt_claims(
+        refreshed["access_token"]
+            .as_str()
+            .expect("refreshed access_token"),
+    );
+    assert_eq!(
+        claims["forgejo_aud"], "u:7:integration",
+        "refresh keeps the claim; got {claims}"
+    );
+    hydra_delete_client(&client_id).await;
+    delete_client_metadata(&client_id);
+
+    // Another resource: no claim anywhere.
+    let (tokens, client_id, _) = registry_claims_flow(&user, without_claims).await;
+    let claims = decode_jwt_claims(tokens["access_token"].as_str().expect("access_token"));
+    assert!(
+        claims.get("forgejo_aud").is_none() && claims["ext"].get("forgejo_aud").is_none(),
+        "a resource without claims must not get them; got {claims}"
+    );
+    hydra_delete_client(&client_id).await;
+    delete_client_metadata(&client_id);
+
+    // Disabled row: the audience is dropped, and its claims with it.
+    set_registry_resource_enabled(with_claims, false);
+    let (tokens, client_id, _) = registry_claims_flow(&user, with_claims).await;
+    let claims = decode_jwt_claims(tokens["access_token"].as_str().expect("access_token"));
+    assert!(
+        claims.get("forgejo_aud").is_none() && claims["ext"].get("forgejo_aud").is_none(),
+        "a disabled row must not contribute claims; got {claims}"
+    );
+    hydra_delete_client(&client_id).await;
+    delete_client_metadata(&client_id);
+    set_registry_resource_enabled(with_claims, true);
+
+    // No metadata on the identity: the flow still succeeds, without the claim.
+    kratos_set_metadata_admin(&user.identity_id, serde_json::json!({})).await;
+    let (tokens, client_id, _) = registry_claims_flow(&user, with_claims).await;
+    let claims = decode_jwt_claims(tokens["access_token"].as_str().expect("access_token"));
+    assert!(
+        claims.get("forgejo_aud").is_none(),
+        "no metadata, no claim; got {claims}"
+    );
+    hydra_delete_client(&client_id).await;
+    delete_client_metadata(&client_id);
+
+    for r in [with_claims, without_claims] {
+        delete_registry_resource(r);
+    }
+    user.cleanup().await;
+}

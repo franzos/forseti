@@ -333,8 +333,11 @@ All admin pages require AAL2 + Forseti-admin allowlist or org ownership.
 - [ ] Disable toggle → next consent requesting that resource gets no `aud`; re-enable restores it
 - [ ] Delete with confirm → row gone, consent denies the audience
 - [ ] Org-scoped admin (`?org=`): sees only own-org rows; create on a non-verified domain → fail-closed error; sibling-org row id → "Not found" (no existence leak)
-- [ ] CSRF on toggle / re-check / delete POSTs
-- [ ] Audit rows: `admin.resource.created`, `admin.resource.toggled`, `admin.resource.deleted` (critical)
+- [ ] Access-token claims: set on create and via **Edit** → shown in the list; a reserved name (`sub`) or an invalid one → inline error, input echoed back
+- [ ] With `forgejo_aud` on a row and in an identity's `metadata_admin`: a consent granting that resource puts the claim in the access token (top level when Hydra lists it in `allowed_top_level_claims`), a consent for another resource does not, and the refresh grant keeps it
+- [ ] Org-scoped admin: no claims field on create, no **Edit** link, `/admin/resources/{id}/claims` → "Not found", a crafted create POST with claims → error
+- [ ] CSRF on toggle / re-check / claims / delete POSTs
+- [ ] Audit rows: `admin.resource.created`, `admin.resource.toggled`, `admin.resource.claims_updated` (critical), `admin.resource.deleted` (critical)
 
 ### 7.4 Identities (`/admin/identities`)
 

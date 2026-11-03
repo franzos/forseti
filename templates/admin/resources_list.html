@@ -21,6 +21,7 @@
         <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">{{ chrome.t("admin-resources-col-resource") }}</th>
         <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">{{ chrome.t("admin-resources-col-name") }}</th>
         <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">{{ chrome.t("admin-resources-col-org") }}</th>
+        <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">{{ chrome.t("admin-resources-field-claims") }}</th>
         <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">{{ chrome.t("admin-resources-col-corroboration") }}</th>
         <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">{{ chrome.t("admin-resources-col-enabled") }}</th>
         <th class="px-4 py-3 font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">{{ chrome.t("admin-resources-col-created") }}</th>
@@ -30,7 +31,7 @@
     <tbody>
       {% if rows.is_empty() %}
         <tr>
-          <td colspan="7"
+          <td colspan="8"
               class="px-4 py-6 text-center font-body-md text-body-md text-on-surface-variant">
             {{ chrome.t("admin-resources-empty-prefix") }} <a href="{{ new_url }}" class="text-primary hover:underline">{{ chrome.t("admin-resources-empty-link") }}</a> {{ chrome.t("admin-resources-empty-suffix") }}
           </td>
@@ -43,6 +44,17 @@
             </td>
             <td class="px-4 py-3 font-body-md text-body-md text-on-surface">{{ r.display_name }}</td>
             <td class="px-4 py-3 font-body-sm text-body-sm text-on-surface-variant">{{ r.org_name }}</td>
+            <td class="px-4 py-3 whitespace-nowrap">
+              {% if r.access_token_claims.is_empty() %}
+                <span class="font-body-sm text-body-sm text-on-surface-variant">{{ chrome.t("admin-resources-claims-none") }}</span>
+              {% else %}
+                <code class="font-mono text-xs">{{ r.access_token_claims }}</code>
+              {% endif %}
+              {% if !r.claims_url.is_empty() %}
+                <a href="{{ r.claims_url }}"
+                   class="font-label-sm text-label-sm text-primary hover:underline ms-2">{{ chrome.t("admin-resources-action-edit-claims") }}</a>
+              {% endif %}
+            </td>
             <td class="px-4 py-3"
                 title="{{ r.corroborated_at }}">
               {% if r.corroboration == "corroborated" %}

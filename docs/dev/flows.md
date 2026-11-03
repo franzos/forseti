@@ -1090,7 +1090,10 @@ owner's decision. A failed fetch rejects with `temporarily_unavailable`.
 - `decision = accept` → `finalize_consent` (`src/oauth/consent.rs:885`).
   Resolves the audience policy (below), fetches the identity, folds
   traits into id_token claims by granted scope
-  (`build_id_token_claims`, `src/oauth/consent.rs:1110`), then
+  (`build_id_token_claims`, `src/oauth/consent.rs:1110`), copies the
+  `metadata_admin` keys named by the registry rows of the granted audiences
+  into `session.access_token` (`access_token_claim_keys`,
+  `build_access_token_claims`), then
   `hydra::accept_consent_request` with the granted audiences and
   `remember = form.remember == "true"`. Once Hydra accepts, the consent
   request is recorded against its login session (`op_sessions::record_consent`,

@@ -69,6 +69,10 @@ oauth2:
   # PKCE by spec, so this stays scoped to public.
   pkce:
     enforced_for_public_clients: true
+  # Registry access-token claims the integration suite expects at the top
+  # level of the JWT, not only under `ext`.
+  allowed_top_level_claims:
+    - forgejo_aud
 
 # Access tokens are JWTs by default. Resource servers (MCP servers,
 # downstream APIs) validate locally against Hydra's JWKS — no admin-API

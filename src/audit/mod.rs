@@ -136,6 +136,7 @@ pub mod action {
     pub const ADMIN_RESOURCE_CREATED: &str = "admin.resource.created";
     pub const ADMIN_RESOURCE_TOGGLED: &str = "admin.resource.toggled";
     pub const ADMIN_RESOURCE_DELETED: &str = "admin.resource.deleted";
+    pub const ADMIN_RESOURCE_CLAIMS_UPDATED: &str = "admin.resource.claims_updated";
     pub const ADMIN_IDENTITY_DISABLED: &str = "admin.identity.disabled";
     pub const ADMIN_IDENTITY_ENABLED: &str = "admin.identity.enabled";
     pub const ADMIN_IDENTITY_DELETED: &str = "admin.identity.deleted";

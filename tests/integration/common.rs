@@ -2364,6 +2364,44 @@ pub fn set_registry_resource_enabled(resource: &str, enabled: bool) {
     .unwrap_or_else(|e| panic!("set resource_registry.enabled: {e}"));
 }
 
+/// Set `resource_registry.access_token_claims` (space-separated) for `resource`.
+pub fn set_registry_resource_claims(resource: &str, claims: &str) {
+    let conn = forseti_db_conn();
+    conn.execute(
+        "UPDATE resource_registry SET access_token_claims = ?1 WHERE resource = ?2",
+        params![claims, resource],
+    )
+    .unwrap_or_else(|e| panic!("set resource_registry.access_token_claims: {e}"));
+}
+
+/// `(id, access_token_claims)` of a `resource_registry` row.
+pub fn read_registry_resource_claims(resource: &str) -> Option<(i64, String)> {
+    let conn = forseti_db_conn();
+    conn.query_row(
+        "SELECT id, access_token_claims FROM resource_registry WHERE resource = ?1",
+        params![resource],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .ok()
+}
+
+/// Replace an identity's `metadata_admin` through the Kratos admin API.
+pub async fn kratos_set_metadata_admin(identity_id: &str, metadata: Value) {
+    let res = browser_client()
+        .patch(format!("{KRATOS_ADMIN}/admin/identities/{identity_id}"))
+        .json(&serde_json::json!([
+            {"op": "add", "path": "/metadata_admin", "value": metadata}
+        ]))
+        .send()
+        .await
+        .expect("PATCH metadata_admin: transport");
+    assert!(
+        res.status().is_success(),
+        "PATCH metadata_admin: status {}",
+        res.status()
+    );
+}
+
 /// Delete a `resource_registry` row (test cleanup).
 pub fn delete_registry_resource(resource: &str) {
     let conn = forseti_db_conn();

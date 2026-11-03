@@ -1406,6 +1406,9 @@ async fn finalize_consent(
         &consent_locale,
     );
 
+    let claim_keys = access_token_claim_keys(state, &grant_audience).await;
+    let access_token_session = build_access_token_claims(identity.as_ref(), &claim_keys);
+
     match ory::hydra::accept_consent_request(
         &state.ory,
         challenge,
@@ -1413,6 +1416,7 @@ async fn finalize_consent(
         grant_audience,
         remember,
         id_token_session,
+        access_token_session,
     )
     .await
     {
@@ -1506,6 +1510,68 @@ pub(crate) const SUPPORTED_CLAIMS: [&str; 26] = [
     "pronouns",
     "links",
 ];
+
+/// Claim keys of the registry rows whose resource is a granted audience,
+/// matched verbatim or canonically like [`resolve_granted_audience`].
+fn claim_keys_for_audience(rows: &[(String, Vec<String>)], granted: &[String]) -> Vec<String> {
+    let granted_canonical: Vec<String> = granted
+        .iter()
+        .filter_map(|g| crate::oauth::canonical_resource(g))
+        .collect();
+    let mut keys: Vec<String> = Vec::new();
+    for (resource, claims) in rows {
+        let matched = granted.iter().any(|g| g == resource)
+            || crate::oauth::canonical_resource(resource)
+                .is_some_and(|r| granted_canonical.contains(&r));
+        if !matched {
+            continue;
+        }
+        for claim in claims {
+            if !keys.contains(claim) {
+                keys.push(claim.clone());
+            }
+        }
+    }
+    keys
+}
+
+/// Registry claim keys for this consent's granted audiences. A failed read
+/// issues the token without them: a missing claim only ever narrows access.
+async fn access_token_claim_keys(state: &AppState, granted: &[String]) -> Vec<String> {
+    if granted.is_empty() {
+        return Vec::new();
+    }
+    match crate::resource_registry::list_enabled_claims(&state.db).await {
+        Ok(rows) => claim_keys_for_audience(&rows, granted),
+        Err(e) => {
+            tracing::error!(error = ?e, "consent: resource registry claims read failed; issuing the token without them");
+            Vec::new()
+        }
+    }
+}
+
+/// The given keys present in the identity's `metadata_admin`, which only
+/// admins can write. Absent or null keys are left out.
+fn build_access_token_claims(
+    identity: Option<&ory::Identity>,
+    keys: &[String],
+) -> serde_json::Map<String, serde_json::Value> {
+    let Some(metadata) = identity
+        .and_then(|i| i.metadata_admin.as_ref())
+        .and_then(|m| m.as_ref())
+        .and_then(|m| m.as_object())
+    else {
+        return serde_json::Map::new();
+    };
+    keys.iter()
+        .filter_map(|k| {
+            metadata
+                .get(k)
+                .filter(|v| !v.is_null())
+                .map(|v| (k.clone(), v.clone()))
+        })
+        .collect()
+}
 
 /// Fold identity traits into id_token claims, scoped by granted scope.
 /// `email` adds `email`/`email_verified`; `profile` adds
@@ -1742,9 +1808,10 @@ mod tests {
     }
 
     use super::{
-        ClientAudience, build_id_token_claims, extract_resource_url, intersect_requested_scope,
-        project_group_slugs, resolve_claim_active_org, resolve_granted_audience, resource_params,
-        subject_is_signed_in, with_prompt_login,
+        ClientAudience, build_access_token_claims, build_id_token_claims, claim_keys_for_audience,
+        extract_resource_url, intersect_requested_scope, project_group_slugs,
+        resolve_claim_active_org, resolve_granted_audience, resource_params, subject_is_signed_in,
+        with_prompt_login,
     };
     use crate::ory;
 
@@ -2590,6 +2657,95 @@ mod tests {
         );
         assert!(v.get("preferred_username").is_none());
         assert!(v.get("updated_at").is_none());
+    }
+
+    #[test]
+    fn access_token_claims_copy_only_listed_metadata_admin_keys() {
+        let identity = ory::Identity {
+            metadata_admin: Some(Some(serde_json::json!({
+                "forgejo_aud": "u:1:abc",
+                "note": "operator only",
+                "cleared": null,
+            }))),
+            metadata_public: Some(Some(serde_json::json!({"forgejo_aud": "u:2:public"}))),
+            ..ory::Identity::new(
+                "id".to_string(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+            )
+        };
+        let keys = [
+            "forgejo_aud".to_string(),
+            "cleared".to_string(),
+            "missing".to_string(),
+        ];
+        let claims = build_access_token_claims(Some(&identity), &keys);
+        assert_eq!(
+            serde_json::Value::Object(claims),
+            serde_json::json!({"forgejo_aud": "u:1:abc"})
+        );
+        assert!(build_access_token_claims(Some(&identity), &[]).is_empty());
+        assert!(build_access_token_claims(None, &keys).is_empty());
+
+        let no_metadata = ory::Identity::new(
+            "id".to_string(),
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        );
+        assert!(build_access_token_claims(Some(&no_metadata), &keys).is_empty());
+        let not_an_object = ory::Identity {
+            metadata_admin: Some(Some(serde_json::json!(["forgejo_aud"]))),
+            ..no_metadata.clone()
+        };
+        assert!(build_access_token_claims(Some(&not_an_object), &keys).is_empty());
+    }
+
+    #[test]
+    fn claim_keys_follow_only_granted_registry_resources() {
+        let rows = vec![
+            (
+                "https://mcp.git.example.com/mcp".to_string(),
+                vec!["forgejo_aud".to_string()],
+            ),
+            (
+                "https://other.example.com/mcp".to_string(),
+                vec!["other".to_string(), "forgejo_aud".to_string()],
+            ),
+            ("bare-identifier".to_string(), vec!["bare".to_string()]),
+        ];
+        let granted = |g: &[&str]| g.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+
+        assert!(claim_keys_for_audience(&rows, &[]).is_empty());
+        assert_eq!(
+            claim_keys_for_audience(&rows, &granted(&["https://mcp.git.example.com/mcp"])),
+            vec!["forgejo_aud".to_string()]
+        );
+        // Canonical match across a trailing slash, as the audience resolver does.
+        assert_eq!(
+            claim_keys_for_audience(&rows, &granted(&["https://mcp.git.example.com/mcp/"])),
+            vec!["forgejo_aud".to_string()]
+        );
+        assert_eq!(
+            claim_keys_for_audience(
+                &rows,
+                &granted(&[
+                    "https://mcp.git.example.com/mcp",
+                    "https://other.example.com/mcp"
+                ])
+            ),
+            vec!["forgejo_aud".to_string(), "other".to_string()]
+        );
+        assert_eq!(
+            claim_keys_for_audience(&rows, &granted(&["bare-identifier"])),
+            vec!["bare".to_string()]
+        );
+        assert!(
+            claim_keys_for_audience(&rows, &granted(&["https://unlisted.example.com/mcp"]))
+                .is_empty()
+        );
+        assert!(claim_keys_for_audience(&rows, &granted(&["client-id"])).is_empty());
     }
 
     #[test]

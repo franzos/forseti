@@ -68,7 +68,7 @@ pub async fn get_consent_request(
         .map_err(|e| anyhow::anyhow!("hydra get_consent_request failed: {e}"))
 }
 
-/// Accept a Hydra consent challenge with the granted scopes and id_token claim payload (folded into Hydra's `session.id_token`).
+/// Accept a Hydra consent challenge with the granted scopes and the id_token and access-token claim payloads (Hydra's `session.id_token` / `session.access_token`).
 /// A remembered consent (`remember == true`) persists indefinitely, until the user revokes it from Authorized apps.
 pub async fn accept_consent_request(
     clients: &OryClients,
@@ -77,12 +77,16 @@ pub async fn accept_consent_request(
     grant_audience: Vec<String>,
     remember: bool,
     id_token_session: serde_json::Value,
+    access_token_session: serde_json::Map<String, serde_json::Value>,
 ) -> Result<OAuth2RedirectTo> {
     let mut session = AcceptOAuth2ConsentRequestSession::new();
     // `Option<Option<Value>>` mirrors openapi-generator's "nullable optional"
     // shape; the outer `Some` says "field present", the inner `Some` says
     // "value non-null".
     session.id_token = Some(Some(id_token_session));
+    if !access_token_session.is_empty() {
+        session.access_token = Some(Some(serde_json::Value::Object(access_token_session)));
+    }
 
     let mut body = AcceptOAuth2ConsentRequest::new();
     body.grant_scope = Some(grant_scope);

@@ -268,6 +268,29 @@ Enrolling the resource in the [resource registry](#the-resource-registry-adminre
 
 The registry is a ceiling, not a grant: an audience only reaches a token when the user consents to a request that actually asked for that resource. If the registry is unreadable at consent time, Forseti fails closed and denies every requested audience.
 
+#### Access-token claims from `metadata_admin`
+
+Some resource servers need a per-user value in the access token that no standard claim carries, such as forgejo-mcp, which reads the audience of the user's Forgejo Authorized Integration from `forgejo_aud`. This is the equivalent of Keycloak's user-attribute mapper or Auth0's `app_metadata` plus a custom claim: the value lives in the identity's `metadata_admin`, which only admins can write through Kratos's admin API, and the resource's [registry](#the-resource-registry-adminresources) row names the keys consent copies into tokens for that resource.
+
+Set them on the row (**Access-token claims**, on create or via **Edit** in the list), separated by spaces. Only Forseti-wide admins can set them: an org-scoped admin could otherwise route any user's operator-written metadata to their own resource server. Names are letters, digits, `_`, `-`, `.` and `:`, up to 64 characters and 10 per row; claims Hydra sets itself (`iss`, `sub`, `aud`, `exp`, `nbf`, `iat`, `jti`, `client_id`, `scp`, `ext`) and the ID-token-only `nonce` and `at_hash` are refused.
+
+Hydra puts session claims under `ext` in the JWT. To have them at the top level as well, list them in `hydra.yml`:
+
+```yaml
+oauth2:
+  allowed_top_level_claims:
+    - forgejo_aud
+```
+
+Set the value on an identity through the Kratos admin API. The patch below replaces the whole `metadata_admin`, so carry over any keys already in it:
+
+```bash
+curl -X PATCH http://kratos:4434/admin/identities/<id> -H 'Content-Type: application/json' \
+    -d '[{"op":"add","path":"/metadata_admin","value":{"forgejo_aud":"u:1:..."}}]'
+```
+
+A token carries a row's claims only when consent grants that resource as an audience, matched like the audience itself (verbatim, then canonically); disabled rows contribute none. Keys missing from `metadata_admin`, or set to `null`, are left out, and a failed registry read issues the token without them. Hydra stores the claims with the consent and reuses them for every refresh, so a change to `metadata_admin` or to the row reaches tokens only after the user's next authorization, not on refresh.
+
 Whether the per-IP limiter trusts forwarded-for headers is a single deployment-wide knob: `[proxy] trust_forwarded_for` plus `trusted_hops` (see below). The same settings drive the audit middleware (audited client IP) and every per-IP limiter — the underlying question ("is there a trusted reverse proxy, and how many?") doesn't change per-endpoint. Limiters without a global knob of their own (`/claim-email`, `/oauth/device`, `/handoff`) carry a derived global backstop of 20x their per-IP caps.
 
 Every rate-limit knob across `[oauth]`, `[claim_email]`, and `[handoff]` is clamped at config-load time to a sanity ceiling — `1_000` per minute, `10_000` per hour, `100_000` per day. A clamped value emits a `tracing::warn!` at boot so an operator typo (`per_minute = 1_000_000`) is loud rather than silent. `0` is preserved as the documented "disable this bucket" sentinel.
@@ -1594,11 +1617,12 @@ Each row carries:
 
 - **`resource`** — the canonical resource URI (canonicalised on create; matched across a trailing slash or fragment), or a verbatim non-URI identifier for legacy audiences like `stackpit-web`.
 - **`display_name`**, **`org_id`**, **`enabled`** (the toggle consent actually checks), **`created_by`**, **`created_at`**.
+- **`access_token_claims`** — `metadata_admin` keys copied into tokens for this resource; Forseti-wide admins only. See [Access-token claims from `metadata_admin`](#access-token-claims-from-metadata_admin).
 - **Corroboration badge** — an advisory RFC 9728 check, run on create and via the per-row "re-check" button: Forseti fetches `https://{host}/.well-known/oauth-protected-resource{path}` through the same SSRF guard as the CIMD fetcher and compares the document's `resource` and `authorization_servers` against the row and the configured issuer. Statuses: `unchecked` / `corroborated` / `unreachable` / `mismatch`. It **never gates** creation (the app may not be deployed yet) and never grants anything; non-URI identifiers have nothing to fetch and stay `unchecked`.
 
 **Org scoping.** A Forseti-wide admin can register any resource into any org. An org-scoped admin (`?org=<slug>`) sees only rows stamped with their org and may only create resources whose URI host is a **verified domain** of that org (fail closed) — domain-ownership proof via the existing org domains verification.
 
-Disabling a row denies the audience on the next consent; deleting it does the same permanently. Already-issued tokens keep their `aud` until they expire (5-minute JWTs by default). Audit rows: `admin.resource.created`, `admin.resource.toggled`, `admin.resource.deleted` (the delete at critical severity).
+Disabling a row denies the audience on the next consent; deleting it does the same permanently. Already-issued tokens keep their `aud` until they expire (5-minute JWTs by default). Audit rows: `admin.resource.created`, `admin.resource.toggled`, `admin.resource.claims_updated` and `admin.resource.deleted` (the last two at critical severity).
 
 #### Fronting the issuer (front proxy vs haproxy)
 

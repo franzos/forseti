@@ -41,6 +41,58 @@ pub struct Row {
     pub corroborated_at: Option<NaiveDateTime>,
     pub created_by: Option<String>,
     pub created_at: NaiveDateTime,
+    /// Space-separated `metadata_admin` keys; see [`parse_access_token_claims`].
+    pub access_token_claims: String,
+}
+
+/// Claims Hydra sets itself, plus the ID-token-only ones resource servers use
+/// to tell an ID token from an access token.
+const RESERVED_CLAIMS: &[&str] = &[
+    "iss",
+    "sub",
+    "aud",
+    "exp",
+    "nbf",
+    "iat",
+    "jti",
+    "client_id",
+    "scp",
+    "ext",
+    "nonce",
+    "at_hash",
+];
+const MAX_CLAIMS: usize = 10;
+const MAX_CLAIM_LEN: usize = 64;
+
+/// Parse the admin form's claim list (whitespace- or comma-separated) into
+/// unique, validated names, in input order.
+pub fn parse_access_token_claims(input: &str) -> Result<Vec<String>, String> {
+    let mut claims: Vec<String> = Vec::new();
+    for name in input.split(|c: char| c == ',' || c.is_whitespace()) {
+        if name.is_empty() || claims.iter().any(|c| c == name) {
+            continue;
+        }
+        if name.len() > MAX_CLAIM_LEN
+            || !name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | ':'))
+        {
+            return Err(format!(
+                "\"{name}\" is not a valid claim name: use up to {MAX_CLAIM_LEN} letters, digits, \
+                 '_', '-', '.' or ':'."
+            ));
+        }
+        if RESERVED_CLAIMS.contains(&name) {
+            return Err(format!(
+                "\"{name}\" is a reserved claim and can't be copied from metadata."
+            ));
+        }
+        claims.push(name.to_string());
+    }
+    if claims.len() > MAX_CLAIMS {
+        return Err(format!("At most {MAX_CLAIMS} claims per resource."));
+    }
+    Ok(claims)
 }
 
 /// Caller-supplied fields for a new row; `enabled`, `corroboration` and the
@@ -72,6 +124,41 @@ pub async fn list_enabled(db: &DbPool) -> anyhow::Result<Vec<String>> {
             .load(conn)
     })?;
     Ok(resources)
+}
+
+/// `(resource, claims)` for enabled rows that carry access-token claims.
+pub async fn list_enabled_claims(db: &DbPool) -> anyhow::Result<Vec<(String, Vec<String>)>> {
+    let rows: Vec<(String, String)> = db_interact!(db, |conn| {
+        rr::table
+            .filter(rr::enabled.eq(true))
+            .filter(rr::access_token_claims.ne(""))
+            .select((rr::resource, rr::access_token_claims))
+            .order(rr::resource.asc())
+            .load(conn)
+    })?;
+    Ok(rows
+        .into_iter()
+        .map(|(resource, claims)| {
+            let claims = claims.split_whitespace().map(str::to_string).collect();
+            (resource, claims)
+        })
+        .collect())
+}
+
+/// Replace a row's access-token claims. Zero-row match returns Ok.
+pub async fn set_access_token_claims(
+    db: &DbPool,
+    id: i64,
+    claims: &[String],
+) -> anyhow::Result<()> {
+    let joined = claims.join(" ");
+    db_interact!(db, |conn| {
+        diesel::update(rr::table.filter(rr::id.eq(id)))
+            .set(rr::access_token_claims.eq(joined.clone()))
+            .execute(conn)
+            .map(|_| ())
+    })?;
+    Ok(())
 }
 
 /// Every row, enabled or not, for the admin list.
@@ -238,6 +325,66 @@ mod tests {
 
         set_enabled(&db, a.id, true).await.expect("re-enable a");
         assert_eq!(list_enabled(&db).await.expect("list_enabled").len(), 2);
+    }
+
+    #[test]
+    fn parse_access_token_claims_validates_and_dedupes() {
+        assert_eq!(parse_access_token_claims(""), Ok(vec![]));
+        assert_eq!(
+            parse_access_token_claims(" forgejo_aud, team:id  forgejo_aud\n"),
+            Ok(vec!["forgejo_aud".to_string(), "team:id".to_string()])
+        );
+        for bad in ["sub", "ext", "nonce", "a b=c", "ünicode", &"x".repeat(65)] {
+            assert!(
+                parse_access_token_claims(bad).is_err(),
+                "{bad:?} must be refused"
+            );
+        }
+        let eleven = (0..11)
+            .map(|i| format!("c{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(parse_access_token_claims(&eleven).is_err());
+    }
+
+    #[tokio::test]
+    async fn access_token_claims_round_trip_and_skip_disabled_rows() {
+        let db = crate::orgs::db::test_pool().await;
+        insert(&db, new_resource("https://a.example.com/mcp"))
+            .await
+            .expect("insert a");
+        insert(&db, new_resource("https://b.example.com/mcp"))
+            .await
+            .expect("insert b");
+        let rows = list_all(&db).await.expect("list_all");
+        assert_eq!(rows[0].access_token_claims, "");
+        assert!(list_enabled_claims(&db).await.expect("none yet").is_empty());
+
+        let claims = vec!["forgejo_aud".to_string(), "team".to_string()];
+        set_access_token_claims(&db, rows[0].id, &claims)
+            .await
+            .expect("set claims");
+        assert_eq!(
+            get(&db, rows[0].id)
+                .await
+                .expect("get")
+                .expect("row")
+                .access_token_claims,
+            "forgejo_aud team"
+        );
+        assert_eq!(
+            list_enabled_claims(&db).await.expect("list_enabled_claims"),
+            vec![("https://a.example.com/mcp".to_string(), claims.clone())]
+        );
+
+        set_enabled(&db, rows[0].id, false).await.expect("disable");
+        assert!(list_enabled_claims(&db).await.expect("disabled").is_empty());
+
+        set_enabled(&db, rows[0].id, true).await.expect("enable");
+        set_access_token_claims(&db, rows[0].id, &[])
+            .await
+            .expect("clear claims");
+        assert!(list_enabled_claims(&db).await.expect("cleared").is_empty());
     }
 
     #[tokio::test]

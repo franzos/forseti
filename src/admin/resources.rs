@@ -52,6 +52,10 @@ struct ResourceRow {
     created_by: String,
     /// Non-URI verbatim identifiers have nothing to fetch; hide the button.
     can_recheck: bool,
+    /// Space-separated `metadata_admin` keys copied into the access token.
+    access_token_claims: String,
+    /// Empty for org-scoped admins, who can't edit claims.
+    claims_url: String,
     toggle_url: String,
     recheck_url: String,
     delete_url: String,
@@ -84,6 +88,7 @@ struct ResourceNewTemplate {
     resource: String,
     display_name: String,
     org_id: String,
+    access_token_claims: String,
     /// Org selector options; empty (and unused) for org-scoped admins.
     orgs: Vec<OrgOption>,
     /// True for an org-scoped admin: no selector, pinned to their org.
@@ -139,6 +144,11 @@ pub async fn list(
                 created_at,
                 created_by: r.created_by.unwrap_or_default(),
                 can_recheck: has_fetchable_host(&r.resource),
+                claims_url: match scope {
+                    AdminScope::Forseti => format!("/admin/resources/{}/claims", r.id),
+                    AdminScope::Org { .. } => String::new(),
+                },
+                access_token_claims: r.access_token_claims.clone(),
                 toggle_url: with_org(&format!("/admin/resources/{}/toggle", r.id), &scope),
                 recheck_url: with_org(&format!("/admin/resources/{}/recheck", r.id), &scope),
                 delete_url: with_org(&format!("/admin/resources/{}/delete", r.id), &scope),
@@ -189,6 +199,7 @@ async fn render_new_page(
     resource: &str,
     display_name: &str,
     org_id: &str,
+    access_token_claims: &str,
 ) -> Response {
     let (orgs, scoped_org_name) = match scope {
         AdminScope::Org { id, .. } => {
@@ -210,6 +221,7 @@ async fn render_new_page(
         resource: resource.to_string(),
         display_name: display_name.to_string(),
         org_id: org_id.to_string(),
+        access_token_claims: access_token_claims.to_string(),
         orgs,
         scoped: matches!(scope, AdminScope::Org { .. }),
         scoped_org_name,
@@ -220,7 +232,7 @@ async fn render_new_page(
 
 pub async fn new(State(state): State<AppState>, admin: RequireAdminScoped, csrf: Csrf) -> Response {
     let RequireAdminScoped { ctx, scope } = admin;
-    render_new_page(&state, &ctx, &scope, &csrf, String::new(), "", "", "").await
+    render_new_page(&state, &ctx, &scope, &csrf, String::new(), "", "", "", "").await
 }
 
 #[derive(Debug, Deserialize)]
@@ -232,6 +244,10 @@ pub struct CreateForm {
     /// Only honored for Forseti-wide admins; org-scoped admins are pinned.
     #[serde(default)]
     org_id: String,
+    /// Forseti-wide admins only: an org admin could otherwise route any
+    /// user's operator-written metadata to their own resource server.
+    #[serde(default)]
+    access_token_claims: String,
 }
 
 pub async fn create(
@@ -246,6 +262,7 @@ pub async fn create(
     let raw_resource = form.resource.trim().to_string();
     let display_name = form.display_name.trim().to_string();
     let form_org = form.org_id.trim().to_string();
+    let raw_claims = form.access_token_claims.trim().to_string();
 
     // async render_new_page can't be awaited from a closure, hence the macro.
     macro_rules! rerender {
@@ -259,6 +276,7 @@ pub async fn create(
                 &raw_resource,
                 &display_name,
                 &form_org,
+                &raw_claims,
             )
             .await
         };
@@ -267,6 +285,13 @@ pub async fn create(
     if raw_resource.is_empty() {
         rerender!("Resource is required.");
     }
+    if matches!(scope, AdminScope::Org { .. }) && !raw_claims.is_empty() {
+        rerender!("Only Forseti administrators can set access-token claims.");
+    }
+    let claims = match resource_registry::parse_access_token_claims(&raw_claims) {
+        Ok(c) => c,
+        Err(msg) => rerender!(msg),
+    };
     // Dual matching, mirroring the consent resolver: canonicalizable URIs are
     // stored canonical, anything else is a verbatim opaque identifier.
     let stored =
@@ -359,6 +384,25 @@ pub async fn create(
         );
     }
 
+    if !claims.is_empty() {
+        let set = match resource_registry::find_by_resource(&state.db, &stored).await {
+            Ok(Some(row)) => {
+                resource_registry::set_access_token_claims(&state.db, row.id, &claims).await
+            }
+            Ok(None) => Err(anyhow::anyhow!("row missing right after insert")),
+            Err(e) => Err(e),
+        };
+        if let Err(e) = set {
+            tracing::error!(error = ?e, resource = %stored, "admin/resources: storing access-token claims failed");
+            return render_admin_error(
+                &state,
+                "Claims not saved",
+                "The resource was registered, but its access-token claims were not saved. \
+                 Set them again from the resource list.",
+            );
+        }
+    }
+
     // Advisory corroboration; a failure here never unwinds the row.
     let checked = match corroborate(&state, &stored).await {
         Some(status) => {
@@ -387,6 +431,7 @@ pub async fn create(
                 "org_id" => org_id.as_str(),
                 "display_name" => effective_name.as_str(),
                 "corroboration" => checked,
+                "claims" => claims.join(" "),
             )),
     )
     .await;
@@ -463,6 +508,118 @@ pub async fn toggle(
     .await;
 
     Redirect::to(&with_org("/admin/resources", &scope)).into_response()
+}
+
+#[derive(askama::Template)]
+#[template(path = "admin/resource_claims.html")]
+struct ResourceClaimsTemplate {
+    chrome: PageChrome,
+    admin_active: AdminSection,
+    error_message: String,
+    resource: String,
+    display_name: String,
+    access_token_claims: String,
+    form_action: String,
+    cancel_url: String,
+}
+
+/// Claims are Forseti-admin only, so an org-scoped admin gets the same
+/// "Not found" as for a row outside their org.
+async fn load_row_for_claims(
+    state: &AppState,
+    scope: &AdminScope,
+    id: i64,
+) -> Result<resource_registry::Row, Response> {
+    if matches!(scope, AdminScope::Org { .. }) {
+        return Err(render_admin_error(
+            state,
+            "Not found",
+            "We couldn't find that resource in this organization.",
+        ));
+    }
+    load_row_in_scope(state, scope, id).await
+}
+
+fn render_claims_page(
+    ctx: &AdminCtx,
+    csrf: &Csrf,
+    row: &resource_registry::Row,
+    access_token_claims: &str,
+    error_message: String,
+) -> Response {
+    render(&ResourceClaimsTemplate {
+        chrome: ctx.chrome(csrf),
+        admin_active: AdminSection::Resources,
+        error_message,
+        resource: row.resource.clone(),
+        display_name: row.display_name.clone(),
+        access_token_claims: access_token_claims.to_string(),
+        form_action: format!("/admin/resources/{}/claims", row.id),
+        cancel_url: "/admin/resources".to_string(),
+    })
+}
+
+pub async fn claims_edit(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    admin: RequireAdminScoped,
+    csrf: Csrf,
+) -> Response {
+    let RequireAdminScoped { ctx, scope } = admin;
+    let row = match load_row_for_claims(&state, &scope, id).await {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+    render_claims_page(&ctx, &csrf, &row, &row.access_token_claims, String::new())
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ClaimsForm {
+    #[serde(default)]
+    access_token_claims: String,
+}
+
+pub async fn claims_update(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    actx: AuditCtx,
+    admin: RequireAdminScoped,
+    csrf: Csrf,
+    CsrfForm(form): CsrfForm<ClaimsForm>,
+) -> Response {
+    let RequireAdminScoped { ctx, scope } = admin;
+    let row = match load_row_for_claims(&state, &scope, id).await {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+    let claims = match resource_registry::parse_access_token_claims(&form.access_token_claims) {
+        Ok(c) => c,
+        Err(msg) => {
+            return render_claims_page(&ctx, &csrf, &row, form.access_token_claims.trim(), msg);
+        }
+    };
+    if let Err(e) = resource_registry::set_access_token_claims(&state.db, id, &claims).await {
+        tracing::error!(error = ?e, id, "admin/resources: set_access_token_claims failed");
+        return render_admin_error(
+            &state,
+            "Update failed",
+            "We couldn't update that resource. Please try again in a moment.",
+        );
+    }
+
+    let _ = audit::log(
+        &state.db,
+        ctx.audit_event(action::ADMIN_RESOURCE_CLAIMS_UPDATED, &actx)
+            .target(target_kind::RESOURCE, row.resource)
+            .metadata(audit_metadata!(
+                "previous" => row.access_token_claims,
+                "claims" => claims.join(" "),
+            ))
+            .critical(),
+    )
+    .await;
+
+    Redirect::to("/admin/resources").into_response()
 }
 
 pub async fn recheck(

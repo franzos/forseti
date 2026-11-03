@@ -117,6 +117,10 @@ pub fn router() -> Router<AppState> {
         .route("/admin/resources/{id}/toggle", post(resources::toggle))
         .route("/admin/resources/{id}/recheck", post(resources::recheck))
         .route(
+            "/admin/resources/{id}/claims",
+            get(resources::claims_edit).post(resources::claims_update),
+        )
+        .route(
             "/admin/resources/{id}/delete",
             get(resources::delete_confirm).post(resources::delete),
         )

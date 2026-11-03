@@ -1,0 +1,45 @@
+{% extends "admin/admin_shell.html" %}
+
+{% block admin_title %}{{ chrome.t("admin-resources-claims-page-title") }}{% endblock %}
+
+{% block admin_content %}
+  <div class="max-w-2xl">
+    <h1 class="font-headline-lg text-headline-lg text-on-surface mb-stack-sm">{{ chrome.t("admin-resources-claims-page-title") }}</h1>
+    <p class="font-body-md text-body-md text-on-surface mb-stack-xs">{{ display_name }}</p>
+    <p class="mb-stack-md"><code class="font-mono text-xs select-all">{{ resource }}</code></p>
+    <p class="font-body-md text-body-md text-on-surface-variant mb-stack-lg">
+      {{ chrome.t("admin-resources-claims-subtitle") }}
+    </p>
+
+    {% if !error_message.is_empty() %}
+      <div class="bg-error-container border border-error rounded-lg p-3 mb-stack-md">
+        <p class="font-body-sm text-body-sm text-on-error-container">{{ error_message }}</p>
+      </div>
+    {% endif %}
+
+    <form method="POST"
+          action="{{ form_action }}"
+          class="flex flex-col gap-stack-md">
+      <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+
+      <label class="flex flex-col gap-stack-xs">
+        <span class="font-label-md text-label-md text-on-surface">{{ chrome.t("admin-resources-field-claims") }}</span>
+        <input type="text"
+               name="access_token_claims"
+               value="{{ access_token_claims }}"
+               placeholder="forgejo_aud"
+               class="font-mono text-sm bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2">
+        <span class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-resources-field-claims-hint") }}</span>
+      </label>
+
+      <div class="flex items-center gap-stack-md mt-stack-sm">
+        <button type="submit"
+                class="bg-primary text-on-primary font-label-md text-label-md font-bold px-4 py-2 rounded-lg hover:opacity-90 transition-opacity">
+          {{ chrome.t("admin-resources-claims-action-save") }}
+        </button>
+        <a href="{{ cancel_url }}"
+           class="font-label-md text-label-md text-on-surface-variant border border-outline-variant rounded-lg px-4 py-2 hover:bg-surface-container-high transition-colors">{{ chrome.t("admin-resources-new-action-cancel") }}</a>
+      </div>
+    </form>
+  </div>
+{% endblock %}
