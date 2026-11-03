@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.2.24] - 2026-11-03
+
+### Added
+- Resource registry: per-resource access-token claims from admin metadata
+
 ## [0.2.23] - 2026-11-02
 
 ### Changed
