@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.2.25] - 2026-11-08
+
+### Changed
+- Audit webhook tokens under 32 bytes refuse to boot on a production URL. Existing short tokens: `forseti config rotate webhook-token --yes`, then `forseti config prune webhook-token`, then restart Kratos and Forseti
+- `config check` reports short audit webhook tokens
+- POSIX device poll shares the 60/min per-IP rate limit with device init
+- Offline audit ingest body capped at 256 KiB
+- Database pool create and recycle timeouts fixed at 5 s
+- Organization names limited to 64 characters, no control characters
+- CI advisory audit also covers the Linux client lockfile
+
+### Fixed
+- Admin audit filter by action prefix ignored names with underscores
+- SSH public key form accepted several keys or control characters as one key
+- Invite mail could carry injected header lines from an org name
+- PAM module dereferenced a null conversation callback
+- Linux daemon debug output printed the host secret
+
 ## [0.2.24] - 2026-11-03
 
 ### Added
