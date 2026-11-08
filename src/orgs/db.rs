@@ -360,7 +360,7 @@ pub async fn create_org(
     let slug = slug.to_string();
     let name = name.to_string();
     let created_by = created_by.map(str::to_string);
-    let now = Utc::now().to_rfc3339();
+    let now = crate::db::now_rfc3339();
     let result = db_interact!(db, |conn| {
         diesel::insert_into(organizations::table)
             .values(NewOrg {
@@ -665,7 +665,7 @@ struct NewMember<'a> {
 /// non-default rows, so the same "insert Default Member iff count==0" applies.
 pub async fn add_default_floor_member_txn(db: &DbPool, identity_id: &str) -> anyhow::Result<()> {
     let ident = identity_id.to_string();
-    let now = Utc::now().to_rfc3339();
+    let now = crate::db::now_rfc3339();
     crate::serialized_txn!(db, (), diesel::result::Error, |c| {
         let non_default: i64 = organization_members::table
             .filter(organization_members::identity_id.eq(&ident))
@@ -712,7 +712,7 @@ pub async fn join_org_race_safe(
     let ident = identity_id.to_string();
     let org = org_id.to_string();
     let role_s = role.as_str();
-    let now = Utc::now().to_rfc3339();
+    let now = crate::db::now_rfc3339();
     crate::serialized_txn!(db, (), diesel::result::Error, |c| {
         match diesel::insert_into(organization_members::table)
             .values(NewMember {
@@ -756,7 +756,7 @@ pub async fn add_member_race_safe(
 ) -> anyhow::Result<()> {
     let ident = identity_id.to_string();
     let org = org_id.to_string();
-    let now = Utc::now().to_rfc3339();
+    let now = crate::db::now_rfc3339();
     db_interact!(db, |conn| {
         match diesel::insert_into(organization_members::table)
             .values(NewMember {
@@ -989,8 +989,8 @@ pub async fn insert_invite(
     let role_s = role.as_str();
     let invited_by = invited_by.map(str::to_string);
     let now = Utc::now();
-    let created_at = now.to_rfc3339();
-    let expires_at = (now + ChronoDuration::days(ttl_days)).to_rfc3339();
+    let created_at = crate::db::rfc3339(now);
+    let expires_at = crate::db::rfc3339(now + ChronoDuration::days(ttl_days));
     db_interact!(db, |conn| {
         diesel::insert_into(organization_invites::table)
             .values(NewInvite {
@@ -1110,7 +1110,7 @@ pub async fn finalize_invite_txn(
     let org = org_id.to_string();
     let ident = identity_id.to_string();
     let role_s = role.as_str();
-    let now = Utc::now().to_rfc3339();
+    let now = crate::db::now_rfc3339();
     let outcome = db_interact!(db, |conn| {
         conn.transaction::<InviteFinalizeOutcome, diesel::result::Error, _>(|c| {
             // Swallow the unique-constraint violation (ON CONFLICT DO NOTHING

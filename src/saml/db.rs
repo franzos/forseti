@@ -1,6 +1,5 @@
 //! Diesel queries for saml_connections + saml_links.
 
-use chrono::Utc;
 use diesel::prelude::*;
 use serde::Serialize;
 
@@ -68,7 +67,7 @@ pub async fn insert_connection(
     let o = org_id.to_string();
     let d = display_name.to_string();
     let c = created_by.to_string();
-    let now = Utc::now().to_rfc3339();
+    let now = crate::db::now_rfc3339();
     db_interact!(db, |conn| {
         diesel::insert_into(saml_connections::table)
             .values(NewConnection {
@@ -89,7 +88,7 @@ pub async fn insert_connection(
 pub async fn set_enabled(db: &DbPool, org_id: &str, enabled: bool) -> anyhow::Result<bool> {
     let o = org_id.to_string();
     let v = if enabled { 1 } else { 0 };
-    let now = Utc::now().to_rfc3339();
+    let now = crate::db::now_rfc3339();
     let affected = db_interact!(db, |conn| {
         diesel::update(saml_connections::table.filter(saml_connections::org_id.eq(&o)))
             .set((
@@ -179,7 +178,7 @@ pub async fn upsert_link(
     let e = email.to_lowercase();
     let i = identity_id.to_string();
     let s = idp_subject.map(str::to_string);
-    let now = Utc::now().to_rfc3339();
+    let now = crate::db::now_rfc3339();
     db_interact!(db, |conn| {
         conn.transaction::<_, diesel::result::Error, _>(|c| {
             match diesel::insert_into(saml_links::table)
@@ -271,7 +270,7 @@ mod tests {
         crate::orgs::db::create_org(&db, "org-s", "org-s", "Org S", None)
             .await
             .unwrap();
-        let now = Utc::now().to_rfc3339();
+        let now = crate::db::now_rfc3339();
         let inserted: anyhow::Result<usize> = async {
             Ok(db_interact!(db, |conn| {
                 diesel::insert_into(saml_connections::table)

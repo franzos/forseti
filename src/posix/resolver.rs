@@ -14,7 +14,7 @@
 //! `kind = "user"` group is served single-member, but only when its owning
 //! account is visible on the host. UPGs are never enumerated.
 
-use axum::extract::{Json as JsonBody, Path, State};
+use axum::extract::{DefaultBodyLimit, Json as JsonBody, Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -75,7 +75,11 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/posix/v1/group/gid/{gid}", get(group_by_gid))
         .route("/posix/v1/authorized_keys/{name}", get(authorized_keys))
         .route("/posix/v1/offline_verifiers", get(offline_verifiers))
-        .route("/posix/v1/offline_audit", post(offline_audit));
+        .merge(
+            Router::new()
+                .route("/posix/v1/offline_audit", post(offline_audit))
+                .layer(DefaultBodyLimit::max(OFFLINE_AUDIT_BODY_LIMIT_BYTES)),
+        );
 
     // Resolution is never license-gated: the free tier resolves up to
     // `free_seats` accounts, and an already-provisioned account keeps resolving
@@ -466,6 +470,16 @@ async fn offline_verifiers(State(state): State<AppState>, host: RequirePosixHost
 /// the audit table in one request.
 const OFFLINE_AUDIT_MAX_BATCH: usize = 256;
 
+/// Request-body cap for `offline_audit`; a full batch of ordinary events fits well inside it.
+const OFFLINE_AUDIT_BODY_LIMIT_BYTES: usize = 256 * 1024;
+
+/// The `utmp` `ut_user` width, which `useradd` also enforces.
+const OFFLINE_AUDIT_USERNAME_MAX: usize = 32;
+
+fn clip(s: &str, max: usize) -> String {
+    s.chars().take(max).collect()
+}
+
 #[derive(serde::Deserialize)]
 struct OfflineAuditBatch {
     events: Vec<OfflineAuditEvent>,
@@ -508,12 +522,13 @@ async fn offline_audit(
         } else {
             action::POSIX_OFFLINE_AUTH_FAILED
         };
-        // Truncate so a hostile host can't bloat the row.
-        let reason: String = ev.reason.chars().take(128).collect();
-        let occurred: String = ev.occurred_at.chars().take(64).collect();
+        // Clip so a hostile host can't bloat the row.
+        let username = clip(&ev.username, OFFLINE_AUDIT_USERNAME_MAX);
+        let reason = clip(&ev.reason, 128);
+        let occurred = clip(&ev.occurred_at, 64);
         let meta = SafeMetadata::from_pairs(&[
             ("host_id", serde_json::Value::String(host.host_id.clone())),
-            ("username", serde_json::Value::String(ev.username.clone())),
+            ("username", serde_json::Value::String(username)),
             ("reason", serde_json::Value::String(reason)),
             ("occurred_at", serde_json::Value::String(occurred)),
         ]);
@@ -623,5 +638,21 @@ mod tests {
         assert!(offline_pull_suppressed(false, false));
         assert!(offline_pull_suppressed(false, true));
         assert!(!offline_pull_suppressed(true, false));
+    }
+
+    #[test]
+    fn clip_counts_chars_not_bytes() {
+        assert_eq!(clip("äöüß€", 3), "äöü");
+        assert_eq!(clip("ab", 32), "ab");
+        assert_eq!(clip("", 4), "");
+    }
+
+    #[test]
+    fn clip_caps_username() {
+        let long = "u".repeat(100);
+        assert_eq!(
+            clip(&long, OFFLINE_AUDIT_USERNAME_MAX).chars().count(),
+            OFFLINE_AUDIT_USERNAME_MAX
+        );
     }
 }

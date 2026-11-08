@@ -37,6 +37,24 @@ pub use db::{
 /// Stable PK of the seeded "Default" org. Matches the migration's INSERT.
 pub const DEFAULT_ORG_ID: &str = "default";
 
+pub const MAX_ORG_NAME_LEN: usize = 64;
+
+/// Validate an org display name, returning it trimmed. The error is the
+/// plain-text response body the create and rename handlers send back.
+pub(crate) fn validate_org_name(raw: &str) -> Result<&str, &'static str> {
+    let name = raw.trim();
+    if name.is_empty() {
+        return Err("name required");
+    }
+    if name.chars().count() > MAX_ORG_NAME_LEN {
+        return Err("name too long");
+    }
+    if name.chars().any(char::is_control) {
+        return Err("name has invalid characters");
+    }
+    Ok(name)
+}
+
 /// Org roles. `owner` runs governance; `member` is read-only for org-scoped
 /// resources. Stored / wired as the lowercase variant name via [`Role::as_str`]
 /// and `FromStr` (forms, DB, OIDC claims all share that vocabulary).
@@ -380,6 +398,21 @@ pub async fn resolve_admin_scope(
 mod tests {
     use super::*;
     use crate::config::AdminConfig;
+
+    #[test]
+    fn validate_org_name_rules() {
+        assert_eq!(validate_org_name(""), Err("name required"));
+        assert_eq!(validate_org_name("   "), Err("name required"));
+        assert_eq!(validate_org_name("  Acme  "), Ok("Acme"));
+        let max = "a".repeat(MAX_ORG_NAME_LEN);
+        assert_eq!(validate_org_name(&max), Ok(max.as_str()));
+        let over = "a".repeat(MAX_ORG_NAME_LEN + 1);
+        assert_eq!(validate_org_name(&over), Err("name too long"));
+        assert_eq!(
+            validate_org_name("Ac\tme"),
+            Err("name has invalid characters")
+        );
+    }
 
     fn admin_cfg(emails: &[&str]) -> AdminConfig {
         AdminConfig {

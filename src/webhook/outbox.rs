@@ -98,7 +98,7 @@ pub async fn enqueue_pending(
     if targets.is_empty() {
         return Ok(Vec::new());
     }
-    let now = Utc::now().to_rfc3339();
+    let now = crate::db::now_rfc3339();
     let mut rows = Vec::with_capacity(targets.len());
     for target in targets {
         let payload = sign_set(
@@ -213,7 +213,7 @@ pub async fn list_dead(db: &DbPool) -> anyhow::Result<Vec<OutboxRow>> {
 /// picks it up again on the next tick.
 pub async fn requeue_dead(db: &DbPool, row_id: &str) -> anyhow::Result<bool> {
     let row_id = row_id.to_string();
-    let now = Utc::now().to_rfc3339();
+    let now = crate::db::now_rfc3339();
     let n = db_interact!(db, |conn| {
         diesel::update(
             webhook_outbox::table
@@ -252,7 +252,7 @@ pub async fn discard_dead(db: &DbPool, row_id: &str) -> anyhow::Result<bool> {
 /// ABORTED. Bounded to rows older than the 5-minute reconcile window so
 /// in-flight transactions aren't disturbed.
 pub async fn reconcile_pending(db: &DbPool, ory: &Arc<OryClients>) -> anyhow::Result<()> {
-    let cutoff = (Utc::now() - chrono::Duration::minutes(5)).to_rfc3339();
+    let cutoff = crate::db::rfc3339(Utc::now() - chrono::Duration::minutes(5));
     let stuck = db_interact!(db, |conn| {
         webhook_outbox::table
             .filter(webhook_outbox::state.eq(state::PENDING))

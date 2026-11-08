@@ -157,7 +157,7 @@ async fn drain_once(
     http: &reqwest::Client,
     cfg: &crate::config::WebhookConfig,
 ) -> anyhow::Result<usize> {
-    let now = Utc::now().to_rfc3339();
+    let now = crate::db::now_rfc3339();
     let candidates: Vec<OutboxRow> = db_interact!(db, |conn| {
         webhook_outbox::table
             .filter(webhook_outbox::state.eq(state::CONFIRMED))
@@ -208,7 +208,7 @@ async fn try_claim(
     cfg: &crate::config::WebhookConfig,
 ) -> anyhow::Result<bool> {
     let lease_until =
-        (Utc::now() + chrono::Duration::seconds(cfg.claim_lease_seconds)).to_rfc3339();
+        crate::db::rfc3339(Utc::now() + chrono::Duration::seconds(cfg.claim_lease_seconds));
     let id = row.id.clone();
     let original_next = row.next_attempt_at.clone();
     let n: usize = db_interact!(db, |conn| {
@@ -287,7 +287,7 @@ async fn record_outcome(
 ) -> anyhow::Result<()> {
     match outcome {
         DeliveryOutcome::Success => {
-            let now = Utc::now().to_rfc3339();
+            let now = crate::db::now_rfc3339();
             let id = row.id.clone();
             let new_attempts = row.attempts + 1;
             db_interact!(db, |conn| {
@@ -334,12 +334,13 @@ async fn record_outcome(
                     "webhook dead-lettered"
                 );
             } else {
-                let next = (Utc::now()
-                    + chrono::Duration::seconds(backoff_seconds(
-                        attempts,
-                        cfg.backoff_cap_seconds,
-                    )))
-                .to_rfc3339();
+                let next = crate::db::rfc3339(
+                    Utc::now()
+                        + chrono::Duration::seconds(backoff_seconds(
+                            attempts,
+                            cfg.backoff_cap_seconds,
+                        )),
+                );
                 let err_for_db = err.clone();
                 let next_for_log = next.clone();
                 db_interact!(db, |conn| {
@@ -457,9 +458,9 @@ mod tests {
     #[test]
     fn aged_out_boundary() {
         const MAX: i64 = 72;
-        let fresh = Utc::now().to_rfc3339();
+        let fresh = crate::db::now_rfc3339();
         assert!(!aged_out("row-1", &fresh, MAX));
-        let old = (Utc::now() - chrono::Duration::hours(MAX + 1)).to_rfc3339();
+        let old = crate::db::rfc3339(Utc::now() - chrono::Duration::hours(MAX + 1));
         assert!(aged_out("row-2", &old, MAX));
         // Unparseable timestamp is treated as aged-out (fail-closed).
         assert!(aged_out("row-3", "not-a-date", MAX));

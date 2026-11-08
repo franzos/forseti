@@ -121,10 +121,10 @@ pub(super) async fn orgs_create(
         return render_upsell(&state, &csrf.0, &email, Feature::Orgs, locale);
     }
 
-    let name = form.name.trim();
-    if name.is_empty() {
-        return (StatusCode::BAD_REQUEST, "name required").into_response();
-    }
+    let name = match orgs::validate_org_name(&form.name) {
+        Ok(n) => n,
+        Err(msg) => return (StatusCode::BAD_REQUEST, msg).into_response(),
+    };
     if crate::orgs::reserved_names::reserved_name_hit(&state.cfg.orgs.reserved_names, name)
         .is_some()
     {

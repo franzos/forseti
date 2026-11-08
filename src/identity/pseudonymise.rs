@@ -124,7 +124,7 @@ mod tests {
     }
 
     async fn seed(db: &DbPool, who: &str, email: &str) {
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = crate::db::now_rfc3339();
         let org = format!("org-{who}");
         orgs_db::create_org(db, &org, &org, &org, Some(who))
             .await

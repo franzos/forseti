@@ -80,7 +80,6 @@ pub struct AppConfig {
     pub security: SecurityConfig,
     /// POSIX account materialisation (Linux auth): uid/gid bands, shell, home prefix, free-tier seat cap.
     #[serde(default)]
-    #[allow(dead_code)]
     pub posix: PosixConfig,
     /// Prometheus scrape gate for `/metrics` (internal listener only, commercial `observability` feature).
     #[serde(default)]
@@ -700,6 +699,9 @@ impl DatabaseConfig {
     }
 }
 
+/// Shortest audit webhook token accepted on a production-shaped deployment.
+pub const WEBHOOK_TOKEN_MIN_LEN: usize = 32;
+
 /// One token (string) or an accept list (array) during rotation. The
 /// receiver in `audit::kratos_webhook` accepts a request when the presented
 /// bearer matches any entry, so an operator can add a new token, roll it
@@ -764,13 +766,24 @@ impl WebhookTokens {
                     .to_string(),
             );
         }
+        if DatabaseConfig::looks_like_production(self_url)
+            && entries.iter().any(|t| t.len() < WEBHOOK_TOKEN_MIN_LEN)
+        {
+            return Err(format!(
+                "audit.webhook_token has an entry shorter than {WEBHOOK_TOKEN_MIN_LEN} bytes; \
+                 generate a real secret (`openssl rand -hex 32`) before serving on a public https URL"
+            ));
+        }
         Ok(())
     }
 
-    /// Entries shorter than this are warned about at boot, never refused:
-    /// refusing would break an existing deployment on upgrade.
+    /// Entries shorter than [`WEBHOOK_TOKEN_MIN_LEN`]; warned about at boot on a
+    /// non-production URL only, since `validate` refuses them on production.
     pub fn weak_entries(&self) -> usize {
-        self.entries().iter().filter(|t| t.len() < 32).count()
+        self.entries()
+            .iter()
+            .filter(|t| t.len() < WEBHOOK_TOKEN_MIN_LEN)
+            .count()
     }
 }
 
@@ -2083,9 +2096,11 @@ mod tests {
     }
 
     #[test]
-    fn webhook_tokens_short_entries_are_counted_not_refused() {
-        let t = WebhookTokens::Many(vec!["short".into(), "g".repeat(32)]);
+    fn webhook_tokens_short_entry_refused_on_production_shape() {
+        let t = WebhookTokens::Many(vec!["hook_s3cret".into(), "g".repeat(32)]);
         assert_eq!(t.weak_entries(), 1);
-        assert!(t.validate(PROD_URL).is_ok());
+        assert!(t.validate(DEV_URL).is_ok());
+        let err = t.validate(PROD_URL).expect_err("short entry on production");
+        assert!(!err.contains("hook_s3cret"), "token leaked: {err}");
     }
 }

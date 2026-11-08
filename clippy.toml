@@ -1,0 +1,3 @@
+disallowed-methods = [
+    { path = "chrono::DateTime::to_rfc3339", reason = "use crate::db::rfc3339 for DB timestamps" },
+]

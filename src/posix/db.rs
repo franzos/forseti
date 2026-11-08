@@ -2,9 +2,7 @@
 //!
 //! uid/gid are conceptually `u32`; diesel maps the `Integer` columns to `i32`,
 //! so we cast at the boundary.
-#![allow(dead_code)]
 
-use chrono::Utc;
 use diesel::prelude::*;
 use serde::Serialize;
 use uuid::Uuid;
@@ -175,9 +173,7 @@ pub async fn host_by_id(db: &DbPool, id: &str) -> anyhow::Result<Option<HostEnro
 pub struct HostListRow {
     pub id: String,
     pub hostname: String,
-    pub org_id: String,
     pub force_mfa: i32,
-    pub created_by: Option<String>,
     pub created_at: String,
     pub last_seen_at: Option<String>,
 }
@@ -190,9 +186,7 @@ pub async fn list_hosts(db: &DbPool) -> anyhow::Result<Vec<HostListRow>> {
             .select((
                 host_enrollments::id,
                 host_enrollments::hostname,
-                host_enrollments::org_id,
                 host_enrollments::force_mfa,
-                host_enrollments::created_by,
                 host_enrollments::created_at,
                 host_enrollments::last_seen_at,
             ))
@@ -634,21 +628,6 @@ pub async fn count_accounts(db: &DbPool) -> anyhow::Result<u32> {
     Ok(n.max(0) as u32)
 }
 
-// all_uids/all_gids are intentionally UNCAPPED: id allocation needs the true max.
-pub async fn all_uids(db: &DbPool) -> anyhow::Result<Vec<u32>> {
-    let rows: Vec<i32> = db_interact!(db, |conn| {
-        posix_accounts::table.select(posix_accounts::uid).load(conn)
-    })?;
-    Ok(rows.into_iter().map(|v| v as u32).collect())
-}
-
-pub async fn all_gids(db: &DbPool) -> anyhow::Result<Vec<u32>> {
-    let rows: Vec<i32> = db_interact!(db, |conn| {
-        posix_groups::table.select(posix_groups::gid).load(conn)
-    })?;
-    Ok(rows.into_iter().map(|v| v as u32).collect())
-}
-
 /// Every distinct `identity_id` with a posix account row. Uncapped: the
 /// reconcile sweep must see ALL accounts or it would skip orphans past the cap.
 pub async fn all_account_identity_ids(db: &DbPool) -> anyhow::Result<Vec<String>> {
@@ -733,71 +712,6 @@ pub async fn group_by_gid(db: &DbPool, gid: u32) -> anyhow::Result<Option<PosixG
             .optional()
     })?;
     Ok(row)
-}
-
-pub async fn list_groups(db: &DbPool) -> anyhow::Result<Vec<PosixGroup>> {
-    let rows: Vec<PosixGroup> = db_interact!(db, |conn| {
-        posix_groups::table
-            .order(posix_groups::name.asc())
-            .limit(MAX_ROWS_PER_LIST)
-            .select(PosixGroup::as_select())
-            .load(conn)
-    })?;
-    Ok(rows)
-}
-
-pub async fn group_member_usernames(db: &DbPool, gid: u32) -> anyhow::Result<Vec<String>> {
-    let g = gid as i32;
-    let rows: Vec<String> = db_interact!(db, |conn| {
-        posix_group_members::table
-            .inner_join(
-                posix_accounts::table
-                    .on(posix_group_members::identity_id.eq(posix_accounts::identity_id)),
-            )
-            .filter(posix_group_members::gid.eq(g))
-            .filter(posix_accounts::enabled.eq(1))
-            .order(posix_accounts::username.asc())
-            .limit(MAX_ROWS_PER_LIST)
-            .select(posix_accounts::username)
-            .load(conn)
-    })?;
-    Ok(rows)
-}
-
-/// Enabled accounts that are members of a `posix_groups` `gid`. Retained for the
-/// user-private-group range; the resolver reads org/team membership at request time.
-pub async fn accounts_in_gid(db: &DbPool, gid: u32) -> anyhow::Result<Vec<PosixAccount>> {
-    let g = gid as i32;
-    let rows: Vec<PosixAccount> = db_interact!(db, |conn| {
-        posix_group_members::table
-            .inner_join(
-                posix_accounts::table
-                    .on(posix_group_members::identity_id.eq(posix_accounts::identity_id)),
-            )
-            .filter(posix_group_members::gid.eq(g))
-            .filter(posix_accounts::enabled.eq(1))
-            .order(posix_accounts::username.asc())
-            .limit(MAX_ROWS_PER_LIST)
-            .select(PosixAccount::as_select())
-            .load(conn)
-    })?;
-    Ok(rows)
-}
-
-/// Whether `identity_id` is a member of `gid`. The caller checks `enabled`
-/// separately on the account row.
-pub async fn is_member(db: &DbPool, gid: u32, identity_id: &str) -> anyhow::Result<bool> {
-    let g = gid as i32;
-    let id = identity_id.to_string();
-    let found: Option<i32> = db_interact!(db, |conn| {
-        posix_group_members::table
-            .filter(posix_group_members::gid.eq(g))
-            .filter(posix_group_members::identity_id.eq(&id))
-            .select(posix_group_members::gid)
-            .first(conn)
-            .optional()
-    })?;
-    Ok(found.is_some())
 }
 
 pub async fn authorized_keys_for(db: &DbPool, identity_id: &str) -> anyhow::Result<Vec<SshKey>> {
@@ -1025,7 +939,7 @@ pub async fn provision_account(
     let user = username.to_string();
     let shell = shell.to_string();
     let home = home_dir.to_string();
-    let now = Utc::now().to_rfc3339();
+    let now = crate::db::now_rfc3339();
     let account: PosixAccount = db_interact!(db, |conn| {
         conn.transaction::<PosixAccount, diesel::result::Error, _>(|c| {
             diesel::insert_into(posix_accounts::table)
@@ -1073,7 +987,7 @@ pub async fn set_account_enabled(
 ) -> anyhow::Result<()> {
     let id = identity_id.to_string();
     let flag = i32::from(enabled);
-    let now = Utc::now().to_rfc3339();
+    let now = crate::db::now_rfc3339();
     db_interact!(db, |conn| {
         diesel::update(posix_accounts::table.filter(posix_accounts::identity_id.eq(&id)))
             .set((
@@ -1146,7 +1060,7 @@ pub async fn insert_host(
     let secret_hash = secret_hash.to_string();
     let org_id = org_id.to_string();
     let created_by = created_by.map(str::to_string);
-    let now = Utc::now().to_rfc3339();
+    let now = crate::db::now_rfc3339();
     db_interact!(db, |conn| {
         diesel::insert_into(host_enrollments::table)
             .values(NewHostEnrollment {
@@ -1231,7 +1145,7 @@ pub async fn insert_ssh_key(
     let key = public_key.to_string();
     let comment = comment.to_string();
     let expires = expires_at.map(str::to_string);
-    let now = Utc::now().to_rfc3339();
+    let now = crate::db::now_rfc3339();
     let inserted = id.clone();
     db_interact!(db, |conn| {
         diesel::insert_into(ssh_authorized_keys::table)
@@ -1264,29 +1178,12 @@ pub async fn delete_ssh_key(db: &DbPool, identity_id: &str, id: &str) -> anyhow:
     Ok(n > 0)
 }
 
-pub async fn add_group_member(db: &DbPool, gid: u32, identity_id: &str) -> anyhow::Result<()> {
-    let g = gid as i32;
-    let ident = identity_id.to_string();
-    let now = Utc::now().to_rfc3339();
-    db_interact!(db, |conn| {
-        diesel::insert_into(posix_group_members::table)
-            .values(NewGroupMember {
-                gid: g,
-                identity_id: &ident,
-                added_at: now.clone(),
-            })
-            .execute(conn)
-            .map(|_| ())
-    })?;
-    Ok(())
-}
-
 // --- device sessions (RFC 8628 device-auth state) ------------------------
 //
 // `device_code` is the Hydra-issued bearer secret (PK, never logged). Status
 // transitions are atomic single-use UPDATEs so a replay or double-poll can't
-// re-approve. Timestamps are fixed-width RFC 3339 UTC, so expiry comparisons
-// are lexicographic-safe.
+// re-approve. Timestamps are written by `crate::db::rfc3339`, so expiry
+// comparisons are lexicographic-safe.
 
 /// Status consts kept as `&str` so the UPDATE guards and handlers agree on spelling.
 pub mod device_status {
@@ -1299,12 +1196,9 @@ pub mod device_status {
 #[diesel(table_name = device_sessions)]
 pub struct DeviceSession {
     pub device_code: String,
-    pub user_code: String,
     pub host_id: String,
     pub requested_username: String,
     pub status: String,
-    pub identity_id: Option<String>,
-    pub created_at: String,
     pub expires_at: String,
 }
 
@@ -1339,7 +1233,7 @@ pub async fn insert_device_session(
     let user = requested_username.to_string();
     let exp = expires_at.to_string();
     let cch = client_code_hash.to_string();
-    let now = Utc::now().to_rfc3339();
+    let now = crate::db::now_rfc3339();
     let res: Result<(), diesel::result::Error> = db_interact!(db, |conn| {
         diesel::insert_into(device_sessions::table)
             .values(NewDeviceSession {
@@ -1428,7 +1322,7 @@ pub async fn approve_device_session(
 ) -> anyhow::Result<bool> {
     let dc = device_code.to_string();
     let id = identity_id.to_string();
-    let now = Utc::now().to_rfc3339();
+    let now = crate::db::now_rfc3339();
     let approved: bool = db_interact!(db, |conn| {
         conn.transaction::<bool, diesel::result::Error, _>(|c| {
             let n = diesel::update(
@@ -1484,7 +1378,7 @@ pub async fn deny_device_session(db: &DbPool, device_code: &str) -> anyhow::Resu
 }
 
 /// Opportunistic prune of expired rows (`expires_at < now`). `now_rfc3339` is
-/// compared lexicographically, safe for fixed-width RFC 3339 UTC timestamps.
+/// compared lexicographically, safe for timestamps from `crate::db::rfc3339`.
 pub async fn lazy_prune_expired(db: &DbPool, now_rfc3339: &str) -> anyhow::Result<usize> {
     let now = now_rfc3339.to_string();
     let n: usize = db_interact!(db, |conn| {
@@ -1530,7 +1424,7 @@ pub async fn upsert_offline_secret(
 ) -> anyhow::Result<()> {
     let id = identity_id.to_string();
     let v = verifier.to_string();
-    let now = Utc::now().to_rfc3339();
+    let now = crate::db::now_rfc3339();
     db_interact!(db, |conn| {
         diesel::insert_into(offline_secrets::table)
             .values(NewOfflineSecret {

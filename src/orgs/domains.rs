@@ -1,6 +1,5 @@
 //! Ownership-proven email domains for internal-org auto-join.
 
-use chrono::Utc;
 use diesel::prelude::*;
 use rand::RngExt;
 use serde::Serialize;
@@ -63,7 +62,7 @@ pub async fn add_pending_domain(
     } else {
         token.to_string()
     };
-    let now = Utc::now().to_rfc3339();
+    let now = crate::db::now_rfc3339();
     let result = db_interact!(db, |conn| {
         diesel::insert_into(org_allowed_domains::table)
             .values(NewOrgAllowedDomain {
@@ -148,7 +147,7 @@ pub async fn mark_domain_verified(
     domain: &str,
 ) -> anyhow::Result<DomainVerifyOutcome> {
     let (o, d) = (org_id.to_string(), domain.to_string());
-    let now = Utc::now().to_rfc3339();
+    let now = crate::db::now_rfc3339();
     let result = db_interact!(db, |conn| {
         diesel::update(
             org_allowed_domains::table
@@ -433,13 +432,6 @@ pub async fn verify_dns_txt(domain: &str, expected_token: &str) -> Result<bool, 
     }
 }
 
-/// Collapse CR/LF in an owner-controlled value before interpolating it into a
-/// challenge email sent to a third party, so a crafted org name can't inject
-/// extra lines into the message body.
-fn sanitize_line(s: &str) -> String {
-    s.replace(['\r', '\n'], " ")
-}
-
 fn build_domain_challenge_email(
     brand_name: &str,
     domain: &str,
@@ -448,8 +440,8 @@ fn build_domain_challenge_email(
     actor_email: &str,
 ) -> (String, String) {
     let subject = format!("{brand_name}: confirm ownership of {domain}");
-    let requesting_org_name = sanitize_line(requesting_org_name);
-    let actor_email = sanitize_line(actor_email);
+    let requesting_org_name = crate::mailer::sanitize_line(requesting_org_name);
+    let actor_email = crate::mailer::sanitize_line(actor_email);
     let body = format!(
         "Hello,\n\n\"{requesting_org_name}\" ({actor_email}) on {brand_name} requested to link \
          the domain \"{domain}\" to their organization, using this mailbox as proof of \

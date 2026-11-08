@@ -51,13 +51,14 @@ pub(crate) async fn record(
     } else {
         MAX_REMEMBER_SECS
     };
-    let cutoff =
-        (now - chrono::Duration::seconds(horizon.saturating_add(PRUNE_MARGIN_SECS))).to_rfc3339();
+    let cutoff = crate::db::rfc3339(
+        now - chrono::Duration::seconds(horizon.saturating_add(PRUNE_MARGIN_SECS)),
+    );
     let (sid, subject, ksid, now) = (
         sid.to_string(),
         subject.to_string(),
         kratos_session_id.to_string(),
-        now.to_rfc3339(),
+        crate::db::rfc3339(now),
     );
     db_interact!(db, |conn| {
         use diesel::upsert::excluded;
@@ -103,7 +104,7 @@ pub(crate) async fn record_consent(
         sid.to_string(),
         subject.to_string(),
         client_id.to_string(),
-        chrono::Utc::now().to_rfc3339(),
+        crate::db::now_rfc3339(),
     );
     db_interact!(db, |conn| {
         diesel::insert_into(hydra_consent_grants::table)
@@ -489,7 +490,7 @@ mod tests {
         record(&db, "sid-old", "user-a", "ks-1", 86400)
             .await
             .unwrap();
-        let stale = (chrono::Utc::now() - chrono::Duration::days(3)).to_rfc3339();
+        let stale = crate::db::rfc3339(chrono::Utc::now() - chrono::Duration::days(3));
         let aged: anyhow::Result<usize> = async {
             Ok(db_interact!(db, |conn| {
                 diesel::update(hydra_login_sessions::table)
@@ -559,7 +560,7 @@ mod tests {
         record_consent(&db, "cr-old", "sid-old", "user-a", "app-1")
             .await
             .unwrap();
-        let stale = (chrono::Utc::now() - chrono::Duration::days(3)).to_rfc3339();
+        let stale = crate::db::rfc3339(chrono::Utc::now() - chrono::Duration::days(3));
         let aged: anyhow::Result<usize> = async {
             Ok(db_interact!(db, |conn| {
                 diesel::update(hydra_consent_grants::table)
@@ -595,7 +596,7 @@ mod tests {
     async fn recorded_kratos_session_distinguishes_no_row_from_null_session() {
         let db = crate::orgs::db::test_pool().await;
         record(&db, "sid-1", "user-a", "ks-1", 86400).await.unwrap();
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = crate::db::now_rfc3339();
         let inserted: anyhow::Result<usize> = async {
             Ok(db_interact!(db, |conn| {
                 diesel::insert_into(hydra_login_sessions::table)

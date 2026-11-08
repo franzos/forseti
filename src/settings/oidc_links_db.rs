@@ -2,7 +2,6 @@
 //! provider for an identity, so the linked-providers page can show a
 //! "Connected {date}" without intercepting the Kratos link flow.
 
-use chrono::Utc;
 use diesel::prelude::*;
 
 use crate::db::DbPool;
@@ -27,7 +26,7 @@ pub(crate) async fn upsert_seen(
 ) -> anyhow::Result<String> {
     let ident = identity_id.to_string();
     let prov = provider.to_string();
-    let now = Utc::now().to_rfc3339();
+    let now = crate::db::now_rfc3339();
     let stored: String = db_interact!(db, |conn| {
         diesel::insert_into(oidc_links::table)
             .values(NewLink {

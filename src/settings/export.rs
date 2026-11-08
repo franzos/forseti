@@ -81,6 +81,8 @@ pub(crate) async fn settings_account_export(
 
 /// Assemble the envelope. Any source failing fails the whole export: a
 /// document silently missing a section is exactly the gap it exists to close.
+// Display only; DB timestamps go through crate::db::rfc3339.
+#[allow(clippy::disallowed_methods)]
 pub(crate) async fn build_export(state: &AppState, identity_id: &str) -> anyhow::Result<Value> {
     let db = &state.db;
     let ory = &state.ory;

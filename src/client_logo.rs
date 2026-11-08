@@ -18,7 +18,6 @@ use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get as get_method;
-use chrono::Utc;
 use diesel::prelude::*;
 
 use crate::config::{OrgsConfig, ProxyConfig};
@@ -58,7 +57,7 @@ pub async fn upsert(
     let client_id = client_id.to_string();
     let content_type = content_type.to_string();
     let etag = etag.to_string();
-    let updated_at = Utc::now().to_rfc3339();
+    let updated_at = crate::db::now_rfc3339();
     db_interact!(db, |conn| {
         use diesel::upsert::excluded;
         diesel::insert_into(client_logos::table)

@@ -213,10 +213,11 @@ support_email = "support@example.com"
 # Postgres for HA deployments. Defaults to sqlite at ./forseti.db.
 # [database]
 # url = "sqlite://./forseti.db"
-# url = "postgres://forseti:forseti@localhost:5432/forseti"
+# url = "postgres://forseti:forseti@localhost:5432/forseti?connect_timeout=5"
 # skip_migrations = false  # set true to gate schema changes through a pipeline
 # max_connections = 16     # Postgres pool ceiling; default twice the CPU count (sqlite: fixed at 8)
 # acquire_timeout_secs = 30  # wait for a free connection this long, then fail instead of hanging
+# Pool connection create and recycle timeouts are fixed at 5 s.
 
 # Identity-management knobs. `unverified_ttl_days` is the window used by the
 # `forseti unverified-prune` CLI: a Kratos identity that still has an unverified
@@ -298,7 +299,7 @@ support_email = "support@example.com"
 # value and the `auth.config.value` fields in `infra/kratos/kratos.yml`,
 # then starting both back up.
 # [audit]
-# webhook_token = "change-me-32-bytes-of-secret-entropy"
+# webhook_token = "change-me-32-bytes-of-secret-entropy"   # min 32 bytes
 # ip_salt = ""                 # optional; derived from [security].cookie_secret when
 #                              # unset (rotating that secret then rotates audit ip_hash
 #                              # values too). Set a dedicated value (`openssl rand -hex 32`)

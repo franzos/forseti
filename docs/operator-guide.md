@@ -140,10 +140,10 @@ Forseti-owned database. Separate from the Kratos/Hydra Postgres — schema isola
 
 | Key               | Type    | Default                  | Description                                                                                                                                          |
 |-------------------|---------|--------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `url`             | string  | `"sqlite://./forseti.db"` | `sqlite://path/to/file.db` (or a bare path) for single-binary self-hosters; `postgres://user:pass@host/db` for HA. URL scheme picks the backend.    |
+| `url`             | string  | `"sqlite://./forseti.db"` | `sqlite://path/to/file.db` (or a bare path) for single-binary self-hosters; `postgres://user:pass@host/db?connect_timeout=5` for HA. URL scheme picks the backend. |
 | `skip_migrations` | bool    | `false`                  | When `true`, the boot-time migration run is skipped. Use this when schema changes are gated through a deploy pipeline instead of the running binary. |
 | `max_connections` | usize   | twice the CPU count      | Postgres pool ceiling. Ignored for sqlite, whose pool is fixed at 8 (one writer at a time is the point).                                              |
-| `acquire_timeout_secs` | u64 | `30`                   | How long a request waits for a free pooled connection before failing with a pool error (surfaces as a 500) instead of hanging. Both backends.        |
+| `acquire_timeout_secs` | u64 | `30`                   | How long a request waits for a free pooled connection before failing with a pool error (surfaces as a 500) instead of hanging. Both backends. Pool connection create and recycle timeouts are fixed at 5 s. |
 
 Defaulting to sqlite-next-to-the-binary is deliberate: clone, run, get a working Forseti with persistent state. Operators who want Postgres set `[database]` explicitly.
 
@@ -161,7 +161,7 @@ Migrations run on startup by default (`FORSETI_DATABASE__SKIP_MIGRATIONS=1` to o
 The playground compose file ships a dedicated `forseti-postgres` sidecar on `127.0.0.1:5450` (separate from the Kratos/Hydra postgres, per the design's schema-isolation goal). Smoke-boot the Postgres path with:
 
 ```bash
-FORSETI_DATABASE__URL="postgres://forseti:secret@localhost:5450/forseti" cargo run
+FORSETI_DATABASE__URL="postgres://forseti:secret@localhost:5450/forseti?connect_timeout=5" cargo run
 ```
 
 ### `[internal]`
@@ -605,6 +605,8 @@ The internal listener does not mount `/readyz` or `/healthz`; those stay on the 
 The `POST /internal/audit/kratos` endpoint authenticates inbound Kratos webhooks with a shared bearer token (`Authorization: Bearer <token>`). Forseti reads it from `[audit].webhook_token`; Kratos sends it from the `auth.config.value` field on each `web_hook` in `kratos.yml`.
 
 **The token is mandatory.** Forseti refuses to boot when `webhook_token` is empty (exit code `1`, error on stderr): a misconfigured deployment is supposed to fail loudly at startup rather than silently accept or reject every inbound event.
+
+**Every entry must be at least 32 bytes** (`openssl rand -hex 32`). On a production-shaped `[self].url` (https, not localhost or a private address) Forseti refuses to boot when any accept-list entry is shorter; elsewhere it logs a warning. `forseti config check` reports the same rule as `audit.webhook_token.length`. To replace an existing short token on production, run `forseti config rotate webhook-token --yes` (the interactive form asks for a Forseti restart while the short entry is still staged, and that restart is refused), then `forseti config prune webhook-token` to drop the short entry, then restart Kratos and Forseti. Webhooks carrying the new token return 401 until the Forseti restart.
 
 **To rotate, use `forseti config rotate webhook-token`** (see [Rotating the audit webhook token](#rotating-the-audit-webhook-token)) rather than hand-editing both files: it stages the new token in an accept-list so Forseti keeps accepting the old one until every `web_hook` has picked up the new value, avoiding an audit-loss window. Hand-editing both files in one shot works too, but there's no online-rotation path that way. Kratos's Viper-based config loader does not support env-var overrides for fields inside arrays (see [ory/kratos#2663](https://github.com/ory/kratos/issues/2663)), so the token has to be a literal value in `kratos.yml`, and stopping Forseti before both files agree drops every webhook delivered in between. For real production deploys, template the config through your deploy tooling (Helm's `values.yaml`, Terraform, or equivalent) and source the token from your secret manager. Forseti-side value comes from `config.toml` (or `FORSETI_AUDIT__WEBHOOK_TOKEN`), where env-var binding works because Forseti's config is a flat struct.
 

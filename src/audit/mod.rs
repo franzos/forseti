@@ -940,7 +940,7 @@ fn emit_audit_fallback(row: &NewAuditEvent) {
 /// (trailing `Z`, or seconds-only) mis-sorts against the stored `+00:00`
 /// values and drops or admits rows inside the boundary second.
 fn created_at_text(ts: DateTime<Utc>) -> String {
-    ts.to_rfc3339()
+    crate::db::rfc3339(ts)
 }
 
 fn build_row(event: AuditEvent) -> anyhow::Result<NewAuditEvent> {
@@ -1070,13 +1070,10 @@ pub async fn query(db: &DbPool, filter: AuditFilter) -> anyhow::Result<(Vec<Audi
                 if let Some(v) = f.action_exact.as_deref() {
                     q = q.filter(a::action.eq(v.to_string()));
                 } else if let Some(v) = f.action_prefix.as_deref() {
-                    let needle: String = v
-                        .trim()
-                        .chars()
-                        .filter(|c| !matches!(c, '%' | '_' | '\\'))
-                        .collect();
+                    let needle = v.trim();
                     if !needle.is_empty() {
-                        q = q.filter(a::action.like(format!("{needle}%")));
+                        let escaped = escape_like(needle);
+                        q = q.filter(a::action.like(format!("{escaped}%")).escape('\\'));
                     }
                 }
                 if let Some(v) = f.since.as_ref() {
@@ -1449,13 +1446,17 @@ mod created_at_boundary_tests {
     use chrono::{TimeZone, Timelike};
 
     async fn insert_at(db: &DbPool, id: &str, ts: DateTime<Utc>) {
+        insert_action_at(db, id, ts, "test.boundary").await;
+    }
+
+    pub(super) async fn insert_action_at(db: &DbPool, id: &str, ts: DateTime<Utc>, action: &str) {
         let row = NewAuditEvent {
             id: id.to_string(),
             created_at: created_at_text(ts),
             actor_kind: actor_kind::SYSTEM.to_string(),
             actor_id: None,
             actor_email: None,
-            action: "test.boundary".to_string(),
+            action: action.to_string(),
             target_kind: None,
             target_id: None,
             org_id: None,
@@ -1486,7 +1487,7 @@ mod created_at_boundary_tests {
             .unwrap()
     }
 
-    async fn ids(db: &DbPool, filter: AuditFilter) -> Vec<String> {
+    pub(super) async fn ids(db: &DbPool, filter: AuditFilter) -> Vec<String> {
         let (rows, _) = query(db, filter).await.expect("query");
         let mut out: Vec<String> = rows.into_iter().map(|r| r.id).collect();
         out.sort();
@@ -1529,5 +1530,40 @@ mod created_at_boundary_tests {
             .await,
             vec!["before".to_string()]
         );
+    }
+}
+
+#[cfg(test)]
+mod action_prefix_tests {
+    use super::created_at_boundary_tests::{ids, insert_action_at};
+    use super::*;
+    use crate::orgs::db::test_pool;
+
+    async fn prefix(db: &DbPool, p: &str) -> Vec<String> {
+        ids(
+            db,
+            AuditFilter {
+                action_prefix: Some(p.to_string()),
+                limit: 50,
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn prefix_matches_metacharacters_literally() {
+        let db = test_pool().await;
+        let ts = Utc::now();
+        insert_action_at(&db, "a", ts, "posix.ssh_key_added").await;
+        insert_action_at(&db, "b", ts, "posix.sshXkey_added").await;
+        insert_action_at(&db, "c", ts, "auth.login").await;
+
+        assert_eq!(prefix(&db, "posix.ssh_key").await, vec!["a".to_string()]);
+        assert_eq!(
+            prefix(&db, "posix.").await,
+            vec!["a".to_string(), "b".to_string()]
+        );
+        assert!(prefix(&db, "%").await.is_empty());
     }
 }

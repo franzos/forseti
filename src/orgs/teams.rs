@@ -96,7 +96,7 @@ pub async fn create_team(
         name.to_string(),
         slug,
         created_by.map(str::to_string),
-        Utc::now().to_rfc3339(),
+        crate::db::rfc3339(Utc::now()),
     );
     let team: Team = db_interact!(db, |conn| {
         diesel::insert_into(org_teams::table)
@@ -314,7 +314,7 @@ pub async fn add_member(
         org_id.to_string(),
         team_id.to_string(),
         identity_id.to_string(),
-        Utc::now().to_rfc3339(),
+        crate::db::rfc3339(Utc::now()),
     );
     let added = db_interact!(db, |conn| {
         conn.transaction::<bool, diesel::result::Error, _>(|c| {

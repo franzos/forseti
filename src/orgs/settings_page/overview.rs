@@ -253,11 +253,16 @@ pub(super) async fn overview_save(
         return r;
     }
     let new_name = form.name.trim();
-    if new_name != target.org.name
-        && crate::orgs::reserved_names::reserved_name_hit(&state.cfg.orgs.reserved_names, new_name)
+    if new_name != target.org.name {
+        // Only a changed name is validated, so an org with a legacy name can still edit its slug.
+        if let Err(msg) = orgs::validate_org_name(new_name) {
+            return (StatusCode::BAD_REQUEST, msg).into_response();
+        }
+        if crate::orgs::reserved_names::reserved_name_hit(&state.cfg.orgs.reserved_names, new_name)
             .is_some()
-    {
-        return (StatusCode::CONFLICT, "that name is not allowed").into_response();
+        {
+            return (StatusCode::CONFLICT, "that name is not allowed").into_response();
+        }
     }
     let new_slug = orgs::slugify(&form.slug);
     if new_slug != target.org.slug {

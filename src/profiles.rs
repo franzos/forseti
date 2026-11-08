@@ -282,7 +282,7 @@ pub async fn upsert(db: &DbPool, input: ProfileInput<'_>) -> Result<()> {
         website: null_if_empty(input.website),
         avatar_url: null_if_empty(input.avatar_url),
         links_json,
-        updated_at: Utc::now().to_rfc3339(),
+        updated_at: crate::db::now_rfc3339(),
         username: None,
         username_lc: None,
     };
@@ -323,7 +323,7 @@ pub async fn set_username(db: &DbPool, identity_id: &str, username: &str) -> Res
         website: None,
         avatar_url: None,
         links_json: None,
-        updated_at: Utc::now().to_rfc3339(),
+        updated_at: crate::db::now_rfc3339(),
         username_lc: username.as_deref().map(username::fold),
         username,
     };
@@ -506,7 +506,7 @@ mod tests {
 
     /// Backdate this identity's tombstones so the cooldown is out of the way.
     async fn expire_cooldown(db: &DbPool, id: &str) -> Result<()> {
-        let old = (Utc::now() - chrono::Duration::days(60)).to_rfc3339();
+        let old = crate::db::rfc3339(Utc::now() - chrono::Duration::days(60));
         let id = id.to_string();
         db_interact!(db, |conn| {
             diesel::update(

@@ -675,6 +675,8 @@ pub(crate) fn build_invite_email(
     accept_url: &str,
     ttl_days: i64,
 ) -> (String, String) {
+    let org_name = crate::mailer::sanitize_line(org_name);
+    let inviter_email = crate::mailer::sanitize_line(inviter_email);
     let subject = format!("{inviter_email} invited you to {org_name} on {brand_name}");
     let body = format!(
         "Hello,\n\n{inviter_email} has invited you to join \"{org_name}\" on {brand_name} as {role}.\n\nAccept the invite by visiting:\n\n  {accept_url}\n\nThis invite expires in {ttl_days} days.\n\nIf you weren't expecting this email, you can safely ignore it.\n",
@@ -762,6 +764,34 @@ mod invite_email_tests {
         assert!(
             body.contains("as member"),
             "non-owner role must propagate; got: {body}",
+        );
+    }
+
+    #[test]
+    fn invite_email_strips_newlines_from_org_name() {
+        let (subject, body) = build_invite_email(
+            "PortalCo",
+            "Acme\r\nBcc: x",
+            "alice@acme.example\nCc: y",
+            "owner",
+            "https://example.test/invite/accept?token=opaque",
+            7,
+        );
+        assert!(
+            !subject.contains(['\r', '\n']),
+            "subject must not carry an injected newline; got: {subject:?}",
+        );
+        assert!(
+            body.contains("join \"Acme  Bcc: x\" on PortalCo"),
+            "body must carry the org name on one line; got: {body:?}",
+        );
+        assert!(
+            !body.contains('\r'),
+            "body must not carry a CR; got: {body:?}"
+        );
+        assert!(
+            body.contains("alice@acme.example Cc: y has invited you"),
+            "inviter email must be on one line; got: {body:?}",
         );
     }
 }

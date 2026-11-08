@@ -119,28 +119,34 @@ fn require_client_secret(cfg: &crate::config::PosixConfig) -> Option<String> {
 
 // --- rate limit ----------------------------------------------------------
 
-/// Coarse per-IP rate limit on `device/init`; hosts behind one NAT share a
-/// bucket. The real defense against breaching Hydra's `slow_down` is Forseti's
-/// own backoff (the daemon honours the `interval` we return).
+/// Coarse per-IP rate limit, one bucket each for `device/init` and `device/poll`.
+/// A daemon polls about 12/min, so more than about five hosts behind one NAT exhaust
+/// the shared poll bucket. Forseti's own backoff keeps Hydra's `slow_down` at bay.
 //
 // TODO(R12): replace with a host-id KeyExtractor reading the Basic-auth
 // host_id so one compromised host can't exhaust the bucket for its NAT peers.
-const DEVICE_INIT_RATE_PER_MINUTE: u32 = 60;
+const DEVICE_RATE_PER_MINUTE: u32 = 60;
 
 fn rate_limit_error(_err: tower_governor::GovernorError) -> Response {
     StatusCode::TOO_MANY_REQUESTS.into_response()
 }
 
 pub fn router(proxy: &crate::config::ProxyConfig) -> Router<AppState> {
-    let init = Router::new().route("/posix/v1/device/init", post(device_init));
     let init = rate_limit::single_window(
-        init,
+        Router::new().route("/posix/v1/device/init", post(device_init)),
         proxy,
         60_000,
-        DEVICE_INIT_RATE_PER_MINUTE,
+        DEVICE_RATE_PER_MINUTE,
         rate_limit_error,
     );
-    init.merge(Router::new().route("/posix/v1/device/poll", post(device_poll)))
+    let poll = rate_limit::single_window(
+        Router::new().route("/posix/v1/device/poll", post(device_poll)),
+        proxy,
+        60_000,
+        DEVICE_RATE_PER_MINUTE,
+        rate_limit_error,
+    );
+    init.merge(poll)
 }
 
 // --- device/init ---------------------------------------------------------
@@ -197,9 +203,9 @@ async fn device_init(
     // A code UNIQUE collision (Ok(false)) is a rare Hydra clash; reject so the
     // daemon restarts the flow, never 500.
     // `seconds` panics on an out-of-range value; Hydra's field is untrusted input here.
-    let expires_at = (Utc::now()
-        + chrono::TimeDelta::try_seconds(authz.expires_in).unwrap_or_default())
-    .to_rfc3339();
+    let expires_at = crate::db::rfc3339(
+        Utc::now() + chrono::TimeDelta::try_seconds(authz.expires_in).unwrap_or_default(),
+    );
     let client_code = mint_client_code();
     match db::insert_device_session(
         &state.db,
@@ -269,7 +275,7 @@ async fn device_poll(
     // Session must belong to THIS host (else 404, don't leak another host's flow).
     // `req.device_code` is the code minted in `device_init`, not Hydra's; it is
     // stored hashed, so a DB read never yields a redeemable code.
-    let _ = db::lazy_prune_expired(&state.db, &now.to_rfc3339()).await;
+    let _ = db::lazy_prune_expired(&state.db, &crate::db::rfc3339(now)).await;
     let presented = crate::posix::hash_token(&req.device_code);
     let session = match db::device_session_by_client_code_hash(&state.db, &presented).await {
         Ok(Some(s)) if s.host_id == host.host_id => s,
@@ -289,7 +295,7 @@ async fn device_poll(
         _ => {}
     }
 
-    if session_expired(&session, &now.to_rfc3339()) {
+    if session_expired(&session, &crate::db::rfc3339(now)) {
         let _ = db::deny_device_session(&state.db, &session.device_code).await;
         return Json(DevicePollResponse::Expired).into_response();
     }
@@ -607,7 +613,7 @@ fn evaluate_binding(
 
 // --- small helpers -------------------------------------------------------
 
-/// Lexicographic expiry check on the fixed-width RFC 3339 timestamps.
+/// Lexicographic expiry check on timestamps from `crate::db::rfc3339`.
 fn session_expired(session: &DeviceSession, now_rfc3339: &str) -> bool {
     session.expires_at.as_str() < now_rfc3339
 }
@@ -918,12 +924,9 @@ mod tests {
     fn session_expiry_is_lexicographic() {
         let s = DeviceSession {
             device_code: "dc".into(),
-            user_code: "uc".into(),
             host_id: "h".into(),
             requested_username: "alice".into(),
             status: device_status::PENDING.into(),
-            identity_id: None,
-            created_at: "2026-06-23T00:00:00+00:00".into(),
             expires_at: "2026-06-23T00:10:00+00:00".into(),
         };
         assert!(!session_expired(&s, "2026-06-23T00:05:00+00:00"));

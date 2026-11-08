@@ -27,6 +27,9 @@
 //! files directly (rather than treating `tests/integration/mod.rs` as the
 //! root, which would clash with `tests/integration.rs`).
 
+// Test fixtures write RFC3339 directly; the DB timestamp writer is crate-internal.
+#![allow(clippy::disallowed_methods)]
+
 #[path = "integration/common.rs"]
 mod common;
 

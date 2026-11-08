@@ -79,9 +79,24 @@ pub fn is_valid_email(addr: &str) -> bool {
     has_dot && labels.all(|l| !l.is_empty())
 }
 
+/// Replace every control character (CR/LF included) with a space before an
+/// owner-controlled value is interpolated into a mail subject or body, so it
+/// can't inject extra header or body lines.
+pub(crate) fn sanitize_line(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::is_valid_email;
+    use super::{is_valid_email, sanitize_line};
+
+    #[test]
+    fn sanitize_line_replaces_control_chars() {
+        assert_eq!(sanitize_line("Acme\r\nBcc: x\t\u{0}y"), "Acme  Bcc: x  y");
+        assert_eq!(sanitize_line("Acme Engineering"), "Acme Engineering");
+    }
 
     #[test]
     fn accepts_ordinary_addresses() {

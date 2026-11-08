@@ -164,7 +164,7 @@ pub async fn insert_or_get_cimd(
     client_id: &str,
     now: chrono::DateTime<Utc>,
 ) -> anyhow::Result<()> {
-    let now_str = now.to_rfc3339();
+    let now_str = crate::db::rfc3339(now);
     let id = client_id.to_string();
     db_interact!(db, |conn| {
         diesel::insert_into(ocm::table)
@@ -217,7 +217,7 @@ pub async fn insert_form_created(
     source: &str,
     now: chrono::DateTime<Utc>,
 ) -> anyhow::Result<()> {
-    let now_str = now.to_rfc3339();
+    let now_str = crate::db::rfc3339(now);
     let id = client_id.to_string();
     let admin = admin_email.to_string();
     let org = org_id.to_string();
@@ -256,7 +256,7 @@ pub async fn insert_form_created(
 /// and Hydra's are separate servers, so this cannot be a SQL migration — it is
 /// a deploy step (`forseti reconcile-client-metadata`).
 pub async fn backfill_legacy_admin(db: &DbPool, client_id: &str) -> anyhow::Result<bool> {
-    let now_str = Utc::now().to_rfc3339();
+    let now_str = crate::db::now_rfc3339();
     let id = client_id.to_string();
     let wrote: bool = db_interact!(db, |conn| {
         let existing: Option<Row> = ocm::table
@@ -340,7 +340,7 @@ pub async fn mark_verified(
     admin_email: &str,
     lazy_source: &'static str,
 ) -> anyhow::Result<String> {
-    let now = Utc::now().to_rfc3339();
+    let now = crate::db::now_rfc3339();
     let id = client_id.to_string();
     let admin = admin_email.to_string();
     // Reads the prior state before writing, so it needs the write lock up front.
@@ -374,7 +374,7 @@ pub async fn mark_unverified(
     admin_email: &str,
     lazy_source: &'static str,
 ) -> anyhow::Result<String> {
-    let now = Utc::now().to_rfc3339();
+    let now = crate::db::now_rfc3339();
     let id = client_id.to_string();
     let admin = admin_email.to_string();
     let prior: String = crate::serialized_txn!(db, String, diesel::result::Error, |c| {

@@ -126,8 +126,8 @@ pub async fn save(db: &DbPool, blob: &str, license: &License) -> anyhow::Result<
         customer: license.customer.clone(),
         email: license.email.clone(),
         tier: TIER_WIRE.to_string(),
-        issued_at: license.issued_at.to_rfc3339(),
-        expires_at: license.expires_at.map(|d| d.to_rfc3339()),
+        issued_at: crate::db::rfc3339(license.issued_at),
+        expires_at: license.expires_at.map(crate::db::rfc3339),
         features: serde_json::to_string(
             &license
                 .features
@@ -137,8 +137,8 @@ pub async fn save(db: &DbPool, blob: &str, license: &License) -> anyhow::Result<
         )?,
         max_orgs,
         max_seats,
-        activated_at: Utc::now().to_rfc3339(),
-        verified_at: Utc::now().to_rfc3339(),
+        activated_at: crate::db::now_rfc3339(),
+        verified_at: crate::db::now_rfc3339(),
     };
     db_interact!(db, |conn| {
         // Diesel's per-backend upsert helpers diverge between sqlite and

@@ -4,6 +4,7 @@
 
 use std::time::Duration;
 
+use chrono::{DateTime, SecondsFormat, Utc};
 use deadpool_diesel::{
     postgres::{Manager as PgManager, Pool as PgPool, Runtime as PgRuntime},
     sqlite::{
@@ -32,6 +33,17 @@ const fn fnv1a_64(s: &str) -> u64 {
 
 use crate::config::{DatabaseBackend, DatabaseConfig};
 
+/// Current time in the one spelling used for every timestamp stored in or compared by the DB.
+pub(crate) fn now_rfc3339() -> String {
+    rfc3339(Utc::now())
+}
+
+/// Fixed-width `2026-01-01T00:00:00.000000+00:00`. `+00:00` sorts before `.` and digits under
+/// byte order, so older rows with a shorter or no fraction sort at or before an equal instant.
+pub(crate) fn rfc3339(t: DateTime<Utc>) -> String {
+    t.to_rfc3339_opts(SecondsFormat::Micros, false)
+}
+
 diesel::define_sql_function! {
     /// SQL `LOWER()` over a nullable text column; `LOWER(NULL)` is `NULL`.
     fn lower(x: diesel::sql_types::Nullable<diesel::sql_types::Text>) -> diesel::sql_types::Nullable<diesel::sql_types::Text>
@@ -45,6 +57,9 @@ const POSTGRES_MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations/po
 
 /// SQLite has one writer at a time; more connections only deepen the write-lock queue and burn blocking workers.
 const SQLITE_MAX_POOL: usize = 8;
+
+const POOL_CREATE_TIMEOUT: Duration = Duration::from_secs(5);
+const POOL_RECYCLE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Pool handle stored in `AppState`; both variants share one Rust query API via `interact`.
 #[derive(Clone)]
@@ -81,6 +96,8 @@ impl DbPool {
                 let pool = SqlitePool::builder(manager)
                     .max_size(SQLITE_MAX_POOL)
                     .runtime(SqliteRuntime::Tokio1)
+                    .create_timeout(Some(POOL_CREATE_TIMEOUT))
+                    .recycle_timeout(Some(POOL_RECYCLE_TIMEOUT))
                     .wait_timeout(Some(Duration::from_secs(cfg.acquire_timeout_secs)))
                     .post_create(Hook::async_fn(|conn, _metrics| {
                         Box::pin(async move {
@@ -108,6 +125,8 @@ impl DbPool {
                 let manager = PgManager::new(cfg.url.clone(), PgRuntime::Tokio1);
                 let mut builder = PgPool::builder(manager)
                     .runtime(PgRuntime::Tokio1)
+                    .create_timeout(Some(POOL_CREATE_TIMEOUT))
+                    .recycle_timeout(Some(POOL_RECYCLE_TIMEOUT))
                     .wait_timeout(Some(Duration::from_secs(cfg.acquire_timeout_secs)));
                 if let Some(max) = cfg.max_connections {
                     builder = builder.max_size(max.max(1));
@@ -336,5 +355,51 @@ fn sqlite_path(url: &str) -> String {
         rest.to_string()
     } else {
         url.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{TimeZone, Timelike};
+
+    fn at(nanos: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+            .unwrap()
+            .with_nanosecond(nanos)
+            .unwrap()
+    }
+
+    #[test]
+    fn rfc3339_is_fixed_width_with_offset() {
+        let s = rfc3339(at(0));
+        assert_eq!(s, "2026-01-01T00:00:00.000000+00:00");
+        assert_eq!(s.len(), 32);
+        assert!(now_rfc3339().ends_with("+00:00"));
+        assert_eq!(now_rfc3339().len(), 32);
+    }
+
+    #[test]
+    fn rfc3339_truncates_nanos_to_micros() {
+        assert_eq!(rfc3339(at(123_456_789)), "2026-01-01T00:00:00.123456+00:00");
+    }
+
+    #[test]
+    fn rfc3339_one_microsecond_apart_sorts_in_order() {
+        assert!(rfc3339(at(999_000)) < rfc3339(at(1_000_000)));
+        assert!(rfc3339(at(1_000)) < rfc3339(at(2_000)));
+    }
+
+    #[test]
+    fn legacy_spellings_sort_at_or_before_same_instant() {
+        let no_fraction = "2026-01-01T00:00:00+00:00";
+        let short_fraction = "2026-01-01T00:00:00.123+00:00";
+        let micros = "2026-01-01T00:00:00.123000+00:00";
+        assert!(no_fraction < short_fraction);
+        assert!(short_fraction < micros);
+        assert_eq!(rfc3339(at(123_000_000)), micros);
+        let legacy_nanos = "2026-01-01T00:00:00.123456789+00:00";
+        assert!(rfc3339(at(123_456_789)).as_str() < legacy_nanos);
+        assert!(legacy_nanos < rfc3339(at(123_457_000)).as_str());
     }
 }

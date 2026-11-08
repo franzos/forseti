@@ -264,6 +264,8 @@ const PRIVILEGED_WINDOW: chrono::Duration = chrono::Duration::minutes(15);
 
 /// Privileged-session deadline as RFC3339: flow `issued_at` plus
 /// [`PRIVILEGED_WINDOW`]. `None` when `issued_at` is unparseable.
+// Display only; DB timestamps go through crate::db::rfc3339.
+#[allow(clippy::disallowed_methods)]
 fn privileged_deadline_rfc3339(flow: &serde_json::Value) -> Option<String> {
     let issued = flow.get("issued_at").and_then(|v| v.as_str())?;
     let parsed = chrono::DateTime::parse_from_rfc3339(issued).ok()?;

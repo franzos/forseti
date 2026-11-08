@@ -62,7 +62,7 @@ struct RevealRow {
 }
 
 fn prune_cutoff(ttl_seconds: u64) -> String {
-    (Utc::now() - chrono::Duration::seconds(ttl_seconds as i64)).to_rfc3339()
+    crate::db::rfc3339(Utc::now() - chrono::Duration::seconds(ttl_seconds as i64))
 }
 
 /// Store a reveal payload and return an opaque token to embed in the redirect URL (treat like a session id).
@@ -80,7 +80,7 @@ pub async fn store_secret_reveal(
     let row = NewReveal {
         token: token_hash(&token),
         payload,
-        created_at: Utc::now().to_rfc3339(),
+        created_at: crate::db::now_rfc3339(),
     };
     let prune = prune_cutoff(reveal_ttl_seconds);
     let result: anyhow::Result<()> = async {

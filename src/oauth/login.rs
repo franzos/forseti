@@ -225,6 +225,8 @@ pub(crate) async fn oauth_login(
                 .await;
             }
             ReauthDecision::Reauthenticate => {
+                // Cookie payload, not a DB timestamp; parsed back by reauth::parse_rfc3339.
+                #[allow(clippy::disallowed_methods)]
                 let payload = serde_json::to_vec(&ReauthMark {
                     c: challenge.clone(),
                     t: auth_time.map(|t| t.to_rfc3339()).unwrap_or_default(),

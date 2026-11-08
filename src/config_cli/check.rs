@@ -4,6 +4,7 @@ use serde_json::Value;
 use toml_edit::DocumentMut;
 
 use crate::cli::{CheckArgs, PathArgs};
+use crate::config::{DatabaseConfig, WEBHOOK_TOKEN_MIN_LEN};
 
 use super::catalog;
 use super::init::is_dev_smtp;
@@ -1006,6 +1007,54 @@ pub(crate) fn check_forseti_placeholders(doc: &DocumentMut) -> Vec<Finding> {
     findings
 }
 
+/// Same rule as `WebhookTokens::validate`: FAIL on a production-shaped
+/// `[self].url`, WARN otherwise. Reports a count, never the entries.
+pub(crate) fn check_forseti_webhook_length(doc: &DocumentMut) -> Vec<Finding> {
+    let entries = webhook_token_entries(doc);
+    if entries.is_empty() {
+        return Vec::new();
+    }
+    let short = entries
+        .iter()
+        .filter(|t| t.len() < WEBHOOK_TOKEN_MIN_LEN)
+        .count();
+    let key = "audit.webhook_token.length";
+    if short == 0 {
+        return vec![Finding::ok(
+            key,
+            format!(
+                "<{} entries, all >= {WEBHOOK_TOKEN_MIN_LEN} bytes>",
+                entries.len()
+            ),
+        )];
+    }
+    let current = format!(
+        "<{short} of {} entries under {WEBHOOK_TOKEN_MIN_LEN} bytes>",
+        entries.len()
+    );
+    let recommended = "`config rotate webhook-token`, then `config prune webhook-token`";
+    let self_url = doc
+        .get("self")
+        .and_then(|s| s.get("url"))
+        .and_then(|u| u.as_str())
+        .unwrap_or("http://localhost");
+    if DatabaseConfig::looks_like_production(self_url) {
+        vec![Finding::fail(
+            key,
+            current,
+            recommended,
+            "Forseti refuses to boot on a production-shaped [self].url with a short webhook token.",
+        )]
+    } else {
+        vec![Finding::warn(
+            key,
+            current,
+            recommended,
+            "a short bearer guards audit writes and session revocation; boot refuses it on a production-shaped [self].url.",
+        )]
+    }
+}
+
 /// Walk every scalar in a TOML document, building dotted paths.
 fn walk_toml(item: &toml_edit::Item, path: &mut String, emit: &mut impl FnMut(&str, &str)) {
     match item {
@@ -1199,6 +1248,7 @@ pub(crate) fn check(args: &CheckArgs) -> i32 {
                     if let Some(doc) = &forseti_doc {
                         findings.extend(check_forseti_crosslink(&root, doc));
                         findings.extend(check_forseti_placeholders(doc));
+                        findings.extend(check_forseti_webhook_length(doc));
                     }
                 }
                 for f in &findings {
@@ -1497,6 +1547,65 @@ webhook_token = "0f3b8c1d9a2e4f7b6c5d8e9a0b1c2d3e"
             severity_of(&check_forseti_placeholders(&doc), "audit.webhook_token"),
             None,
             "a real secret produces no finding; the OK line belongs to the crosslink check"
+        );
+    }
+
+    fn webhook_length_doc(token: &str, self_url: Option<&str>) -> DocumentMut {
+        let self_section = self_url
+            .map(|u| format!("[self]\nurl = \"{u}\"\n\n"))
+            .unwrap_or_default();
+        format!("{self_section}[audit]\nwebhook_token = \"{token}\"\n")
+            .parse()
+            .expect("test toml parses")
+    }
+
+    #[test]
+    fn a_short_webhook_token_on_a_production_url_is_fail() {
+        let doc = webhook_length_doc("hook_s3cret", Some("https://forseti.example.com"));
+        let findings = check_forseti_webhook_length(&doc);
+        assert_eq!(
+            severity_of(&findings, "audit.webhook_token.length"),
+            Some(Severity::Fail)
+        );
+        assert!(
+            findings.iter().all(|f| !f.current.contains("hook_s3cret")),
+            "token leaked"
+        );
+    }
+
+    #[test]
+    fn a_short_webhook_token_on_localhost_is_warn() {
+        let doc = webhook_length_doc("hook_s3cret", Some("http://localhost"));
+        assert_eq!(
+            severity_of(
+                &check_forseti_webhook_length(&doc),
+                "audit.webhook_token.length"
+            ),
+            Some(Severity::Warn)
+        );
+        let doc = webhook_length_doc("hook_s3cret", None);
+        assert_eq!(
+            severity_of(
+                &check_forseti_webhook_length(&doc),
+                "audit.webhook_token.length"
+            ),
+            Some(Severity::Warn),
+            "a missing [self].url is not production-shaped"
+        );
+    }
+
+    #[test]
+    fn a_32_byte_webhook_token_passes_the_length_check() {
+        let doc = webhook_length_doc(
+            "0f3b8c1d9a2e4f7b6c5d8e9a0b1c2d3e",
+            Some("https://forseti.example.com"),
+        );
+        assert_eq!(
+            severity_of(
+                &check_forseti_webhook_length(&doc),
+                "audit.webhook_token.length"
+            ),
+            Some(Severity::Ok)
         );
     }
 

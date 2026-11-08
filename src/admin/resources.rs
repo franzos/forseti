@@ -130,6 +130,8 @@ pub async fn list(
             }
         };
 
+    // Display only; DB timestamps go through crate::db::rfc3339.
+    #[allow(clippy::disallowed_methods)]
     let rows = rows
         .into_iter()
         .map(|r| {

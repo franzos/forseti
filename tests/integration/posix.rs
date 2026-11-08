@@ -2220,7 +2220,7 @@ async fn offline_verifiers_force_mfa_host_is_empty() {
 }
 
 /// `/posix/v1/offline_audit` ingest: a batch of queued offline-auth events
-/// lands as audit rows; an oversized batch is rejected with 413.
+/// lands as audit rows; an oversized batch or body is rejected with 413.
 #[tokio::test]
 async fn offline_audit_ingest_writes_rows_and_caps_batch() {
     if !portal_reachable().await {
@@ -2280,6 +2280,24 @@ async fn offline_audit_ingest_writes_rows_and_caps_batch() {
         res.status(),
         StatusCode::PAYLOAD_TOO_LARGE,
         "an oversized batch must be rejected with 413"
+    );
+
+    // A body over the 256 KiB cap is rejected before parsing.
+    let res = client
+        .post(format!("{INTERNAL}/posix/v1/offline_audit"))
+        .basic_auth(&host_id, Some(secret))
+        .json(&serde_json::json!({
+            "events": [
+                { "username": username, "result": "failure", "reason": "r".repeat(300 * 1024) }
+            ]
+        }))
+        .send()
+        .await
+        .expect("POST offline_audit (oversized body)");
+    assert_eq!(
+        res.status(),
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "a body over the limit must be rejected with 413"
     );
 
     delete_host_enrollment(&host_id);

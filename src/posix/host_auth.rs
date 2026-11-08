@@ -86,7 +86,8 @@ where
             .map(|seen| (now - seen.with_timezone(&Utc)).num_seconds() > 60)
             .unwrap_or(true);
         if stale
-            && let Err(e) = db::touch_last_seen(&app_state.db, &host_id, &now.to_rfc3339()).await
+            && let Err(e) =
+                db::touch_last_seen(&app_state.db, &host_id, &crate::db::rfc3339(now)).await
         {
             tracing::warn!(error = ?e, host_id, "posix host auth: last_seen touch failed");
         }

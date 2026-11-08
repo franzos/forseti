@@ -4,7 +4,7 @@ use std::path::Path;
 
 pub const DEFAULT_CONFIG_PATH: &str = "/etc/forseti/unixd.toml";
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub server_url: String,
@@ -48,6 +48,26 @@ impl Default for Config {
             offline_poll_secs: 300,
             offline_max_lifetime_secs: 604_800,
         }
+    }
+}
+
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("server_url", &self.server_url)
+            .field("host_id", &self.host_id)
+            .field("host_secret", &"[redacted]")
+            .field("socket_path", &self.socket_path)
+            .field("cache_db", &self.cache_db)
+            .field("cache_ttl_secs", &self.cache_ttl_secs)
+            .field("request_timeout_secs", &self.request_timeout_secs)
+            .field("device_timeout_secs", &self.device_timeout_secs)
+            .field("device_session_cap_secs", &self.device_session_cap_secs)
+            .field("credentials_db", &self.credentials_db)
+            .field("offline_lockout_max", &self.offline_lockout_max)
+            .field("offline_poll_secs", &self.offline_poll_secs)
+            .field("offline_max_lifetime_secs", &self.offline_max_lifetime_secs)
+            .finish()
     }
 }
 
@@ -129,5 +149,21 @@ mod tests {
         assert_eq!(c.offline_lockout_max, 5);
         assert_eq!(c.offline_poll_secs, 300);
         assert_eq!(c.offline_max_lifetime_secs, 604_800);
+    }
+
+    #[test]
+    fn debug_redacts_host_secret() {
+        let c = Config::parse_str(
+            r#"
+            server_url = "https://id.example.com"
+            host_id = "h"
+            host_secret = "s3cr3t"
+        "#,
+        )
+        .unwrap();
+        let out = format!("{c:?}");
+        assert!(out.contains("[redacted]"));
+        assert!(out.contains("server_url"));
+        assert!(!out.contains("s3cr3t"));
     }
 }

@@ -497,9 +497,11 @@ pub struct AddKeyForm {
     comment: String,
 }
 
-/// Accepted OpenSSH public-key prefixes. A cheap shape check so an obvious
-/// paste error (private key, URL, base64 blob) doesn't land in authorized_keys.
+/// Cheap shape check for a single OpenSSH public-key line: a known key type, a
+/// base64 blob, and an optional comment, so an obvious paste error (private
+/// key, URL, several lines) doesn't land in authorized_keys.
 fn looks_like_ssh_key(s: &str) -> bool {
+    const MAX_SSH_KEY_LINE: usize = 8 * 1024;
     const PREFIXES: &[&str] = &[
         "ssh-ed25519",
         "ssh-rsa",
@@ -508,7 +510,18 @@ fn looks_like_ssh_key(s: &str) -> bool {
         "sk-ssh-ed25519@openssh.com",
         "sk-ecdsa-sha2-nistp256@openssh.com",
     ];
-    PREFIXES.iter().any(|p| s.starts_with(p))
+    if s.len() > MAX_SSH_KEY_LINE || s.chars().any(char::is_control) {
+        return false;
+    }
+    let mut fields = s.splitn(3, ' ');
+    let key_type = fields.next().unwrap_or_default();
+    let blob = fields.next().unwrap_or_default();
+    !key_type.is_empty()
+        && !blob.is_empty()
+        && PREFIXES.iter().any(|p| key_type.starts_with(p))
+        && blob
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '='))
 }
 
 pub async fn add_key(
@@ -719,13 +732,34 @@ mod tests {
 
     #[test]
     fn ssh_key_shape_check() {
-        assert!(looks_like_ssh_key("ssh-ed25519 AAAA... user@host"));
-        assert!(looks_like_ssh_key("ssh-rsa AAAA..."));
-        assert!(looks_like_ssh_key("ecdsa-sha2-nistp256 AAAA..."));
-        assert!(looks_like_ssh_key("sk-ssh-ed25519@openssh.com AAAA..."));
+        const ED: &str =
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGd8kQ2fZ3b+Vx/1yQm9Tn0rLw4Ue7sPcJhXaKbO5iRt";
+        assert!(looks_like_ssh_key(&format!("{ED} user@host")));
+        assert!(looks_like_ssh_key(ED));
+        assert!(looks_like_ssh_key(&format!("{ED} Alice laptop 2026")));
+        assert!(looks_like_ssh_key(
+            "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC7xq=="
+        ));
+        assert!(looks_like_ssh_key(
+            "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTY="
+        ));
+        assert!(looks_like_ssh_key(
+            "sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29t"
+        ));
         assert!(!looks_like_ssh_key("-----BEGIN OPENSSH PRIVATE KEY-----"));
         assert!(!looks_like_ssh_key("not a key"));
         assert!(!looks_like_ssh_key(""));
+        assert!(!looks_like_ssh_key("ssh-ed25519"));
+        assert!(!looks_like_ssh_key(&format!("{ED} a\n{ED} b")));
+        assert!(!looks_like_ssh_key(&format!("{ED} a\rb")));
+        assert!(!looks_like_ssh_key("ssh-ed25519\tAAAAC3NzaC1lZDI1NTE5"));
+        assert!(!looks_like_ssh_key("ssh-ed25519  AAAAC3NzaC1lZDI1NTE5"));
+        assert!(!looks_like_ssh_key(" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5"));
+        assert!(!looks_like_ssh_key("ssh-ed25519 AAAA... user@host"));
+        assert!(!looks_like_ssh_key(&format!(
+            "ssh-ed25519 {}",
+            "A".repeat(9 * 1024)
+        )));
     }
 
     #[test]

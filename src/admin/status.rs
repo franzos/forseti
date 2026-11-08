@@ -151,6 +151,8 @@ pub async fn show(State(state): State<AppState>, admin: RequireAdmin) -> Respons
         }
     };
 
+    // Display only; DB timestamps go through crate::db::rfc3339.
+    #[allow(clippy::disallowed_methods)]
     let last_kratos_webhook_full = crate::audit::last_kratos_webhook_epoch().map(|secs| {
         chrono::DateTime::<chrono::Utc>::from_timestamp(secs as i64, 0)
             .map(|ts| ts.to_rfc3339())

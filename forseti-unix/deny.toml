@@ -1,0 +1,5 @@
+# cargo-deny config for forseti-unix/Cargo.lock; CI runs `cargo deny check advisories` against it.
+[advisories]
+version = 2
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "warn"

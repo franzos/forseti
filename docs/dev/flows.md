@@ -2481,10 +2481,12 @@ sequenceDiagram
 
 ### Daemon-facing endpoints
 
-Router at `src/posix/device.rs:115` (`/posix/v1/device/init`, `/posix/v1/device/poll`),
+Router in `src/posix/device.rs` (`/posix/v1/device/init`, `/posix/v1/device/poll`),
 both gated by `RequirePosixHost` and mounted on the internal listener.
-`device/init` carries its own per-IP rate bucket (60/min); the real backoff
-is Forseti owning the `interval` it returns.
+`device/init` and `device/poll` each carry their own per-IP rate bucket
+(60/min); a daemon polls about 12/min, so more than about five hosts behind
+one NAT exhaust the poll bucket. The real backoff is Forseti owning the
+`interval` it returns.
 
 - **`device_init`** (`src/posix/device.rs:133`) — resolves the named account,
   requires it `enabled` AND visible on the host (`scope::account_visible_on_host`);

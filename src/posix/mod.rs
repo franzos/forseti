@@ -50,7 +50,7 @@ const RECONCILE_BATCH: usize = 100;
 /// and the id is absent: a "don't know" (Kratos outage) must never purge a
 /// live user's account. Returns the number of accounts removed.
 pub async fn reconcile_orphans(db: &DbPool, ory: &Arc<OryClients>) -> anyhow::Result<usize> {
-    match db::lazy_prune_expired(db, &chrono::Utc::now().to_rfc3339()).await {
+    match db::lazy_prune_expired(db, &crate::db::now_rfc3339()).await {
         Ok(n) if n > 0 => tracing::info!(
             pruned = n,
             "posix reconcile: removed expired device sessions"

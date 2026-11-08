@@ -54,12 +54,14 @@ unsafe fn zeroize_cstr(s: *const c_char) {
 /// are relayed to the user by the PAM client (sshd/login); responses come back.
 #[repr(C)]
 pub struct PamConv {
-    conv: extern "C" fn(
-        num_msg: c_int,
-        pam_message: &&PamMessage,
-        pam_response: &mut *const PamResponse,
-        appdata_ptr: *const AppDataPtr,
-    ) -> PamResultCode,
+    conv: Option<
+        extern "C" fn(
+            num_msg: c_int,
+            pam_message: &&PamMessage,
+            pam_response: &mut *const PamResponse,
+            appdata_ptr: *const AppDataPtr,
+        ) -> PamResultCode,
+    >,
     appdata_ptr: *const AppDataPtr,
 }
 
@@ -68,6 +70,9 @@ impl PamConv {
     /// reply is returned (`Some`); info/error styles return `None`. A failed
     /// conversation yields the client's `PamResultCode` as `Err`.
     pub fn send(&self, style: PamMessageStyle, msg: &str) -> PamResult<Option<String>> {
+        let Some(conv) = self.conv else {
+            return Err(PamResultCode::PAM_CONV_ERR);
+        };
         let mut resp_ptr: *const PamResponse = ptr::null();
         let msg_cstr = CString::new(msg).map_err(|_| PamResultCode::PAM_CONV_ERR)?;
         let msg = PamMessage {
@@ -75,7 +80,7 @@ impl PamConv {
             msg: msg_cstr.as_ptr(),
         };
 
-        let ret = (self.conv)(NUM_MSG, &&msg, &mut resp_ptr, self.appdata_ptr);
+        let ret = conv(NUM_MSG, &&msg, &mut resp_ptr, self.appdata_ptr);
 
         // On failure the client allocated nothing we may free (pam_conv(3)).
         if PamResultCode::PAM_SUCCESS != ret {
@@ -117,5 +122,42 @@ impl PamConv {
 impl PamItem for PamConv {
     fn item_type() -> PamItemType {
         PAM_CONV
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pam::constants::PAM_TEXT_INFO;
+
+    extern "C" fn info_conv(
+        _num_msg: c_int,
+        _pam_message: &&PamMessage,
+        pam_response: &mut *const PamResponse,
+        _appdata_ptr: *const AppDataPtr,
+    ) -> PamResultCode {
+        *pam_response = ptr::null();
+        PamResultCode::PAM_SUCCESS
+    }
+
+    #[test]
+    fn send_returns_conv_err_when_conv_is_null() {
+        let conv = PamConv {
+            conv: None,
+            appdata_ptr: ptr::null(),
+        };
+        assert_eq!(
+            conv.send(PAM_TEXT_INFO, "hello"),
+            Err(PamResultCode::PAM_CONV_ERR)
+        );
+    }
+
+    #[test]
+    fn send_with_info_style_returns_none() {
+        let conv = PamConv {
+            conv: Some(info_conv),
+            appdata_ptr: ptr::null(),
+        };
+        assert_eq!(conv.send(PAM_TEXT_INFO, "hello"), Ok(None));
     }
 }
