@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.2.26] - 2026-11-10
+
+### Added
+- Self-service resource claims: users link an upstream OIDC account to set a claim
+- Admin claims page configures the upstream issuer, client and value template
+- Settings page to link, replace and remove resource claim values
+
+### Changed
+- A self-service claim may be listed on only one resource
+
 ## [0.2.25] - 2026-11-08
 
 ### Changed
