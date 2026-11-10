@@ -13,4 +13,9 @@ ignore = [
   # not in the shipped binary and parses no untrusted input. Drops when
   # askama releases a version that moves off it.
   "RUSTSEC-2026-0374",
+  # Bundled SQLite before 3.54.0 leaks page-cache memory on a crafted
+  # db/-wal pair. Forseti opens only its own 0600 database; writing it is
+  # already full compromise. diesel 2.3.14 caps libsqlite3-sys below the
+  # fixed 0.39. Drops when diesel allows 0.39.
+  "RUSTSEC-2026-0459",
 ]
