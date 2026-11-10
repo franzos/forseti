@@ -17,6 +17,16 @@ type HmacSha256 = Hmac<Sha256>;
 /// How far ahead of our clock a minted timestamp may sit and still verify.
 const MAX_FUTURE_SKEW_SECS: u64 = 60;
 
+/// A 32-byte subkey of the operator secret for one purpose, named by `label`.
+// The label is HKDF `info` (domain separation), not the salt input: the operator secret is the only entropy source.
+pub(crate) fn derive_subkey(secret: &[u8], label: &[u8]) -> [u8; 32] {
+    let mut key = [0u8; 32];
+    Hkdf::<Sha256>::new(None, secret)
+        .expand(label, &mut key)
+        .expect("HKDF expand of 32 bytes is within OKM length bound");
+    key
+}
+
 /// Per-cookie shape (name, key salt, TTL, `Secure`); reuse one for encode + decode so the paths can't drift.
 pub struct SignedCookie<'a> {
     pub name: &'a str,
@@ -27,13 +37,8 @@ pub struct SignedCookie<'a> {
 }
 
 impl<'a> SignedCookie<'a> {
-    // Per-cookie salt is HKDF `info` (cookie-type domain separation), not the salt input: the operator secret is the only entropy source.
     fn derive_key(&self, secret: &[u8]) -> [u8; 32] {
-        let mut key = [0u8; 32];
-        Hkdf::<Sha256>::new(None, secret)
-            .expand(self.salt, &mut key)
-            .expect("HKDF expand of 32 bytes is within OKM length bound");
-        key
+        derive_subkey(secret, self.salt)
     }
 
     /// The MAC input: the wire value, prefixed with the cookie's own name and

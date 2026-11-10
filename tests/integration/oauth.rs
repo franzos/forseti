@@ -1137,7 +1137,7 @@ async fn an_approved_registry_resource_is_registered_for_the_refresh_grant() {
 }
 
 /// Run one confidential auth-code flow for `resource` and return the tokens.
-async fn registry_claims_flow(
+pub(crate) async fn registry_claims_flow(
     user: &RegisteredUser,
     resource: &str,
 ) -> (serde_json::Value, String, String) {

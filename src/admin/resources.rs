@@ -13,7 +13,6 @@
 //! document's `resource` + `authorization_servers` against the row and the
 //! configured issuer. A badge, never a gate.
 
-use std::net::IpAddr;
 use std::time::Duration;
 
 use axum::extract::{Path, State};
@@ -32,7 +31,7 @@ use crate::format::humanise_timestamp;
 use crate::orgs::AdminScope;
 use crate::page_chrome::PageChrome;
 use crate::render::render;
-use crate::resource_registry::{self, NewResource, corroboration};
+use crate::resource_registry::{self, ClaimConflict, NewResource, SelfService, corroboration};
 use crate::state::AppState;
 
 const CORROBORATION_TIMEOUT: Duration = Duration::from_secs(5);
@@ -54,6 +53,8 @@ struct ResourceRow {
     can_recheck: bool,
     /// Space-separated `metadata_admin` keys copied into the access token.
     access_token_claims: String,
+    /// Empty when self-service is off.
+    self_service_claim: String,
     /// Empty for org-scoped admins, who can't edit claims.
     claims_url: String,
     toggle_url: String,
@@ -151,6 +152,7 @@ pub async fn list(
                     AdminScope::Org { .. } => String::new(),
                 },
                 access_token_claims: r.access_token_claims.clone(),
+                self_service_claim: r.self_service_claim.clone(),
                 toggle_url: with_org(&format!("/admin/resources/{}/toggle", r.id), &scope),
                 recheck_url: with_org(&format!("/admin/resources/{}/recheck", r.id), &scope),
                 delete_url: with_org(&format!("/admin/resources/{}/delete", r.id), &scope),
@@ -388,13 +390,22 @@ pub async fn create(
 
     if !claims.is_empty() {
         let set = match resource_registry::find_by_resource(&state.db, &stored).await {
-            Ok(Some(row)) => {
-                resource_registry::set_access_token_claims(&state.db, row.id, &claims).await
-            }
-            Ok(None) => Err(anyhow::anyhow!("row missing right after insert")),
-            Err(e) => Err(e),
+            Ok(Some(row)) => resource_registry::set_access_token_claims(&state.db, row.id, &claims)
+                .await
+                .map_err(|e| (Some(row.id), e)),
+            Ok(None) => Err((None, anyhow::anyhow!("row missing right after insert"))),
+            Err(e) => Err((None, e)),
         };
-        if let Err(e) = set {
+        if let Err((id, e)) = set {
+            if let (Some(id), Some(conflict)) = (id, e.downcast_ref::<ClaimConflict>()) {
+                let msg = conflict.to_string();
+                match resource_registry::delete(&state.db, id).await {
+                    Ok(()) => rerender!(msg),
+                    Err(e) => {
+                        tracing::error!(error = ?e, resource = %stored, "admin/resources: removing row after claim conflict failed");
+                    }
+                }
+            }
             tracing::error!(error = ?e, resource = %stored, "admin/resources: storing access-token claims failed");
             return render_admin_error(
                 &state,
@@ -521,8 +532,84 @@ struct ResourceClaimsTemplate {
     resource: String,
     display_name: String,
     access_token_claims: String,
+    self_service: SelfServiceFields,
     form_action: String,
     cancel_url: String,
+}
+
+/// The self-service inputs as entered (trimmed), for validation and echo.
+#[derive(Debug, Default)]
+struct SelfServiceFields {
+    claim: String,
+    issuer: String,
+    client_id: String,
+    template: String,
+}
+
+impl SelfServiceFields {
+    fn from_row(row: &resource_registry::Row) -> Self {
+        Self {
+            claim: row.self_service_claim.clone(),
+            issuer: row.self_service_issuer.clone(),
+            client_id: row.self_service_client_id.clone(),
+            template: row.self_service_template.clone(),
+        }
+    }
+
+    fn from_form(form: &ClaimsForm) -> Self {
+        Self {
+            claim: form.self_service_claim.trim().to_string(),
+            issuer: form.self_service_issuer.trim().to_string(),
+            client_id: form.self_service_client_id.trim().to_string(),
+            template: form.self_service_template.trim().to_string(),
+        }
+    }
+}
+
+/// All four fields empty turns self-service off; otherwise every field must
+/// be valid. The issuer is kept as entered: discovery compares it verbatim to
+/// the document's `issuer`.
+fn validate_self_service(
+    claims: &[String],
+    fields: &SelfServiceFields,
+    allow_private: bool,
+) -> Result<Option<SelfService>, String> {
+    let SelfServiceFields {
+        claim,
+        issuer,
+        client_id,
+        template,
+    } = fields;
+    if claim.is_empty() && issuer.is_empty() && client_id.is_empty() && template.is_empty() {
+        return Ok(None);
+    }
+    if !claims.iter().any(|c| c == claim) {
+        return Err("The self-service claim must be one of the access-token claims.".to_string());
+    }
+    if issuer.len() > 2048 {
+        return Err("Issuer URL must be at most 2048 characters.".to_string());
+    }
+    let url = Url::parse(issuer).map_err(|_| "Issuer URL is not a valid URL.".to_string())?;
+    crate::outbound::check_target(&url, allow_private).map_err(|e| format!("Issuer URL {e}."))?;
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err("Issuer URL must not have a query or fragment.".to_string());
+    }
+    if client_id.is_empty()
+        || client_id.len() > 255
+        || !client_id.chars().all(|c| c.is_ascii_graphic())
+    {
+        return Err(
+            "Client ID is required, at most 255 characters, printable ASCII without spaces."
+                .to_string(),
+        );
+    }
+    crate::claim_template::Template::parse(template).map_err(|e| format!("Value {e}."))?;
+    Ok(Some(SelfService {
+        claim: claim.clone(),
+        issuer: issuer.clone(),
+        client_id: client_id.clone(),
+        template: template.clone(),
+    }))
 }
 
 /// Claims are Forseti-admin only, so an org-scoped admin gets the same
@@ -547,6 +634,7 @@ fn render_claims_page(
     csrf: &Csrf,
     row: &resource_registry::Row,
     access_token_claims: &str,
+    self_service: SelfServiceFields,
     error_message: String,
 ) -> Response {
     render(&ResourceClaimsTemplate {
@@ -556,6 +644,7 @@ fn render_claims_page(
         resource: row.resource.clone(),
         display_name: row.display_name.clone(),
         access_token_claims: access_token_claims.to_string(),
+        self_service,
         form_action: format!("/admin/resources/{}/claims", row.id),
         cancel_url: "/admin/resources".to_string(),
     })
@@ -572,13 +661,28 @@ pub async fn claims_edit(
         Ok(r) => r,
         Err(resp) => return resp,
     };
-    render_claims_page(&ctx, &csrf, &row, &row.access_token_claims, String::new())
+    render_claims_page(
+        &ctx,
+        &csrf,
+        &row,
+        &row.access_token_claims,
+        SelfServiceFields::from_row(&row),
+        String::new(),
+    )
 }
 
 #[derive(Debug, Deserialize)]
 pub struct ClaimsForm {
     #[serde(default)]
     access_token_claims: String,
+    #[serde(default)]
+    self_service_claim: String,
+    #[serde(default)]
+    self_service_issuer: String,
+    #[serde(default)]
+    self_service_client_id: String,
+    #[serde(default)]
+    self_service_template: String,
 }
 
 pub async fn claims_update(
@@ -594,14 +698,32 @@ pub async fn claims_update(
         Ok(r) => r,
         Err(resp) => return resp,
     };
-    let claims = match resource_registry::parse_access_token_claims(&form.access_token_claims) {
-        Ok(c) => c,
-        Err(msg) => {
-            return render_claims_page(&ctx, &csrf, &row, form.access_token_claims.trim(), msg);
-        }
+    let fields = SelfServiceFields::from_form(&form);
+    let raw_claims = form.access_token_claims.trim();
+    let rerender = |fields: SelfServiceFields, msg: String| {
+        render_claims_page(&ctx, &csrf, &row, raw_claims, fields, msg)
     };
-    if let Err(e) = resource_registry::set_access_token_claims(&state.db, id, &claims).await {
-        tracing::error!(error = ?e, id, "admin/resources: set_access_token_claims failed");
+    let claims = match resource_registry::parse_access_token_claims(raw_claims) {
+        Ok(c) => c,
+        Err(msg) => return rerender(fields, msg),
+    };
+    let allow_private = state.cfg.oauth.cimd.allow_private_targets;
+    let self_service = match validate_self_service(&claims, &fields, allow_private) {
+        Ok(s) => s,
+        Err(msg) => return rerender(fields, msg),
+    };
+    if let Err(e) = resource_registry::set_claims_and_self_service(
+        &state.db,
+        id,
+        &claims,
+        self_service.as_ref(),
+    )
+    .await
+    {
+        if let Some(conflict) = e.downcast_ref::<ClaimConflict>() {
+            return rerender(fields, conflict.to_string());
+        }
+        tracing::error!(error = ?e, id, "admin/resources: set_claims_and_self_service failed");
         return render_admin_error(
             &state,
             "Update failed",
@@ -612,10 +734,18 @@ pub async fn claims_update(
     let _ = audit::log(
         &state.db,
         ctx.audit_event(action::ADMIN_RESOURCE_CLAIMS_UPDATED, &actx)
-            .target(target_kind::RESOURCE, row.resource)
+            .target(target_kind::RESOURCE, row.resource.clone())
             .metadata(audit_metadata!(
-                "previous" => row.access_token_claims,
+                "previous" => row.access_token_claims.as_str(),
                 "claims" => claims.join(" "),
+                "previous_self_service_claim" => row.self_service_claim.as_str(),
+                "previous_self_service_issuer" => row.self_service_issuer.as_str(),
+                "previous_self_service_client_id" => row.self_service_client_id.as_str(),
+                "previous_self_service_template" => row.self_service_template.as_str(),
+                "self_service_claim" => fields.claim,
+                "self_service_issuer" => fields.issuer,
+                "self_service_client_id" => fields.client_id,
+                "self_service_template" => fields.template,
             ))
             .critical(),
     )
@@ -798,32 +928,13 @@ struct ProtectedResourceMetadata {
     authorization_servers: Vec<String>,
 }
 
-/// SSRF-guarded GET of the metadata document: same composition as
-/// `oauth::cimd_fetch` (scheme policy, blocked-IP literals, then the shared
-/// guarded `outbound` client with no redirects, 5 s / 64 KiB caps).
+/// SSRF-guarded GET of the metadata document: `outbound::check_target`, then
+/// the shared guarded `outbound` client with no redirects, 5 s / 64 KiB caps.
 async fn fetch_metadata(
     url: &Url,
     allow_private: bool,
 ) -> Result<ProtectedResourceMetadata, String> {
-    match url.scheme() {
-        "https" => {}
-        "http" if allow_private => {}
-        _ => return Err("metadata URL must use https://".to_string()),
-    }
-    match url.host() {
-        None => return Err("metadata URL must include a host".to_string()),
-        Some(_) if allow_private => {}
-        Some(url::Host::Domain(d)) if d.eq_ignore_ascii_case("localhost") => {
-            return Err("metadata host must not be a loopback address".to_string());
-        }
-        Some(url::Host::Ipv4(v4)) if crate::webhook::is_blocked_ip(IpAddr::V4(v4)) => {
-            return Err("metadata host must not be a private or special-use IP".to_string());
-        }
-        Some(url::Host::Ipv6(v6)) if crate::webhook::is_blocked_ip(IpAddr::V6(v6)) => {
-            return Err("metadata host must not be a private or special-use IP".to_string());
-        }
-        Some(_) => {}
-    }
+    crate::outbound::check_target(url, allow_private).map_err(|e| format!("metadata URL {e}"))?;
 
     use crate::outbound::FetchError;
     let describe = |e: FetchError| match e {
@@ -901,6 +1012,97 @@ mod tests {
             "http://host.containers.internal:3000/hydra"
         ));
         assert!(!issuer_listed(&servers, "https://other.issuer"));
+    }
+
+    fn fields(claim: &str, issuer: &str, client_id: &str, template: &str) -> SelfServiceFields {
+        SelfServiceFields {
+            claim: claim.to_string(),
+            issuer: issuer.to_string(),
+            client_id: client_id.to_string(),
+            template: template.to_string(),
+        }
+    }
+
+    #[test]
+    fn validate_self_service_off_and_valid() {
+        let claims = vec!["forgejo_aud".to_string(), "team".to_string()];
+        assert_eq!(
+            validate_self_service(&claims, &SelfServiceFields::default(), false),
+            Ok(None)
+        );
+        let ok = fields(
+            "forgejo_aud",
+            "https://git.example.com/",
+            "abc-123",
+            "u:{sub}:{uuid}",
+        );
+        assert_eq!(
+            validate_self_service(&claims, &ok, false),
+            Ok(Some(SelfService {
+                claim: "forgejo_aud".to_string(),
+                issuer: "https://git.example.com/".to_string(),
+                client_id: "abc-123".to_string(),
+                template: "u:{sub}:{uuid}".to_string(),
+            }))
+        );
+        let http = fields("forgejo_aud", "http://127.0.0.1:8092/default", "c", "{sub}");
+        assert!(validate_self_service(&claims, &http, true).is_ok());
+    }
+
+    #[test]
+    fn validate_self_service_refusals() {
+        let claims = vec!["forgejo_aud".to_string()];
+        let cases = [
+            (
+                fields("", "https://git.example.com/", "c", "{sub}"),
+                "one of the access-token claims",
+            ),
+            (
+                fields("other", "https://git.example.com/", "c", "{sub}"),
+                "one of the access-token claims",
+            ),
+            (
+                fields("forgejo_aud", "git.example.com", "c", "{sub}"),
+                "not a valid URL",
+            ),
+            (
+                fields("forgejo_aud", "http://git.example.com/", "c", "{sub}"),
+                "must use https://",
+            ),
+            (
+                fields("forgejo_aud", "https://127.0.0.1/", "c", "{sub}"),
+                "private or special-use",
+            ),
+            (
+                fields("forgejo_aud", "https://git.example.com/?a=b", "c", "{sub}"),
+                "query or fragment",
+            ),
+            (
+                fields("forgejo_aud", "https://git.example.com/#x", "c", "{sub}"),
+                "query or fragment",
+            ),
+            (
+                fields("forgejo_aud", "https://git.example.com/", "", "{sub}"),
+                "Client ID",
+            ),
+            (
+                fields("forgejo_aud", "https://git.example.com/", "a b", "{sub}"),
+                "Client ID",
+            ),
+            (
+                fields("forgejo_aud", "https://git.example.com/", "c", ""),
+                "must contain {sub}",
+            ),
+            (
+                fields("forgejo_aud", "https://git.example.com/", "c", "u|{sub}"),
+                "template literals",
+            ),
+        ];
+        for (input, want) in cases {
+            let err = validate_self_service(&claims, &input, false)
+                .expect_err(&format!("{input:?} must be refused"));
+            assert!(err.contains(want), "{input:?}: {err}");
+        }
     }
 
     #[test]

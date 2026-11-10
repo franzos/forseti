@@ -627,6 +627,96 @@ pub async fn admin_update_identity_state(
         .map_err(|e| anyhow::anyhow!("kratos admin update_identity (state) failed: {e}"))
 }
 
+/// JSON Patch (RFC 6902) that sets (`Some`) or removes (`None`) one key of
+/// `metadata_admin` and leaves every other key alone. `current` is the
+/// identity's `metadata_admin` as last read; removing an absent key yields no
+/// ops.
+pub(crate) fn metadata_admin_patch(
+    current: Option<&serde_json::Value>,
+    key: &str,
+    value: Option<&str>,
+) -> std::result::Result<Vec<ory_client::models::JsonPatch>, &'static str> {
+    use ory_client::models::{JsonPatch, json_patch::OpEnum};
+    let object = match current {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::Object(map)) => Some(map),
+        Some(_) => return Err("metadata_admin is not an object"),
+    };
+    let key_path = format!(
+        "/metadata_admin/{}",
+        key.replace('~', "~0").replace('/', "~1")
+    );
+    let op = match (object, value) {
+        (None, Some(v)) => JsonPatch {
+            from: None,
+            op: OpEnum::Add,
+            path: "/metadata_admin".to_string(),
+            value: Some(Some(serde_json::json!({ key: v }))),
+        },
+        (Some(_), Some(v)) => JsonPatch {
+            from: None,
+            op: OpEnum::Add,
+            path: key_path,
+            value: Some(Some(serde_json::Value::String(v.to_string()))),
+        },
+        (Some(map), None) if map.contains_key(key) => JsonPatch::new(OpEnum::Remove, key_path),
+        (_, None) => return Ok(Vec::new()),
+    };
+    Ok(vec![op])
+}
+
+/// True when `metadata_admin` carries a non-null `key`, the same rule consent
+/// applies when copying claims.
+pub(crate) fn metadata_admin_has_key(identity: &Identity, key: &str) -> bool {
+    identity
+        .metadata_admin
+        .as_ref()
+        .and_then(|m| m.as_ref())
+        .and_then(|m| m.get(key))
+        .is_some_and(|v| !v.is_null())
+}
+
+async fn patch_metadata_admin_key(
+    clients: &OryClients,
+    id: &str,
+    key: &str,
+    value: Option<&str>,
+) -> Result<bool> {
+    let identity = admin_get_identity(clients, id).await?;
+    let was_set = metadata_admin_has_key(&identity, key);
+    let current = identity.metadata_admin.as_ref().and_then(|m| m.as_ref());
+    let patch = metadata_admin_patch(current, key, value).map_err(anyhow::Error::msg)?;
+    if !patch.is_empty() {
+        identity_api::patch_identity(&clients.kratos_admin, id, Some(patch))
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!("kratos admin patch_identity (metadata_admin) failed: {e}")
+            })?;
+    }
+    Ok(was_set)
+}
+
+/// Write `metadata_admin.<key>`, creating the object when it is null.
+pub async fn admin_set_metadata_admin_key(
+    clients: &OryClients,
+    id: &str,
+    key: &str,
+    value: &str,
+) -> Result<()> {
+    patch_metadata_admin_key(clients, id, key, Some(value))
+        .await
+        .map(|_| ())
+}
+
+/// Drop `metadata_admin.<key>`; returns whether it held a non-null value.
+pub async fn admin_remove_metadata_admin_key(
+    clients: &OryClients,
+    id: &str,
+    key: &str,
+) -> Result<bool> {
+    patch_metadata_admin_key(clients, id, key, None).await
+}
+
 /// Permanently delete an identity. Cascades to sessions and verifiable
 /// addresses on the Kratos side.
 pub async fn admin_delete_identity(clients: &OryClients, id: &str) -> Result<()> {
@@ -855,4 +945,106 @@ pub async fn fetch_logout_url(clients: &OryClients, cookie: &str) -> Result<Opti
         .get("logout_url")
         .and_then(|v| v.as_str())
         .map(str::to_string))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ory_client::models::json_patch::OpEnum;
+    use serde_json::json;
+
+    fn ops(
+        current: Option<serde_json::Value>,
+        key: &str,
+        value: Option<&str>,
+    ) -> Vec<serde_json::Value> {
+        metadata_admin_patch(current.as_ref(), key, value)
+            .expect("patch")
+            .iter()
+            .map(|op| serde_json::to_value(op).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn set_on_absent_or_null_adds_the_object() {
+        let want = vec![json!({"op": "add", "path": "/metadata_admin", "value": {"aud": "u:1:x"}})];
+        assert_eq!(ops(None, "aud", Some("u:1:x")), want);
+        assert_eq!(ops(Some(json!(null)), "aud", Some("u:1:x")), want);
+    }
+
+    #[test]
+    fn set_on_object_adds_only_the_key() {
+        let current = json!({"other": "keep", "aud": "old"});
+        assert_eq!(
+            ops(Some(current.clone()), "aud", Some("new")),
+            vec![json!({"op": "add", "path": "/metadata_admin/aud", "value": "new"})]
+        );
+        assert_eq!(
+            ops(Some(json!({})), "aud", Some("v")),
+            vec![json!({"op": "add", "path": "/metadata_admin/aud", "value": "v"})]
+        );
+    }
+
+    #[test]
+    fn non_object_is_refused() {
+        for current in [json!(["aud"]), json!("aud"), json!(1), json!(true)] {
+            assert!(metadata_admin_patch(Some(&current), "aud", Some("v")).is_err());
+            assert!(metadata_admin_patch(Some(&current), "aud", None).is_err());
+        }
+    }
+
+    #[test]
+    fn remove_present_key() {
+        let patch = metadata_admin_patch(Some(&json!({"aud": "v", "x": 1})), "aud", None).unwrap();
+        assert_eq!(patch.len(), 1);
+        assert_eq!(patch[0].op, OpEnum::Remove);
+        assert_eq!(patch[0].path, "/metadata_admin/aud");
+        assert_eq!(
+            serde_json::to_value(&patch[0]).unwrap(),
+            json!({"op": "remove", "path": "/metadata_admin/aud"})
+        );
+    }
+
+    #[test]
+    fn remove_absent_is_no_op() {
+        assert!(ops(None, "aud", None).is_empty());
+        assert!(ops(Some(json!(null)), "aud", None).is_empty());
+        assert!(ops(Some(json!({"other": 1})), "aud", None).is_empty());
+    }
+
+    #[test]
+    fn pointer_escapes_tilde_before_slash() {
+        let current = json!({"a/b~c": "v"});
+        assert_eq!(
+            ops(Some(current.clone()), "a/b~c", Some("w")),
+            vec![json!({"op": "add", "path": "/metadata_admin/a~1b~0c", "value": "w"})]
+        );
+        assert_eq!(
+            ops(Some(current), "a/b~c", None),
+            vec![json!({"op": "remove", "path": "/metadata_admin/a~1b~0c"})]
+        );
+        assert_eq!(
+            ops(Some(json!({})), "~1", Some("w"))[0]["path"],
+            "/metadata_admin/~01"
+        );
+    }
+
+    #[test]
+    fn set_on_null_keeps_the_raw_key() {
+        assert_eq!(ops(None, "a/b", Some("v"))[0]["value"], json!({"a/b": "v"}));
+    }
+
+    #[test]
+    fn has_key_ignores_null_and_absent() {
+        let mut identity = Identity::default();
+        assert!(!metadata_admin_has_key(&identity, "aud"));
+        identity.metadata_admin = Some(None);
+        assert!(!metadata_admin_has_key(&identity, "aud"));
+        identity.metadata_admin = Some(Some(json!({"aud": null})));
+        assert!(!metadata_admin_has_key(&identity, "aud"));
+        identity.metadata_admin = Some(Some(json!(["aud"])));
+        assert!(!metadata_admin_has_key(&identity, "aud"));
+        identity.metadata_admin = Some(Some(json!({"aud": "v"})));
+        assert!(metadata_admin_has_key(&identity, "aud"));
+    }
 }

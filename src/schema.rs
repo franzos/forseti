@@ -383,6 +383,10 @@ diesel::table! {
         created_by -> Nullable<Text>,
         created_at -> Timestamp,
         access_token_claims -> Text,
+        self_service_claim -> Text,
+        self_service_issuer -> Text,
+        self_service_client_id -> Text,
+        self_service_template -> Text,
     }
 }
 

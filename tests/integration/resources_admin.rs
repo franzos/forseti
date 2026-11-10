@@ -344,6 +344,10 @@ async fn org_admin_cannot_set_access_token_claims() {
         .form(&[
             ("_csrf", csrf.as_str()),
             ("access_token_claims", "forgejo_aud"),
+            ("self_service_claim", "forgejo_aud"),
+            ("self_service_issuer", "https://git.example.com/"),
+            ("self_service_client_id", "c"),
+            ("self_service_template", "{sub}"),
         ])
         .send()
         .await
@@ -353,6 +357,11 @@ async fn org_admin_cannot_set_access_token_claims() {
         read_registry_resource_claims(resource).expect("row").1,
         "",
         "row untouched"
+    );
+    assert_eq!(
+        read_registry_resource_self_service(resource).expect("row")[0],
+        "",
+        "self-service untouched"
     );
     delete_registry_resource(resource);
 
@@ -375,6 +384,346 @@ async fn org_admin_cannot_set_access_token_claims() {
     );
     assert!(
         read_registry_resource_claims(crafted).is_none(),
+        "no row written"
+    );
+}
+
+/// Deletes the listed `resource_registry` rows when dropped, so a failed
+/// assertion doesn't leave a self-service claim behind in the shared DB.
+struct RegistryRows(Vec<String>);
+
+impl Drop for RegistryRows {
+    fn drop(&mut self) {
+        for r in &self.0 {
+            delete_registry_resource(r);
+        }
+    }
+}
+
+fn unique_suffix() -> String {
+    uuid::Uuid::new_v4().simple().to_string()[..12].to_string()
+}
+
+async fn get_claims_editor(admin: &reqwest::Client, id: i64) -> (String, String) {
+    let body = admin
+        .get(format!("{PORTAL}/admin/resources/{id}/claims"))
+        .send()
+        .await
+        .expect("GET claims editor")
+        .text()
+        .await
+        .expect("editor body");
+    let csrf = extract_form_csrf(&body).expect("csrf in editor");
+    (body, csrf)
+}
+
+async fn post_claims(
+    admin: &reqwest::Client,
+    id: i64,
+    csrf: &str,
+    claims: &str,
+    ss: [&str; 4],
+) -> reqwest::Response {
+    admin
+        .post(format!("{PORTAL}/admin/resources/{id}/claims"))
+        .form(&[
+            ("_csrf", csrf),
+            ("access_token_claims", claims),
+            ("self_service_claim", ss[0]),
+            ("self_service_issuer", ss[1]),
+            ("self_service_client_id", ss[2]),
+            ("self_service_template", ss[3]),
+        ])
+        .send()
+        .await
+        .expect("POST claims editor")
+}
+
+/// The conflict message, as rendered (Askama escapes the quotes).
+fn names_conflict(body: &str, claim: &str) -> bool {
+    body.contains(&format!(
+        "claim &#34;{claim}&#34; is already used by another resource"
+    ))
+}
+
+/// Self-service config set through the claims page reads back, prefills the
+/// editor, marks the list row and audits critically; an invalid field
+/// re-renders with every input echoed and the row unchanged; all four fields
+/// empty turns it off.
+#[tokio::test]
+async fn registry_ui_sets_self_service() {
+    assert!(portal_reachable().await);
+    let Some(admin) = try_admin_signed_in_client().await else {
+        eprintln!("FORSETI_ADMIN_TEST_* not set; skipping admin resources test");
+        return;
+    };
+
+    let sfx = unique_suffix();
+    let resource = format!("https://ui-self-service-{sfx}.mcp.test/mcp");
+    let claim = format!("ss_{sfx}");
+    let _rows = RegistryRows(vec![resource.clone()]);
+    seed_registry_resource(&resource);
+    let (id, _) = read_registry_resource_claims(&resource).expect("seeded row");
+
+    let (body, csrf) = get_claims_editor(&admin, id).await;
+    for field in [
+        "self_service_claim",
+        "self_service_issuer",
+        "self_service_client_id",
+        "self_service_template",
+    ] {
+        assert!(
+            body.contains(&format!(r#"name="{field}""#)),
+            "{field} field"
+        );
+    }
+
+    let claims = format!("{claim} team");
+    let issuer = "https://git.example.com/";
+    let res = post_claims(
+        &admin,
+        id,
+        &csrf,
+        &claims,
+        [&claim, issuer, " forseti-client ", "u:{sub}:{uuid}"],
+    )
+    .await;
+    assert!(
+        res.status().is_success(),
+        "update redirects; got {}",
+        res.status()
+    );
+    assert_eq!(
+        read_registry_resource_self_service(&resource).expect("row"),
+        [
+            claim.clone(),
+            issuer.to_string(),
+            "forseti-client".to_string(),
+            "u:{sub}:{uuid}".to_string(),
+        ]
+    );
+    assert_eq!(
+        read_registry_resource_claims(&resource).expect("row").1,
+        claims
+    );
+
+    let ev = latest_audit_event("admin.resource.claims_updated", &resource).expect("audit row");
+    assert_eq!(ev.severity, "critical");
+    assert_eq!(ev.metadata["claims"], claims.as_str());
+    assert_eq!(ev.metadata["self_service_claim"], claim.as_str());
+    assert_eq!(ev.metadata["self_service_issuer"], issuer);
+    assert_eq!(ev.metadata["self_service_client_id"], "forseti-client");
+    assert_eq!(ev.metadata["self_service_template"], "u:{sub}:{uuid}");
+
+    let (body, csrf) = get_claims_editor(&admin, id).await;
+    assert!(
+        body.contains(&format!(r#"value="{claim}""#)),
+        "claim prefilled"
+    );
+    assert!(
+        body.contains(r#"value="https://git.example.com/""#),
+        "issuer prefilled"
+    );
+    assert!(
+        body.contains(r#"value="forseti-client""#),
+        "client id prefilled"
+    );
+    assert!(
+        body.contains(r#"value="u:{sub}:{uuid}""#),
+        "template prefilled"
+    );
+
+    let list = admin
+        .get(format!("{PORTAL}/admin/resources"))
+        .send()
+        .await
+        .expect("GET /admin/resources")
+        .text()
+        .await
+        .expect("list body");
+    assert!(
+        list.contains(&format!(r#"title="{claim}">Self-service</span>"#)),
+        "list marks the self-service row"
+    );
+
+    let res = post_claims(
+        &admin,
+        id,
+        &csrf,
+        &claims,
+        [
+            &claim,
+            "https://git.example.com/?x=1",
+            "other-client",
+            "u|{sub}",
+        ],
+    )
+    .await;
+    assert_eq!(res.status().as_u16(), 200, "invalid input re-renders");
+    let body = res.text().await.expect("re-rendered editor");
+    assert!(body.contains("query or fragment"), "explains the refusal");
+    assert!(
+        body.contains(&format!(r#"value="{claims}""#)),
+        "claims echoed"
+    );
+    assert!(
+        body.contains(&format!(r#"value="{claim}""#)),
+        "claim echoed"
+    );
+    assert!(
+        body.contains(r#"value="https://git.example.com/?x=1""#),
+        "issuer echoed"
+    );
+    assert!(body.contains(r#"value="other-client""#), "client id echoed");
+    assert!(body.contains(r#"value="u|{sub}""#), "template echoed");
+    assert_eq!(
+        read_registry_resource_self_service(&resource).expect("row")[2],
+        "forseti-client",
+        "row unchanged"
+    );
+
+    let res = post_claims(
+        &admin,
+        id,
+        &csrf,
+        "team",
+        [&claim, issuer, "forseti-client", "{sub}"],
+    )
+    .await;
+    assert_eq!(res.status().as_u16(), 200);
+    let body = res.text().await.expect("re-rendered editor");
+    assert!(
+        body.contains("must be one of the access-token claims"),
+        "the self-service claim has to stay listed"
+    );
+
+    let res = post_claims(&admin, id, &csrf, "team", ["", "", "", ""]).await;
+    assert!(res.status().is_success(), "clearing redirects");
+    assert_eq!(
+        read_registry_resource_self_service(&resource).expect("row"),
+        [String::new(), String::new(), String::new(), String::new()]
+    );
+    assert_eq!(
+        read_registry_resource_claims(&resource).expect("row").1,
+        "team"
+    );
+}
+
+/// A self-service claim is exclusive across rows: neither another row's
+/// claims nor its self-service claim may name it, a row may not take a
+/// self-service claim another row lists, and the create form refuses it.
+#[tokio::test]
+async fn self_service_claim_conflicts_are_refused() {
+    assert!(portal_reachable().await);
+    let Some(admin) = try_admin_signed_in_client().await else {
+        eprintln!("FORSETI_ADMIN_TEST_* not set; skipping admin resources test");
+        return;
+    };
+
+    let sfx = unique_suffix();
+    let owner = format!("https://ss-owner-{sfx}.mcp.test/mcp");
+    let other = format!("https://ss-other-{sfx}.mcp.test/mcp");
+    let created = format!("https://ss-created-{sfx}.mcp.test/mcp");
+    let claim = format!("ss_{sfx}");
+    let listed = format!("listed_{sfx}");
+    let _rows = RegistryRows(vec![owner.clone(), other.clone(), created.clone()]);
+    seed_registry_resource(&owner);
+    seed_registry_resource(&other);
+    set_registry_resource_claims(&owner, &claim);
+    set_registry_resource_self_service(&owner, &claim, "https://git.example.com/", "c", "{sub}");
+    set_registry_resource_claims(&other, &listed);
+    let (owner_id, _) = read_registry_resource_claims(&owner).expect("owner row");
+    let (other_id, _) = read_registry_resource_claims(&other).expect("other row");
+
+    // Another row listing the self-service claim.
+    let (_, csrf) = get_claims_editor(&admin, other_id).await;
+    let both = format!("{listed} {claim}");
+    let res = post_claims(&admin, other_id, &csrf, &both, ["", "", "", ""]).await;
+    assert_eq!(res.status().as_u16(), 200, "conflict re-renders");
+    let body = res.text().await.expect("body");
+    assert!(
+        names_conflict(&body, &claim),
+        "names the claim; got {}",
+        &body[..body.len().min(4000)]
+    );
+    assert_eq!(
+        read_registry_resource_claims(&other).expect("row").1,
+        listed
+    );
+
+    // Another row taking the same self-service claim.
+    let res = post_claims(
+        &admin,
+        other_id,
+        &csrf,
+        &both,
+        [&claim, "https://git.example.com/", "c", "{sub}"],
+    )
+    .await;
+    assert_eq!(res.status().as_u16(), 200, "conflict re-renders");
+    let body = res.text().await.expect("body");
+    assert!(names_conflict(&body, &claim), "names the claim");
+    assert_eq!(
+        read_registry_resource_self_service(&other).expect("row")[0],
+        ""
+    );
+
+    // The owner taking a self-service claim another row lists.
+    let (_, csrf) = get_claims_editor(&admin, owner_id).await;
+    let res = post_claims(
+        &admin,
+        owner_id,
+        &csrf,
+        &format!("{claim} {listed}"),
+        [&listed, "https://git.example.com/", "c", "{sub}"],
+    )
+    .await;
+    assert_eq!(res.status().as_u16(), 200, "conflict re-renders");
+    let body = res.text().await.expect("body");
+    assert!(names_conflict(&body, &listed), "names the claim");
+    assert_eq!(
+        read_registry_resource_self_service(&owner).expect("row")[0],
+        claim
+    );
+    assert_eq!(read_registry_resource_claims(&owner).expect("row").1, claim);
+
+    // The owner keeps its own self-service claim on a plain save.
+    let res = post_claims(
+        &admin,
+        owner_id,
+        &csrf,
+        &claim,
+        [&claim, "https://git.example.com/", "c", "{sub}"],
+    )
+    .await;
+    assert!(res.status().is_success(), "own claim is no conflict");
+
+    // The create form.
+    let body = admin
+        .get(format!("{PORTAL}/admin/resources/new"))
+        .send()
+        .await
+        .expect("GET /admin/resources/new")
+        .text()
+        .await
+        .expect("create form body");
+    let csrf = extract_form_csrf(&body).expect("csrf in create form");
+    let res = admin
+        .post(format!("{PORTAL}/admin/resources/new"))
+        .form(&[
+            ("_csrf", csrf.as_str()),
+            ("resource", created.as_str()),
+            ("org_id", "default"),
+            ("access_token_claims", claim.as_str()),
+        ])
+        .send()
+        .await
+        .expect("POST /admin/resources/new");
+    assert_eq!(res.status().as_u16(), 200, "conflict re-renders the form");
+    let body = res.text().await.expect("body");
+    assert!(names_conflict(&body, &claim), "names the claim");
+    assert!(
+        read_registry_resource_claims(&created).is_none(),
         "no row written"
     );
 }

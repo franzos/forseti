@@ -33,6 +33,7 @@ pub(crate) mod offline_access;
 pub(crate) mod oidc_links_db;
 pub(crate) mod password;
 pub(crate) mod profile;
+pub(crate) mod resource_claims;
 pub(crate) mod sessions;
 pub(crate) mod two_factor;
 
@@ -76,6 +77,14 @@ pub(crate) fn router(cfg: &crate::config::AppConfig) -> Router<AppState> {
             post(authorized_apps::settings_authorized_apps_revoke),
         )
         .route(
+            "/settings/resource-claims",
+            get(resource_claims::settings_resource_claims),
+        )
+        .route(
+            "/settings/resource-claims/{id}/remove",
+            post(resource_claims::settings_resource_claims_remove),
+        )
+        .route(
             "/settings/offline-access",
             get(offline_access::settings_offline_access),
         )
@@ -93,6 +102,8 @@ pub(crate) fn router(cfg: &crate::config::AppConfig) -> Router<AppState> {
             get(export::settings_account_export),
         )
         .merge(offline_access_router(cfg))
+        .merge(resource_claims_router(cfg))
+        .merge(resource_claims_callback_router(cfg))
 }
 
 /// The offline-passphrase save on its own sub-router so its rate limit
@@ -110,6 +121,38 @@ fn offline_access_router(cfg: &crate::config::AppConfig) -> Router<AppState> {
         3_600_000,
         cfg.posix.offline_saves_per_hour,
         crate::rate_limit::plain_text_error("settings.offline_access"),
+    )
+}
+
+/// The link start on its own sub-router: each call fetches the issuer's
+/// discovery document, so an unthrottled loop turns Forseti into a fetcher.
+fn resource_claims_router(cfg: &crate::config::AppConfig) -> Router<AppState> {
+    let r = Router::new().route(
+        "/settings/resource-claims/{id}/start",
+        post(resource_claims::settings_resource_claims_start),
+    );
+    crate::rate_limit::single_window(
+        r,
+        &cfg.proxy,
+        600_000,
+        30,
+        crate::rate_limit::plain_text_error("settings.resource_claims"),
+    )
+}
+
+/// The issuer's redirect back, in its own bucket: a valid link cookie can be
+/// replayed until it expires, and each replay fetches from the issuer.
+fn resource_claims_callback_router(cfg: &crate::config::AppConfig) -> Router<AppState> {
+    let r = Router::new().route(
+        "/settings/resource-claims/callback",
+        get(resource_claims::settings_resource_claims_callback),
+    );
+    crate::rate_limit::single_window(
+        r,
+        &cfg.proxy,
+        600_000,
+        60,
+        crate::rate_limit::plain_text_error("settings.resource_claims_callback"),
     )
 }
 

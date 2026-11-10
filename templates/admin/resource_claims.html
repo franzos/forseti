@@ -32,6 +32,52 @@
         <span class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-resources-field-claims-hint") }}</span>
       </label>
 
+      <div class="flex flex-col gap-stack-md border-t border-outline-variant pt-stack-md mt-stack-sm">
+        <div>
+          <h2 class="font-headline-sm text-headline-sm text-on-surface mb-stack-xs">{{ chrome.t("admin-resources-self-service-heading") }}</h2>
+          <p class="font-body-md text-body-md text-on-surface-variant">{{ chrome.t("admin-resources-self-service-subtitle") }}</p>
+        </div>
+
+        <label class="flex flex-col gap-stack-xs">
+          <span class="font-label-md text-label-md text-on-surface">{{ chrome.t("admin-resources-self-service-field-claim") }}</span>
+          <input type="text"
+                 name="self_service_claim"
+                 value="{{ self_service.claim }}"
+                 placeholder="forgejo_aud"
+                 class="font-mono text-sm bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2">
+          <span class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-resources-self-service-field-claim-hint") }}</span>
+        </label>
+
+        <label class="flex flex-col gap-stack-xs">
+          <span class="font-label-md text-label-md text-on-surface">{{ chrome.t("admin-resources-self-service-field-issuer") }}</span>
+          <input type="url"
+                 name="self_service_issuer"
+                 value="{{ self_service.issuer }}"
+                 placeholder="https://git.example.com/"
+                 class="font-mono text-sm bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2">
+          <span class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-resources-self-service-field-issuer-hint") }}</span>
+        </label>
+
+        <label class="flex flex-col gap-stack-xs">
+          <span class="font-label-md text-label-md text-on-surface">{{ chrome.t("admin-resources-self-service-field-client-id") }}</span>
+          <input type="text"
+                 name="self_service_client_id"
+                 value="{{ self_service.client_id }}"
+                 class="font-mono text-sm bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2">
+          <span class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-resources-self-service-field-client-id-hint") }}</span>
+        </label>
+
+        <label class="flex flex-col gap-stack-xs">
+          <span class="font-label-md text-label-md text-on-surface">{{ chrome.t("admin-resources-self-service-field-template") }}</span>
+          <input type="text"
+                 name="self_service_template"
+                 value="{{ self_service.template }}"
+                 placeholder="u:{sub}:{uuid}"
+                 class="font-mono text-sm bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2">
+          <span class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-resources-self-service-field-template-hint") }}</span>
+        </label>
+      </div>
+
       <div class="flex items-center gap-stack-md mt-stack-sm">
         <button type="submit"
                 class="bg-primary text-on-primary font-label-md text-label-md font-bold px-4 py-2 rounded-lg hover:opacity-90 transition-opacity">

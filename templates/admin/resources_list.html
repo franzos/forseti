@@ -50,6 +50,10 @@
               {% else %}
                 <code class="font-mono text-xs">{{ r.access_token_claims }}</code>
               {% endif %}
+              {% if !r.self_service_claim.is_empty() %}
+                <span class="font-label-sm text-label-sm bg-secondary-container text-on-secondary-container px-2 py-0.5 rounded-full font-semibold ms-2"
+                      title="{{ r.self_service_claim }}">{{ chrome.t("admin-resources-self-service-badge") }}</span>
+              {% endif %}
               {% if !r.claims_url.is_empty() %}
                 <a href="{{ r.claims_url }}"
                    class="font-label-sm text-label-sm text-primary hover:underline ms-2">{{ chrome.t("admin-resources-action-edit-claims") }}</a>

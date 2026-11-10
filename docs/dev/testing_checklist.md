@@ -150,6 +150,24 @@ Run these first. If any of them fail, stop and triage before touching the browse
 - [ ] Audit row: `oauth.consent.revoked` (or equivalent — verify in `/admin/audit`)
 - [ ] Empty state when no grants
 
+### 4.6.5 Resource accounts (`/settings/resource-claims`)
+
+Needs a row with self-service set up against the playground `mock-oidc` issuer (§7.3), `[oauth.cimd].allow_private_targets = true`, and `host.containers.internal` resolving to `127.0.0.1` for both Forseti and the browser. The mock's login page takes any username and makes it the ID token's `sub`.
+
+- [ ] "Resource accounts" link in the Connections group of the settings nav; no visible rows → "No resources offer account linking."
+- [ ] Row shows display name, claim chip, resource and "Not linked"; with template `u:{sub}:{uuid}` a **Value** input with the template as placeholder, with template `{sub}` no input
+- [ ] Response `Content-Security-Policy` `form-action` includes `http://host.containers.internal:8092`
+- [ ] Malformed value (`u:42:not-a-uuid`, or an uppercase UUID) → "That value doesn't have the expected format.", no redirect to the issuer
+- [ ] **Link account** with `u:42:<lowercase uuid>` → lands on the mock login page; sign in as `42` → back on the page with "Account linked…" and "Linked"; identity's `metadata_admin` carries the claim with exactly that value, sibling keys untouched (`curl http://127.0.0.1:4434/admin/identities/<id>`)
+- [ ] Same start, sign in as `43` → "The account you signed in with doesn't match the value you entered.", nothing written
+- [ ] **Link again** with a new UUID → value replaced
+- [ ] **Remove** → "Link removed…", key gone from `metadata_admin`, row back to "Not linked"; a second remove in another tab → "There was no linked value to remove."
+- [ ] Start, then wait over 10 minutes (or delete the `forseti_claim_link` cookie) before signing in → "The link request expired or doesn't belong to this session. Please start again."
+- [ ] Start, sign out of Forseti in another tab, finish at the mock → no bounce through login with the code in the URL, nothing written, `resource.claim.link_failed` with `reason` `no_session`
+- [ ] Named-org row hidden from a non-member; a crafted start POST for its id → "That resource isn't available for linking."
+- [ ] After a link, a fresh consent for the resource puts the value in the access token (under `ext`, top level only when Hydra lists the claim)
+- [ ] Audit rows: `resource.claim.linked` (critical, with `upstream_sub`), `resource.claim.link_failed` with `reason` (`invalid_value`, `value_mismatch`, `state_mismatch`, ...), `resource.claim.removed` (critical)
+
 ### 4.7 Account / danger zone (`/settings/account` + `/settings/account/delete`)
 
 - [ ] Landing page renders without privileged-session check: an "Export your data" card above the "Delete account" card
@@ -336,6 +354,11 @@ All admin pages require AAL2 + Forseti-admin allowlist or org ownership.
 - [ ] Access-token claims: set on create and via **Edit** → shown in the list; a reserved name (`sub`) or an invalid one → inline error, input echoed back
 - [ ] With `forgejo_aud` on a row and in an identity's `metadata_admin`: a consent granting that resource puts the claim in the access token (top level when Hydra lists it in `allowed_top_level_claims`), a consent for another resource does not, and the refresh grant keeps it
 - [ ] Org-scoped admin: no claims field on create, no **Edit** link, `/admin/resources/{id}/claims` → "Not found", a crafted create POST with claims → error
+- [ ] Self-service section on the claims page: claim `<one of the row's claims>`, issuer `http://host.containers.internal:8092/default`, any client ID, template `u:{sub}:{uuid}` → saved, **Self-service** badge in the list, fields read back on **Edit**
+- [ ] Self-service refusals, each inline with all fields echoed: claim not in the row's claims, `http://` issuer with `allow_private_targets` off, issuer with a query, client ID with a space, template without `{sub}` or with two `{uuid}`, only some of the four fields filled
+- [ ] Global claim rule: another row listing the self-service claim (on **Edit** or on create) → `claim "<name>" is already used by another resource`, and the create leaves no row behind; making a claim self-service that another row already lists → same error
+- [ ] Clearing all four fields turns self-service off: badge gone, row gone from `/settings/resource-claims`, an already linked value still in `metadata_admin`
+- [ ] Audit: `admin.resource.claims_updated` (critical) carries `self_service_*` and `previous_self_service_*`
 - [ ] CSRF on toggle / re-check / claims / delete POSTs
 - [ ] Audit rows: `admin.resource.created`, `admin.resource.toggled`, `admin.resource.claims_updated` (critical), `admin.resource.deleted` (critical)
 

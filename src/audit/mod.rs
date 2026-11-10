@@ -204,6 +204,10 @@ pub mod action {
     pub const ORG_DOMAIN_ADDED: &str = "org.domain.added";
     pub const ORG_DOMAIN_VERIFIED: &str = "org.domain.verified";
     pub const ORG_DOMAIN_REMOVED: &str = "org.domain.removed";
+    // self-service resource claims (`src/settings/resource_claims.rs`)
+    pub const RESOURCE_CLAIM_LINKED: &str = "resource.claim.linked";
+    pub const RESOURCE_CLAIM_LINK_FAILED: &str = "resource.claim.link_failed";
+    pub const RESOURCE_CLAIM_REMOVED: &str = "resource.claim.removed";
     // account-self (#1)
     pub const ACCOUNT_SELF_DELETED: &str = "account.self_deleted";
     pub const ACCOUNT_EXPORTED: &str = "account.exported";

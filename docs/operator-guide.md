@@ -102,7 +102,7 @@ The authoritative schema is `src/config.rs`. The example file is `config.example
 | `x_frame_options`  | bool   | `true`             | Also emit `X-Frame-Options: SAMEORIGIN` for older browsers.            |
 | `extra_form_action` | list of strings | `[]`      | Extra origins for the CSP `form-action` directive. Needed for an upstream OIDC provider added to `kratos.yml` by hand, or a host a provider bounces through. |
 
-`cookie_secret` is the root key behind the HMAC for Forseti's signed cookies (one-shot flash, `active_org` switcher, `forseti_app_referrer` handoff, CSRF double-submit). Each cookie derives its own key from this secret plus a per-use domain-separation salt (see `src/flash.rs`, `src/orgs/cookie.rs`, `src/handoff/cookie.rs`).
+`cookie_secret` is the root key behind the HMAC for Forseti's signed cookies (one-shot flash, `active_org` switcher, `forseti_app_referrer` handoff, `forseti_claim_link` resource-claim link, CSRF double-submit). Each cookie derives its own key from this secret plus a per-use domain-separation salt (see `src/flash.rs`, `src/orgs/cookie.rs`, `src/handoff/cookie.rs`).
 
 Generate one with `openssl rand -hex 32` (a hex string is decoded to bytes; anything that isn't valid hex is taken as raw UTF-8 bytes). The decoded key must be at least 32 bytes or Forseti hard-fails at boot. Override via `FORSETI_SECURITY__COOKIE_SECRET`.
 
@@ -290,6 +290,48 @@ curl -X PATCH http://kratos:4434/admin/identities/<id> -H 'Content-Type: applica
 ```
 
 A token carries a row's claims only when consent grants that resource as an audience, matched like the audience itself (verbatim, then canonically); disabled rows contribute none. Keys missing from `metadata_admin`, or set to `null`, are left out, and a failed registry read issues the token without them. Hydra stores the claims with the consent and reuses them for every refresh, so a change to `metadata_admin` or to the row reaches tokens only after the user's next authorization, not on refresh.
+
+#### Self-service resource claims
+
+Writing a value per user through the Kratos admin API doesn't scale past a handful of people. A registry row can instead let users set the value of one of its claims themselves, on **Settings > Resource accounts** (`/settings/resource-claims`). The user signs in at an upstream OIDC issuer, Forseti validates the ID token, derives the value from the token's `sub`, and writes `metadata_admin.<claim>` through the Kratos admin API, touching no other key. Users can't type a value in unverified: anyone who learns another user's value could otherwise act as them at the resource. Nothing from the upstream (tokens, profile) is stored.
+
+The case it's built for is forgejo-mcp. It reads the audience of the user's Forgejo Authorized Integration from `forgejo_aud`, and Forgejo generates that audience itself as `u:<forgejo-user-id>:<uuid>`. The user creates the integration in Forgejo, pastes the audience on the settings page and signs in at Forgejo; Forseti checks that the `u:<id>` part is the Forgejo account they signed in with, then stores the value.
+
+**Register a public OAuth2 application at the issuer.** In Forgejo, create an OAuth2 application (user **Settings > Applications**, or the site administration for an instance-wide one) with **Confidential client** unticked and the redirect URI `<self.url>/settings/resource-claims/callback`, e.g. `https://id.example.com/settings/resource-claims/callback`. One redirect URI covers every row that uses the application. There is no client secret to copy: Forseti is a public client with PKCE (S256). Forgejo requires PKCE for public clients and shows its consent screen, with the account name, on every link. Issuers that only allow confidential clients don't work.
+
+**Configure the row.** On the row's claims page (**Edit** in the list, Forseti-wide admins only), the **Self-service** section takes four fields. All four empty turns self-service off; otherwise all four must be valid.
+
+| Field | Value |
+|-------|-------|
+| Claim | One of the row's access-token claims, e.g. `forgejo_aud`. |
+| Issuer URL | Exactly as the issuer's discovery document states `issuer`, trailing slash included. Forgejo's is its `ROOT_URL`, e.g. `https://git.example.com/`. `https://` only, no credentials, query or fragment, no `localhost` or loopback/private IP literal, at most 2048 characters. |
+| Client ID | The application's client id. Printable ASCII without spaces, at most 255 characters. |
+| Value template | Letters, digits, `_`, `.`, `:` and `-`, with exactly one `{sub}` (the upstream subject) and at most one `{uuid}` (a canonical lowercase UUID the user enters), at most 128 characters. Forgejo: `u:{sub}:{uuid}`. A template without `{uuid}` needs no input; the user just signs in. |
+
+The save writes one critical `admin.resource.claims_updated` audit row with the previous and new values of all fields, and the list shows a **Self-service** badge on the row. At every link Forseti fetches `<issuer>/.well-known/openid-configuration`; the document's `issuer` must equal the configured value byte for byte, its authorization, token and JWKS endpoints must sit on the issuer's origin, and when it lists `code_challenge_methods_supported` that list must include `S256`. ID tokens must be signed RS256 or ES256. The settings page adds each listed issuer's origin to its CSP `form-action`, so no `[security].extra_form_action` entry is needed.
+
+**A self-service claim is global.** Consent copies a claim by name into tokens for every resource that lists it, so a self-service claim may appear on no other row, neither as that row's self-service claim nor in its access-token claims. Forseti checks both directions on the claims page and the create form (`claim "<name>" is already used by another resource`), and a partial unique index backs it. Ordinary claims can still be shared between rows.
+
+**Who sees a row.** The settings page lists enabled rows with self-service configured. A row in the default org is visible to every user; a row in a named org only to that org's members. This gates the settings page and its link and remove actions only; consent copies claims without an org check.
+
+**Linking.** When the template has `{uuid}`, the submitted value must match the template. On the way back Forseti renders the template with the verified `sub` and the submitted UUID and compares the result to the submitted value; a mismatch says the account doesn't match. A `sub` that renders outside the claim-value characters or past 255 characters is refused. Users can link again to replace the value, or remove it (a JSON Patch `remove`, no round trip). Each outcome is audited: `resource.claim.linked` and `resource.claim.removed` (both critical) and `resource.claim.link_failed` with a `reason`, each with the resource, the claim and, once known, the upstream `sub`. As with admin-written values, a change reaches tokens on the client's next authorization.
+
+**Rate limits.** Starting a link is limited to 30 per 10 minutes per client IP and 10 per 10 minutes per identity, since each start fetches the issuer's discovery document. The callback has its own bucket of 60 per 10 minutes per client IP. Removing isn't limited. The numbers are fixed in code; client IPs follow [`[proxy]`](#proxy--reverse-proxy-trust).
+
+**Turning self-service off leaves values in place.** Values already linked stay in `metadata_admin` and keep reaching tokens for the row, and the row drops off the settings page, so users can't remove them anymore. Remove one by hand through the Kratos admin API (Kratos rejects a `remove` of a key that isn't there):
+
+```bash
+curl -X PATCH http://kratos:4434/admin/identities/<id> -H 'Content-Type: application/json' \
+    -d '[{"op":"remove","path":"/metadata_admin/forgejo_aud"}]'
+```
+
+To stop the claim reaching any token at once, also drop it from the row's access-token claims.
+
+**In-flight links and `cookie_secret`.** A link is bound to a signed `forseti_claim_link` cookie (10 minutes, path `/settings/resource-claims`), and the PKCE verifier and nonce are derived from [`[security].cookie_secret`](#security). With `cookie_secret` unset, Forseti generates a random key per process (and refuses to boot on a production-looking `self.url`). A restart then invalidates every link in flight: a user who is at the issuer during the restart comes back to "The link request expired or doesn't belong to this session. Please start again." and nothing is written. The same happens when a multi-instance deployment doesn't share the secret. Two tabs linking at once share the one cookie, so the first one fails the same way.
+
+**Top level or `ext`.** Hydra's `oauth2.allowed_top_level_claims` decides where the claim lands, exactly as for admin-written values above: listed, it's at the top level of the access token and under `ext`; not listed, only under `ext`. List the claim when the resource server reads it from the top level.
+
+**Private issuers in development.** The issuer URL and every upstream fetch go through the same SSRF guard as CIMD. `[oauth.cimd].allow_private_targets = true` lets an `http://` or private issuer through, which is how the playground's mock issuer (`http://host.containers.internal:8092/default`) works. Never enable it in production.
 
 Whether the per-IP limiter trusts forwarded-for headers is a single deployment-wide knob: `[proxy] trust_forwarded_for` plus `trusted_hops` (see below). The same settings drive the audit middleware (audited client IP) and every per-IP limiter — the underlying question ("is there a trusted reverse proxy, and how many?") doesn't change per-endpoint. Limiters without a global knob of their own (`/claim-email`, `/oauth/device`, `/handoff`) carry a derived global backstop of 20x their per-IP caps.
 
@@ -1620,6 +1662,7 @@ Each row carries:
 - **`resource`** — the canonical resource URI (canonicalised on create; matched across a trailing slash or fragment), or a verbatim non-URI identifier for legacy audiences like `stackpit-web`.
 - **`display_name`**, **`org_id`**, **`enabled`** (the toggle consent actually checks), **`created_by`**, **`created_at`**.
 - **`access_token_claims`** — `metadata_admin` keys copied into tokens for this resource; Forseti-wide admins only. See [Access-token claims from `metadata_admin`](#access-token-claims-from-metadata_admin).
+- **Self-service** (claim, issuer URL, client ID, value template): lets users link the value of one of those claims themselves; Forseti-wide admins only. See [Self-service resource claims](#self-service-resource-claims).
 - **Corroboration badge** — an advisory RFC 9728 check, run on create and via the per-row "re-check" button: Forseti fetches `https://{host}/.well-known/oauth-protected-resource{path}` through the same SSRF guard as the CIMD fetcher and compares the document's `resource` and `authorization_servers` against the row and the configured issuer. Statuses: `unchecked` / `corroborated` / `unreachable` / `mismatch`. It **never gates** creation (the app may not be deployed yet) and never grants anything; non-URI identifiers have nothing to fetch and stay `unchecked`.
 
 **Org scoping.** A Forseti-wide admin can register any resource into any org. An org-scoped admin (`?org=<slug>`) sees only rows stamped with their org and may only create resources whose URI host is a **verified domain** of that org (fail closed) — domain-ownership proof via the existing org domains verification.

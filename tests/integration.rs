@@ -93,6 +93,9 @@ mod regressions;
 #[path = "integration/registration.rs"]
 mod registration;
 
+#[path = "integration/resource_claims.rs"]
+mod resource_claims;
+
 #[path = "integration/resources_admin.rs"]
 mod resources_admin;
 

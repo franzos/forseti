@@ -569,6 +569,60 @@ ID as the target and `reason=settings_self_serve` in metadata.
 can't narrow a grant from this page — to drop a scope they revoke and let
 the app re-prompt with the smaller scope set on next sign-in.
 
+### Resource claims (`/settings/resource-claims`)
+
+Self-service values for registry rows that name an upstream issuer, client id and value template (see the operator guide, "Self-service resource claims"). Forseti-owned, no Kratos settings flow: Forseti is a public OIDC client of the row's issuer, and the verified value goes into `metadata_admin.<claim>` through the Kratos admin API. Handlers in `src/settings/resource_claims.rs`, routes in `src/settings/mod.rs`.
+
+`GET /settings/resource-claims`: `settings_resource_claims` (`src/settings/resource_claims.rs:118`), template `templates/settings_resource_claims.html`. Rows come from `resource_registry::list_self_service` (`src/resource_registry.rs:353`, enabled rows with a self-service claim) filtered by `visible_to` (`src/resource_registry.rs:367`: default-org rows for everyone, named-org rows for members). `kratos::admin_get_identity` plus `metadata_admin_has_key` (`src/ory/kratos.rs:670`) decide Linked / Not linked. A value input shows only when the template has `{uuid}`. The response extends CSP `form-action` with the issuer origins (`app::allow_form_action_to`, `src/app.rs:686`) because the start POST 303s there.
+
+`POST /settings/resource-claims/{id}/start`: `settings_resource_claims_start` (`src/settings/resource_claims.rs:308`), CSRF-checked, behind a per-IP bucket of 30 per 10 minutes (`resource_claims_router`, `src/settings/mod.rs:129`) and a per-identity `KeyedQuota` of 10 per 10 minutes. `usable_row` (`src/settings/resource_claims.rs:203`) re-checks enabled, configured and visible. The submitted value must match the template (`claim_template::Template::matches`, `src/claim_template.rs:80`). Discovery (`oidc_rp::discovery::discover`, `src/oidc_rp/discovery.rs:152`) requires the document's `issuer` to equal the configured one and every endpoint on the issuer's origin. A fresh `state` goes into the signed `forseti_claim_link` cookie (`{s,i,r,v}`: state, identity, row, value; 10 minutes, `Path=/settings/resource-claims`, `SameSite=Lax`); the PKCE verifier and nonce are HMACs of `state` under `oidc_rp::link_key(cookie_secret)` (`src/oidc_rp/mod.rs:25`), so the cookie carries no secret.
+
+`GET /settings/resource-claims/callback`: `settings_resource_claims_callback` (`src/settings/resource_claims.rs:397`) and `finish_link` (`src/settings/resource_claims.rs:415`), per-IP bucket of 60 per 10 minutes (`src/settings/mod.rs:145`). Every outcome clears the link cookie. A missing or invalid cookie is logged (`link_missing`) and not audited; with a verified cookie, every failure writes `resource.claim.link_failed` with its reason, in check order: `no_session` (no bounce through login, the code would sit in the return URL), `state_mismatch`, `identity_mismatch`, `upstream_error`, `code_missing`, `not_available` / `template_invalid` / `invalid_value` (the row is re-read; nothing about it is taken from the cookie), `discovery_failed`, `issuer_mismatch` (RFC 9207 `iss`), `exchange_failed`, `jwks_failed`, `id_token_invalid` (`oidc_rp::id_token::verify`, `src/oidc_rp/id_token.rs:78`: RS256/ES256, `iss`, `aud`, `azp`, `exp`, `iat`, nonce), `sub_unrenderable`, `value_mismatch`, `write_failed`. Success writes the key with `kratos::admin_set_metadata_admin_key` (`src/ory/kratos.rs:700`) and audits `resource.claim.linked` (critical).
+
+`POST /settings/resource-claims/{id}/remove`: `settings_resource_claims_remove` (`src/settings/resource_claims.rs:568`), CSRF-checked, not rate-limited, same `usable_row` gate. `kratos::admin_remove_metadata_admin_key` (`src/ory/kratos.rs:712`) patches out the key and reports whether it held a value: if so, `resource.claim.removed` (critical); if not, "nothing to remove" and no audit row. Failures are logged, not audited.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as Browser
+    participant P as Forseti
+    participant I as Upstream issuer
+    participant K as Kratos admin
+
+    U->>P: GET /settings/resource-claims
+    P->>P: list_self_service + visible_to
+    P->>K: GET /admin/identities/{id}
+    K-->>P: metadata_admin
+    P-->>U: rows (Linked / Not linked), CSP form-action += issuer origins
+
+    U->>P: POST /settings/resource-claims/{id}/start (CSRF, value)
+    P->>P: per-IP + per-identity limits, usable_row, template.matches(value)
+    P->>I: GET {issuer}/.well-known/openid-configuration
+    I-->>P: issuer, authorization/token/JWKS endpoints (same origin)
+    P-->>U: 303 authorization_endpoint?state, nonce, code_challenge (S256) + Set-Cookie forseti_claim_link
+    U->>I: sign in, consent
+    I-->>U: 302 /settings/resource-claims/callback?code&state[&iss]
+
+    U->>P: GET /settings/resource-claims/callback (cookie)
+    P->>P: verify cookie, session, state, identity; re-read row
+    P->>I: GET discovery document
+    P->>I: POST token_endpoint (code, code_verifier, client_id)
+    I-->>P: id_token
+    P->>I: GET jwks_uri
+    P->>P: verify ID token, render template with sub, compare to value
+    P->>K: GET identity, PATCH add /metadata_admin/{claim} (whole object when null)
+    P->>P: audit resource.claim.linked
+    P-->>U: 303 /settings/resource-claims (flash) + clear cookie
+
+    U->>P: POST /settings/resource-claims/{id}/remove (CSRF)
+    P->>P: usable_row
+    P->>K: GET identity, PATCH remove /metadata_admin/{claim}
+    P->>P: audit resource.claim.removed (if it was set)
+    P-->>U: 303 /settings/resource-claims (flash)
+```
+
+The admin side is the claims page, `claims_update` (`src/admin/resources.rs:688`): `validate_self_service` (`src/admin/resources.rs:572`), then `resource_registry::set_claims_and_self_service` (`src/resource_registry.rs:320`) runs the both-direction claim conflict check and the UPDATE in one transaction.
+
 ### 2FA / Passkeys
 
 `GET /settings/2fa` — handler `settings_2fa` (`src/settings/two_factor.rs:73`), renderer

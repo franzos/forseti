@@ -1,5 +1,5 @@
 {# Settings left-nav. Caller sets `active` to one of:
-   "hub" | "profile" | "password" | "2fa" | "sessions" | "authorized-apps" | "linked-providers" | "offline-access" | "organization" | "account".
+   "hub" | "profile" | "password" | "2fa" | "sessions" | "authorized-apps" | "linked-providers" | "resource-claims" | "offline-access" | "organization" | "account".
    Grouped like the admin nav: the first label is plain (top), the rest sit on a
    faint rule. The Account (danger zone) entry is set apart and highlights in
    error tones when active. #}
@@ -34,6 +34,8 @@
        class="flex items-center gap-3 px-4 py-2 rounded-xl font-label-md text-label-md {% if active == "authorized-apps" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">{{ chrome.t("settings-nav-authorized-apps") }}</a>
     <a href="/settings/linked-providers"
        class="flex items-center gap-3 px-4 py-2 rounded-xl font-label-md text-label-md {% if active == "linked-providers" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">{{ chrome.t("settings-nav-linked-providers") }}</a>
+    <a href="/settings/resource-claims"
+       class="flex items-center gap-3 px-4 py-2 rounded-xl font-label-md text-label-md {% if active == "resource-claims" %}bg-secondary-container text-on-secondary-container font-bold{% else %}text-on-surface-variant hover:bg-surface-container-high{% endif %} transition-all">{{ chrome.t("settings-nav-resource-claims") }}</a>
 
     <div class="flex items-center pe-3 my-1">
       <span class="flex-1 border-t border-outline-variant/60"></span>

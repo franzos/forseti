@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+
+{% block referrer_banner %}
+  {% include "_referrer_banner.html" %}
+{% endblock %}
+
+{% block title %}{{ chrome.t("settings-claims-heading") }} &middot; {{ chrome.brand.name }}{% endblock %}
+
+{% block nav_settings_class %}text-primary font-bold border-b-2 border-primary{% endblock %}
+
+{% block content %}
+  <div class="flex flex-col md:flex-row gap-stack-lg">
+    {% let active = "resource-claims" %}
+    {% include "partials/settings_nav.html" %}
+
+    <section class="flex-1 flex flex-col gap-stack-lg">
+      <div>
+        <h1 class="font-headline-lg text-headline-lg text-on-surface">{{ chrome.t("settings-claims-heading") }}</h1>
+        <p class="font-body-md text-body-md text-on-surface-variant mt-1">{{ chrome.t("settings-claims-subtitle") }}</p>
+      </div>
+
+      {% if !flash.is_empty() %}
+        <div class="bg-tertiary-container border border-outline-variant rounded-lg p-stack-md">
+          <p class="font-body-sm text-body-sm text-on-tertiary-container">{{ flash }}</p>
+        </div>
+      {% endif %}
+
+      {% if rows.is_empty() %}
+        <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg">
+          <p class="font-body-md text-body-md text-on-surface-variant">{{ chrome.t("settings-claims-empty") }}</p>
+        </div>
+      {% else %}
+        <ul class="flex flex-col gap-stack-md">
+          {% for row in rows %}
+            <li class="bg-surface-container-lowest border border-outline-variant rounded-xl p-stack-lg flex flex-col gap-stack-md">
+              <div class="min-w-0 flex flex-col gap-stack-sm">
+                <div class="flex items-center gap-2 flex-wrap">
+                  <h2 class="font-headline-sm text-headline-sm text-on-surface truncate"><bdi>{{ row.name }}</bdi></h2>
+                  <span class="font-label-sm text-label-sm bg-surface-container border border-outline-variant rounded-full px-2.5 py-0.5 text-on-surface-variant">{{ row.claim }}</span>
+                </div>
+                <p class="font-body-sm text-body-sm text-on-surface-variant truncate"><bdi>{{ row.resource }}</bdi></p>
+                {% if row.has_value %}
+                  <p class="font-label-sm text-label-sm text-tertiary">{{ chrome.t("settings-claims-status-set") }}</p>
+                {% else %}
+                  <p class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("settings-claims-status-unset") }}</p>
+                {% endif %}
+              </div>
+
+              <div class="flex flex-col gap-stack-md">
+                <form method="POST"
+                      action="/settings/resource-claims/{{ row.id }}/start"
+                      class="flex flex-col gap-stack-md">
+                  <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+                  {% if row.needs_value %}
+                    <div class="flex flex-col gap-stack-sm">
+                      <label for="value-{{ row.id }}" class="font-label-md text-label-md text-on-surface">{{ chrome.t("settings-claims-value-label") }}</label>
+                      <input type="text"
+                             id="value-{{ row.id }}"
+                             name="value"
+                             placeholder="{{ row.template }}"
+                             autocomplete="off"
+                             spellcheck="false"
+                             maxlength="255"
+                             required
+                             class="w-full bg-surface-container border border-outline-variant rounded-lg px-4 py-3 font-body-md text-body-md text-on-surface focus:outline-none focus:ring-2 focus:ring-primary">
+                      <p class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("settings-claims-value-hint") }}</p>
+                    </div>
+                  {% endif %}
+                  <div>
+                    <button type="submit"
+                            class="inline-flex items-center justify-center gap-2 bg-primary text-on-primary hover:bg-primary/90 px-5 py-3 rounded-xl font-label-lg text-label-lg font-semibold">
+                      {% if row.has_value %}
+                        {{ chrome.t("settings-claims-replace-action") }}
+                      {% else %}
+                        {{ chrome.t("settings-claims-start-action") }}
+                      {% endif %}
+                    </button>
+                  </div>
+                </form>
+
+                {% if row.has_value %}
+                  <form method="POST" action="/settings/resource-claims/{{ row.id }}/remove">
+                    <input type="hidden" name="_csrf" value="{{ chrome.csrf_token }}">
+                    <button type="submit"
+                            class="font-label-md text-label-md text-error border border-error rounded-lg px-4 py-2 hover:bg-error-container hover:text-on-error-container transition-colors focus:outline-none focus:ring-2 focus:ring-error focus:ring-offset-2">
+                      {{ chrome.t("settings-claims-remove-action") }}
+                    </button>
+                  </form>
+                {% endif %}
+              </div>
+            </li>
+          {% endfor %}
+        </ul>
+      {% endif %}
+
+      <div>
+        <a href="/settings"
+           class="font-label-md text-label-md text-on-surface-variant hover:text-primary transition-colors"><span class="dir-flip">&larr;</span> {{ chrome.t("settings-claims-back") }}</a>
+      </div>
+    </section>
+  </div>
+{% endblock %}

@@ -562,7 +562,7 @@ fn resolve_cookie_secret(configured: Option<&str>, self_url: &str) -> Arc<[u8]> 
     rand::rng().fill(&mut bytes);
     tracing::warn!(
         "[security].cookie_secret not configured; generated ephemeral 32-byte key. \
-         Flash, active-org, and app-referrer cookies will not survive restart. \
+         Flash, active-org, app-referrer and resource-claim link cookies will not survive restart. \
          Set [security].cookie_secret in production (e.g. `openssl rand -hex 32`)."
     );
     Arc::from(bytes.to_vec().into_boxed_slice())
@@ -956,6 +956,20 @@ mod tests {
         assert_eq!(
             extra.0,
             vec!["https://app.example.com", "https://other.example.com"]
+        );
+    }
+
+    #[test]
+    fn form_action_includes_an_allowed_issuer_origin() {
+        let csp = csp_form_action(
+            "http://localhost:4433",
+            "",
+            "",
+            &["http://host.containers.internal:8092/default".to_string()],
+        );
+        assert_eq!(
+            csp,
+            "'self' http://localhost:4433 http://host.containers.internal:8092"
         );
     }
 

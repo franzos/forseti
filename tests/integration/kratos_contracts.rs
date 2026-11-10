@@ -1,9 +1,11 @@
 //! Assorted Kratos-side contract tests that don't fit the flow-specific
 //! files: the admin recovery-code reveal, the `/error` landing page (which
 //! fetches Kratos self-service errors), and the full set of Kratos webhook
-//! event actions the audit receiver ingests. All drive the real playground.
+//! event actions the audit receiver ingests, and the `metadata_admin` JSON
+//! Patch shapes. All drive the real playground.
 
 use crate::common::*;
+use serde_json::Value;
 
 /// Admin "Generate recovery code" must mint a code via Kratos
 /// (`admin_create_recovery_code`) and surface it through the one-shot reveal
@@ -126,5 +128,91 @@ async fn kratos_webhook_all_known_actions_land_audit_rows() {
             audit_row_exists(action, &actor_id),
             "action `{action}` must land an audit_events row (target_id={actor_id})"
         );
+    }
+}
+
+async fn patch_identity(identity_id: &str, patch: Value) -> reqwest::StatusCode {
+    browser_client()
+        .patch(format!("{KRATOS_ADMIN}/admin/identities/{identity_id}"))
+        .json(&patch)
+        .send()
+        .await
+        .expect("PATCH identity transport")
+        .status()
+}
+
+async fn metadata_admin(identity_id: &str) -> Value {
+    let identity: Value = browser_client()
+        .get(format!("{KRATOS_ADMIN}/admin/identities/{identity_id}"))
+        .send()
+        .await
+        .expect("GET identity transport")
+        .json()
+        .await
+        .expect("identity body");
+    identity
+        .get("metadata_admin")
+        .cloned()
+        .unwrap_or(Value::Null)
+}
+
+/// Kratos accepts the JSON Patch shapes `ory::kratos::metadata_admin_patch`
+/// emits: `add` of the whole object onto null, `add` and `remove` of one
+/// escaped key that leave siblings alone, and a 4xx for `remove` of an
+/// absent key (why the builder emits no op there).
+#[tokio::test]
+async fn kratos_metadata_admin_key_patch_shapes() {
+    let email = unique_email("metadata-admin-patch");
+    let id = kratos_admin_create_identity(&email).await;
+
+    let outcome = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(async {
+        assert_eq!(metadata_admin(&id).await, Value::Null);
+
+        let status = patch_identity(
+            &id,
+            serde_json::json!([{"op": "add", "path": "/metadata_admin", "value": {"a/b": "u:1:x"}}]),
+        )
+        .await;
+        assert!(status.is_success(), "add onto null: {status}");
+        assert_eq!(metadata_admin(&id).await, serde_json::json!({"a/b": "u:1:x"}));
+
+        let status = patch_identity(
+            &id,
+            serde_json::json!([{"op": "add", "path": "/metadata_admin/sibling", "value": "keep"}]),
+        )
+        .await;
+        assert!(status.is_success(), "add sibling: {status}");
+        let status = patch_identity(
+            &id,
+            serde_json::json!([{"op": "add", "path": "/metadata_admin/a~1b", "value": "u:1:y"}]),
+        )
+        .await;
+        assert!(status.is_success(), "replace via add: {status}");
+        assert_eq!(
+            metadata_admin(&id).await,
+            serde_json::json!({"a/b": "u:1:y", "sibling": "keep"})
+        );
+
+        let status = patch_identity(
+            &id,
+            serde_json::json!([{"op": "remove", "path": "/metadata_admin/a~1b"}]),
+        )
+        .await;
+        assert!(status.is_success(), "remove: {status}");
+        assert_eq!(metadata_admin(&id).await, serde_json::json!({"sibling": "keep"}));
+
+        let status = patch_identity(
+            &id,
+            serde_json::json!([{"op": "remove", "path": "/metadata_admin/a~1b"}]),
+        )
+        .await;
+        assert!(status.is_client_error(), "remove absent: {status}");
+        assert_eq!(metadata_admin(&id).await, serde_json::json!({"sibling": "keep"}));
+    }))
+    .await;
+
+    delete_test_identity(&id).await.expect("cleanup identity");
+    if let Err(p) = outcome {
+        std::panic::resume_unwind(p);
     }
 }

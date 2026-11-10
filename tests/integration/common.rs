@@ -44,6 +44,9 @@ pub const HYDRA_ADMIN: &str = "http://localhost:4445";
 /// returns `[{ to: [{ email }], subject, ... }]`); use
 /// [`read_mailcrab_inbox`] / [`wait_for_mailcrab`] for the helpers.
 pub const MAILCRAB: &str = "http://localhost:4436";
+/// The stack's mock-oauth2-server issuer (`infra/docker-compose.yml`), allowed
+/// as an outbound target by `config.ci.toml`.
+pub const MOCK_OIDC_ISSUER: &str = "http://host.containers.internal:8092/default";
 
 // --- Client builders -------------------------------------------------------
 
@@ -2374,6 +2377,46 @@ pub fn set_registry_resource_claims(resource: &str, claims: &str) {
     .unwrap_or_else(|e| panic!("set resource_registry.access_token_claims: {e}"));
 }
 
+/// Set the four `resource_registry.self_service_*` columns for `resource`;
+/// an empty `claim` turns self-service off.
+pub fn set_registry_resource_self_service(
+    resource: &str,
+    claim: &str,
+    issuer: &str,
+    client_id: &str,
+    template: &str,
+) {
+    let conn = forseti_db_conn();
+    conn.execute(
+        "UPDATE resource_registry SET self_service_claim = ?1, self_service_issuer = ?2, \
+         self_service_client_id = ?3, self_service_template = ?4 WHERE resource = ?5",
+        params![claim, issuer, client_id, template, resource],
+    )
+    .unwrap_or_else(|e| panic!("set resource_registry.self_service_*: {e}"));
+}
+
+/// Move a `resource_registry` row into `org_id`.
+pub fn set_registry_resource_org(resource: &str, org_id: &str) {
+    let conn = forseti_db_conn();
+    conn.execute(
+        "UPDATE resource_registry SET org_id = ?1 WHERE resource = ?2",
+        params![org_id, resource],
+    )
+    .unwrap_or_else(|e| panic!("set resource_registry.org_id: {e}"));
+}
+
+/// `[claim, issuer, client_id, template]` of a `resource_registry` row.
+pub fn read_registry_resource_self_service(resource: &str) -> Option<[String; 4]> {
+    let conn = forseti_db_conn();
+    conn.query_row(
+        "SELECT self_service_claim, self_service_issuer, self_service_client_id, \
+         self_service_template FROM resource_registry WHERE resource = ?1",
+        params![resource],
+        |r| Ok([r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?]),
+    )
+    .ok()
+}
+
 /// `(id, access_token_claims)` of a `resource_registry` row.
 pub fn read_registry_resource_claims(resource: &str) -> Option<(i64, String)> {
     let conn = forseti_db_conn();
@@ -2400,6 +2443,39 @@ pub async fn kratos_set_metadata_admin(identity_id: &str, metadata: Value) {
         "PATCH metadata_admin: status {}",
         res.status()
     );
+}
+
+/// Sign in at the mock issuer as `sub` on `authorize_url` (the Location
+/// Forseti redirected to) and return the mock's redirect back to Forseti's
+/// callback, unfollowed.
+pub async fn mock_oidc_login(authorize_url: &str, sub: &str) -> String {
+    let client = manual_redirect_client();
+    let res = client
+        .get(authorize_url)
+        .send()
+        .await
+        .expect("GET mock authorize");
+    assert!(
+        res.status().is_success(),
+        "mock login page: {}",
+        res.status()
+    );
+    let res = client
+        .post(authorize_url)
+        .form(&[("username", sub), ("claims", "")])
+        .send()
+        .await
+        .expect("POST mock login");
+    assert!(
+        res.status().is_redirection(),
+        "mock login redirects back: {}",
+        res.status()
+    );
+    res.headers()
+        .get("location")
+        .and_then(|h| h.to_str().ok())
+        .expect("mock login Location")
+        .to_string()
 }
 
 /// Delete a `resource_registry` row (test cleanup).
