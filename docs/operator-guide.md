@@ -304,7 +304,7 @@ The case it's built for is forgejo-mcp. It reads the audience of the user's Forg
 | Field | Value |
 |-------|-------|
 | Claim | One of the row's access-token claims, e.g. `forgejo_aud`. |
-| Issuer URL | Exactly as the issuer's discovery document states `issuer`, trailing slash included. Forgejo's is its `ROOT_URL`, e.g. `https://git.example.com/`. `https://` only, no credentials, query or fragment, no `localhost` or loopback/private IP literal, at most 2048 characters. |
+| Issuer URL | Exactly as the issuer's discovery document states `issuer`, character for character, trailing slash or not. Forgejo's is its `ROOT_URL` without the trailing slash, e.g. `https://git.example.com`. `https://` only, no credentials, query or fragment, no `localhost` or loopback/private IP literal, at most 2048 characters. |
 | Client ID | The application's client id. Printable ASCII without spaces, at most 255 characters. |
 | Value template | Letters, digits, `_`, `.`, `:` and `-`, with exactly one `{sub}` (the upstream subject) and at most one `{uuid}` (a canonical lowercase UUID the user enters), at most 128 characters. Forgejo: `u:{sub}:{uuid}`. A template without `{uuid}` needs no input; the user just signs in. |
 
