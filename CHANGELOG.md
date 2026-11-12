@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.2.27] - 2026-11-12
+
+### Added
+- CIMD scopes discovered from each resource's RFC 9728 `scopes_supported`
+- Registry rows store their resource's advertised scopes; changes are audited
+- `config check` warns unless Hydra uses `strategies.scope: exact`; set it in `hydra.yml` and restart Hydra
+
+### Changed
+- CIMD scope allowlist: only config, built-in, document and registry scopes reach a client. List step-up scopes, and scopes of servers without RFC 9728 metadata, in `[oauth.scope_descriptions]`
+- Registry scopes are granted only for their own resource's audience
+- CIMD scope ceiling raised to 256 entries
+- Scopes containing `*` never reach a CIMD client
+- Global CIMD rate limit counts first sightings of a client only
+- IPv6 clients are rate-limited per /64
+- 30 s request timeout on the public listener
+- `allow_private_targets` refuses to boot on a production URL
+- Warning when `X-Forwarded-For` arrives but isn't trusted
+
+### Fixed
+- Identity deletes finish when the browser disconnects
+- Claim-email confirmation re-checks the identity before deleting it
+- Linux client: SQLite advisory RUSTSEC-2026-0459
+
 ## [0.2.26] - 2026-11-10
 
 ### Added
