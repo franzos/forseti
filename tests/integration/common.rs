@@ -47,6 +47,8 @@ pub const MAILCRAB: &str = "http://localhost:4436";
 /// The stack's mock-oauth2-server issuer (`infra/docker-compose.yml`), allowed
 /// as an outbound target by `config.ci.toml`.
 pub const MOCK_OIDC_ISSUER: &str = "http://host.containers.internal:8092/default";
+/// Forseti's issuer under `config.ci.toml` (`[hydra].issuer`).
+pub const FORSETI_ISSUER: &str = "http://host.containers.internal:3000/hydra";
 
 // --- Client builders -------------------------------------------------------
 
@@ -2476,6 +2478,27 @@ pub async fn mock_oidc_login(authorize_url: &str, sub: &str) -> String {
         .and_then(|h| h.to_str().ok())
         .expect("mock login Location")
         .to_string()
+}
+
+/// `(corroboration, scopes_supported)` of a `resource_registry` row.
+pub fn read_registry_resource_scopes(resource: &str) -> Option<(String, String)> {
+    let conn = forseti_db_conn();
+    conn.query_row(
+        "SELECT corroboration, scopes_supported FROM resource_registry WHERE resource = ?1",
+        params![resource],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .ok()
+}
+
+/// Set `resource_registry.scopes_supported` (space-separated) for `resource`.
+pub fn set_registry_resource_scopes(resource: &str, scopes: &str) {
+    let conn = forseti_db_conn();
+    conn.execute(
+        "UPDATE resource_registry SET scopes_supported = ?1 WHERE resource = ?2",
+        params![scopes, resource],
+    )
+    .unwrap_or_else(|e| panic!("set resource_registry.scopes_supported: {e}"));
 }
 
 /// Delete a `resource_registry` row (test cleanup).

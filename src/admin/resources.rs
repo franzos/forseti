@@ -13,8 +13,6 @@
 //! document's `resource` + `authorization_servers` against the row and the
 //! configured issuer. A badge, never a gate.
 
-use std::time::Duration;
-
 use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Redirect, Response};
 use serde::Deserialize;
@@ -30,12 +28,10 @@ use crate::extractors::{Csrf, RequireAdminScoped};
 use crate::format::humanise_timestamp;
 use crate::orgs::AdminScope;
 use crate::page_chrome::PageChrome;
+use crate::protected_resource;
 use crate::render::render;
 use crate::resource_registry::{self, ClaimConflict, NewResource, SelfService, corroboration};
 use crate::state::AppState;
-
-const CORROBORATION_TIMEOUT: Duration = Duration::from_secs(5);
-const CORROBORATION_DOC_LIMIT_BYTES: usize = 64 * 1024;
 
 /// One row on the list page; URLs are precomputed so the template doesn't
 /// re-implement the `?org=` threading.
@@ -146,7 +142,7 @@ pub async fn list(
                 created_at_pretty: humanise_timestamp(&ctx.locale, &created_at),
                 created_at,
                 created_by: r.created_by.unwrap_or_default(),
-                can_recheck: has_fetchable_host(&r.resource),
+                can_recheck: protected_resource::has_fetchable_host(&r.resource),
                 claims_url: match scope {
                     AdminScope::Forseti => format!("/admin/resources/{}/claims", r.id),
                     AdminScope::Org { .. } => String::new(),
@@ -417,23 +413,18 @@ pub async fn create(
     }
 
     // Advisory corroboration; a failure here never unwinds the row.
-    let checked = match corroborate(&state, &stored).await {
-        Some(status) => {
-            match resource_registry::find_by_resource(&state.db, &stored).await {
-                Ok(Some(row)) => {
-                    if let Err(e) =
-                        resource_registry::set_corroboration(&state.db, row.id, status).await
-                    {
-                        tracing::warn!(error = ?e, resource = %stored, "admin/resources: storing corroboration failed");
-                    }
-                }
-                other => {
-                    tracing::warn!(result = ?other.err(), resource = %stored, "admin/resources: re-read after insert failed");
-                }
+    let checked = match resource_registry::find_by_resource(&state.db, &stored).await {
+        Ok(Some(row)) => match check_and_store(&state, &ctx, &actx, row.id, &stored).await {
+            Ok(status) => status.unwrap_or(corroboration::UNCHECKED),
+            Err(e) => {
+                tracing::warn!(error = ?e, resource = %stored, "admin/resources: storing corroboration failed");
+                corroboration::UNCHECKED
             }
-            status
+        },
+        other => {
+            tracing::warn!(result = ?other.err(), resource = %stored, "admin/resources: re-read after insert failed");
+            corroboration::UNCHECKED
         }
-        None => corroboration::UNCHECKED,
     };
 
     let _ = audit::log(
@@ -757,19 +748,18 @@ pub async fn claims_update(
 pub async fn recheck(
     State(state): State<AppState>,
     Path(id): Path<i64>,
+    actx: AuditCtx,
     admin: RequireAdminScoped,
     _: CsrfForm<NoPayload>,
 ) -> Response {
-    let RequireAdminScoped { scope, .. } = admin;
+    let RequireAdminScoped { ctx, scope } = admin;
     let row = match load_row_in_scope(&state, &scope, id).await {
         Ok(r) => r,
         Err(resp) => return resp,
     };
 
     // Verbatim non-URI identifiers have nothing to fetch; stay `unchecked`.
-    if let Some(status) = corroborate(&state, &row.resource).await
-        && let Err(e) = resource_registry::set_corroboration(&state.db, id, status).await
-    {
+    if let Err(e) = check_and_store(&state, &ctx, &actx, id, &row.resource).await {
         tracing::error!(error = ?e, id, "admin/resources: storing corroboration failed");
         return render_admin_error(
             &state,
@@ -844,175 +834,63 @@ pub async fn delete(
     Redirect::to(&with_org("/admin/resources", &scope)).into_response()
 }
 
-// --- RFC 9728 corroboration ----------------------------------------------
-
-/// True when the stored resource is an http(s) URI with a host — i.e. the
-/// corroboration fetch has somewhere to go.
-fn has_fetchable_host(resource: &str) -> bool {
-    Url::parse(resource)
-        .ok()
-        .filter(|u| matches!(u.scheme(), "http" | "https"))
-        .and_then(|u| u.host_str().map(str::to_string))
-        .is_some()
-}
-
-/// RFC 9728 §3 well-known location, path-aware: the well-known prefix sits
-/// between the origin and the resource's path component.
-fn protected_resource_metadata_url(resource: &Url) -> Option<Url> {
-    resource.host_str()?;
-    let path = resource.path().trim_end_matches('/');
-    let wk = if path.is_empty() {
-        "/.well-known/oauth-protected-resource".to_string()
-    } else {
-        format!("/.well-known/oauth-protected-resource{path}")
-    };
-    let mut url = resource.clone();
-    url.set_query(None);
-    url.set_fragment(None);
-    url.set_path(&wk);
-    Some(url)
-}
-
-/// Run the advisory check for `resource`. `None` = nothing to check (verbatim
-/// non-URI identifier), the row stays `unchecked`. Never gates anything.
-async fn corroborate(state: &AppState, resource: &str) -> Option<&'static str> {
-    let url = Url::parse(resource)
-        .ok()
-        .filter(|u| matches!(u.scheme(), "http" | "https"))?;
-    let wk = protected_resource_metadata_url(&url)?;
-    let allow_private = state.cfg.oauth.cimd.allow_private_targets;
-    let status = match fetch_metadata(&wk, allow_private).await {
-        Ok(doc) => {
-            let issuer = state.cfg.hydra.issuer_or_public();
-            if resource_matches(&doc.resource, resource)
-                && issuer_listed(&doc.authorization_servers, issuer)
-            {
-                corroboration::CORROBORATED
-            } else {
-                tracing::info!(
-                    resource,
-                    doc_resource = %doc.resource,
-                    "admin/resources: RFC 9728 document fetched but did not corroborate"
-                );
-                corroboration::MISMATCH
-            }
-        }
-        Err(e) => {
-            tracing::info!(resource, error = %e, "admin/resources: RFC 9728 fetch failed");
-            corroboration::UNREACHABLE
-        }
-    };
-    Some(status)
-}
-
-/// The document's `resource` against the stored (canonical) row value, with
-/// the same verbatim-then-canonical dual matching the consent resolver uses.
-fn resource_matches(doc_resource: &str, stored: &str) -> bool {
-    let doc_resource = doc_resource.trim();
-    doc_resource == stored
-        || crate::oauth::canonical_resource(doc_resource).is_some_and(|c| c == stored)
-}
-
-/// Trailing-slash-insensitive membership test for `authorization_servers`.
-fn issuer_listed(servers: &[String], issuer: &str) -> bool {
-    let want = issuer.trim_end_matches('/');
-    servers
-        .iter()
-        .any(|s| s.trim().trim_end_matches('/') == want)
-}
-
-#[derive(Debug, Deserialize)]
-struct ProtectedResourceMetadata {
-    resource: String,
-    #[serde(default)]
-    authorization_servers: Vec<String>,
-}
-
-/// SSRF-guarded GET of the metadata document: `outbound::check_target`, then
-/// the shared guarded `outbound` client with no redirects, 5 s / 64 KiB caps.
-async fn fetch_metadata(
-    url: &Url,
-    allow_private: bool,
-) -> Result<ProtectedResourceMetadata, String> {
-    crate::outbound::check_target(url, allow_private).map_err(|e| format!("metadata URL {e}"))?;
-
-    use crate::outbound::FetchError;
-    let describe = |e: FetchError| match e {
-        FetchError::Transport(m) => m,
-        FetchError::Status(s) => format!("HTTP {s}"),
-        FetchError::TooLarge => "document too large".to_string(),
-    };
-    let client = crate::outbound::client(allow_private);
-    let resp = crate::outbound::get_ok(
-        client,
-        url.as_str(),
-        Some("application/json"),
-        CORROBORATION_TIMEOUT,
+/// Run the RFC 9728 check for a row and store the status and scopes. Returns
+/// the status, or `None` when the resource has nothing to fetch; errs only
+/// when storing the result fails.
+async fn check_and_store(
+    state: &AppState,
+    ctx: &AdminCtx,
+    actx: &AuditCtx,
+    id: i64,
+    resource: &str,
+) -> Result<Option<&'static str>, anyhow::Error> {
+    let Some(check) = protected_resource::check(
+        resource,
+        state.cfg.hydra.issuer_or_public(),
+        state.cfg.oauth.cimd.allow_private_targets,
     )
     .await
-    .map_err(describe)?;
-    let buf = crate::outbound::read_capped(resp, CORROBORATION_DOC_LIMIT_BYTES)
-        .await
-        .map_err(describe)?;
-    serde_json::from_slice(&buf).map_err(|e| format!("invalid document: {e}"))
+    else {
+        return Ok(None);
+    };
+    if let Some(reason) = &check.reason {
+        tracing::info!(
+            resource,
+            status = check.status,
+            reason,
+            "admin/resources: RFC 9728 document did not corroborate"
+        );
+    }
+    let diff =
+        resource_registry::set_check_result(&state.db, id, check.status, check.scopes.as_deref())
+            .await?;
+    if let Some(diff) = diff {
+        let _ = audit::log(
+            &state.db,
+            ctx.audit_event(action::RESOURCE_SCOPES_CHANGED, actx)
+                .target(target_kind::RESOURCE, resource.to_string())
+                .metadata(audit_metadata!(
+                    "added" => diff.added.join(" "),
+                    "removed" => diff.removed.join(" "),
+                )),
+        )
+        .await;
+        match resource_registry::load_registry_scopes(&state.db).await {
+            Ok(reg) if reg.budget_cut => tracing::warn!(
+                resource,
+                budget = resource_registry::REGISTRY_SCOPE_BUDGET,
+                "admin/resources: registry scopes exceed the budget; newer rows' scopes ignored"
+            ),
+            Ok(_) => {}
+            Err(e) => tracing::warn!(error = ?e, "admin/resources: registry scope reload failed"),
+        }
+    }
+    Ok(Some(check.status))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn wk(raw: &str) -> String {
-        protected_resource_metadata_url(&Url::parse(raw).unwrap())
-            .expect("well-known URL")
-            .to_string()
-    }
-
-    #[test]
-    fn well_known_url_without_path() {
-        assert_eq!(
-            wk("https://mcp.example.com"),
-            "https://mcp.example.com/.well-known/oauth-protected-resource"
-        );
-    }
-
-    #[test]
-    fn well_known_url_inserts_before_path() {
-        assert_eq!(
-            wk("https://stackpit.gofranz.com/mcp"),
-            "https://stackpit.gofranz.com/.well-known/oauth-protected-resource/mcp"
-        );
-    }
-
-    #[test]
-    fn well_known_url_keeps_port_and_drops_query() {
-        assert_eq!(
-            wk("http://127.0.0.1:8890/mcp/v1?x=1"),
-            "http://127.0.0.1:8890/.well-known/oauth-protected-resource/mcp/v1"
-        );
-    }
-
-    #[test]
-    fn resource_matches_verbatim_and_canonical() {
-        let stored = "https://stackpit.gofranz.com/mcp";
-        assert!(resource_matches(stored, stored));
-        assert!(resource_matches(
-            "https://stackpit.gofranz.com/mcp/",
-            stored
-        ));
-        assert!(!resource_matches("https://other.example/mcp", stored));
-        // Verbatim non-URI identifiers only ever match verbatim.
-        assert!(resource_matches("stackpit-web", "stackpit-web"));
-    }
-
-    #[test]
-    fn issuer_listed_is_trailing_slash_insensitive() {
-        let servers = vec!["http://host.containers.internal:3000/hydra/".to_string()];
-        assert!(issuer_listed(
-            &servers,
-            "http://host.containers.internal:3000/hydra"
-        ));
-        assert!(!issuer_listed(&servers, "https://other.issuer"));
-    }
 
     fn fields(claim: &str, issuer: &str, client_id: &str, template: &str) -> SelfServiceFields {
         SelfServiceFields {
@@ -1103,13 +981,5 @@ mod tests {
                 .expect_err(&format!("{input:?} must be refused"));
             assert!(err.contains(want), "{input:?}: {err}");
         }
-    }
-
-    #[test]
-    fn has_fetchable_host_rejects_verbatim_identifiers() {
-        assert!(has_fetchable_host("https://mcp.example.com/mcp"));
-        assert!(!has_fetchable_host("stackpit-web"));
-        assert!(!has_fetchable_host("stackpit.gofranz.com"));
-        assert!(!has_fetchable_host("urn:example:resource"));
     }
 }

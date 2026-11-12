@@ -219,7 +219,7 @@ Keep at least one backup of the previous key for forensic verification of histor
 
 ### `[oauth.scope_descriptions]`
 
-Map of scope name to human-readable description, surfaced on `/oauth/consent`. Unknown scopes fall back to the raw scope name. Example:
+Map of scope name to human-readable description, surfaced on `/oauth/consent`. Unknown scopes fall back to the raw scope name. The keys are also part of the CIMD scope allowlist: a CIMD client can only get a custom scope onto its Hydra row when the scope is a key here, an entry in `[oauth.cimd].client_scope_extra`, in the client's own metadata document, or in the stored `scopes_supported` of the registry row the request's `resource=` names (see [Scope allowlist](#cimd-zero-config-client-onboarding)). Keys here apply to every resource; registry scopes apply to their own resource only. List step-up scopes, and the scopes of resource servers without RFC 9728 metadata, here. Example:
 
 ```toml
 [oauth.scope_descriptions]
@@ -245,13 +245,13 @@ Settings for the CIMD authorization shim at `GET /oauth2/authorize` (see [CIMD](
 
 | Key                        | Type     | Default          | Description                                                                                                                                                |
 |----------------------------|----------|------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `allow_private_targets`    | bool     | `false`          | Stand down the SSRF guard on outbound document fetches: allows `http://` and loopback/private-IP client_id and metadata URLs, so local fixture servers work in development and CI. **Never enable in production.** |
-| `client_scope_extra`       | string[] | `[]`             | Extra scope entries unioned into every CIMD client's Hydra `scope` ceiling, on top of the built-in `openid offline offline_access`, the scopes each authorize request asks for, and the document's own `scope`. |
+| `allow_private_targets`    | bool     | `false`          | Stand down the SSRF guard on outbound document fetches: allows `http://` and loopback/private-IP client_id and metadata URLs, so local fixture servers work in development and CI. **Never enable in production.** Forseti refuses to boot with it on when `[self].url` is production-shaped (`https` with any host except `localhost`, a loopback or private IPv4, or a loopback, unique-local or link-local IPv6), and `forseti config check` reports it as FAIL. |
+| `client_scope_extra`       | string[] | `[]`             | Scope entries every CIMD client's Hydra `scope` ceiling carries, after the built-in `openid offline offline_access` and before the document's `scope` and the request's allowlisted scopes. Each entry (whitespace-separated values count as separate scopes) is also on the [scope allowlist](#cimd-zero-config-client-onboarding) and applies to every resource; registry scopes are the per-resource source. Entries containing `*` are ignored. |
 | `allowed_client_hosts`     | string[] | `[]`             | When non-empty, only client_id URLs whose host matches an entry exactly (case-insensitive; subdomains do NOT match) may use the shim. Empty = open: any HTTPS client_id host is accepted, consent-gated, per the MCP open-client model. A client-vendor list (`["claude.ai"]`), not a per-resource list. |
 | `ip_rate_per_minute`       | u32      | `10`             | Per-IP rate limit on `GET /oauth2/authorize` — max requests per minute. In-memory, per-process. `0` disables this bucket.                                  |
 | `ip_rate_per_hour`         | u32      | `100`            | Per-IP rate limit — max requests per hour. Enforced in parallel with the per-minute bucket. `0` disables.                                                  |
-| `global_rate_per_minute`   | u32      | `40`             | Global (all-callers-share-one-bucket) rate limit, requests per minute. Bounds total traffic even when a spoofed `X-Forwarded-For` defeats the per-IP bucket. `0` disables. |
-| `global_rate_per_hour`     | u32      | `400`            | Global rate limit, requests per hour, in parallel with the per-minute global bucket. `0` disables.                                                        |
+| `global_rate_per_minute`   | u32      | `40`             | Global (all-callers-share-one-bucket) limit on first sightings of a `client_id` (no metadata row yet, so a document fetch), per minute. Known clients are limited per IP only. `0` disables. |
+| `global_rate_per_hour`     | u32      | `400`            | Global limit on first sightings of a `client_id`, per hour, in parallel with the per-minute window. `0` disables.                                         |
 | `max_clients`              | u32      | `500`            | Ceiling on how many CIMD clients may exist in total. The rate keys above bound how fast clients are registered; this bounds the standing count, since every distinct client_id URL leaves a permanent Hydra client and metadata row behind. Only a *new* client_id is refused — everything already registered keeps working. `0` lifts the ceiling. |
 | `max_clients_per_host`     | u32      | `50`             | Same ceiling, per client_id host, so one host can't consume the global allowance on its own. `0` lifts it.                                                |
 
@@ -354,12 +354,16 @@ These are clamped at load time under the same ceilings as `[oauth]`/`[orgs]`/`[c
 
 | Key                    | Type | Default | Description                                                                                                                                                                                                                              |
 |------------------------|------|---------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `trust_forwarded_for`  | bool | `false` | Honour `X-Forwarded-For` (then `X-Real-IP`) when deriving the audited client IP and keying per-IP rate limiters. Set `true` ONLY when Forseti's listener is reachable solely through your reverse proxy. See [proxy guide](./operator-guide-proxy.md). |
+| `trust_forwarded_for`  | bool | `false` | Honour `X-Forwarded-For` when deriving the audited client IP and keying per-IP rate limiters. Set `true` ONLY when Forseti's listener is reachable solely through your reverse proxy. See [proxy guide](./operator-guide-proxy.md). |
 | `trusted_hops`         | u8   | `1`     | Number of proxies in front of Forseti, each appending one `X-Forwarded-For` entry. The client is the entry this many from the right; everything further left is caller-supplied and ignored. `0` behaves as `1`. |
 
-**How the chain is read.** Every proxy appends the address it accepted the connection from, so the rightmost `trusted_hops` entries were written by infrastructure you control and the entry just inside them is the real client. Forseti never reads the leftmost entry, which is whatever the caller sent. Your proxy therefore does not need to strip inbound `X-Forwarded-For` (nginx's default `$proxy_add_x_forwarded_for` append is fine), but it must *append*, not overwrite, and if it sets `X-Real-IP` it must overwrite that one. If the chain is shorter than `trusted_hops` (the request did not come through the proxy), Forseti falls back to `X-Real-IP` and then the TCP peer.
+**How the chain is read.** Every proxy appends the address it accepted the connection from, so the rightmost `trusted_hops` entries were written by infrastructure you control and the entry just inside them is the real client. Forseti never reads the leftmost entry, which is whatever the caller sent. Your proxy therefore does not need to strip inbound `X-Forwarded-For` (nginx's default `$proxy_add_x_forwarded_for` append is fine), but it must *append*, not overwrite, and if it sets `X-Real-IP` it must overwrite that one. If the chain is shorter than `trusted_hops` (the request did not come through the proxy), Forseti falls back to the TCP peer. It never reads `X-Real-IP`.
 
 **Safety precondition: the listener must be unreachable except through the trusted proxy.** There is no trusted-proxy allowlist. Anyone who can reach the listener directly is, from Forseti's point of view, the last proxy: they append nothing, so their own header becomes the chain and they choose both the audited IP and their rate-limit key. Bind the listener to loopback or a private interface, or firewall the port to the proxy's address, before enabling the flag. The global rate-limit buckets are the only backstop otherwise. With `trust_forwarded_for = false` (the default) Forseti keys on the TCP peer address, which cannot be forged.
+
+**Limiter keys.** Per-IP limiters key an IPv6 client by its /64, since one host usually holds the whole prefix; an IPv4-mapped IPv6 address counts as IPv4. The audit `ip_hash` keeps the full address. When a request on the public listener carries `X-Forwarded-For` while `trust_forwarded_for` is off, Forseti logs one warning per process: behind a proxy that means every caller shares the proxy's bucket.
+
+**Request timeout.** Forseti cuts a public-listener request at 30 s and answers `503`; the audit middleware still records it. The internal listener has no timeout. The timeout doesn't cover a client that sends its headers or body slowly, so the reverse proxy must enforce client header and body timeouts (haproxy `timeout http-request` and `timeout client`, nginx `client_header_timeout` and `client_body_timeout`).
 
 ### Environment overrides
 
@@ -1071,6 +1075,8 @@ Why `config-init`'s baked-in recommendations are set the way they are. This used
 
 **Hydra `strategies.access_token: jwt`.** Access tokens are JWTs by default. Resource servers validate locally against Hydra's JWKS. Flip to `opaque` if you need immediate revocation (and route every RS to the admin API on `:4445`).
 
+**Hydra `strategies.scope: exact`.** Hydra's default `wildcard` strategy lets a `*` entry on a client's scope match every dot-free scope, so one stray `*` on a client turns its ceiling into "anything". RFC 6749 scopes are opaque strings with no wildcard semantics. Forseti drops `*` tokens before they reach a CIMD client, and `forseti config check` warns when `strategies.scope` isn't `exact`.
+
 ## Managing configuration with forseti config
 
 `config-check` and `config-init` cover linting and first-time generation. Once a deployment is live, day-2 operations (turning on a sign-in provider, rotating a secret, restoring from a backup) go through the rest of the `forseti config` surface. Like `config-check`/`config-init`, every subcommand here is a pure file operation: no DB, no running Forseti process, no live Kratos/Hydra API calls beyond a couple of best-effort read-only probes (counting affected identities/clients before a destructive change, when an admin URL is configured).
@@ -1568,6 +1574,7 @@ The playground ships with **JWT access tokens and a 5-minute TTL**, pinned in `i
 ```yaml
 strategies:
   access_token: jwt
+  scope: exact
 
 ttl:
   access_token: 5m
@@ -1633,7 +1640,25 @@ Documents are cached in-process (1024 entries, TTL from `Cache-Control: max-age`
 
 **The `localhost` compensation.** Hydra's loopback redirect matching is IP-literal-only: a registered port-less `http://127.0.0.1/callback` matches any port, but `http://localhost/callback` does not — and Claude Code builds `http://localhost:{ephemeral}/callback` at runtime. The shim compensates by upserting the requested literal onto the Hydra row when it matched a loopback document entry only via the any-port rule. At most 5 such literals are kept (oldest evicted); document URIs are never evicted.
 
-**Scope ceiling.** The Hydra row's `scope` is the union of the row's existing scope (never shrinks), the built-in `openid offline offline_access`, the request's `scope` values, `[oauth.cimd].client_scope_extra`, and the document's own `scope` — capped at 30 entries with a warning when truncated. This is a ceiling, never a grant: the consent screen and the resource server's own role intersection remain the actual authorization.
+**Scope ceiling.** The Hydra row's `scope` is the union, in this order, of the row's existing entries (never removed), the built-in `openid offline offline_access`, `[oauth.cimd].client_scope_extra`, the document's own `scope`, and the request's allowlisted `scope` values. It's capped at 256 entries with a warning when the cap truncates; request scopes come last, so they never push out operator or document entries. The resource registry contributes at most 128 distinct scopes across all rows, oldest rows first (by creation time), so config sources plus registry scopes stay well under the cap. This is a ceiling, never a grant: the consent screen and the resource server's own role intersection remain the actual authorization.
+
+**Scope allowlist.** A request scope reaches the ceiling only when it's on the allowlist. The global sources: the built-in `openid offline offline_access`, the consent screen's own `email profile org orgs groups extended_profile`, the keys of [`[oauth.scope_descriptions]`](#oauthscope_descriptions), the entries of `client_scope_extra`, and the client document's `scope`. The per-resource source: the stored `scopes_supported` of each enabled, counted [registry row](#the-resource-registry-adminresources) that one of the request's `resource=` values names (matched verbatim, then canonically; the first 5 values count). A request without a matching `resource=` gets the global sources only, which is what the MCP spec expects anyway: clients must send `resource=`.
+
+When scopes are still dropped after the stored lists, and a `resource=` names a registry row with a fetchable URI, Forseti re-fetches that row's RFC 9728 document once, stores the result and filters again. One re-fetch per resource per 60 s, per process; the URL comes from the stored row, never from the request. A throttled or failed re-fetch keeps the stored list. So an MCP server release that adds a scope to `scopes_supported` works on the next request, with no Forseti change.
+
+Any token containing `*` is dropped from every source and from the request: Hydra's default `wildcard` scope strategy would treat it as a pattern (see [`strategies.scope: exact`](#configuration-rationale)). Any other request scope stays off the Hydra row; Forseti passes the request to Hydra unchanged, Hydra answers `invalid_scope`, and Forseti logs one warning per request naming up to 5 of the dropped scopes. The global sources aren't per client: any listed scope can reach any CIMD client's ceiling, and consent gates the grant.
+
+**Upgrade requirement: list step-up scopes in config.** A CIMD client that asks for a scope its Hydra row doesn't carry yet, and that no source allows, gets `invalid_scope` and can't connect. Scopes an MCP server publishes in its RFC 9728 `scopes_supported` are discovered per resource, as long as the server is enrolled in the registry and the client sends `resource=`. Two kinds still need config: step-up scopes a server deliberately leaves out of `scopes_supported`, and every scope of a server that publishes no RFC 9728 document. List those under `[oauth.scope_descriptions]` (or `client_scope_extra`); config scopes apply to every resource. `openid` and `offline_access` are built in and need no entry. Set Hydra's `strategies.scope: exact` as well. For Stackpit and Formshive, the step-up scopes:
+
+```toml
+[oauth.scope_descriptions]
+"stackpit:admin"                = "Create and archive your Stackpit projects"
+"formshive:forms:write"         = "Create and modify your forms"
+"formshive:integrations:write"  = "Create and modify your form integrations"
+"formshive:admin"               = "Delete your forms, submissions and integrations"
+```
+
+Descriptions for the discovered scopes are optional; without one, the consent screen shows the raw scope name.
 
 **What CIMD clients can never do:**
 
@@ -1663,11 +1688,16 @@ Each row carries:
 - **`display_name`**, **`org_id`**, **`enabled`** (the toggle consent actually checks), **`created_by`**, **`created_at`**.
 - **`access_token_claims`** — `metadata_admin` keys copied into tokens for this resource; Forseti-wide admins only. See [Access-token claims from `metadata_admin`](#access-token-claims-from-metadata_admin).
 - **Self-service** (claim, issuer URL, client ID, value template): lets users link the value of one of those claims themselves; Forseti-wide admins only. See [Self-service resource claims](#self-service-resource-claims).
-- **Corroboration badge** — an advisory RFC 9728 check, run on create and via the per-row "re-check" button: Forseti fetches `https://{host}/.well-known/oauth-protected-resource{path}` through the same SSRF guard as the CIMD fetcher and compares the document's `resource` and `authorization_servers` against the row and the configured issuer. Statuses: `unchecked` / `corroborated` / `unreachable` / `mismatch`. It **never gates** creation (the app may not be deployed yet) and never grants anything; non-URI identifiers have nothing to fetch and stay `unchecked`.
+- **Corroboration badge** — an advisory RFC 9728 check, run on create and via the per-row "re-check" button: Forseti fetches `https://{host}/.well-known/oauth-protected-resource{path}` through the same SSRF guard as the CIMD fetcher and compares the document's `resource` and `authorization_servers` against the row and the configured issuer. Statuses: `unchecked` / `corroborated` / `unreachable` / `mismatch`. It **never gates** creation (the app may not be deployed yet) and never binds an audience; non-URI identifiers have nothing to fetch and stay `unchecked`.
+- **Stored scopes** - the document's `scopes_supported`, kept on the row and refreshed on create, on re-check and by the CIMD shim's on-demand re-fetch. Only a `corroborated` document replaces the list; a corroborated document that drops a scope shrinks it, a missing or non-array `scopes_supported` leaves it as it is. On `mismatch` or `unreachable` the stored list stays, so an MCP server outage doesn't refuse scopes that worked a minute ago; disable the row to cut it off. Entries must be RFC 6749 scope tokens without `*`, at most 128 characters, at most 30 per row; anything else is skipped. Every change writes a `resource.scopes_changed` audit row with the added and removed names.
+
+**Which rows count.** A row's stored scopes count when the row is enabled and either sits in the default org or its URI host is still a verified domain of its org. Losing or removing that verification stops its scopes counting (audience binding is unaffected). Put org-independent rows in the default org.
+
+**Consent downscoping.** Per RFC 8707 section 2.2, a scope that comes only from registry rows (not built in, not a `scope_descriptions` key, not in `client_scope_extra`) is granted only when the token's audience includes a counted row that lists it; otherwise consent leaves it out of the grant, and the consent screen doesn't show it. This applies to every client: a registry scope can sit on a shared client's ceiling after one request for resource A, and Hydra then accepts it on a request for resource B, but the token for B won't carry it. A client's own scope (pre-registered, or from a CIMD document's `scope`) that some registry row also lists is held to the same rule; add it to config if it should apply everywhere. Scopes in no source at all pass through untouched.
 
 **Org scoping.** A Forseti-wide admin can register any resource into any org. An org-scoped admin (`?org=<slug>`) sees only rows stamped with their org and may only create resources whose URI host is a **verified domain** of that org (fail closed) — domain-ownership proof via the existing org domains verification.
 
-Disabling a row denies the audience on the next consent; deleting it does the same permanently. Already-issued tokens keep their `aud` until they expire (5-minute JWTs by default). Audit rows: `admin.resource.created`, `admin.resource.toggled`, `admin.resource.claims_updated` and `admin.resource.deleted` (the last two at critical severity).
+Disabling a row denies the audience on the next consent; deleting it does the same permanently. Already-issued tokens keep their `aud` until they expire (5-minute JWTs by default). Audit rows: `admin.resource.created`, `admin.resource.toggled`, `admin.resource.claims_updated`, `admin.resource.deleted` (the last two at critical severity) and `resource.scopes_changed` (from the admin or the CIMD shim).
 
 #### Fronting the issuer (front proxy vs haproxy)
 
@@ -1707,7 +1737,7 @@ Whoever can administer the client can upload — Forseti admins for any client, 
 
 The client's own `logo_uri` is deliberately *not* used here. It's client-controlled (a CIMD document carries it onto the Hydra row), and rendering a remote URL would make every user's browser hit the relying party's server from your consent page — leaking IP, user-agent and timing before the user has agreed to anything. Unverified clients still show their logo; the caution banner is the trust signal, and hiding the logo would only make "no logo" ambiguous between "not reviewed" and "never uploaded one".
 
-**Rate-limit mechanics.** The CIMD shim's per-IP buckets share the deployment-wide behaviour of every other public limiter: in-memory, per-process (no cross-replica coordination), keyed on the TCP peer IP unless `[proxy].trust_forwarded_for = true` behind an appending proxy (see [`[proxy]`](#proxy--reverse-proxy-trust) and the haproxy sketches in [`operator-guide-proxy.md`](./operator-guide-proxy.md)). The global bucket bounds total shim traffic even when a spoofed `X-Forwarded-For` defeats the per-IP one. A throttled request gets `429` with `Retry-After`.
+**Rate-limit mechanics.** The CIMD shim's per-IP buckets share the deployment-wide behaviour of every other public limiter: in-memory, per-process (no cross-replica coordination), keyed on the TCP peer IP (IPv6 by its /64) unless `[proxy].trust_forwarded_for = true` behind an appending proxy (see [`[proxy]`](#proxy--reverse-proxy-trust) and the haproxy sketches in [`operator-guide-proxy.md`](./operator-guide-proxy.md)). The global windows count first sightings of a `client_id` only (no metadata row yet, so a document fetch), checked in the handler before the fetch; they bound how fast unknown clients cost a fetch even when a spoofed `X-Forwarded-For` defeats the per-IP buckets, while known clients are limited per IP only. A throttled request gets `429` with `Retry-After`.
 
 #### RFC 9728 — Protected Resource Metadata
 
@@ -1717,7 +1747,7 @@ MCP servers advertise their authorization server via [RFC 9728](https://datatrac
 2. Client fetches `<url>` (path-aware: `/.well-known/oauth-protected-resource{path}` on the MCP server's origin) → JSON pointing at the issuer.
 3. Client resolves the issuer's AS metadata via RFC 8414 path insertion first — which lands on Forseti's augmented document (see [Fronting the issuer](#fronting-the-issuer-front-proxy-vs-haproxy)).
 
-The document itself is MCP-server-side; Forseti's [corroboration check](#the-resource-registry-adminresources) fetches it as an advisory signal when the resource is enrolled. Sample (the MCP-server author publishes this):
+The document itself is MCP-server-side; Forseti's [corroboration check](#the-resource-registry-adminresources) fetches it when the resource is enrolled, on re-check and when a CIMD request needs a scope the stored list doesn't have. Forseti reads three fields: `resource` (must match the row, verbatim or canonically), `authorization_servers` (must list the issuer) and `scopes_supported` (stored per resource when the first two hold). Sample (the MCP-server author publishes this):
 
 ```json
 {
@@ -1734,7 +1764,7 @@ The document itself is MCP-server-side; Forseti's [corroboration check](#the-res
 
 1. `/admin/resources/new` → enter the MCP server's canonical resource URI (e.g. `https://mcp.example.com/mcp`) and a display name. Org-scoped admins can only use hosts on a verified org domain.
 2. Submit. The corroboration check runs immediately; an `unreachable` badge is normal when the app isn't deployed yet — use **Re-check** later.
-3. Add scope descriptions under `[oauth.scope_descriptions]` in `config.toml` (`<app>:<resource>:<verb>` convention) so the consent screen reads naturally.
+3. Scopes the MCP server publishes in `scopes_supported` need nothing more: they're stored on the row and allowed for requests naming this resource. List step-up scopes the server leaves out of `scopes_supported`, and every scope of a server without an RFC 9728 document, under `[oauth.scope_descriptions]` in `config.toml` (`<app>:<resource>:<verb>` convention). Add a description for any scope whose raw name shouldn't be what the consent screen shows.
 4. Done — CIMD clients (Claude Code, claude.ai) connect with no further operator work.
 
 Pre-registering a client is only needed for non-CIMD clients: `/admin/clients/new` → the **MCP server** card pre-fills `authorization_code` + `refresh_token`, `none` auth method, PKCE, the audience textarea and redirect-URI hints. A client created this way is `verified`, and its registered audience counts as consent policy on its own.
@@ -1973,7 +2003,7 @@ Caddy injects `X-Forwarded-*` headers automatically and handles TLS via Let's En
 
 For the path-prefixed shape, the rewrite is the load-bearing bit — `/hydra/*` and `/kratos/*` must be stripped before the upstream sees them, since Hydra and Kratos don't honour subpath mounting. The haproxy example in the proxy doc shows the exact rewrite rules.
 
-Forseti currently logs the peer IP it sees from the TCP socket. With a proxy in front, that is the proxy's IP. Forseti does not yet honor `X-Forwarded-For` for logging; treat the forwarded header as the source of truth in your log pipeline.
+Forseti keys the audit log and per-IP limiters on the TCP peer unless `[proxy].trust_forwarded_for` is on. With a proxy in front, the peer is the proxy's IP; set `trust_forwarded_for = true` and `trusted_hops` to read the client from `X-Forwarded-For` (see [`[proxy]`](#proxy--reverse-proxy-trust)).
 
 ## Secrets management
 

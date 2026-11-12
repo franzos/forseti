@@ -359,8 +359,12 @@ All admin pages require AAL2 + Forseti-admin allowlist or org ownership.
 - [ ] Global claim rule: another row listing the self-service claim (on **Edit** or on create) → `claim "<name>" is already used by another resource`, and the create leaves no row behind; making a claim self-service that another row already lists → same error
 - [ ] Clearing all four fields turns self-service off: badge gone, row gone from `/settings/resource-claims`, an already linked value still in `metadata_admin`
 - [ ] Audit: `admin.resource.claims_updated` (critical) carries `self_service_*` and `previous_self_service_*`
+- [ ] Scopes on create + **Re-check**: a corroborated RFC 9728 document's `scopes_supported` is stored on the row (invalid entries and `*` skipped); a change writes `resource.scopes_changed` with added/removed; `mismatch`/`unreachable` keep the stored list
+- [ ] Scope discovery: a CIMD request with `resource=<row>` and a scope the MCP server just added to `scopes_supported` gets it onto the client ceiling on the first request; a second new scope within 60 s stays off; without `resource=` the scope is dropped
+- [ ] Org row scopes count only while the row's host is a verified domain of its org; disabling the row cuts its scopes off every consent
+- [ ] Consent downscoping: with one CIMD client, a registry scope granted with `resource=A` is in the token; the same scope requested with `resource=B` (B doesn't list it) or no `resource=` is missing from the consent screen and from the token
 - [ ] CSRF on toggle / re-check / claims / delete POSTs
-- [ ] Audit rows: `admin.resource.created`, `admin.resource.toggled`, `admin.resource.claims_updated` (critical), `admin.resource.deleted` (critical)
+- [ ] Audit rows: `admin.resource.created`, `admin.resource.toggled`, `admin.resource.claims_updated` (critical), `admin.resource.deleted` (critical), `resource.scopes_changed`
 
 ### 7.4 Identities (`/admin/identities`)
 

@@ -3,6 +3,7 @@
 use std::future::IntoFuture;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::{
     Router,
@@ -12,6 +13,7 @@ use axum::{
 };
 use tokio_util::sync::CancellationToken;
 use tower_http::set_header::SetResponseHeaderLayer;
+use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::audit;
@@ -45,6 +47,13 @@ pub(crate) async fn readyz(State(state): State<AppState>) -> Response {
             .into_response();
     }
     "ready".into_response()
+}
+
+const PUBLIC_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+// 503 rather than the default 408: the stall is ours, and 408 invites automatic client retries.
+fn request_timeout_layer(timeout: Duration) -> TimeoutLayer {
+    TimeoutLayer::with_status_code(axum::http::StatusCode::SERVICE_UNAVAILABLE, timeout)
 }
 
 fn worker_stale_threshold_secs(tick_seconds: u64) -> i64 {
@@ -95,6 +104,10 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         std::process::exit(1);
     }
     if let Err(msg) = cfg.audit.webhook_token.validate(&cfg.self_.url) {
+        eprintln!("config error: {msg}");
+        std::process::exit(1);
+    }
+    if let Err(msg) = cfg.oauth.cimd.validate(&cfg.self_.url) {
         eprintln!("config error: {msg}");
         std::process::exit(1);
     }
@@ -318,6 +331,7 @@ pub(crate) async fn run() -> anyhow::Result<()> {
 
     let mut public_app = public_app
         .merge(static_assets::router())
+        .layer(request_timeout_layer(PUBLIC_REQUEST_TIMEOUT))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             audit::middleware,
@@ -1088,5 +1102,59 @@ mod span_tests {
             .collect();
         assert!(names.contains(&"path"), "{names:?}");
         assert!(!names.contains(&"uri"), "{names:?}");
+    }
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use std::time::Duration;
+
+    use axum::{Router, body::Body, http::Request, http::StatusCode, routing::get};
+    use tower::ServiceExt;
+
+    use super::{PUBLIC_REQUEST_TIMEOUT, request_timeout_layer};
+
+    fn app() -> Router {
+        Router::new()
+            .route(
+                "/slow",
+                get(|| async {
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    "slow"
+                }),
+            )
+            .route("/fast", get(|| async { "fast" }))
+            .layer(request_timeout_layer(Duration::from_millis(50)))
+    }
+
+    async fn status(uri: &str) -> StatusCode {
+        let req = Request::get(uri).body(Body::empty()).expect("request");
+        app().oneshot(req).await.expect("infallible").status()
+    }
+
+    #[tokio::test]
+    async fn a_stalled_handler_answers_503() {
+        assert_eq!(status("/slow").await, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn a_fast_handler_is_untouched() {
+        assert_eq!(status("/fast").await, StatusCode::OK);
+    }
+
+    #[test]
+    fn the_public_app_mounts_the_timeout_inside_audit() {
+        assert_eq!(PUBLIC_REQUEST_TIMEOUT, Duration::from_secs(30));
+        let app = include_str!("app.rs");
+        let start = app
+            .find(".merge(static_assets::router())")
+            .expect("static assets");
+        let tail = &app[start..];
+        let between = &tail[..tail.find("audit::middleware").expect("audit")];
+        assert!(between.contains(".layer(request_timeout_layer(PUBLIC_REQUEST_TIMEOUT))"));
+
+        let internal = &app[app.find("let internal_app").expect("internal_app")..];
+        let block = &internal[..internal.find(".with_state(").expect("internal state")];
+        assert!(!block.contains("request_timeout_layer"));
     }
 }

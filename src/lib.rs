@@ -38,6 +38,7 @@ mod outbound;
 mod page_chrome;
 mod posix;
 mod profiles;
+mod protected_resource;
 mod rate_limit;
 mod render;
 mod resource_registry;

@@ -12,6 +12,7 @@ use diesel::prelude::*;
 
 use crate::db::DbPool;
 use crate::orgs::DEFAULT_ORG_ID;
+use crate::schema::org_allowed_domains as oad;
 use crate::schema::organization_members as om;
 use crate::schema::resource_registry as rr;
 use crate::{db_interact, serialized_txn};
@@ -241,6 +242,190 @@ pub fn parse_access_token_claims(input: &str) -> Result<Vec<String>, String> {
         return Err(format!("At most {MAX_CLAIMS} claims per resource."));
     }
     Ok(claims)
+}
+
+pub const MAX_ROW_SCOPES: usize = 30;
+pub const MAX_SCOPE_LEN: usize = 128;
+
+/// Valid RFC 6749 scope-tokens from a fetched `scopes_supported`, deduplicated
+/// in order and capped at [`MAX_ROW_SCOPES`]; `*` is refused because Hydra's
+/// wildcard strategy would treat it as a pattern.
+pub fn parse_scopes_supported(raw: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for s in raw {
+        let valid = (1..=MAX_SCOPE_LEN).contains(&s.len())
+            && s.bytes()
+                .all(|b| matches!(b, 0x21 | 0x23..=0x5B | 0x5D..=0x7E) && b != b'*');
+        if valid && !out.contains(s) {
+            out.push(s.clone());
+            if out.len() == MAX_ROW_SCOPES {
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// Distinct scopes all counted rows contribute together; later rows lose theirs first.
+pub const REGISTRY_SCOPE_BUDGET: usize = 128;
+
+/// A counted row's stored scopes after the budget.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopeRow {
+    pub id: i64,
+    pub resource: String,
+    pub scopes: Vec<String>,
+}
+
+#[derive(Debug, Default)]
+pub struct RegistryScopes {
+    /// Enabled rows in the default org or on a verified domain of their org,
+    /// oldest first.
+    pub counted: Vec<ScopeRow>,
+    /// Every stored scope of every row, enabled or counted or not.
+    pub all_listed: std::collections::HashSet<String>,
+    /// Whether [`REGISTRY_SCOPE_BUDGET`] cut any counted row's scopes.
+    pub budget_cut: bool,
+}
+
+/// Added and removed names when [`set_check_result`] changed a stored list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopeDiff {
+    pub added: Vec<String>,
+    pub removed: Vec<String>,
+}
+
+fn resource_host(resource: &str) -> Option<String> {
+    url::Url::parse(resource)
+        .ok()?
+        .host_str()
+        .map(str::to_ascii_lowercase)
+}
+
+pub async fn load_registry_scopes(db: &DbPool) -> anyhow::Result<RegistryScopes> {
+    let rows: Vec<(i64, String, String, bool, String)> = db_interact!(db, |conn| {
+        rr::table
+            .select((
+                rr::id,
+                rr::resource,
+                rr::org_id,
+                rr::enabled,
+                rr::scopes_supported,
+            ))
+            .order((rr::created_at.asc(), rr::id.asc()))
+            .load(conn)
+    })?;
+    let mut orgs: Vec<String> = rows
+        .iter()
+        .filter(|r| r.3 && r.2 != DEFAULT_ORG_ID)
+        .map(|r| r.2.clone())
+        .collect();
+    orgs.sort();
+    orgs.dedup();
+    let verified: Vec<(String, String)> = if orgs.is_empty() {
+        Vec::new()
+    } else {
+        db_interact!(db, |conn| {
+            oad::table
+                .filter(oad::org_id.eq_any(&orgs))
+                .filter(oad::verified_at.is_not_null())
+                .select((oad::org_id, oad::domain))
+                .load(conn)
+        })?
+    };
+
+    let mut out = RegistryScopes::default();
+    let mut budget: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (id, resource, org_id, enabled, stored) in rows {
+        out.all_listed
+            .extend(stored.split_whitespace().map(str::to_string));
+        let counts = enabled
+            && (org_id == DEFAULT_ORG_ID
+                || resource_host(&resource).is_some_and(|host| {
+                    verified
+                        .iter()
+                        .any(|(o, d)| *o == org_id && d.eq_ignore_ascii_case(&host))
+                }));
+        if !counts {
+            continue;
+        }
+        let mut scopes = Vec::new();
+        for s in stored.split_whitespace() {
+            if budget.contains(s) || budget.len() < REGISTRY_SCOPE_BUDGET {
+                budget.insert(s.to_string());
+                scopes.push(s.to_string());
+            } else {
+                out.budget_cut = true;
+            }
+        }
+        out.counted.push(ScopeRow {
+            id,
+            resource,
+            scopes,
+        });
+    }
+    Ok(out)
+}
+
+/// The counted row a request's `resource` value names: verbatim (trimmed)
+/// first, then canonical, as consent resolves audiences.
+pub fn match_counted<'a>(rows: &'a [ScopeRow], raw: &str) -> Option<&'a ScopeRow> {
+    let raw = raw.trim();
+    rows.iter().find(|r| r.resource.trim() == raw).or_else(|| {
+        let canonical = crate::oauth::canonical_resource(raw)?;
+        rows.iter().find(|r| {
+            crate::oauth::canonical_resource(&r.resource).as_deref() == Some(canonical.as_str())
+        })
+    })
+}
+
+/// Record an RFC 9728 check result (a [`corroboration`] value), stamp
+/// `corroborated_at`, and replace the stored scopes when `scopes` is `Some`.
+/// Returns the change when the stored list changed. Zero-row match returns Ok.
+pub async fn set_check_result(
+    db: &DbPool,
+    id: i64,
+    status: &str,
+    scopes: Option<&[String]>,
+) -> anyhow::Result<Option<ScopeDiff>> {
+    let status = status.to_string();
+    let scopes: Option<Vec<String>> = scopes.map(<[String]>::to_vec);
+    let now = Utc::now().naive_utc();
+    let diff = serialized_txn!(db, Option<ScopeDiff>, diesel::result::Error, |c| {
+        let target = rr::table.filter(rr::id.eq(id));
+        diesel::update(target)
+            .set((
+                rr::corroboration.eq(&status),
+                rr::corroborated_at.eq(Some(now)),
+            ))
+            .execute(c)?;
+        let Some(new) = &scopes else {
+            return Ok(None);
+        };
+        let Some(old): Option<String> = target.select(rr::scopes_supported).first(c).optional()?
+        else {
+            return Ok(None);
+        };
+        let old: Vec<&str> = old.split_whitespace().collect();
+        let added: Vec<String> = new
+            .iter()
+            .filter(|s| !old.contains(&s.as_str()))
+            .cloned()
+            .collect();
+        let removed: Vec<String> = old
+            .iter()
+            .filter(|s| !new.iter().any(|n| n == *s))
+            .map(|s| s.to_string())
+            .collect();
+        if added.is_empty() && removed.is_empty() {
+            return Ok(None);
+        }
+        diesel::update(target)
+            .set(rr::scopes_supported.eq(new.join(" ")))
+            .execute(c)?;
+        Ok(Some(ScopeDiff { added, removed }))
+    })?;
+    Ok(diff)
 }
 
 /// Caller-supplied fields for a new row; `enabled`, `corroboration` and the
@@ -487,23 +672,6 @@ pub async fn delete(db: &DbPool, id: i64) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Record an RFC 9728 check result (a [`corroboration`] value) and stamp
-/// `corroborated_at`. Zero-row match returns Ok.
-pub async fn set_corroboration(db: &DbPool, id: i64, status: &str) -> anyhow::Result<()> {
-    let status = status.to_string();
-    let now = Utc::now().naive_utc();
-    db_interact!(db, |conn| {
-        diesel::update(rr::table.filter(rr::id.eq(id)))
-            .set((
-                rr::corroboration.eq(status.clone()),
-                rr::corroborated_at.eq(Some(now)),
-            ))
-            .execute(conn)
-            .map(|_| ())
-    })?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -578,6 +746,299 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" ");
         assert!(parse_access_token_claims(&eleven).is_err());
+    }
+
+    #[test]
+    fn parse_scopes_supported_keeps_valid_tokens_only() {
+        let v = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let long_ok = "x".repeat(MAX_SCOPE_LEN);
+        let too_long = "x".repeat(MAX_SCOPE_LEN + 1);
+        let input = v(&[
+            "a:b",
+            "",
+            "a b",
+            "a\"b",
+            "a\\b",
+            "caf\u{e9}",
+            "a\tb",
+            "*",
+            "x:*",
+            &too_long,
+            "x~y",
+            &long_ok,
+            "a:b",
+        ]);
+        assert_eq!(parse_scopes_supported(&input), v(&["a:b", "x~y", &long_ok]));
+        let forty: Vec<String> = (0..40).map(|i| format!("s{i}")).collect();
+        assert_eq!(parse_scopes_supported(&forty), forty[..MAX_ROW_SCOPES]);
+    }
+
+    async fn stored_scopes(db: &DbPool, id: i64) -> String {
+        async fn read(db: &DbPool, id: i64) -> anyhow::Result<String> {
+            let s: String = db_interact!(db, |conn| {
+                rr::table
+                    .filter(rr::id.eq(id))
+                    .select(rr::scopes_supported)
+                    .first(conn)
+            })?;
+            Ok(s)
+        }
+        read(db, id).await.expect("stored scopes")
+    }
+
+    fn strs(xs: &[&str]) -> Vec<String> {
+        xs.iter().map(|s| s.to_string()).collect()
+    }
+
+    async fn insert_with_scopes(db: &DbPool, resource: &str, org: &str, scopes: &[&str]) -> i64 {
+        let mut new = new_resource(resource);
+        new.org_id = org.to_string();
+        insert(db, new).await.expect("insert");
+        let id = find_by_resource(db, resource)
+            .await
+            .expect("find")
+            .expect("row")
+            .id;
+        set_check_result(db, id, corroboration::CORROBORATED, Some(&strs(scopes)))
+            .await
+            .expect("set scopes");
+        id
+    }
+
+    #[tokio::test]
+    async fn registry_scopes_count_enabled_default_org_rows_only() {
+        let db = crate::orgs::db::test_pool().await;
+        insert_with_scopes(&db, "https://a.example.com/mcp", DEFAULT_ORG_ID, &["a:r"]).await;
+        let b =
+            insert_with_scopes(&db, "https://b.example.com/mcp", DEFAULT_ORG_ID, &["b:r"]).await;
+        set_enabled(&db, b, false).await.expect("disable b");
+
+        let reg = load_registry_scopes(&db).await.expect("load");
+        assert_eq!(
+            reg.counted,
+            vec![ScopeRow {
+                id: reg.counted[0].id,
+                resource: "https://a.example.com/mcp".into(),
+                scopes: strs(&["a:r"]),
+            }]
+        );
+        assert!(reg.all_listed.contains("a:r") && reg.all_listed.contains("b:r"));
+        assert!(!reg.budget_cut);
+    }
+
+    #[tokio::test]
+    async fn org_rows_count_only_while_their_host_is_verified() {
+        use crate::orgs::domains::{add_pending_domain, delete_domain, mark_domain_verified};
+        let db = crate::orgs::db::test_pool().await;
+        crate::orgs::db::create_org(&db, "o1", "acme", "Acme", None)
+            .await
+            .expect("org");
+        insert_with_scopes(&db, "https://MCP.acme.com/mcp", "o1", &["acme:r"]).await;
+        let counted = |r: &RegistryScopes| r.counted.iter().any(|c| c.scopes == ["acme:r"]);
+
+        add_pending_domain(&db, "o1", "mcp.acme.com", "dns_txt", "tok", None)
+            .await
+            .expect("pending");
+        assert!(!counted(&load_registry_scopes(&db).await.expect("load")));
+
+        mark_domain_verified(&db, "o1", "mcp.acme.com")
+            .await
+            .expect("verify");
+        assert!(counted(&load_registry_scopes(&db).await.expect("load")));
+
+        delete_domain(&db, "o1", "mcp.acme.com")
+            .await
+            .expect("delete");
+        let reg = load_registry_scopes(&db).await.expect("load");
+        assert!(!counted(&reg));
+        assert!(reg.all_listed.contains("acme:r"));
+    }
+
+    #[tokio::test]
+    async fn another_orgs_verified_domain_does_not_count_a_row() {
+        use crate::orgs::domains::{add_pending_domain, mark_domain_verified};
+        let db = crate::orgs::db::test_pool().await;
+        for (id, slug) in [("oa", "a"), ("ob", "b")] {
+            crate::orgs::db::create_org(&db, id, slug, slug, None)
+                .await
+                .expect("org");
+        }
+        insert_with_scopes(&db, "https://mcp.acme.com/mcp", "oa", &["acme:r"]).await;
+        add_pending_domain(&db, "ob", "mcp.acme.com", "dns_txt", "tok", None)
+            .await
+            .expect("pending");
+        mark_domain_verified(&db, "ob", "mcp.acme.com")
+            .await
+            .expect("verify");
+        assert!(
+            load_registry_scopes(&db)
+                .await
+                .expect("load")
+                .counted
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn uncounted_rows_use_no_budget() {
+        let db = crate::orgs::db::test_pool().await;
+        let names: Vec<String> = (0..30).map(|i| format!("off:{i}")).collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        for row in 0..5 {
+            let id = insert_with_scopes(
+                &db,
+                &format!("https://off{row}.example.com"),
+                DEFAULT_ORG_ID,
+                &names,
+            )
+            .await;
+            set_enabled(&db, id, false).await.expect("disable");
+        }
+        insert_with_scopes(&db, "https://org.example.com", "nobody", &["org:x"]).await;
+        let scopes: Vec<String> = (0..30).map(|i| format!("on:{i}")).collect();
+        let scopes: Vec<&str> = scopes.iter().map(String::as_str).collect();
+        for row in 0..4 {
+            insert_with_scopes(
+                &db,
+                &format!("https://on{row}.example.com"),
+                DEFAULT_ORG_ID,
+                &scopes,
+            )
+            .await;
+        }
+        let reg = load_registry_scopes(&db).await.expect("load");
+        assert_eq!(reg.counted.len(), 4);
+        assert!(reg.counted.iter().all(|r| r.scopes.len() == 30));
+        assert!(!reg.budget_cut);
+    }
+
+    #[tokio::test]
+    async fn registry_budget_truncates_newer_rows_first() {
+        let db = crate::orgs::db::test_pool().await;
+        for row in 0..5 {
+            let scopes: Vec<String> = (0..30).map(|i| format!("r{row}:{i}")).collect();
+            let scopes: Vec<&str> = scopes.iter().map(String::as_str).collect();
+            insert_with_scopes(
+                &db,
+                &format!("https://r{row}.example.com"),
+                DEFAULT_ORG_ID,
+                &scopes,
+            )
+            .await;
+        }
+        insert_with_scopes(
+            &db,
+            "https://late.example.com",
+            DEFAULT_ORG_ID,
+            &["late:x", "r0:0"],
+        )
+        .await;
+
+        let reg = load_registry_scopes(&db).await.expect("load");
+        let lens: Vec<usize> = reg.counted.iter().map(|r| r.scopes.len()).collect();
+        assert_eq!(lens, vec![30, 30, 30, 30, 8, 1]);
+        assert_eq!(
+            reg.counted[5].scopes,
+            ["r0:0"],
+            "only already-counted scopes survive"
+        );
+        assert!(reg.budget_cut);
+        assert!(reg.all_listed.contains("late:x"));
+    }
+
+    #[test]
+    fn match_counted_verbatim_then_canonical() {
+        let rows = vec![
+            ScopeRow {
+                id: 1,
+                resource: "https://stackpit.example.com/mcp".into(),
+                scopes: vec![],
+            },
+            ScopeRow {
+                id: 2,
+                resource: "stackpit.example.com".into(),
+                scopes: vec![],
+            },
+        ];
+        let id = |raw: &str| match_counted(&rows, raw).map(|r| r.id);
+        assert_eq!(id(" https://stackpit.example.com/mcp "), Some(1));
+        assert_eq!(id("https://stackpit.example.com/mcp/"), Some(1));
+        assert_eq!(id("https://stackpit.example.com/mcp#x"), Some(1));
+        assert_eq!(id("stackpit.example.com"), Some(2));
+        assert_eq!(id("https://other.example.com/mcp"), None);
+        assert_eq!(id("other"), None);
+    }
+
+    #[tokio::test]
+    async fn set_check_result_replaces_keeps_and_diffs() {
+        let db = crate::orgs::db::test_pool().await;
+        insert(&db, new_resource("https://e.example.com"))
+            .await
+            .expect("insert");
+        let id = list_all(&db).await.expect("list_all")[0].id;
+
+        let diff = set_check_result(
+            &db,
+            id,
+            corroboration::CORROBORATED,
+            Some(&strs(&["a", "b"])),
+        )
+        .await
+        .expect("first");
+        assert_eq!(
+            diff,
+            Some(ScopeDiff {
+                added: strs(&["a", "b"]),
+                removed: vec![],
+            })
+        );
+
+        let diff = set_check_result(&db, id, corroboration::UNREACHABLE, None)
+            .await
+            .expect("keep");
+        assert_eq!(diff, None);
+        let row = &list_all(&db).await.expect("list_all")[0];
+        assert_eq!(row.corroboration, corroboration::UNREACHABLE);
+        assert_eq!(stored_scopes(&db, id).await, "a b");
+
+        let diff = set_check_result(
+            &db,
+            id,
+            corroboration::CORROBORATED,
+            Some(&strs(&["b", "a"])),
+        )
+        .await
+        .expect("same set");
+        assert_eq!(diff, None);
+
+        let diff = set_check_result(
+            &db,
+            id,
+            corroboration::CORROBORATED,
+            Some(&strs(&["b", "c"])),
+        )
+        .await
+        .expect("change");
+        assert_eq!(
+            diff,
+            Some(ScopeDiff {
+                added: strs(&["c"]),
+                removed: strs(&["a"]),
+            })
+        );
+        assert_eq!(stored_scopes(&db, id).await, "b c");
+
+        assert_eq!(
+            set_check_result(
+                &db,
+                id + 100,
+                corroboration::CORROBORATED,
+                Some(&strs(&["x"]))
+            )
+            .await
+            .expect("unknown id"),
+            None
+        );
     }
 
     #[tokio::test]
@@ -867,7 +1328,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_corroboration_stamps_timestamp() {
+    async fn set_check_result_stamps_timestamp() {
         let db = crate::orgs::db::test_pool().await;
 
         insert(&db, new_resource("https://c.example.com"))
@@ -875,14 +1336,14 @@ mod tests {
             .expect("insert");
         let id = list_all(&db).await.expect("list_all")[0].id;
 
-        set_corroboration(&db, id, corroboration::CORROBORATED)
+        set_check_result(&db, id, corroboration::CORROBORATED, None)
             .await
-            .expect("set_corroboration");
+            .expect("set_check_result");
         let row = &list_all(&db).await.expect("list_all")[0];
         assert_eq!(row.corroboration, corroboration::CORROBORATED);
         let first = row.corroborated_at.expect("corroborated_at stamped");
 
-        set_corroboration(&db, id, corroboration::UNREACHABLE)
+        set_check_result(&db, id, corroboration::UNREACHABLE, None)
             .await
             .expect("re-check");
         let row = &list_all(&db).await.expect("list_all")[0];

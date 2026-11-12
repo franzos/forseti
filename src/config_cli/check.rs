@@ -320,6 +320,16 @@ pub(crate) fn check_hydra(root: &Value) -> Vec<Finding> {
         )),
     }
 
+    match dig_str(root, &["strategies", "scope"]) {
+        Some("exact") => findings.push(Finding::ok("strategies.scope", "exact")),
+        other => findings.push(Finding::warn(
+            "strategies.scope",
+            other.unwrap_or("<unset (wildcard)>"),
+            "exact",
+            "wildcard matching lets a `*` scope on a client match other scopes; RFC 6749 scopes are opaque strings.",
+        )),
+    }
+
     // oidc.dynamic_client_registration.enabled: anyone who can reach
     // `/oauth2/register` mints a client. Forseti's trust model treats a client
     // with no `oauth_client_metadata` row as unverified precisely because of
@@ -1033,12 +1043,7 @@ pub(crate) fn check_forseti_webhook_length(doc: &DocumentMut) -> Vec<Finding> {
         entries.len()
     );
     let recommended = "`config rotate webhook-token`, then `config prune webhook-token`";
-    let self_url = doc
-        .get("self")
-        .and_then(|s| s.get("url"))
-        .and_then(|u| u.as_str())
-        .unwrap_or("http://localhost");
-    if DatabaseConfig::looks_like_production(self_url) {
+    if DatabaseConfig::looks_like_production(forseti_self_url(doc)) {
         vec![Finding::fail(
             key,
             current,
@@ -1053,6 +1058,34 @@ pub(crate) fn check_forseti_webhook_length(doc: &DocumentMut) -> Vec<Finding> {
             "a short bearer guards audit writes and session revocation; boot refuses it on a production-shaped [self].url.",
         )]
     }
+}
+
+/// `[self].url`, or a non-production default when it is missing.
+fn forseti_self_url(doc: &DocumentMut) -> &str {
+    doc.get("self")
+        .and_then(|s| s.get("url"))
+        .and_then(|u| u.as_str())
+        .unwrap_or("http://localhost")
+}
+
+/// Same rule as `CimdConfig::validate`: FAIL when the flag is on and
+/// `[self].url` is production-shaped. No finding otherwise.
+pub(crate) fn check_forseti_cimd_private_targets(doc: &DocumentMut) -> Vec<Finding> {
+    let enabled = doc
+        .get("oauth")
+        .and_then(|o| o.get("cimd"))
+        .and_then(|c| c.get("allow_private_targets"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if !enabled || !DatabaseConfig::looks_like_production(forseti_self_url(doc)) {
+        return Vec::new();
+    }
+    vec![Finding::fail(
+        "oauth.cimd.allow_private_targets",
+        "true",
+        "false",
+        "disables the SSRF guard on CIMD document fetches; Forseti refuses to boot with it on a production-shaped [self].url.",
+    )]
 }
 
 /// Walk every scalar in a TOML document, building dotted paths.
@@ -1249,6 +1282,7 @@ pub(crate) fn check(args: &CheckArgs) -> i32 {
                         findings.extend(check_forseti_crosslink(&root, doc));
                         findings.extend(check_forseti_placeholders(doc));
                         findings.extend(check_forseti_webhook_length(doc));
+                        findings.extend(check_forseti_cimd_private_targets(doc));
                     }
                 }
                 for f in &findings {
@@ -1609,6 +1643,58 @@ webhook_token = "0f3b8c1d9a2e4f7b6c5d8e9a0b1c2d3e"
         );
     }
 
+    fn cimd_private_targets_doc(flag: Option<bool>, self_url: &str) -> DocumentMut {
+        let cimd = flag
+            .map(|f| format!("[oauth.cimd]\nallow_private_targets = {f}\n"))
+            .unwrap_or_default();
+        format!("[self]\nurl = \"{self_url}\"\n\n{cimd}")
+            .parse()
+            .expect("test toml parses")
+    }
+
+    #[test]
+    fn cimd_private_targets_on_a_production_url_is_fail() {
+        let doc = cimd_private_targets_doc(Some(true), "https://forseti.example.com");
+        assert_eq!(
+            severity_of(
+                &check_forseti_cimd_private_targets(&doc),
+                "oauth.cimd.allow_private_targets"
+            ),
+            Some(Severity::Fail)
+        );
+    }
+
+    #[test]
+    fn cimd_private_targets_on_localhost_is_not_fail() {
+        let doc = cimd_private_targets_doc(Some(true), "http://localhost:3000");
+        assert!(
+            check_forseti_cimd_private_targets(&doc)
+                .iter()
+                .all(|f| f.severity != Severity::Fail)
+        );
+    }
+
+    #[test]
+    fn cimd_private_targets_absent_or_false_has_no_finding() {
+        for flag in [None, Some(false)] {
+            let doc = cimd_private_targets_doc(flag, "https://forseti.example.com");
+            assert!(check_forseti_cimd_private_targets(&doc).is_empty());
+        }
+    }
+
+    #[test]
+    fn the_committed_configs_pass_the_cimd_private_targets_check() {
+        for path in ["config.ci.toml", "config.example.toml"] {
+            let text = std::fs::read_to_string(path).expect("committed config exists");
+            let doc: DocumentMut = text.parse().expect("committed config parses");
+            let findings = check_forseti_cimd_private_targets(&doc);
+            assert!(
+                findings.iter().all(|f| f.severity != Severity::Fail),
+                "{path}: {findings:?}"
+            );
+        }
+    }
+
     #[test]
     fn a_placeholder_inside_an_accept_list_is_still_caught() {
         // `[audit].webhook_token` may be an array mid-rotation.
@@ -1698,6 +1784,24 @@ oidc:
             Path::new("."),
         );
         assert_eq!(severity_of(&f, key), Some(Severity::Ok));
+    }
+
+    #[test]
+    fn hydra_scope_strategy_must_be_exact() {
+        let key = "strategies.scope";
+        let f = check_hydra(&parse("strategies:\n  access_token: jwt\n"));
+        assert_eq!(severity_of(&f, key), Some(Severity::Warn));
+        let f = check_hydra(&parse("strategies:\n  scope: wildcard\n"));
+        assert_eq!(severity_of(&f, key), Some(Severity::Warn));
+        let f = check_hydra(&parse("strategies:\n  scope: exact\n"));
+        assert_eq!(severity_of(&f, key), Some(Severity::Ok));
+    }
+
+    #[test]
+    fn committed_playground_hydra_config_uses_exact_scopes() {
+        let yaml = include_str!("../../infra/hydra/hydra.yml");
+        let f = check_hydra(&parse(yaml));
+        assert_eq!(severity_of(&f, "strategies.scope"), Some(Severity::Ok));
     }
 
     #[test]

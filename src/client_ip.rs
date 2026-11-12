@@ -8,7 +8,8 @@
 //! operator controls and everything left of them is caller-supplied. Taking
 //! the leftmost entry instead would let any caller pick their own key.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv6Addr};
+use std::sync::Once;
 
 use axum::http::HeaderMap;
 use tower_governor::GovernorError;
@@ -55,6 +56,31 @@ pub(crate) fn client_ip(
     }
 }
 
+/// Rate-limiter key for a client address: IPv4-mapped IPv6 becomes IPv4, other
+/// IPv6 addresses collapse to their /64, since one host usually holds a whole /64.
+pub(crate) fn limiter_key(ip: IpAddr) -> IpAddr {
+    match ip.to_canonical() {
+        IpAddr::V6(v6) => IpAddr::V6(Ipv6Addr::from_bits(v6.to_bits() & !0u128 << 64)),
+        v4 => v4,
+    }
+}
+
+/// True when the request carries `X-Forwarded-For` but `[proxy]` does not trust it.
+pub(crate) fn forwarded_for_ignored(headers: &HeaderMap, proxy: &ProxyConfig) -> bool {
+    !proxy.trust_forwarded_for && headers.contains_key("x-forwarded-for")
+}
+
+/// Once per process, so a caller-set header cannot flood the log.
+pub(crate) fn warn_forwarded_for_ignored_once() {
+    static FORWARDED_FOR_WARN: Once = Once::new();
+    FORWARDED_FOR_WARN.call_once(|| {
+        tracing::warn!(
+            "request carries X-Forwarded-For but [proxy].trust_forwarded_for is off; \
+             clients are keyed by the TCP peer. Enable it if Forseti runs behind a proxy."
+        );
+    });
+}
+
 /// `tower_governor` key extractor over [`client_ip`], built from
 /// `[proxy]` so limiter and audit share one answer.
 #[derive(Debug, Clone, Copy)]
@@ -88,6 +114,7 @@ impl KeyExtractor for ClientIpKeyExtractor {
             .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
             .map(|ci| ci.0.ip());
         client_ip(req.headers(), &self.as_proxy_config(), peer)
+            .map(limiter_key)
             .ok_or(GovernorError::UnableToExtractKey)
     }
 }
@@ -221,6 +248,62 @@ mod tests {
         let block = &internal[..internal.find(".with_state(").expect("internal state")];
         assert!(block.contains("audit::internal_middleware"));
         assert!(!block.contains("audit::middleware,"));
+    }
+
+    #[test]
+    fn limiter_key_masks_ipv6_to_the_64() {
+        assert_eq!(
+            limiter_key(ip("2001:db8:1:2:aaaa::1")),
+            limiter_key(ip("2001:db8:1:2:ffff::9"))
+        );
+        assert_eq!(
+            limiter_key(ip("2001:db8:1:2:aaaa::1")),
+            ip("2001:db8:1:2::")
+        );
+        assert_ne!(
+            limiter_key(ip("2001:db8:1:2::1")),
+            limiter_key(ip("2001:db8:1:3::1"))
+        );
+    }
+
+    #[test]
+    fn limiter_key_keeps_ipv4_and_canonicalises_mapped() {
+        assert_eq!(limiter_key(ip("203.0.113.9")), ip("203.0.113.9"));
+        assert_eq!(limiter_key(ip("::ffff:203.0.113.9")), ip("203.0.113.9"));
+    }
+
+    #[test]
+    fn extractor_keys_peers_in_one_64_identically() {
+        let extractor = ClientIpKeyExtractor::from_config(&proxy(false, 1));
+        let key = |peer: &str| {
+            let mut req = axum::http::Request::new(());
+            req.extensions_mut()
+                .insert(axum::extract::ConnectInfo(std::net::SocketAddr::new(
+                    ip(peer),
+                    443,
+                )));
+            extractor.extract(&req).unwrap()
+        };
+        assert_eq!(key("2001:db8:1:2::1"), key("2001:db8:1:2::ffff"));
+        assert_ne!(key("2001:db8:1:2::1"), key("2001:db8:1:3::1"));
+    }
+
+    #[test]
+    fn client_ip_keeps_the_full_ipv6_address() {
+        let peer = Some(ip("2001:db8:1:2:aaaa::1"));
+        assert_eq!(client_ip(&HeaderMap::new(), &proxy(false, 1), peer), peer);
+    }
+
+    #[test]
+    fn forwarded_for_ignored_only_with_header_and_trust_off() {
+        let h = headers(&["198.51.100.7"], None);
+        assert!(forwarded_for_ignored(&h, &proxy(false, 1)));
+        assert!(!forwarded_for_ignored(&h, &proxy(true, 1)));
+        assert!(!forwarded_for_ignored(&HeaderMap::new(), &proxy(false, 1)));
+        assert!(!forwarded_for_ignored(
+            &headers(&[], Some("2.2.2.2")),
+            &proxy(false, 1)
+        ));
     }
 
     #[test]

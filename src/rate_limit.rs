@@ -89,24 +89,34 @@ pub(crate) fn plain_text_error(
     context: &'static str,
 ) -> impl Fn(tower_governor::GovernorError) -> Response + Copy {
     move |err| {
-        use axum::http::StatusCode;
         let retry = match &err {
             tower_governor::GovernorError::TooManyRequests { wait_time, .. } => Some(*wait_time),
             _ => None,
         };
         tracing::trace!(error = ?err, context, "per-IP rate limit triggered");
-        let mut builder = Response::builder()
-            .status(StatusCode::TOO_MANY_REQUESTS)
-            .header("content-type", "text/plain; charset=utf-8");
-        if let Some(s) = retry {
-            builder = builder.header("retry-after", s.to_string());
-        }
-        builder
-            .body(axum::body::Body::from(
-                "Too many requests. Wait a moment and try again.",
-            ))
-            .expect("static response is well-formed")
+        too_many_requests(retry)
     }
+}
+
+/// The plain-text `429` shared by the governor layers and in-handler quotas.
+pub(crate) fn too_many_requests(retry_after_secs: Option<u64>) -> Response {
+    let mut builder = Response::builder()
+        .status(axum::http::StatusCode::TOO_MANY_REQUESTS)
+        .header("content-type", "text/plain; charset=utf-8");
+    if let Some(s) = retry_after_secs {
+        builder = builder.header("retry-after", s.to_string());
+    }
+    builder
+        .body(axum::body::Body::from(
+            "Too many requests. Wait a moment and try again.",
+        ))
+        .expect("static response is well-formed")
+}
+
+/// `Retry-After` seconds for a wait: rounded up, at least 1.
+pub(crate) fn retry_after_secs(wait: std::time::Duration) -> u64 {
+    let secs = wait.as_secs() + u64::from(wait.subsec_nanos() > 0);
+    secs.max(1)
 }
 
 /// Attach one per-client bucket to `r`, keyed per `[proxy]`.
@@ -255,6 +265,17 @@ mod tests {
         let after = RETAINERS.lock().unwrap().len();
         assert_eq!(after, before + 4);
     }
+
+    #[test]
+    fn plain_text_error_is_429_with_retry_after() {
+        let handler = plain_text_error("test");
+        let resp = handler(tower_governor::GovernorError::TooManyRequests {
+            wait_time: 7,
+            headers: None,
+        });
+        assert_eq!(resp.status(), axum::http::StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(resp.headers()["retry-after"], "7");
+    }
 }
 
 /// A process-local "at most `limit` per `window` per key" counter, for
@@ -285,8 +306,14 @@ impl KeyedQuota {
     /// limit and should refuse; the attempt is not recorded in that case, so a
     /// refused caller doesn't extend their own lockout.
     pub(crate) fn admit(&self, key: &str) -> bool {
+        self.try_admit(key).is_ok()
+    }
+
+    /// [`Self::admit`], reporting on refusal how long until the oldest
+    /// recorded attempt leaves the window.
+    pub(crate) fn try_admit(&self, key: &str) -> Result<(), std::time::Duration> {
         if self.limit == 0 {
-            return true;
+            return Ok(());
         }
         let now = std::time::Instant::now();
         let mut map = self
@@ -299,10 +326,11 @@ impl KeyedQuota {
         });
         let entry = map.entry(key.to_string()).or_default();
         if entry.len() >= self.limit {
-            return false;
+            let oldest = entry.iter().min().copied().unwrap_or(now);
+            return Err(self.window.saturating_sub(now.duration_since(oldest)));
         }
         entry.push(now);
-        true
+        Ok(())
     }
 }
 
@@ -341,6 +369,25 @@ mod keyed_quota_tests {
             q.admit("a@example.com"),
             "the window is measured from the admitted attempt, not the refused one"
         );
+    }
+
+    #[test]
+    fn try_admit_reports_a_wait_within_the_window() {
+        let window = Duration::from_secs(60);
+        let q = KeyedQuota::new(window, 2);
+        assert!(q.try_admit("k").is_ok());
+        assert!(q.try_admit("k").is_ok());
+        let wait = q.try_admit("k").expect_err("third is over the limit");
+        assert!(wait > Duration::ZERO && wait <= window, "{wait:?}");
+    }
+
+    #[test]
+    fn retry_after_rounds_up_to_at_least_one_second() {
+        use super::retry_after_secs;
+        assert_eq!(retry_after_secs(Duration::ZERO), 1);
+        assert_eq!(retry_after_secs(Duration::from_millis(10)), 1);
+        assert_eq!(retry_after_secs(Duration::from_secs(2)), 2);
+        assert_eq!(retry_after_secs(Duration::from_millis(2001)), 3);
     }
 
     #[test]

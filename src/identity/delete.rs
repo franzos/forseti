@@ -508,9 +508,64 @@ pub async fn delete_identity(
     Ok(report)
 }
 
+/// [`delete_identity`] in a spawned task, so dropping the caller (request
+/// timeout, client disconnect) does not cancel the write sequence midway.
+pub async fn delete_identity_detached(
+    state: &AppState,
+    req: DeleteRequest,
+) -> Result<DeletionReport, DeleteError> {
+    let state = state.clone();
+    run_detached(async move {
+        let env = DeleteEnv::from_state(&state);
+        delete_identity(&env, req).await
+    })
+    .await
+}
+
+async fn run_detached<F>(fut: F) -> F::Output
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    match tokio::spawn(fut).await {
+        Ok(out) => out,
+        Err(e) => match e.try_into_panic() {
+            Ok(payload) => std::panic::resume_unwind(payload),
+            // The handle is never aborted and the runtime outlives the server.
+            Err(e) => unreachable!("detached delete task cancelled: {e}"),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn detached_future_survives_dropped_caller() {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+        let caller = tokio::spawn(run_detached(async move {
+            let _ = started_tx.send(());
+            let _ = release_rx.await;
+            let _ = done_tx.send(());
+        }));
+        started_rx.await.unwrap();
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        release_tx.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), done_rx)
+            .await
+            .expect("detached task did not finish")
+            .expect("detached task dropped before completing");
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "boom")]
+    async fn detached_panic_is_resumed() {
+        run_detached(async { panic!("boom") }).await;
+    }
 
     #[test]
     fn deletion_url_is_read_from_the_forseti_namespace() {

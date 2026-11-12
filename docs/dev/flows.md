@@ -1141,7 +1141,7 @@ owner's decision. A failed fetch rejects with `temporarily_unavailable`.
 
 - `decision = deny` → `hydra::reject_consent_request` with
   `access_denied`. RP gets an OAuth2 error redirect.
-- `decision = accept` → `finalize_consent` (`src/oauth/consent.rs:885`).
+- `decision = accept` → `finalize_consent` (`src/oauth/consent.rs:1271`).
   Resolves the audience policy (below), fetches the identity, folds
   traits into id_token claims by granted scope
   (`build_id_token_claims`, `src/oauth/consent.rs:1110`), copies the
@@ -1158,7 +1158,7 @@ owner's decision. A failed fetch rejects with `temporarily_unavailable`.
 Audience resolution (both grant paths go through `finalize_consent`, so
 neither can miss it):
 
-- `resolve_granted_audience` (`src/oauth/consent.rs:705`) unions both
+- `resolve_granted_audience` (`src/oauth/consent.rs:884`) unions both
   carriers — Hydra's `requested_access_token_audience` (its non-standard
   `audience=` parameter) and RFC 8707 `resource=` values parsed off the
   challenge's `request_url` — and default-denies anything that is not on
@@ -1175,6 +1175,15 @@ neither can miss it):
   (`hydra::add_client_audiences`, `src/ory/hydra.rs:594`) because fosite
   re-validates the granted audience against the client record on the
   **refresh** grant, not the code exchange.
+- Scopes are then downscoped to the granted audience
+  (`downscope_for_audience` / `downscope_registry`,
+  `src/oauth/consent.rs:1150`, RFC 8707 section 2.2): a scope listed only
+  by registry rows (not base, supported, `scope_descriptions` or
+  `client_scope_extra`) stays only when a counted row in the granted
+  audience lists it. Scopes in no registry list pass through. An
+  unreadable registry keeps the global scopes only. The consent GET
+  resolves the audience before rendering, so the page shows the
+  downscoped list, and the POST audit records the scopes Hydra was given.
 
 Both decisions emit an audit row (`oauth.consent.granted` or
 `oauth.consent.denied`) with the user as actor. `actor_email` is resolved
@@ -1321,11 +1330,13 @@ Edge cases worth knowing:
 
 ### CIMD authorization shim (`GET /oauth2/authorize`)
 
-`GET /oauth2/authorize` — handler `authorize` (`src/oauth/cimd.rs:57`),
-mounted with dual per-IP + global rate limits
-(`oauth::cimd::router`, `src/oauth/cimd.rs:39`). The limits apply only to
-URL-shaped (CIMD) `client_id`s; any other authorize request is redirected
-to Hydra unlimited. `POST /oauth2/authorize` (OIDC Core 3.1.2.1) becomes a
+`GET /oauth2/authorize` — handler `authorize` (`src/oauth/cimd.rs:180`),
+mounted with dual-window per-IP rate limits (`oauth::cimd::router`,
+`src/oauth/cimd.rs:60`). The global windows are checked in
+`authorize_core` and charged only for a `client_id` with no metadata row
+yet, before the document fetch (`cimd_global_limit`). The limits apply
+only to URL-shaped (CIMD) `client_id`s; any other authorize request is
+redirected to Hydra unlimited. `POST /oauth2/authorize` (OIDC Core 3.1.2.1) becomes a
 303 to Hydra's `/oauth2/auth` with the form as the query
 (`redirect_post_to_hydra`, RFC 9110 §15.4.4). Hydra resumes every flow with
 a GET to the request URL it stored, so a POST re-sent with a 307 would lose
@@ -1360,22 +1371,23 @@ sequenceDiagram
     Note over P: hydra_front::well_known_router (src/hydra_front.rs:45) via the shared DiscoveryCache;<br/>augment_discovery_doc (src/hydra_front.rs:183): +cimd flag, authorization_endpoint → shim, −registration_endpoint
     P-->>CD: augmented doc (CORS *)
     CD-->>U: open {origin}/oauth2/authorize?client_id=https://…&redirect_uri=…&resource=…&code_challenge=…
-    U->>P: GET /oauth2/authorize (src/oauth/cimd.rs:57)
+    U->>P: GET /oauth2/authorize (src/oauth/cimd.rs:180)
     alt client_id is not an https:// URL
         P-->>U: 302 → /hydra/oauth2/auth?… (query byte-identical — pre-registered clients pass through)
     else CIMD path
         P->>DB: oauth_client_metadata::get(client_id)
         Note over P: source != 'cimd' → 400 (never mutate an admin client)
-        P->>P: host policy (allowed_client_hosts, src/oauth/cimd.rs:244)
+        P->>P: host policy (allowed_client_hosts, src/oauth/cimd.rs:546)
         P->>Doc: GET client_id URL (cimd_fetch::fetch_document, src/oauth/cimd_fetch.rs:107)
         Note over P,Doc: SSRF guard + cache: single-flight, TTL from Cache-Control clamped [60s,24h],<br/>64 KiB cap, 5s timeout, no redirects, serve-stale-on-error 1h
-        P->>P: validate_doc (src/oauth/cimd.rs:258): client_id byte-equal, auth method none,<br/>code flow only, https/loopback redirect URIs
-        P->>P: match_redirect_uri (src/oauth/cimd.rs:313): exact, or loopback any-port
+        P->>P: validate_doc (src/oauth/cimd.rs:560): client_id byte-equal, auth method none,<br/>code flow only, https/loopback redirect URIs
+        P->>P: match_redirect_uri (src/oauth/cimd.rs:619): exact, or loopback any-port
+        P->>P: discover_scopes (src/oauth/cimd.rs:739): global allowlist, then registry rows named by resource=,<br/>then one throttled RFC 9728 re-fetch of a named row
         P->>H: GET /admin/clients/{id} (get_client_opt, src/ory/hydra.rs:552)
-        alt warm path: doc hash unchanged && redirect_uri already on row
-            Note over P: skip every write (src/oauth/cimd.rs:154)
+        alt warm path: doc hash unchanged && redirect_uri and allowed scopes already on row
+            Note over P: skip every write (src/oauth/cimd.rs:358)
         else cold path
-            P->>H: create/update client (upsert_hydra_client, src/oauth/cimd.rs:378)<br/>scope union capped 30, ≤5 loopback literals, audience preserved
+            P->>H: create/update client (upsert_hydra_client, src/oauth/cimd.rs:934)<br/>scope union capped 256, ≤5 loopback literals, audience preserved
             P->>DB: insert_or_get_cimd + set_cimd_doc_hash (src/oauth_client_metadata.rs:139)
         end
         P->>DB: audit oauth.client.cimd_seen
@@ -1388,12 +1400,12 @@ Details that matter:
 
 - **The redirect into Hydra is a relative path** (`/hydra/oauth2/auth?…`
   when `[hydra].issuer` carries a path, `redirect_to_hydra`,
-  `src/oauth/cimd.rs:210`): the browser must stay on the issuer origin
+  `src/oauth/cimd.rs:504`): the browser must stay on the issuer origin
   it arrived on or Hydra's host-scoped CSRF cookies are lost. A
   path-less issuer (front-proxy-less deployment) falls back to the
   absolute `public_url`.
 - **Rejections render a plain 400** naming the reason
-  (`reject`, `src/oauth/cimd.rs:231`) — never a redirect, because the
+  (`reject`, `src/oauth/cimd.rs:533`) — never a redirect, because the
   redirect_uri is not yet trusted. Each emits an
   `oauth.client.cimd_rejected` audit row (WARNING).
 - **The `localhost` gap.** Hydra port-matches loopback redirect URIs
@@ -1402,12 +1414,34 @@ Details that matter:
   `http://localhost/callback`. When the request matched only via the
   any-port rule, the literal is upserted onto the Hydra row, capped at
   5 non-document entries with oldest-first eviction
-  (`src/oauth/cimd.rs:396-405`).
+  (`src/oauth/cimd.rs:957`).
 - **Scope union never shrinks** the existing row's scope
-  (`scope_union`, `src/oauth/cimd.rs:341`): existing entries first, then
-  base `openid offline offline_access`, the request's scopes,
-  `client_scope_extra`, the document's scope; capped at 30 with a
-  warn-log on truncation.
+  (`scope_union`, `src/oauth/cimd.rs:893`): existing entries first, then
+  base `openid offline offline_access`, `client_scope_extra`, the
+  document's scope, the request's allowlisted scopes; capped at 256 with a
+  warn-log on truncation, so request scopes never evict operator or
+  document entries.
+- **Request scopes are allowlisted** in three stages (`discover_scopes`,
+  `src/oauth/cimd.rs:739`). Stage 1 is the global set (`ScopeAllowlist`,
+  `src/oauth/cimd.rs:646`): base scopes, `consent::SUPPORTED_SCOPES`, keys
+  of `[oauth].scope_descriptions`, whitespace-split `client_scope_extra`
+  and the document's scope. Stage 2 runs only when stage 1 dropped
+  something and the request carries `resource=`: it adds the stored
+  `scopes_supported` of the counted registry rows the first 5 `resource=`
+  values name (`resource_registry::load_registry_scopes`,
+  `match_counted`). No `resource=`, no registry scopes. Stage 3 runs when
+  scopes are still dropped: the first named row with a fetchable URI whose
+  throttle admits it (one re-fetch per stored resource per 60 s,
+  process-wide `KeyedQuota`) is re-fetched through
+  `protected_resource::check`, the result is stored with
+  `set_check_result` (audited as `resource.scopes_changed` when the list
+  changed), and the filter runs again against the reloaded counted rows.
+  The fetched URL always comes from the stored row. Tokens containing `*`
+  never pass. Anything else stays off the Hydra row; the request goes to
+  Hydra unchanged, so Hydra answers `invalid_scope`, and one warn per
+  request names up to 5 scopes dropped by the final stage. The warm path
+  also requires every allowed request scope to be on the row already, so
+  a newly allowed scope reaches the row on the next request naming it.
 - **Updates start from the existing Hydra record** so the `audience`
   array written by the consent-time heal survives Hydra's PUT-override
   (`upsert_hydra_client`, `src/oauth/cimd.rs:378`).

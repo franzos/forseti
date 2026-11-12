@@ -21,10 +21,11 @@ use axum::Router;
 use axum::extract::{Query, State};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::get;
+use ory_client::models::Identity;
 use rand::RngExt;
 use serde::Deserialize;
 
-use super::delete::{DeleteActor, DeleteEnv, DeleteReason, DeleteRequest, delete_identity};
+use super::delete::{DeleteActor, DeleteReason, DeleteRequest, delete_identity_detached};
 use crate::audit_metadata;
 use crate::config::{ClaimEmailConfig, ProxyConfig};
 use crate::csrf::CsrfForm;
@@ -350,59 +351,50 @@ async fn confirm_post(
         let msg = crate::i18n::lookup(&locale, key);
         return render_claim_confirm_error(&state, &csrf.0, locale.clone(), &form.token, &msg);
     }
-    // Code matched — consume the reveal exactly once. Anything below
-    // this point operates on a token that's already gone from the DB.
-    let _ = flash::take_secret_reveal(&state.db, reveal_ttl, &form.token).await;
-
-    // Look up the email-of-record on the doomed identity for the audit
-    // row before we delete it. Best-effort: failures here don't block
-    // the delete because the audit row's actor_email is for human
-    // display, not authorization.
-    //
-    // Critically, also re-check the verified state here. Between
-    // `claim_post` minting the code and the user submitting it, the
-    // legitimate owner could have walked through `/verification` and
-    // verified the address — at which point we must refuse to delete.
-    // Without this check there's a TOCTOU window: code in flight,
-    // owner verifies, claimer enters the code, identity goes away.
-    let (target_email, now_verified, target_email_is_admin) =
-        match ory::kratos::admin_get_identity(&state.ory, &target_identity).await {
-            Ok(id) => {
-                let email_of_record = id
-                    .traits
-                    .and_then(|t| t.get("email").and_then(|v| v.as_str()).map(str::to_string))
-                    .unwrap_or_default();
-                let any_verified = id
-                    .verifiable_addresses
-                    .as_ref()
-                    .map(|addrs| addrs.iter().any(|a| a.verified))
-                    .unwrap_or(false);
-                let is_admin = state.cfg.admin.is_admin(&email_of_record);
-                (email_of_record, any_verified, is_admin)
+    // After the code match (no lookup oracle), before the take (outage keeps the code).
+    let lookup = ory::kratos::admin_get_identity_optional(&state.ory, &target_identity).await;
+    let lookup_error = lookup.as_ref().err().map(|e| format!("{e:#}"));
+    let target_email = match claim_gate(lookup, |e| state.cfg.admin.is_admin(e)) {
+        ClaimGate::Unavailable => {
+            tracing::error!(
+                target_identity = %target_identity,
+                error = lookup_error.as_deref().unwrap_or_default(),
+                "claim-email: identity re-check failed; code left unconsumed",
+            );
+            return render_claim_confirm_error(
+                &state,
+                &csrf.0,
+                locale.clone(),
+                &form.token,
+                &crate::i18n::lookup(&locale, "claim-error-service-unavailable"),
+            );
+        }
+        gate @ (ClaimGate::Gone | ClaimGate::Refuse) => {
+            let _ = flash::take_secret_reveal(&state.db, reveal_ttl, &form.token).await;
+            if matches!(gate, ClaimGate::Refuse) {
+                tracing::warn!(
+                    target_identity = %target_identity,
+                    "claim-email: refused at confirm; identity verified or in admin allowlist",
+                );
             }
-            Err(_) => (String::new(), false, false),
-        };
-    if now_verified || target_email_is_admin {
-        tracing::warn!(
-            target_identity = %target_identity,
-            now_verified,
-            target_email_is_admin,
-            "claim-email: refused at confirm — identity verified or in admin allowlist",
-        );
-        return render_claim_confirm_error(
-            &state,
-            &csrf.0,
-            locale.clone(),
-            &form.token,
-            &crate::i18n::lookup(&locale, "claim-error-no-longer-claimable"),
-        );
-    }
+            return render_claim_confirm_error(
+                &state,
+                &csrf.0,
+                locale.clone(),
+                &form.token,
+                &crate::i18n::lookup(&locale, "claim-error-no-longer-claimable"),
+            );
+        }
+        ClaimGate::Proceed { email } => {
+            let _ = flash::take_secret_reveal(&state.db, reveal_ttl, &form.token).await;
+            email
+        }
+    };
 
     let metadata = audit_metadata!(
         "reclaim_email" => target_email.clone(),
         "deleted_identity_id" => target_identity.clone(),
     );
-    let env = DeleteEnv::from_state(&state);
     let req = DeleteRequest {
         identity_id: target_identity.clone(),
         reason: DeleteReason::Reclaim,
@@ -414,7 +406,7 @@ async fn confirm_post(
         ctx: None,
         metadata,
     };
-    if let Err(e) = delete_identity(&env, req).await {
+    if let Err(e) = delete_identity_detached(&state, req).await {
         tracing::error!(error = ?e, "claim-email: delete identity failed");
         return render_claim_confirm_error(
             &state,
@@ -449,6 +441,47 @@ async fn confirm_post(
         resp.headers_mut().append(axum::http::header::SET_COOKIE, v);
     }
     resp
+}
+
+/// Outcome of the Kratos re-check between a matched code and its consumption.
+#[derive(Debug, PartialEq, Eq)]
+enum ClaimGate {
+    /// Still unverified and not an admin address; `email` is the trait email.
+    Proceed {
+        email: String,
+    },
+    /// An address got verified since the mint, or the email is an admin's.
+    Refuse,
+    Gone,
+    /// Kratos could not answer; the code stays usable.
+    Unavailable,
+}
+
+fn claim_gate(
+    lookup: anyhow::Result<Option<Identity>>,
+    is_admin: impl Fn(&str) -> bool,
+) -> ClaimGate {
+    let identity = match lookup {
+        Ok(Some(identity)) => identity,
+        Ok(None) => return ClaimGate::Gone,
+        Err(_) => return ClaimGate::Unavailable,
+    };
+    let email = identity
+        .traits
+        .as_ref()
+        .and_then(|t| t.get("email").and_then(|v| v.as_str()))
+        .unwrap_or_default()
+        .to_string();
+    let any_verified = identity
+        .verifiable_addresses
+        .iter()
+        .flatten()
+        .any(|a| a.verified);
+    if any_verified || is_admin(&email) {
+        ClaimGate::Refuse
+    } else {
+        ClaimGate::Proceed { email }
+    }
 }
 
 fn render_claim_confirm_error(
@@ -499,4 +532,66 @@ fn claim_recipient_quota(state: &AppState) -> &'static crate::rate_limit::KeyedQ
             state.cfg.claim_email.sends_per_recipient_per_hour,
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ory_client::models::VerifiableIdentityAddress;
+    use ory_client::models::verifiable_identity_address::ViaEnum;
+
+    fn identity(email: &str, verified: bool) -> Identity {
+        let mut id = Identity::new("id".to_string(), "default".to_string(), String::new(), None);
+        id.traits = Some(serde_json::json!({ "email": email }));
+        id.verifiable_addresses = Some(vec![VerifiableIdentityAddress::new(
+            "completed".to_string(),
+            email.to_string(),
+            verified,
+            ViaEnum::Email,
+        )]);
+        id
+    }
+
+    fn admin(e: &str) -> bool {
+        e == "admin@example.com"
+    }
+
+    #[test]
+    fn lookup_error_is_unavailable() {
+        assert_eq!(
+            claim_gate(Err(anyhow::anyhow!("kratos down")), admin),
+            ClaimGate::Unavailable
+        );
+    }
+
+    #[test]
+    fn missing_identity_is_gone() {
+        assert_eq!(claim_gate(Ok(None), admin), ClaimGate::Gone);
+    }
+
+    #[test]
+    fn verified_address_is_refused() {
+        assert_eq!(
+            claim_gate(Ok(Some(identity("user@example.com", true))), admin),
+            ClaimGate::Refuse
+        );
+    }
+
+    #[test]
+    fn admin_email_is_refused() {
+        assert_eq!(
+            claim_gate(Ok(Some(identity("admin@example.com", false))), admin),
+            ClaimGate::Refuse
+        );
+    }
+
+    #[test]
+    fn unverified_non_admin_proceeds_with_trait_email() {
+        assert_eq!(
+            claim_gate(Ok(Some(identity("user@example.com", false))), admin),
+            ClaimGate::Proceed {
+                email: "user@example.com".to_string()
+            }
+        );
+    }
 }

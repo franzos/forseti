@@ -55,10 +55,33 @@ async fn serve_cimd_doc(mutate: impl FnOnce(&mut serde_json::Value)) -> String {
 /// Drive the shim without following redirects. Returns status, the Location
 /// header (empty when absent) and the body.
 async fn shim_authorize(client_id: &str, redirect_uri: &str) -> (StatusCode, String, String) {
+    shim_authorize_scope(client_id, redirect_uri, "openid offline").await
+}
+
+/// [`shim_authorize`] with a caller-chosen `scope`.
+async fn shim_authorize_scope(
+    client_id: &str,
+    redirect_uri: &str,
+    scope: &str,
+) -> (StatusCode, String, String) {
+    shim_authorize_scope_resource(client_id, redirect_uri, scope, None).await
+}
+
+/// [`shim_authorize_scope`] with an optional RFC 8707 `resource=`.
+async fn shim_authorize_scope_resource(
+    client_id: &str,
+    redirect_uri: &str,
+    scope: &str,
+    resource: Option<&str>,
+) -> (StatusCode, String, String) {
+    let resource = resource
+        .map(|r| format!("&resource={}", form_urlencode(r)))
+        .unwrap_or_default();
     let url = format!(
-        "{PORTAL}/oauth2/authorize?client_id={}&response_type=code&scope=openid+offline\
-         &redirect_uri={}&state=cimd-test",
+        "{PORTAL}/oauth2/authorize?client_id={}&response_type=code&scope={}\
+         &redirect_uri={}&state=cimd-test{resource}",
         form_urlencode(client_id),
+        form_urlencode(scope),
         form_urlencode(redirect_uri)
     );
     let res = manual_redirect_client()
@@ -75,6 +98,93 @@ async fn shim_authorize(client_id: &str, redirect_uri: &str) -> (StatusCode, Str
         .to_string();
     let body = res.text().await.unwrap_or_default();
     (status, location, body)
+}
+
+/// A loopback RFC 9728 protected-resource fixture.
+pub(crate) struct Prm {
+    /// `http://127.0.0.1:{port}{path}`, the registry row's resource.
+    pub resource: String,
+    pub scopes: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    pub hits: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Prm {
+    pub fn hits(&self) -> usize {
+        self.hits.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn advertise(&self, scope: &str) {
+        self.scopes.lock().unwrap().push(scope.to_string());
+    }
+}
+
+/// Serve `/.well-known/oauth-protected-resource{path}` on a loopback port.
+/// The document names `doc_resource` (default: the fixture's own resource),
+/// lists `authorization_servers` (default: Forseti's issuer) and advertises
+/// a mutable `scopes_supported`.
+pub(crate) async fn serve_prm(
+    path: &str,
+    doc_resource: Option<&str>,
+    authorization_servers: Option<Vec<String>>,
+    scopes: &[&str],
+) -> Prm {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind prm listener");
+    let addr = listener.local_addr().expect("prm addr");
+    let resource = format!("http://{addr}{path}");
+    let prm = Prm {
+        resource: resource.clone(),
+        scopes: std::sync::Arc::new(std::sync::Mutex::new(
+            scopes.iter().map(|s| s.to_string()).collect(),
+        )),
+        hits: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+    };
+    let doc_resource = doc_resource.unwrap_or(&resource).to_string();
+    let servers = authorization_servers.unwrap_or_else(|| vec![FORSETI_ISSUER.to_string()]);
+    let (scopes, hits) = (prm.scopes.clone(), prm.hits.clone());
+    let handler = move || {
+        let body = serde_json::json!({
+            "resource": doc_resource,
+            "authorization_servers": servers,
+            "scopes_supported": *scopes.lock().unwrap(),
+        })
+        .to_string();
+        hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        async move {
+            (
+                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                body,
+            )
+        }
+    };
+    let app = axum::Router::new().route(
+        &format!("/.well-known/oauth-protected-resource{path}"),
+        axum::routing::get(handler),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve prm fixture");
+    });
+    prm
+}
+
+fn unique_suffix() -> String {
+    format!(
+        "{:x}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    )
+}
+
+async fn client_row_scopes(client_id: &str) -> Vec<String> {
+    hydra_get_client_json(client_id).await["scope"]
+        .as_str()
+        .unwrap_or_default()
+        .split_whitespace()
+        .map(str::to_string)
+        .collect()
 }
 
 /// GET the Hydra client row via the admin API. URL-shaped client_ids need the
@@ -139,11 +249,31 @@ fn shim_auth_url_with(
     challenge: &str,
     extra: &str,
 ) -> String {
+    shim_auth_url_scoped(
+        client_id,
+        redirect_uri,
+        state,
+        challenge,
+        "openid offline",
+        extra,
+    )
+}
+
+/// As [`shim_auth_url_with`], with a caller-chosen `scope`.
+fn shim_auth_url_scoped(
+    client_id: &str,
+    redirect_uri: &str,
+    state: &str,
+    challenge: &str,
+    scope: &str,
+    extra: &str,
+) -> String {
     format!(
         "http://host.containers.internal:3000/oauth2/authorize?client_id={}&response_type=code\
-         &scope=openid+offline&redirect_uri={}&state={state}\
+         &scope={}&redirect_uri={}&state={state}\
          &code_challenge={challenge}&code_challenge_method=S256{extra}",
         form_urlencode(client_id),
+        form_urlencode(scope),
         form_urlencode(redirect_uri),
     )
 }
@@ -499,6 +629,53 @@ async fn cimd_warm_path_skips_admin_write() {
         client_redirect_uris(&client),
         uris_after_first,
         "redirect list must be unchanged after the identical second flow"
+    );
+
+    cleanup_cimd_client(&url).await;
+}
+
+/// Requested scopes outside the allowlist stay off the Hydra row, and a
+/// request naming one is still warm once the row holds every allowed scope.
+#[tokio::test]
+async fn cimd_junk_scopes_stay_off_the_row() {
+    assert!(portal_reachable().await);
+
+    let url = serve_cimd_doc(|d| d["scope"] = serde_json::json!("cimdtest:doc")).await;
+    let redirect = "http://127.0.0.1:43399/callback";
+    let scope = "openid email junk:x";
+
+    let (status, _loc, body) = shim_authorize_scope(&url, redirect, scope).await;
+    assert_eq!(status, StatusCode::FOUND, "first flow body: {body}");
+    let row_scope = hydra_get_client_json(&url).await["scope"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let entries: Vec<&str> = row_scope.split_whitespace().collect();
+    assert!(entries.contains(&"cimdtest:doc"), "{row_scope}");
+    assert!(entries.contains(&"email"), "{row_scope}");
+    assert!(!entries.contains(&"junk:x"), "{row_scope}");
+
+    let patch = serde_json::json!([
+        { "op": "replace", "path": "/client_name", "value": "cimd-junk-canary" }
+    ]);
+    let res = browser_client()
+        .patch(format!(
+            "{HYDRA_ADMIN}/admin/clients/{}",
+            form_urlencode(&url)
+        ))
+        .header("content-type", "application/json")
+        .json(&patch)
+        .send()
+        .await
+        .expect("hydra patch transport");
+    assert!(res.status().is_success(), "canary patch: {}", res.status());
+
+    let (status, _loc, body) = shim_authorize_scope(&url, redirect, scope).await;
+    assert_eq!(status, StatusCode::FOUND, "second flow body: {body}");
+    assert_eq!(
+        hydra_get_client_json(&url).await["client_name"].as_str(),
+        Some("cimd-junk-canary"),
+        "a request naming a dropped scope must take the warm path"
     );
 
     cleanup_cimd_client(&url).await;
@@ -862,33 +1039,52 @@ async fn cimd_consent_captures_resource_url_from_request_url() {
 /// `pub(crate)`: the admin-UI registry tests (`resources_admin.rs`) reuse it.
 pub(crate) async fn cimd_flow_aud(resource: &str, redirect_port: u16, tag: &str) -> Vec<String> {
     let url = serve_cimd_doc(|_| {}).await;
+    let token = cimd_flow_token(
+        &url,
+        Some(resource),
+        &["openid", "offline"],
+        redirect_port,
+        tag,
+    )
+    .await;
+    let claims = decode_jwt_claims(token["access_token"].as_str().expect("access_token"));
+    cleanup_cimd_client(&url).await;
+    jwt_aud(&claims)
+}
+
+/// Drive a full PKCE flow for the CIMD client `url`, requesting and granting
+/// `scope` with an optional `resource=`, and return the token response. Owns
+/// (and cleans up) its user; the client is the caller's business.
+async fn cimd_flow_token(
+    url: &str,
+    resource: Option<&str>,
+    scope: &[&str],
+    redirect_port: u16,
+    tag: &str,
+) -> serde_json::Value {
     let redirect = format!("http://127.0.0.1:{redirect_port}/callback");
     let user = register_test_user(tag).await;
 
     let (verifier, challenge) = pkce_pair();
-    let auth_url = shim_auth_url_with(
-        &url,
+    let extra = resource
+        .map(|r| format!("&resource={}", form_urlencode(r)))
+        .unwrap_or_default();
+    let auth_url = shim_auth_url_scoped(
+        url,
         &redirect,
         &format!("{tag}-1"),
         &challenge,
-        &format!("&resource={}", form_urlencode(resource)),
+        &scope.join(" "),
+        &extra,
     );
     let (consent_challenge, csrf, _body) = drive_to_consent(&user.client, &auth_url).await;
-    let code = consent_accept_chase_code(
-        &user.manual_client,
-        &csrf,
-        &consent_challenge,
-        &["openid", "offline"],
-        false,
-    )
-    .await
-    .expect("authorization code on callback URL");
-    let token = exchange_code_public(&url, &redirect, &code, &verifier).await;
-    let claims = decode_jwt_claims(token["access_token"].as_str().expect("access_token"));
-
-    cleanup_cimd_client(&url).await;
+    let code =
+        consent_accept_chase_code(&user.manual_client, &csrf, &consent_challenge, scope, false)
+            .await
+            .expect("authorization code on callback URL");
+    let token = exchange_code_public(url, &redirect, &code, &verifier).await;
     user.cleanup().await;
-    jwt_aud(&claims)
+    token
 }
 
 /// Task 11 arm swap: a resource enrolled ONLY in the registry — never in
@@ -1181,4 +1377,191 @@ async fn cimd_post_authorize_materializes_and_redirects_303() {
 
     cleanup_cimd_client(&client_id).await;
     delete_client_metadata(&client_id);
+}
+
+// --- registry scope discovery ---------------------------------------------
+
+/// A registry row with an empty stored list learns a scope on demand: the
+/// shim re-fetches the row's RFC 9728 document, stores the scope and unions
+/// it onto the client. A second scope within the re-fetch window stays off.
+#[tokio::test]
+async fn registry_scope_is_discovered_on_demand_and_throttled() {
+    assert!(portal_reachable().await);
+    let sfx = unique_suffix();
+    let (first, second) = (format!("cimdtest:{sfx}a"), format!("cimdtest:{sfx}b"));
+    let prm = serve_prm("/mcp", None, None, &[&first]).await;
+    seed_registry_resource(&prm.resource);
+    let url = serve_cimd_doc(|_| {}).await;
+    let redirect = "http://127.0.0.1:43461/callback";
+
+    let (status, _loc, body) = shim_authorize_scope_resource(
+        &url,
+        redirect,
+        &format!("openid {first}"),
+        Some(&prm.resource),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FOUND, "first flow body: {body}");
+    assert_eq!(prm.hits(), 1);
+    assert!(client_row_scopes(&url).await.contains(&first));
+    assert_eq!(
+        read_registry_resource_scopes(&prm.resource),
+        Some(("corroborated".to_string(), first.clone()))
+    );
+
+    prm.advertise(&second);
+    let (status, _loc, body) = shim_authorize_scope_resource(
+        &url,
+        redirect,
+        &format!("openid {second}"),
+        Some(&prm.resource),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FOUND, "second flow body: {body}");
+    assert_eq!(prm.hits(), 1, "a second re-fetch within the window");
+    assert!(!client_row_scopes(&url).await.contains(&second));
+
+    cleanup_cimd_client(&url).await;
+    delete_registry_resource(&prm.resource);
+}
+
+/// A document that names another resource, or omits Forseti's issuer, is not
+/// corroborated: its scopes stay off the client and out of the registry.
+#[tokio::test]
+async fn registry_scope_from_an_uncorroborated_document_is_refused() {
+    assert!(portal_reachable().await);
+    let sfx = unique_suffix();
+    let scope = format!("cimdtest:{sfx}");
+    let wrong_resource = serve_prm(
+        "/mcp",
+        Some("http://127.0.0.1:1/elsewhere"),
+        None,
+        &[&scope],
+    )
+    .await;
+    let wrong_issuer = serve_prm(
+        "/mcp",
+        None,
+        Some(vec!["https://other-issuer.example.com".to_string()]),
+        &[&scope],
+    )
+    .await;
+    let redirect = "http://127.0.0.1:43462/callback";
+    for prm in [&wrong_resource, &wrong_issuer] {
+        seed_registry_resource(&prm.resource);
+        let url = serve_cimd_doc(|_| {}).await;
+        let (status, _loc, body) = shim_authorize_scope_resource(
+            &url,
+            redirect,
+            &format!("openid {scope}"),
+            Some(&prm.resource),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FOUND, "flow body: {body}");
+        assert_eq!(prm.hits(), 1, "{}", prm.resource);
+        assert!(!client_row_scopes(&url).await.contains(&scope));
+        assert_eq!(
+            read_registry_resource_scopes(&prm.resource),
+            Some(("mismatch".to_string(), String::new()))
+        );
+        cleanup_cimd_client(&url).await;
+        delete_registry_resource(&prm.resource);
+    }
+}
+
+/// No `resource=`, an unregistered one, or a disabled row: no fetch, and the
+/// scope is dropped.
+#[tokio::test]
+async fn registry_scope_needs_a_registered_enabled_resource() {
+    assert!(portal_reachable().await);
+    let sfx = unique_suffix();
+    let scope = format!("cimdtest:{sfx}");
+    let registered = serve_prm("/mcp", None, None, &[&scope]).await;
+    let unregistered = serve_prm("/mcp", None, None, &[&scope]).await;
+    seed_registry_resource(&registered.resource);
+    set_registry_resource_enabled(&registered.resource, false);
+    let redirect = "http://127.0.0.1:43463/callback";
+
+    for resource in [
+        None,
+        Some(unregistered.resource.as_str()),
+        Some(registered.resource.as_str()),
+    ] {
+        let url = serve_cimd_doc(|_| {}).await;
+        let (status, _loc, body) =
+            shim_authorize_scope_resource(&url, redirect, &format!("openid {scope}"), resource)
+                .await;
+        assert_eq!(status, StatusCode::FOUND, "flow body: {body}");
+        assert!(
+            !client_row_scopes(&url).await.contains(&scope),
+            "{resource:?}"
+        );
+        cleanup_cimd_client(&url).await;
+    }
+    assert_eq!(registered.hits() + unregistered.hits(), 0);
+    delete_registry_resource(&registered.resource);
+}
+
+/// A stored registry scope is per resource: without `resource=` it is dropped.
+#[tokio::test]
+async fn stored_registry_scope_without_resource_is_dropped() {
+    assert!(portal_reachable().await);
+    let scope = format!("cimdtest:{}", unique_suffix());
+    let prm = serve_prm("/mcp", None, None, &[&scope]).await;
+    seed_registry_resource(&prm.resource);
+    set_registry_resource_scopes(&prm.resource, &scope);
+    let url = serve_cimd_doc(|_| {}).await;
+
+    let (status, _loc, body) = shim_authorize_scope_resource(
+        &url,
+        "http://127.0.0.1:43464/callback",
+        &format!("openid {scope}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FOUND, "flow body: {body}");
+    assert!(!client_row_scopes(&url).await.contains(&scope));
+    assert_eq!(prm.hits(), 0);
+
+    cleanup_cimd_client(&url).await;
+    delete_registry_resource(&prm.resource);
+}
+
+/// A registry scope reaches the ceiling of a shared client through resource
+/// A, and Hydra then accepts it for any request; consent grants it only on a
+/// token whose audience is A.
+#[tokio::test]
+async fn registry_scope_is_granted_only_for_its_audience() {
+    assert!(portal_reachable().await);
+    let sfx = unique_suffix();
+    let scope = format!("cimdtest:{sfx}a");
+    let a = serve_prm("/mcp", None, None, &[&scope]).await;
+    let b = serve_prm("/mcp", None, None, &[&format!("cimdtest:{sfx}b")]).await;
+    seed_registry_resource(&a.resource);
+    seed_registry_resource(&b.resource);
+    let url = serve_cimd_doc(|_| {}).await;
+    let requested = ["openid", "offline", scope.as_str()];
+    let granted = |token: &serde_json::Value| -> Vec<String> {
+        token["scope"]
+            .as_str()
+            .unwrap_or_default()
+            .split_whitespace()
+            .map(str::to_string)
+            .collect()
+    };
+
+    let token = cimd_flow_token(&url, Some(&a.resource), &requested, 43465, "reg-down-a").await;
+    assert!(granted(&token).contains(&scope), "{token}");
+    assert!(client_row_scopes(&url).await.contains(&scope));
+
+    let token = cimd_flow_token(&url, Some(&b.resource), &requested, 43465, "reg-down-b").await;
+    assert!(!granted(&token).contains(&scope), "{token}");
+    assert!(granted(&token).contains(&"openid".to_string()), "{token}");
+
+    let token = cimd_flow_token(&url, None, &requested, 43465, "reg-down-none").await;
+    assert!(!granted(&token).contains(&scope), "{token}");
+
+    cleanup_cimd_client(&url).await;
+    delete_registry_resource(&a.resource);
+    delete_registry_resource(&b.resource);
 }

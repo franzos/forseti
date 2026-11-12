@@ -727,3 +727,76 @@ async fn self_service_claim_conflicts_are_refused() {
         "no row written"
     );
 }
+
+/// Create and re-check store the RFC 9728 document's `scopes_supported` and
+/// audit the change.
+#[tokio::test]
+async fn registry_ui_stores_and_rechecks_scopes() {
+    assert!(portal_reachable().await);
+    let Some(admin) = try_admin_signed_in_client().await else {
+        eprintln!("FORSETI_ADMIN_TEST_* not set; skipping admin resources test");
+        return;
+    };
+    let sfx = format!(
+        "{:x}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    );
+    let (first, second) = (format!("cimdtest:{sfx}a"), format!("cimdtest:{sfx}b"));
+    let prm = crate::cimd::serve_prm("/mcp", None, None, &[&first]).await;
+
+    let body = admin
+        .get(format!("{PORTAL}/admin/resources/new"))
+        .send()
+        .await
+        .expect("GET /admin/resources/new")
+        .text()
+        .await
+        .expect("create form body");
+    let csrf = extract_form_csrf(&body).expect("csrf in create form");
+    let res = admin
+        .post(format!("{PORTAL}/admin/resources/new"))
+        .form(&[
+            ("_csrf", csrf.as_str()),
+            ("resource", prm.resource.as_str()),
+            ("display_name", "Scopes fixture"),
+            ("org_id", "default"),
+        ])
+        .send()
+        .await
+        .expect("POST /admin/resources/new");
+    assert!(res.status().is_success(), "create: {}", res.status());
+    assert_eq!(
+        read_registry_resource_scopes(&prm.resource),
+        Some(("corroborated".to_string(), first.clone()))
+    );
+    let ev = latest_audit_event("resource.scopes_changed", &prm.resource).expect("audit row");
+    assert_eq!(ev.metadata["added"], serde_json::json!(first));
+
+    prm.advertise(&second);
+    let (id, _) = read_registry_resource_claims(&prm.resource).expect("row id");
+    let list = admin
+        .get(format!("{PORTAL}/admin/resources"))
+        .send()
+        .await
+        .expect("GET /admin/resources")
+        .text()
+        .await
+        .expect("list body");
+    let csrf = extract_form_csrf(&list).expect("csrf on list page");
+    let res = admin
+        .post(format!("{PORTAL}/admin/resources/{id}/recheck"))
+        .form(&[("_csrf", csrf.as_str())])
+        .send()
+        .await
+        .expect("POST recheck");
+    assert!(res.status().is_success(), "recheck: {}", res.status());
+    assert_eq!(
+        read_registry_resource_scopes(&prm.resource),
+        Some(("corroborated".to_string(), format!("{first} {second}")))
+    );
+
+    delete_registry_resource(&prm.resource);
+}

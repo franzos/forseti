@@ -512,10 +512,13 @@ pub struct CimdConfig {
     #[serde(default)]
     pub allow_private_targets: bool,
     /// Extra scope entries unioned into every CIMD client's Hydra `scope`
-    /// ceiling, alongside the built-in `openid offline offline_access`, the
-    /// scopes each authorize request asks for and the document's own `scope`.
-    /// The union is capped at 30 entries. Scope stays a ceiling — consent is
-    /// the actual authorization. Empty by default.
+    /// ceiling, after the built-in `openid offline offline_access`. They also
+    /// join the allowlist for request scopes, with the built-in scopes, the
+    /// scopes Forseti supports, the keys of `[oauth].scope_descriptions` and
+    /// the document's own `scope`; any other requested scope stays off the row
+    /// and Hydra answers `invalid_scope`. The union is capped at 256 entries.
+    /// Scope stays a ceiling: consent is the actual authorization. Empty by
+    /// default.
     #[serde(default)]
     pub client_scope_extra: Vec<String>,
     /// When non-empty, only client_id URLs whose host matches one of these
@@ -534,15 +537,16 @@ pub struct CimdConfig {
     /// `0` to disable the per-hour bucket.
     #[serde(default)]
     pub ip_rate_per_hour: Option<u32>,
-    /// Global (all-callers-share-one-bucket) rate limit on
-    /// `GET /oauth2/authorize`, max requests per minute. Bounds total shim
-    /// traffic even when a spoofable forwarded-for header defeats the per-IP
-    /// buckets. `None` falls back to 40. Set to `0` to disable.
+    /// Global (all-callers-share-one-bucket) limit on first sightings of a
+    /// `client_id` at `/oauth2/authorize`, max per minute: requests for a
+    /// client_id with no metadata row yet, which trigger a document fetch.
+    /// Known clients are limited per IP only. `None` falls back to 40. Set to
+    /// `0` to disable.
     #[serde(default)]
     pub global_rate_per_minute: Option<u32>,
-    /// Global rate limit on `GET /oauth2/authorize`, max requests per hour, in
-    /// parallel with the per-minute global bucket. `None` falls back to 400.
-    /// Set to `0` to disable the bucket.
+    /// Global limit on first sightings of a `client_id`, max per hour, in
+    /// parallel with the per-minute window. `None` falls back to 400. Set to
+    /// `0` to disable the window.
     #[serde(default)]
     pub global_rate_per_hour: Option<u32>,
     /// Ceiling on how many CIMD clients may exist in total. Rate limits bound
@@ -558,6 +562,20 @@ pub struct CimdConfig {
     /// no per-host ceiling.
     #[serde(default)]
     pub max_clients_per_host: Option<u32>,
+}
+
+impl CimdConfig {
+    /// Refuses `allow_private_targets` on a production-shaped `[self].url`.
+    pub fn validate(&self, self_url: &str) -> Result<(), String> {
+        if self.allow_private_targets && DatabaseConfig::looks_like_production(self_url) {
+            return Err(
+                "oauth.cimd.allow_private_targets is enabled; it disables the SSRF guard \
+                 on CIMD document fetches and is refused on a public https URL"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
 }
 
 /// Admin-surface gating: emails allowed through `/admin/*`; everyone else gets 403 even with a valid session.
@@ -2102,5 +2120,33 @@ mod tests {
         assert!(t.validate(DEV_URL).is_ok());
         let err = t.validate(PROD_URL).expect_err("short entry on production");
         assert!(!err.contains("hook_s3cret"), "token leaked: {err}");
+    }
+
+    #[test]
+    fn cimd_allow_private_targets_refused_on_production_shape() {
+        let c = CimdConfig {
+            allow_private_targets: true,
+            ..CimdConfig::default()
+        };
+        let err = c
+            .validate(PROD_URL)
+            .expect_err("private targets on production");
+        assert!(err.contains("oauth.cimd.allow_private_targets"), "{err}");
+    }
+
+    #[test]
+    fn cimd_allow_private_targets_accepted_on_dev_shape() {
+        let c = CimdConfig {
+            allow_private_targets: true,
+            ..CimdConfig::default()
+        };
+        assert!(c.validate(DEV_URL).is_ok());
+    }
+
+    #[test]
+    fn cimd_private_targets_off_is_fine_anywhere() {
+        let c = CimdConfig::default();
+        assert!(c.validate(DEV_URL).is_ok());
+        assert!(c.validate(PROD_URL).is_ok());
     }
 }

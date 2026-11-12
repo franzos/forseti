@@ -132,14 +132,23 @@ support_email = "support@example.com"
 #
 # `allow_private_targets` stands the guard down (allows http:// and
 # loopback/private-IP document URLs) so local fixture servers work in
-# development and CI. Never enable it in production.
+# development and CI. Never enable it in production: Forseti refuses to boot
+# with it on when `[self].url` is https on a host other than localhost or a
+# loopback/private address.
 #
-# `client_scope_extra` lists extra scope entries unioned into every CIMD
-# client's Hydra `scope` ceiling, alongside the built-in
-# `openid offline offline_access`, the scopes each authorize request asks for
-# and the document's own `scope`. The union is capped at 30 entries (a warning
-# is logged when the cap truncates) and never shrinks on re-registration.
-# Scope stays a ceiling — the consent screen is the actual authorization.
+# `client_scope_extra` lists scope entries every CIMD client's Hydra `scope`
+# ceiling carries. The ceiling is the union, in this order, of the row's
+# existing entries (never removed), `openid offline offline_access`,
+# `client_scope_extra`, the document's `scope` and the request's allowlisted
+# scopes, capped at 256 entries (a warning is logged when the cap truncates).
+# A request scope is allowlisted when it is built in, a consent scope
+# (`email profile org orgs groups extended_profile`), a key of
+# `[oauth.scope_descriptions]`, in `client_scope_extra` or in the document's
+# `scope` (these apply to every resource), or in the stored
+# `scopes_supported` of the resource-registry row the request's `resource=`
+# names (that resource only); anything else stays off the row and Hydra
+# answers `invalid_scope`. Tokens containing `*` are always dropped. Scope
+# stays a ceiling - the consent screen is the actual authorization.
 #
 # `allowed_client_hosts` restricts which client_id URL hosts may use the shim
 # (exact, case-insensitive match; subdomains do NOT match). Empty (the
@@ -148,8 +157,10 @@ support_email = "support@example.com"
 #
 # `ip_rate_per_minute` / `ip_rate_per_hour` cap `GET /oauth2/authorize`
 # requests from a single IP (defaults 10/min and 100/hour);
-# `global_rate_per_minute` / `global_rate_per_hour` bound the same route
-# across ALL callers in one shared bucket (defaults 40/min and 400/hour).
+# `global_rate_per_minute` / `global_rate_per_hour` bound first sightings of a
+# client_id (no metadata row yet, so a document fetch) across ALL callers in
+# one shared bucket (defaults 40/min and 400/hour); known clients are limited
+# per IP only.
 # Same clamping and `0`-disables semantics as the other rate keys above.
 #
 # `max_clients` / `max_clients_per_host` cap how many CIMD clients may exist
@@ -181,12 +192,26 @@ support_email = "support@example.com"
 # "org"  = "Your active organization and role"
 # "orgs" = "Your organizations and your roles"
 #
-# MCP scope convention: `<app>:<resource>:<verb>`. Each MCP server documents
-# its own scopes; describe them here so the consent screen reads naturally.
-# Examples:
-# "formshive:forms:read"  = "Read your forms and submissions"
-# "formshive:forms:write" = "Create and modify your forms"
-# "formshive:mcp:invoke"  = "Call your formshive MCP tools on your behalf"
+# MCP scope convention: `<app>:<resource>:<verb>`. The keys also put a scope
+# on the CIMD allowlist for every resource (see `client_scope_extra` above).
+# Scopes an enrolled MCP server publishes in its RFC 9728 `scopes_supported`
+# are discovered per resource and need a key only for a nicer consent label.
+# Step-up scopes kept out of `scopes_supported` (marked below), and every
+# scope of a server without RFC 9728 metadata, must be listed here, or CIMD
+# clients get `invalid_scope`. `openid` and `offline_access` need no entry.
+# Stackpit and Formshive:
+# "stackpit:events:read"         = "Read your Stackpit events"
+# "stackpit:projects:read"       = "Read your Stackpit projects"
+# "stackpit:projects:write"      = "Triage issues in your Stackpit projects"
+# "stackpit:admin"               = "Create and archive your Stackpit projects" # step-up only
+# "formshive:forms:read"         = "Read your forms"
+# "formshive:messages:read"      = "Read your form submissions"
+# "formshive:messages:write"     = "Modify your form submissions"
+# "formshive:integrations:read"  = "Read your form integrations"
+# "formshive:analytics:read"     = "Read your form analytics"
+# "formshive:forms:write"        = "Create and modify your forms"             # step-up only
+# "formshive:integrations:write" = "Create and modify your form integrations" # step-up only
+# "formshive:admin"              = "Delete your forms, submissions and integrations" # step-up only
 
 # Registration page-render rate limiter. `GET /registration` is throttled per
 # source IP AND by a global all-callers bucket to blunt signup-page grinding.
@@ -315,8 +340,8 @@ support_email = "support@example.com"
 # header can't pick the key. Default `false` — secure when Forseti's
 # public listener is exposed directly. Set to `true` ONLY when the
 # listener is reachable solely through that proxy; a direct caller
-# would otherwise be their own "proxy". `X-Real-IP` is honoured as a
-# fallback and must be overwritten (not passed through) by the proxy.
+# would otherwise be their own "proxy". `X-Real-IP` is never read. With
+# this off, a request carrying `X-Forwarded-For` logs one warning per process.
 # See `docs/operator-guide-proxy.md`.
 # [proxy]
 # trust_forwarded_for = false

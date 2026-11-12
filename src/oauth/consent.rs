@@ -285,7 +285,23 @@ pub(crate) async fn oauth_consent(
         (cimd_host.clone(), self_asserted_name.unwrap_or_default())
     };
 
-    let scopes: Vec<ConsentScopeView> = requested_scope
+    // Resolved before the scope list, so the page never shows a registry
+    // scope the grant would drop for this audience.
+    let resolved_audience = resolve_consent_audience(
+        &state,
+        client_id_lookup,
+        &requested_audience,
+        req.request_url.as_deref().unwrap_or_default(),
+    )
+    .await;
+    let shown_scope = downscope_for_audience(
+        &state,
+        client_id_lookup,
+        requested_scope,
+        &resolved_audience,
+    )
+    .await;
+    let scopes: Vec<ConsentScopeView> = shown_scope
         .iter()
         .map(|s| ConsentScopeView {
             name: s.clone(),
@@ -383,16 +399,7 @@ pub(crate) async fn oauth_consent(
     // Show what the token will actually be addressed to. An RP can request an
     // audience the user never sees otherwise, and "approve" should not mean
     // approving an unnamed third party.
-    let audience_ids = third_party_audience(
-        resolve_consent_audience(
-            &state,
-            client_id_lookup,
-            &requested_audience,
-            req.request_url.as_deref().unwrap_or_default(),
-        )
-        .await,
-        client_id_lookup,
-    );
+    let audience_ids = third_party_audience(resolved_audience, client_id_lookup);
     let mut granted_audience = Vec::with_capacity(audience_ids.len());
     for id in audience_ids {
         let name = audience_name(&state, &id)
@@ -573,7 +580,6 @@ pub(crate) async fn oauth_consent_submit(
         form.grant_scope,
         &req.requested_scope.clone().unwrap_or_default(),
     );
-    let grant_scope_for_audit = grant_scope.clone();
 
     // Re-compute the consent locale from the same inputs the GET handler used
     // so the locale claim fallback is consistent between both code paths.
@@ -608,12 +614,13 @@ pub(crate) async fn oauth_consent_submit(
     )
     .await;
 
-    let (mut redirect, groups_count, groups_truncated) = match outcome {
+    let (mut redirect, granted_scope, groups_count, groups_truncated) = match outcome {
         FinalizeOutcome::Granted {
             redirect,
+            scope,
             groups_count,
             groups_truncated,
-        } => (redirect, groups_count, groups_truncated),
+        } => (redirect, scope, groups_count, groups_truncated),
         FinalizeOutcome::Rejected { redirect } => return redirect,
     };
 
@@ -640,7 +647,7 @@ pub(crate) async fn oauth_consent_submit(
         .actor_user(&subject, &actor_email)
         .with_ctx(&actx)
         .metadata(audit_metadata!(
-            "scope" => grant_scope_for_audit.join(" "),
+            "scope" => granted_scope.join(" "),
             "remember" => remember,
             "groups_count" => groups_count as i64,
             "groups_truncated" => groups_truncated,
@@ -1119,11 +1126,83 @@ async fn lookup_identity_email(state: &AppState, subject: &str) -> String {
     }
 }
 
+/// Scopes that apply to every audience: base and supported scopes,
+/// `[oauth].scope_descriptions` keys and `[oauth.cimd].client_scope_extra`.
+fn global_scopes(oauth: &crate::config::OAuthConfig) -> std::collections::HashSet<&str> {
+    super::cimd::CIMD_BASE_SCOPES
+        .iter()
+        .chain(SUPPORTED_SCOPES.iter())
+        .copied()
+        .chain(oauth.scope_descriptions.keys().map(String::as_str))
+        .chain(
+            oauth
+                .cimd
+                .client_scope_extra
+                .iter()
+                .flat_map(|e| e.split_whitespace()),
+        )
+        .collect()
+}
+
+/// RFC 8707 §2.2 downscoping: a scope learned only from registry metadata
+/// stays when a counted row in the granted audience lists it. Global scopes
+/// and scopes in no registry list (a client's own) pass through.
+fn downscope_registry(
+    grant: Vec<String>,
+    global: &std::collections::HashSet<&str>,
+    reg: &crate::resource_registry::RegistryScopes,
+    audience: &[String],
+) -> Vec<String> {
+    let rows: Vec<&crate::resource_registry::ScopeRow> = audience
+        .iter()
+        .filter_map(|a| crate::resource_registry::match_counted(&reg.counted, a))
+        .collect();
+    grant
+        .into_iter()
+        .filter(|s| {
+            global.contains(s.as_str())
+                || !reg.all_listed.contains(s)
+                || rows.iter().any(|r| r.scopes.contains(s))
+        })
+        .collect()
+}
+
+/// [`downscope_registry`] against the live registry; reads it only when a
+/// scope outside the global set is present. An unreadable registry keeps the
+/// global scopes only.
+async fn downscope_for_audience(
+    state: &AppState,
+    client_id: &str,
+    grant: Vec<String>,
+    audience: &[String],
+) -> Vec<String> {
+    let global = global_scopes(&state.cfg.oauth);
+    if grant.iter().all(|s| global.contains(s.as_str())) {
+        return grant;
+    }
+    match crate::resource_registry::load_registry_scopes(&state.db).await {
+        Ok(reg) => downscope_registry(grant, &global, &reg, audience),
+        Err(e) => {
+            tracing::error!(
+                error = ?e,
+                client_id,
+                "consent: resource registry read failed; granting global scopes only",
+            );
+            grant
+                .into_iter()
+                .filter(|s| global.contains(s.as_str()))
+                .collect()
+        }
+    }
+}
+
 /// Tagged result of `finalize_consent`: the caller must know whether Hydra
 /// accepted before emitting `OAUTH_CONSENT_GRANTED` or capturing provenance.
 enum FinalizeOutcome {
     Granted {
         redirect: Response,
+        /// The scopes Hydra was told to grant, after downscoping.
+        scope: Vec<String>,
         groups_count: usize,
         groups_truncated: bool,
     },
@@ -1221,6 +1300,7 @@ async fn finalize_consent(
     };
     let grant_audience =
         resolve_consent_audience(state, client_id, &requested_audience, request_url).await;
+    let grant_scope = downscope_for_audience(state, client_id, grant_scope, &grant_audience).await;
     // On the interactive path the user was shown the resolved audience and
     // approved it, so healing it is recording a decision a human made — and
     // the refresh grant needs it on the record or it fails. On the auto-grant
@@ -1412,7 +1492,7 @@ async fn finalize_consent(
     match ory::hydra::accept_consent_request(
         &state.ory,
         challenge,
-        grant_scope,
+        grant_scope.clone(),
         grant_audience,
         remember,
         id_token_session,
@@ -1437,6 +1517,7 @@ async fn finalize_consent(
             }
             FinalizeOutcome::Granted {
                 redirect: continue_nav::continue_to(&redirect.redirect_to, &consent_locale),
+                scope: grant_scope,
                 groups_count: group_slugs.len(),
                 groups_truncated,
             }
@@ -1861,6 +1942,62 @@ mod tests {
     fn empty_consent_subject_never_grants() {
         assert!(!subject_is_signed_in("", ""));
         assert!(!subject_is_signed_in("id-1", ""));
+    }
+
+    #[test]
+    fn downscope_registry_keeps_registry_scopes_for_their_audience_only() {
+        use crate::resource_registry::{RegistryScopes, ScopeRow};
+        let mut oauth = crate::config::OAuthConfig::default();
+        oauth
+            .scope_descriptions
+            .insert("cfg:read".to_string(), "Read".to_string());
+        let global = super::global_scopes(&oauth);
+        let a = "https://a.example.com/mcp".to_string();
+        let b = "https://b.example.com/mcp".to_string();
+        let reg = RegistryScopes {
+            counted: vec![
+                ScopeRow {
+                    id: 1,
+                    resource: a.clone(),
+                    scopes: vec!["a:read".to_string(), "cfg:read".to_string()],
+                },
+                ScopeRow {
+                    id: 2,
+                    resource: b.clone(),
+                    scopes: vec!["b:read".to_string()],
+                },
+            ],
+            // `off:read` belongs to a disabled row: listed, never counted.
+            all_listed: ["a:read", "b:read", "cfg:read", "off:read"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            budget_cut: false,
+        };
+        let grant = || {
+            [
+                "openid",
+                "email",
+                "cfg:read",
+                "a:read",
+                "off:read",
+                "own:scope",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+        };
+        let down = |aud: &[String]| super::downscope_registry(grant(), &global, &reg, aud);
+
+        assert_eq!(
+            down(&[format!("{a}/")]),
+            vec!["openid", "email", "cfg:read", "a:read", "own:scope"]
+        );
+        assert_eq!(
+            down(std::slice::from_ref(&b)),
+            vec!["openid", "email", "cfg:read", "own:scope"]
+        );
+        assert_eq!(down(&[]), vec!["openid", "email", "cfg:read", "own:scope"]);
     }
 
     #[test]

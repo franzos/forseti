@@ -799,15 +799,16 @@ Multiple Claude hosts (Desktop, Code, claude.ai) hitting **the same** MCP server
 
 ### Enrolling your MCP server: one registry row
 
-Your MCP server itself needs exactly one thing from the operator: a row in Forseti's **resource registry** (`/admin/resources`) naming your canonical resource URI, e.g. `https://mcp.yourapp.com/mcp`. That row is what lets consent bind your URI into access tokens' `aud` — without it, every token comes back with `aud: []` no matter what the client requests, because Hydra ignores RFC 8707 `resource=` and Forseti default-denies unregistered audiences.
+Your MCP server needs two things from the operator: its scopes in config (below) and a row in Forseti's **resource registry** (`/admin/resources`) naming your canonical resource URI, e.g. `https://mcp.yourapp.com/mcp`. That row is what lets consent bind your URI into access tokens' `aud` — without it, every token comes back with `aud: []` no matter what the client requests, because Hydra ignores RFC 8707 `resource=` and Forseti default-denies unregistered audiences.
 
 Details that matter:
 
 - **Exact string.** The `aud` your server validates must match the registry row (URI rows tolerate a trailing-slash difference; the no-slash canonical form is what lands in the token). Agree on the canonical form with the operator and use it everywhere: registry row, your `resource` value in the RFC 9728 document, your server's expected audience.
-- **No restart, no config edit.** The row takes effect on the next consent. The operator can disable it (tokens stop carrying your audience on new consents) or delete it.
+- **No restart.** The row takes effect on the next consent. The operator can disable it (tokens stop carrying your audience on new consents) or delete it.
 - **Corroboration badge.** On create and re-check, Forseti fetches your `/.well-known/oauth-protected-resource` document and compares `resource` + `authorization_servers` against the row and its issuer. It's advisory — an `unreachable` badge before you've deployed is normal — but a green `corroborated` badge is a cheap sanity check that both sides agree.
 - **Org scoping.** If your operator contact is an org-scoped admin (not a Forseti-wide one), they can only register resources on a domain their org has verified.
-- **Scopes** — define a custom set scoped to your MCP server, convention `<app>:<resource>:<verb>` (e.g. `formshive:forms:read`). Have the operator add descriptions under `[oauth.scope_descriptions]` so the consent screen reads naturally.
+- **Scopes** - define a custom set scoped to your MCP server, convention `<app>:<resource>:<verb>` (e.g. `formshive:forms:read`). Publish the non-step-up ones in your RFC 9728 `scopes_supported`: once the operator has enrolled your resource, Forseti stores that list on the registry row and allows those scopes for requests that name your resource with `resource=`. A release that adds a scope to `scopes_supported` works on the next request, with no Forseti change (Forseti re-fetches the document at most once a minute). Step-up scopes you keep out of `scopes_supported` go to the operator's config (`[oauth.scope_descriptions]` or `[oauth.cimd].client_scope_extra`), which is a config edit and a restart. A scope in neither place never reaches a CIMD client's ceiling, and Hydra answers `invalid_scope`.
+- **Per-audience grants** - a scope learned from your `scopes_supported` lands in a token only when that token's audience is your resource (RFC 8707 section 2.2 downscoping). A token for another resource, or one requested without `resource=`, won't carry it, even if the same client asked for it.
 
 ### The two client paths: CIMD and pre-registered
 

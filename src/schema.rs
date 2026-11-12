@@ -387,6 +387,7 @@ diesel::table! {
         self_service_issuer -> Text,
         self_service_client_id -> Text,
         self_service_template -> Text,
+        scopes_supported -> Text,
     }
 }
 

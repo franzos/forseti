@@ -19,7 +19,7 @@ use crate::audit::{AuditCtx, SafeMetadata};
 use crate::csrf;
 use crate::flow_view::session_email;
 use crate::identity::delete::{
-    CollectStep, DeleteActor, DeleteEnv, DeleteError, DeleteReason, DeleteRequest, delete_identity,
+    CollectStep, DeleteActor, DeleteError, DeleteReason, DeleteRequest, delete_identity_detached,
     notified_clients,
 };
 use crate::locale::LanguageIdentifier;
@@ -182,7 +182,6 @@ async fn run_delete_saga(
     let user_id = identity.id.clone();
     let actor_email = session_email(session);
 
-    let env = DeleteEnv::from_state(state);
     let req = DeleteRequest {
         identity_id: user_id.clone(),
         reason: DeleteReason::SelfService,
@@ -194,7 +193,7 @@ async fn run_delete_saga(
         ctx: Some(actx.clone()),
         metadata: SafeMetadata::empty(),
     };
-    let failure_key = match delete_identity(&env, req).await {
+    let failure_key = match delete_identity_detached(state, req).await {
         Ok(_) => {
             // Clear the now-stale Kratos session cookie the browser still
             // holds, so it isn't carried back to a surface that hasn't yet

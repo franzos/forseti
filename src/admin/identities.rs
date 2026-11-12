@@ -22,7 +22,7 @@ use crate::extractors::{Csrf, RequireAdmin};
 use crate::flash::{self, SecretReveal, attach_set_cookie as attach_cookie_if_some};
 use crate::format::{humanise_timestamp, looks_like_uuid};
 use crate::identity::delete::{
-    DeleteActor, DeleteEnv, DeleteError, DeleteReason, DeleteRequest, delete_identity,
+    DeleteActor, DeleteError, DeleteReason, DeleteRequest, delete_identity_detached,
 };
 use crate::ory;
 use crate::page_chrome::PageChrome;
@@ -685,7 +685,6 @@ pub async fn delete(
         return r;
     }
     let list_target = "/admin/identities";
-    let env = DeleteEnv::from_state(&state);
     let req = DeleteRequest {
         identity_id: id.clone(),
         reason: DeleteReason::Admin,
@@ -697,7 +696,7 @@ pub async fn delete(
         ctx: Some(actx),
         metadata: crate::audit::SafeMetadata::empty(),
     };
-    match delete_identity(&env, req).await {
+    match delete_identity_detached(&state, req).await {
         Ok(_) => Redirect::to(list_target).into_response(),
         Err(DeleteError::SoleOwner(names)) => {
             tracing::warn!(id, orgs = %names.join(", "), "admin: delete refused, sole owner");

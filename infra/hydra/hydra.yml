@@ -85,6 +85,8 @@ oauth2:
 # be exposed publicly. See operator-guide.md for the tradeoff.
 strategies:
   access_token: jwt
+  # RFC 6749 scopes are opaque strings; wildcard would let `*` match others.
+  scope: exact
 
 # Access tokens are intentionally short-lived (5m) so the JWT model's
 # revocation lag is bounded to minutes, not hours. Refresh tokens stay

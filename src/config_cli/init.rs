@@ -388,6 +388,7 @@ oauth2:
 
 strategies:
   access_token: jwt
+  scope: exact
 
 ttl:
   access_token: 5m

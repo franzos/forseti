@@ -137,6 +137,7 @@ pub mod action {
     pub const ADMIN_RESOURCE_TOGGLED: &str = "admin.resource.toggled";
     pub const ADMIN_RESOURCE_DELETED: &str = "admin.resource.deleted";
     pub const ADMIN_RESOURCE_CLAIMS_UPDATED: &str = "admin.resource.claims_updated";
+    pub const RESOURCE_SCOPES_CHANGED: &str = "resource.scopes_changed";
     pub const ADMIN_IDENTITY_DISABLED: &str = "admin.identity.disabled";
     pub const ADMIN_IDENTITY_ENABLED: &str = "admin.identity.enabled";
     pub const ADMIN_IDENTITY_DELETED: &str = "admin.identity.deleted";
@@ -459,6 +460,9 @@ pub async fn middleware(
     req: Request,
     next: Next,
 ) -> Response {
+    if crate::client_ip::forwarded_for_ignored(&headers, &state.cfg.proxy) {
+        crate::client_ip::warn_forwarded_for_ignored_once();
+    }
     with_ctx(&state, &state.cfg.proxy, headers, req, next).await
 }
 

@@ -1,9 +1,10 @@
 //! Forseti's authorization endpoint (`/oauth2/authorize`) in front of Hydra's
 //! `/oauth2/auth`. URL-shaped client_ids are resolved per
-//! draft-ietf-oauth-client-id-metadata-document (rate-limited, the matching
-//! Hydra client upserted); every other client_id passes straight through,
-//! unlimited. A POST (OIDC Core 3.1.2.1) becomes a GET with a 303, since
-//! Hydra resumes a flow from the request URL, and
+//! draft-ietf-oauth-client-id-metadata-document (rate-limited per IP, with a
+//! global limit on first sightings of a client_id, the matching Hydra client
+//! upserted); every other client_id passes straight through, unlimited. A
+//! POST (OIDC Core 3.1.2.1) becomes a GET with a 303, since Hydra resumes a
+//! flow from the request URL, and
 //! `prompt=create` (Initiating User Registration 1.0) becomes Hydra's
 //! `prompt=registration`. Fetching and caching live in [`cimd_fetch`].
 
@@ -22,20 +23,25 @@ use crate::config::{HydraConfig, OAuthConfig, ProxyConfig};
 use crate::oauth_client_metadata::{self, source};
 use crate::ory::OAuth2Client;
 use crate::ory::hydra;
+use crate::protected_resource;
 use crate::rate_limit;
+use crate::resource_registry;
 use crate::state::AppState;
 
-/// Base scopes every CIMD client's Hydra row carries; the request's `scope`
-/// values, `[oauth.cimd].client_scope_extra` and the document's own `scope`
-/// union in on top. A ceiling, never a grant — consent stays the authorization.
-const CIMD_BASE_SCOPES: &[&str] = &["openid", "offline", "offline_access"];
+/// Base scopes every CIMD client's Hydra row carries; `[oauth.cimd].client_scope_extra`,
+/// the document's own `scope` and the request's allowlisted `scope` values
+/// union in on top. A ceiling, never a grant: consent stays the authorization.
+pub(super) const CIMD_BASE_SCOPES: &[&str] = &["openid", "offline", "offline_access"];
+/// Cap on dropped scope names logged per request, and on each name's length.
+const MAX_DROPPED_LOGGED: usize = 5;
+const MAX_DROPPED_NAME_CHARS: usize = 64;
 /// Cap on scope entries kept on the Hydra row (existing entries survive first).
-const MAX_SCOPE_ENTRIES: usize = 30;
+const MAX_SCOPE_ENTRIES: usize = 256;
 /// Cap on non-document loopback redirect literals kept on the Hydra row (oldest evicted).
 const MAX_LOOPBACK_LITERALS: usize = 5;
 
 /// Rate-limit defaults for `GET /oauth2/authorize`, mirroring the DCR proxy's:
-/// per-IP 10/min + 100/hour, global 40/min + 400/hour.
+/// per-IP 10/min + 100/hour, global 40/min + 400/hour (first sightings only).
 const DEFAULT_CIMD_IP_RATE_PER_MINUTE: u32 = 10;
 const DEFAULT_CIMD_IP_RATE_PER_HOUR: u32 = 100;
 const DEFAULT_CIMD_GLOBAL_RATE_PER_MINUTE: u32 = 40;
@@ -87,20 +93,59 @@ pub(crate) fn router(
             next.run(req).await
         }
     });
-    let limited = rate_limit::dual_window_with_global(
+    let limited = rate_limit::dual_window(
         r,
         proxy_cfg,
         cimd.ip_rate_per_minute
             .unwrap_or(DEFAULT_CIMD_IP_RATE_PER_MINUTE),
         cimd.ip_rate_per_hour
             .unwrap_or(DEFAULT_CIMD_IP_RATE_PER_HOUR),
-        cimd.global_rate_per_minute
-            .unwrap_or(DEFAULT_CIMD_GLOBAL_RATE_PER_MINUTE),
-        cimd.global_rate_per_hour
-            .unwrap_or(DEFAULT_CIMD_GLOBAL_RATE_PER_HOUR),
         rate_limit::plain_text_error("cimd_authorize"),
     );
     limited.layer(passthrough)
+}
+
+/// Global per-minute and per-hour limits on document fetches for client_ids
+/// with no metadata row yet. `0` disables a window.
+struct CimdGlobalLimit {
+    minute: rate_limit::KeyedQuota,
+    hour: rate_limit::KeyedQuota,
+}
+
+impl CimdGlobalLimit {
+    const KEY: &'static str = "cimd";
+
+    fn new(per_minute: u32, per_hour: u32) -> Self {
+        Self {
+            minute: rate_limit::KeyedQuota::new(
+                std::time::Duration::from_secs(60),
+                per_minute as usize,
+            ),
+            hour: rate_limit::KeyedQuota::new(
+                std::time::Duration::from_secs(3600),
+                per_hour as usize,
+            ),
+        }
+    }
+
+    /// `Err` carries the wait until the refusing window frees a slot.
+    fn try_admit(&self) -> Result<(), std::time::Duration> {
+        self.minute.try_admit(Self::KEY)?;
+        self.hour.try_admit(Self::KEY)
+    }
+}
+
+fn cimd_global_limit(state: &AppState) -> &'static CimdGlobalLimit {
+    static L: std::sync::OnceLock<CimdGlobalLimit> = std::sync::OnceLock::new();
+    L.get_or_init(|| {
+        let cimd = &state.cfg.oauth.cimd;
+        CimdGlobalLimit::new(
+            cimd.global_rate_per_minute
+                .unwrap_or(DEFAULT_CIMD_GLOBAL_RATE_PER_MINUTE),
+            cimd.global_rate_per_hour
+                .unwrap_or(DEFAULT_CIMD_GLOBAL_RATE_PER_HOUR),
+        )
+    })
 }
 
 /// Whether `client_id` is URL-shaped, so it names a CIMD document. `http://`
@@ -213,6 +258,12 @@ async fn authorize_core(
     {
         return reject(state, actx, &client_id, &reason).await;
     }
+    if meta_row.is_none()
+        && let Err(wait) = cimd_global_limit(state).try_admit()
+    {
+        tracing::trace!(%client_id, "cimd: global first-sighting limit triggered");
+        return rate_limit::too_many_requests(Some(rate_limit::retry_after_secs(wait)));
+    }
     let doc = match cimd_fetch::fetch_document(state, &doc_url).await {
         Ok(d) => d,
         Err(e) => return reject(state, actx, &client_id, &e.to_string()).await,
@@ -232,6 +283,24 @@ async fn authorize_core(
             .await;
         }
     };
+
+    let resources = request_resources(&params);
+    let scopes = discover_scopes(
+        state,
+        actx,
+        doc.scope.as_deref(),
+        &requested_scope,
+        &resources,
+    )
+    .await;
+    if !scopes.dropped.is_empty() {
+        tracing::warn!(
+            client_id,
+            dropped = scopes.dropped.len(),
+            names = ?scopes.dropped_for_log(),
+            "cimd: requested scopes outside the allowlist kept off the client"
+        );
+    }
 
     // One Hydra read per authorize, shared by the warm-path check and the
     // upsert. Trade-off: the warm path could avoid it by also persisting the
@@ -265,18 +334,27 @@ async fn authorize_core(
     }
 
     // Warm path: unchanged document + already-registered redirect_uri + no
-    // scope the row is missing means the Hydra row and metadata row are both
-    // current — skip every write.
+    // allowlisted requested scope missing from the row means the Hydra row and
+    // metadata row are both current, so every write is skipped.
     //
     // The scope term is load-bearing. `scope_union` is the only thing that
-    // ever widens a CIMD client's ceiling, and the document hash is not a
-    // proxy for it: the document belongs to the client vendor and stays
-    // byte-identical for months, while the scopes a client requests change
-    // whenever a *resource server* introduces new ones. Without this, the
-    // first service to register a CIMD client fixes its ceiling forever and
-    // every later service gets `invalid_scope` from Hydra with nothing in the
-    // logs to explain it.
+    // widens a CIMD client's ceiling, and the document hash is not a proxy for
+    // it: the document belongs to the client vendor and stays byte-identical
+    // for months, while a resource server's scopes reach the allowlist through
+    // config. Once the operator adds one, the next request naming it misses
+    // here and the union adds it. Dropped scopes are left out of the check, or
+    // a request naming one would take the cold path every time. A full row
+    // counts as covered: the union could not add the missing scope anyway.
     let doc_hash = hex::encode(doc.raw_hash);
+    let row_scope = existing.as_ref().and_then(|c| c.scope.as_deref());
+    let scope_covered = scopes_already_on_row(row_scope, &scopes.kept);
+    let ceiling_full = !scope_covered && scope_ceiling_full(row_scope);
+    if ceiling_full {
+        tracing::warn!(
+            client_id,
+            "cimd: scope ceiling holds {MAX_SCOPE_ENTRIES} entries; requested scope not added"
+        );
+    }
     let warm = meta_row
         .as_ref()
         .is_some_and(|r| r.cimd_doc_hash.as_deref() == Some(doc_hash.as_str()))
@@ -284,10 +362,7 @@ async fn authorize_core(
             .as_ref()
             .and_then(|c| c.redirect_uris.as_ref())
             .is_some_and(|uris| uris.iter().any(|u| u == &request_redirect_uri))
-        && scopes_already_on_row(
-            existing.as_ref().and_then(|c| c.scope.as_deref()),
-            &requested_scope,
-        );
+        && (scope_covered || ceiling_full);
 
     // A row already present means this client_id is registered; only a first
     // sighting adds to the standing count, so only that is capped.
@@ -303,7 +378,7 @@ async fn authorize_core(
             &client_id,
             &doc,
             existing,
-            &requested_scope,
+            &scopes.kept,
             (matched == RedirectMatch::LoopbackPort).then_some(request_redirect_uri.as_str()),
         )
         .await
@@ -564,6 +639,229 @@ fn match_redirect_uri(request_uri: &str, doc_uris: &[String]) -> Option<Redirect
     None
 }
 
+/// Scopes a CIMD request may union onto its client's Hydra row:
+/// [`CIMD_BASE_SCOPES`], [`consent::SUPPORTED_SCOPES`](super::consent::SUPPORTED_SCOPES),
+/// the keys of `[oauth].scope_descriptions`, `[oauth.cimd].client_scope_extra`
+/// and the client document's own `scope`. The set is global, not per client.
+struct ScopeAllowlist<'a> {
+    allowed: std::collections::HashSet<&'a str>,
+}
+
+impl<'a> ScopeAllowlist<'a> {
+    fn new(oauth: &'a OAuthConfig, doc_scope: Option<&'a str>) -> Self {
+        let allowed = CIMD_BASE_SCOPES
+            .iter()
+            .chain(super::consent::SUPPORTED_SCOPES.iter())
+            .copied()
+            .chain(oauth.scope_descriptions.keys().map(String::as_str))
+            .chain(
+                oauth
+                    .cimd
+                    .client_scope_extra
+                    .iter()
+                    .flat_map(|e| e.split_whitespace()),
+            )
+            .chain(doc_scope.unwrap_or_default().split_whitespace())
+            .filter(|s| !is_wildcard(s))
+            .collect();
+        Self { allowed }
+    }
+
+    /// Also admit the stored scopes of the registry rows the request names.
+    fn with_registry(mut self, scopes: &'a [String]) -> Self {
+        self.allowed.extend(
+            scopes
+                .iter()
+                .map(String::as_str)
+                .filter(|s| !is_wildcard(s)),
+        );
+        self
+    }
+
+    fn filter_requested<'r>(&self, requested: &'r str) -> ScopeFilter<'r> {
+        let (kept, dropped): (Vec<&str>, Vec<&str>) = requested
+            .split_whitespace()
+            .partition(|s| !is_wildcard(s) && self.allowed.contains(s));
+        ScopeFilter {
+            kept: kept.join(" "),
+            dropped,
+        }
+    }
+}
+
+/// `resource` values a request may name for registry scope lookup.
+const MAX_REQUEST_RESOURCES: usize = 5;
+/// One on-demand RFC 9728 re-fetch per registry resource per window.
+const REFETCH_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The request's `resource` values, trimmed, non-empty, at most
+/// [`MAX_REQUEST_RESOURCES`].
+fn request_resources(params: &[(String, String)]) -> Vec<&str> {
+    params
+        .iter()
+        .filter(|(k, _)| k == "resource")
+        .map(|(_, v)| v.trim())
+        .filter(|v| !v.is_empty())
+        .take(MAX_REQUEST_RESOURCES)
+        .collect()
+}
+
+/// Counted rows any of `resources` names, deduplicated, in request order.
+fn matched_rows<'a>(
+    counted: &'a [resource_registry::ScopeRow],
+    resources: &[&str],
+) -> Vec<&'a resource_registry::ScopeRow> {
+    let mut rows: Vec<&resource_registry::ScopeRow> = Vec::new();
+    for raw in resources {
+        if let Some(row) = resource_registry::match_counted(counted, raw)
+            && !rows.iter().any(|r| r.id == row.id)
+        {
+            rows.push(row);
+        }
+    }
+    rows
+}
+
+fn registry_scopes(rows: &[&resource_registry::ScopeRow]) -> Vec<String> {
+    rows.iter().flat_map(|r| r.scopes.iter().cloned()).collect()
+}
+
+fn refetch_throttle() -> &'static rate_limit::KeyedQuota {
+    static T: std::sync::OnceLock<rate_limit::KeyedQuota> = std::sync::OnceLock::new();
+    T.get_or_init(|| rate_limit::KeyedQuota::new(REFETCH_WINDOW, 1))
+}
+
+/// Filter the requested scopes against the global sources, then the stored
+/// scopes of the registry rows the request's `resource=` values name, then,
+/// if scopes are still dropped, once more after re-fetching one named row's
+/// RFC 9728 document. The fetched URL comes from the stored row, never from
+/// the request.
+async fn discover_scopes<'r>(
+    state: &AppState,
+    actx: &AuditCtx,
+    doc_scope: Option<&str>,
+    requested: &'r str,
+    resources: &[&str],
+) -> ScopeFilter<'r> {
+    let oauth = &state.cfg.oauth;
+    let global = ScopeAllowlist::new(oauth, doc_scope).filter_requested(requested);
+    if global.dropped.is_empty() || resources.is_empty() {
+        return global;
+    }
+    let reg = match resource_registry::load_registry_scopes(&state.db).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(error = ?e, "cimd: registry scope lookup failed");
+            return global;
+        }
+    };
+    let rows = matched_rows(&reg.counted, resources);
+    if rows.is_empty() {
+        return global;
+    }
+    let stored = registry_scopes(&rows);
+    let filter = ScopeAllowlist::new(oauth, doc_scope)
+        .with_registry(&stored)
+        .filter_requested(requested);
+    if filter.dropped.is_empty() {
+        return filter;
+    }
+    let Some(row) = rows.iter().find(|r| {
+        protected_resource::has_fetchable_host(&r.resource)
+            && refetch_throttle().try_admit(&r.resource).is_ok()
+    }) else {
+        return filter;
+    };
+    let Some(check) = protected_resource::check(
+        &row.resource,
+        state.cfg.hydra.issuer_or_public(),
+        oauth.cimd.allow_private_targets,
+    )
+    .await
+    else {
+        return filter;
+    };
+    let diff = match resource_registry::set_check_result(
+        &state.db,
+        row.id,
+        check.status,
+        check.scopes.as_deref(),
+    )
+    .await
+    {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!(error = ?e, resource = %row.resource, "cimd: storing registry scopes failed");
+            return filter;
+        }
+    };
+    tracing::info!(
+        resource = %row.resource,
+        status = check.status,
+        reason = check.reason.as_deref(),
+        added = diff.as_ref().map_or(0, |d| d.added.len()),
+        "cimd: re-fetched RFC 9728 metadata for a requested resource"
+    );
+    let Some(diff) = diff else {
+        return filter;
+    };
+    let _ = audit::log(
+        &state.db,
+        AuditEvent::new(action::RESOURCE_SCOPES_CHANGED)
+            .with_ctx(actx)
+            .target(audit::target_kind::RESOURCE, row.resource.clone())
+            .metadata(audit_metadata!(
+                "added" => diff.added.join(" "),
+                "removed" => diff.removed.join(" "),
+            )),
+    )
+    .await;
+    let reg = match resource_registry::load_registry_scopes(&state.db).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(error = ?e, "cimd: registry scope lookup failed");
+            return filter;
+        }
+    };
+    if reg.budget_cut {
+        tracing::warn!(
+            budget = resource_registry::REGISTRY_SCOPE_BUDGET,
+            "cimd: registry scopes exceed the budget; newer rows' scopes ignored"
+        );
+    }
+    let stored = registry_scopes(&matched_rows(&reg.counted, resources));
+    ScopeAllowlist::new(oauth, doc_scope)
+        .with_registry(&stored)
+        .filter_requested(requested)
+}
+
+/// Hydra's default `wildcard` strategy lets a `*` ceiling entry match other scopes.
+fn is_wildcard(scope: &str) -> bool {
+    scope.contains('*')
+}
+
+/// A request's `scope` split by [`ScopeAllowlist::filter_requested`].
+struct ScopeFilter<'r> {
+    /// Allowed entries, space-joined in request order.
+    kept: String,
+    dropped: Vec<&'r str>,
+}
+
+impl<'r> ScopeFilter<'r> {
+    /// The dropped names bounded for a log line; the input is unauthenticated.
+    fn dropped_for_log(&self) -> Vec<&'r str> {
+        self.dropped
+            .iter()
+            .take(MAX_DROPPED_LOGGED)
+            .map(|s| {
+                s.char_indices()
+                    .nth(MAX_DROPPED_NAME_CHARS)
+                    .map_or(*s, |(i, _)| &s[..i])
+            })
+            .collect()
+    }
+}
+
 /// Whether every scope the request asks for is already on the Hydra row.
 ///
 /// Gates the warm path: if the answer is no, the row needs a `scope_union`
@@ -577,11 +875,21 @@ fn scopes_already_on_row(existing_scope: Option<&str>, requested_scope: &str) ->
     requested_scope.split_whitespace().all(|s| have.contains(s))
 }
 
+/// Whether the Hydra row's `scope` already holds [`MAX_SCOPE_ENTRIES`] entries.
+fn scope_ceiling_full(existing_scope: Option<&str>) -> bool {
+    existing_scope
+        .unwrap_or_default()
+        .split_whitespace()
+        .count()
+        >= MAX_SCOPE_ENTRIES
+}
+
 /// The Hydra row's `scope` ceiling: existing entries (never shrink), then the
-/// base scopes, the request's `scope` values, `client_scope_extra` and the
-/// document's `scope`, deduplicated in that order and capped at
-/// [`MAX_SCOPE_ENTRIES`]. Returns the joined string and whether the cap cut
-/// anything off.
+/// base scopes, `client_scope_extra`, the document's `scope` and the request's
+/// `scope` values, deduplicated in that order and capped at
+/// [`MAX_SCOPE_ENTRIES`], so request input never evicts operator or document
+/// entries. `requested` must already be allowlisted. Returns the joined string
+/// and whether the cap cut anything off.
 fn scope_union(
     existing: Option<&str>,
     requested: &str,
@@ -600,15 +908,19 @@ fn scope_union(
     for s in CIMD_BASE_SCOPES {
         push(s);
     }
-    for s in requested.split_whitespace() {
-        push(s);
-    }
     for e in extra {
-        for s in e.split_whitespace() {
+        for s in e.split_whitespace().filter(|s| !is_wildcard(s)) {
             push(s);
         }
     }
-    for s in doc_scope.unwrap_or_default().split_whitespace() {
+    for s in doc_scope
+        .unwrap_or_default()
+        .split_whitespace()
+        .filter(|s| !is_wildcard(s))
+    {
+        push(s);
+    }
+    for s in requested.split_whitespace() {
         push(s);
     }
     let truncated = entries.len() > MAX_SCOPE_ENTRIES;
@@ -697,6 +1009,46 @@ async fn upsert_hydra_client(
 #[cfg(test)]
 mod tests {
     #[test]
+    fn global_limit_admits_n_then_refuses() {
+        let l = super::CimdGlobalLimit::new(3, 100);
+        for _ in 0..3 {
+            assert!(l.try_admit().is_ok());
+        }
+        let wait = l.try_admit().expect_err("fourth is over the minute window");
+        assert!(wait <= std::time::Duration::from_secs(60), "{wait:?}");
+    }
+
+    #[test]
+    fn global_limit_zero_disables_both_windows() {
+        let l = super::CimdGlobalLimit::new(0, 0);
+        for _ in 0..1000 {
+            assert!(l.try_admit().is_ok());
+        }
+    }
+
+    #[test]
+    fn global_limit_hour_window_refuses() {
+        let l = super::CimdGlobalLimit::new(0, 2);
+        assert!(l.try_admit().is_ok());
+        assert!(l.try_admit().is_ok());
+        let wait = l.try_admit().expect_err("third is over the hour window");
+        assert!(wait > std::time::Duration::from_secs(60), "{wait:?}");
+    }
+
+    #[test]
+    fn global_limit_hour_refusal_still_uses_a_minute_slot() {
+        let l = super::CimdGlobalLimit::new(3, 1);
+        assert!(l.try_admit().is_ok());
+        assert!(l.try_admit().is_err(), "hour window refuses");
+        assert!(l.try_admit().is_err(), "hour window refuses");
+        let wait = l.try_admit().expect_err("minute window is spent");
+        assert!(
+            wait <= std::time::Duration::from_secs(60),
+            "the minute window refuses first: {wait:?}"
+        );
+    }
+
+    #[test]
     fn client_id_is_cimd_needs_a_url() {
         use super::client_id_is_cimd;
         assert!(client_id_is_cimd(Some("https://app.example/c.json"), false));
@@ -745,9 +1097,10 @@ mod tests {
     }
 
     use super::{
-        CimdDocument, MAX_SCOPE_ENTRIES, RedirectMatch, host_policy_violation,
-        is_acceptable_redirect_entry, match_redirect_uri, scope_union, scopes_already_on_row,
-        supported_grant_types, validate_doc,
+        CimdDocument, MAX_DROPPED_LOGGED, MAX_DROPPED_NAME_CHARS, MAX_SCOPE_ENTRIES, RedirectMatch,
+        ScopeAllowlist, host_policy_violation, is_acceptable_redirect_entry, match_redirect_uri,
+        scope_ceiling_full, scope_union, scopes_already_on_row, supported_grant_types,
+        validate_doc,
     };
 
     const DOC_URL: &str = "https://claude.ai/oauth/claude-code-client-metadata";
@@ -933,7 +1286,7 @@ mod tests {
             scope_union(None, "openid app:read app:read", Some("app:doc"), &extra);
         assert_eq!(
             scope,
-            "openid offline offline_access app:read app:admin app:doc"
+            "openid offline offline_access app:admin app:doc app:read"
         );
         assert!(!truncated);
     }
@@ -946,8 +1299,8 @@ mod tests {
     }
 
     #[test]
-    fn scope_union_caps_at_thirty_entries() {
-        let requested: String = (0..40)
+    fn scope_union_caps_at_max_entries() {
+        let requested: String = (0..MAX_SCOPE_ENTRIES + 10)
             .map(|i| format!("s{i}"))
             .collect::<Vec<_>>()
             .join(" ");
@@ -956,5 +1309,173 @@ mod tests {
         assert!(truncated);
         // The base scopes come before the flood, so they survive the cap.
         assert!(scope.starts_with("openid offline offline_access"));
+    }
+
+    #[test]
+    fn scope_union_request_never_evicts_extra_or_doc_at_cap() {
+        let extra: Vec<String> = (0..15).map(|i| format!("extra:{i}")).collect();
+        let doc: String = (0..12)
+            .map(|i| format!("doc:{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let requested: String = (0..MAX_SCOPE_ENTRIES + 10)
+            .map(|i| format!("req:{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let (scope, truncated) = scope_union(None, &requested, Some(&doc), &extra);
+        assert!(truncated);
+        let kept: Vec<&str> = scope.split_whitespace().collect();
+        assert_eq!(kept.len(), MAX_SCOPE_ENTRIES);
+        for s in extra
+            .iter()
+            .map(String::as_str)
+            .chain(doc.split_whitespace())
+        {
+            assert!(kept.contains(&s), "{s} evicted: {scope}");
+        }
+    }
+
+    // --- scope allowlist ----------------------------------------------------
+
+    fn oauth_with_extras() -> crate::config::OAuthConfig {
+        let mut oauth = crate::config::OAuthConfig::default();
+        oauth
+            .scope_descriptions
+            .insert("desc:read".to_string(), "Read".to_string());
+        oauth.cimd.client_scope_extra = vec!["extra:a extra:b".to_string()];
+        oauth
+    }
+
+    #[test]
+    fn allowlist_admits_each_source() {
+        let oauth = oauth_with_extras();
+        let f = ScopeAllowlist::new(&oauth, Some("doc:x doc:y"))
+            .filter_requested("offline_access email desc:read extra:b doc:y");
+        assert_eq!(f.kept, "offline_access email desc:read extra:b doc:y");
+        assert!(f.dropped.is_empty(), "{:?}", f.dropped);
+    }
+
+    #[test]
+    fn allowlist_drops_and_reports_junk() {
+        let oauth = crate::config::OAuthConfig::default();
+        let f = ScopeAllowlist::new(&oauth, None).filter_requested("openid junk:x email other");
+        assert_eq!(f.kept, "openid email");
+        assert_eq!(f.dropped, vec!["junk:x", "other"]);
+    }
+
+    #[test]
+    fn allowlist_never_admits_wildcard_tokens() {
+        let mut oauth = crate::config::OAuthConfig::default();
+        oauth.cimd.client_scope_extra = vec!["x:* extra:ok".to_string()];
+        let f = ScopeAllowlist::new(&oauth, Some("* app:read"))
+            .filter_requested("* app:read x:* extra:ok");
+        assert_eq!(f.kept, "app:read extra:ok");
+        assert_eq!(f.dropped, vec!["*", "x:*"]);
+    }
+
+    #[test]
+    fn scope_union_skips_wildcard_doc_and_extra_tokens() {
+        let extra = vec!["e:* e:ok".to_string()];
+        let (scope, _) = scope_union(None, "", Some("a:* b"), &extra);
+        assert_eq!(scope, "openid offline offline_access e:ok b");
+    }
+
+    #[test]
+    fn request_resources_collects_trims_and_caps() {
+        let params: Vec<(String, String)> = [
+            ("resource", " https://a.example.com/mcp "),
+            ("scope", "openid"),
+            ("resource", ""),
+            ("resource", "   "),
+            ("resource", "b"),
+            ("resource", "c"),
+            ("resource", "d"),
+            ("resource", "e"),
+            ("resource", "f"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        assert_eq!(
+            super::request_resources(&params),
+            vec!["https://a.example.com/mcp", "b", "c", "d", "e"]
+        );
+    }
+
+    #[test]
+    fn with_registry_admits_registry_scopes_but_not_junk_or_wildcards() {
+        let oauth = crate::config::OAuthConfig::default();
+        let reg = vec!["reg:read".to_string(), "reg:*".to_string()];
+        let f = ScopeAllowlist::new(&oauth, None)
+            .with_registry(&reg)
+            .filter_requested("openid reg:read reg:* junk:x");
+        assert_eq!(f.kept, "openid reg:read");
+        assert_eq!(f.dropped, vec!["reg:*", "junk:x"]);
+    }
+
+    #[test]
+    fn matched_rows_dedupes_in_request_order() {
+        use crate::resource_registry::ScopeRow;
+        let row = |id, resource: &str, scopes: &[&str]| ScopeRow {
+            id,
+            resource: resource.to_string(),
+            scopes: scopes.iter().map(|s| s.to_string()).collect(),
+        };
+        let counted = vec![
+            row(1, "https://a.example.com/mcp", &["a:r"]),
+            row(2, "https://b.example.com/mcp", &["b:r"]),
+            row(3, "https://c.example.com/mcp", &["c:r"]),
+        ];
+        let rows = super::matched_rows(
+            &counted,
+            &[
+                "https://b.example.com/mcp/",
+                "https://unknown.example.com",
+                "https://a.example.com/mcp",
+                "https://b.example.com/mcp",
+            ],
+        );
+        assert_eq!(rows.iter().map(|r| r.id).collect::<Vec<_>>(), vec![2, 1]);
+        assert_eq!(super::registry_scopes(&rows), vec!["b:r", "a:r"]);
+    }
+
+    #[test]
+    fn dropped_names_are_bounded_in_count_and_length() {
+        let oauth = crate::config::OAuthConfig::default();
+        let long = "\u{e9}".repeat(200);
+        let requested = std::iter::repeat_n(long.as_str(), 10)
+            .collect::<Vec<_>>()
+            .join(" ");
+        let f = ScopeAllowlist::new(&oauth, None).filter_requested(&requested);
+        assert_eq!(f.dropped.len(), 10);
+        let logged = f.dropped_for_log();
+        assert_eq!(logged.len(), MAX_DROPPED_LOGGED);
+        for n in logged {
+            assert_eq!(n.chars().count(), MAX_DROPPED_NAME_CHARS);
+        }
+    }
+
+    #[test]
+    fn filtered_request_is_warm_against_a_row_with_its_allowed_scopes() {
+        let oauth = oauth_with_extras();
+        let row = Some("openid offline offline_access extra:a extra:b doc:x email");
+        let requested = "openid email junk:x doc:x";
+        assert!(!scopes_already_on_row(row, requested));
+        let f = ScopeAllowlist::new(&oauth, Some("doc:x")).filter_requested(requested);
+        assert!(scopes_already_on_row(row, &f.kept));
+    }
+
+    #[test]
+    fn a_full_row_is_a_full_ceiling_and_union_adds_nothing() {
+        let row: String = (0..MAX_SCOPE_ENTRIES)
+            .map(|i| format!("old:{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(scope_ceiling_full(Some(&row)));
+        assert!(!scope_ceiling_full(Some("openid email")));
+        assert!(!scope_ceiling_full(None));
+        let (scope, truncated) = scope_union(Some(&row), "email", None, &[]);
+        assert_eq!(scope, row, "a full row takes no new entry");
+        assert!(truncated);
     }
 }
