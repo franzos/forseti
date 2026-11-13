@@ -22,9 +22,9 @@ use axum::{
 use serde::Deserialize;
 
 use crate::audit::{AuditCtx, AuditEvent};
+use crate::backend::identity::Session;
 use crate::config::BrandConfig;
 use crate::locale::LanguageIdentifier;
-use crate::ory;
 use crate::page_chrome::PageChrome;
 use crate::render::render;
 use crate::state::AppState;
@@ -231,7 +231,7 @@ async fn gate_admin_prefix(
     state: &AppState,
     parts: &mut Parts,
     path: &str,
-) -> Result<(ory::Session, String, String), Response> {
+) -> Result<(Session, String, String), Response> {
     use crate::extractors::{SessionFailure, resolve_session_from_parts};
     let session = match resolve_session_from_parts(state, parts, path).await {
         Ok(s) => *s,
@@ -250,9 +250,9 @@ async fn gate_admin_prefix(
         }
     };
 
-    let (identity_id, email) = crate::flow_view::session_principal(&session);
+    let (identity_id, email) = session.principal();
 
-    if !ory::kratos::session_satisfies_aal2(&session) {
+    if !session.satisfies_aal2() {
         return Err(Redirect::to(&crate::auth::aal2_step_up_url(path)).into_response());
     }
 
@@ -285,11 +285,7 @@ pub async fn require_admin_with_scope(
     let scope = crate::orgs::resolve_admin_scope(&state.db, &identity_id, org_slug).await;
     let scope = match scope {
         AdminScopeOutcome::Resolved(AdminScope::Forseti) => {
-            if !state
-                .cfg
-                .admin
-                .is_admin_actor(&email, ory::session_addresses(&session))
-            {
+            if !state.cfg.admin.is_admin_actor(&email, session.addresses()) {
                 let locale = admin_gate_locale(&parts.headers);
                 return Err(render_forbidden(
                     state,
@@ -306,11 +302,7 @@ pub async fn require_admin_with_scope(
             // actor must be an operator too.
             let org_id_str = other.org_id().unwrap_or("").to_string();
             if org_id_str == crate::orgs::DEFAULT_ORG_ID {
-                if !state
-                    .cfg
-                    .admin
-                    .is_admin_actor(&email, ory::session_addresses(&session))
-                {
+                if !state.cfg.admin.is_admin_actor(&email, session.addresses()) {
                     let locale = admin_gate_locale(&parts.headers);
                     return Err(render_forbidden(
                         state,
@@ -360,11 +352,7 @@ pub async fn require_admin(
 ) -> Result<AdminCtx, Response> {
     let (session, identity_id, email) = gate_admin_prefix(state, parts, path).await?;
 
-    if !state
-        .cfg
-        .admin
-        .is_admin_actor(&email, ory::session_addresses(&session))
-    {
+    if !state.cfg.admin.is_admin_actor(&email, session.addresses()) {
         tracing::warn!(
             actor = %identity_id,
             path,
@@ -411,7 +399,7 @@ fn admin_gate_locale(headers: &HeaderMap) -> crate::locale::LanguageIdentifier {
 /// then `en`.
 fn admin_success_locale(
     parts: &Parts,
-    session: ory::Session,
+    session: Session,
     identity_id: &str,
     email: &str,
 ) -> LanguageIdentifier {
@@ -554,5 +542,5 @@ pub(crate) fn with_org(url: &str, scope: &crate::orgs::AdminScope) -> String {
         return url.to_string();
     };
     let sep = if url.contains('?') { '&' } else { '?' };
-    format!("{url}{sep}org={}", ory_client::apis::urlencode(slug))
+    format!("{url}{sep}org={}", crate::web::urlencode(slug))
 }

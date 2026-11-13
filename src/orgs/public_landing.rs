@@ -9,11 +9,13 @@ use axum::extract::{Path, State};
 use axum::response::Response;
 use axum::routing::get;
 
+use crate::backend::identity::FlowInit;
+use crate::backend::identity::FlowKind;
+use crate::backend::{IdentityBackend, IdentityImpl};
 use crate::config::{BrandConfig, OrgsConfig, ProxyConfig};
 use crate::db::DbPool;
 use crate::orgs::db::public_branding_by_slug;
 use crate::orgs::parse_access_mode;
-use crate::ory;
 use crate::page_chrome::{Chrome, PageChrome};
 use crate::rate_limit;
 use crate::render::render;
@@ -76,10 +78,7 @@ struct PublicLandingTemplate {
 /// The slug is accepted by the login pin (id-or-slug), so `/login` themes for
 /// this org and returning members log in there.
 fn login_href(slug: &str) -> String {
-    format!(
-        "/login?organization_id={}",
-        ory_client::apis::urlencode(slug)
-    )
+    format!("/login?organization_id={}", crate::web::urlencode(slug))
 }
 
 /// Bind the registration CTA to `/join/confirm?org=<slug>` when `slug`
@@ -89,7 +88,7 @@ fn login_href(slug: &str) -> String {
 /// this never issues a second query.
 fn register_href(
     self_url: &str,
-    kratos_public_url: &str,
+    identity: &IdentityImpl,
     slug: &str,
     is_signup_org: bool,
 ) -> String {
@@ -99,12 +98,14 @@ fn register_href(
     let return_to = format!(
         "{}/join/confirm?org={}",
         self_url.trim_end_matches('/'),
-        ory_client::apis::urlencode(slug)
+        crate::web::urlencode(slug)
     );
-    ory::kratos::browser_init_url(
-        ory::FlowKind::Registration,
-        kratos_public_url,
-        Some(&return_to),
+    identity.flow_init_url(
+        FlowKind::Registration,
+        FlowInit {
+            return_to: Some(&return_to),
+            ..Default::default()
+        },
     )
 }
 
@@ -153,12 +154,7 @@ pub(crate) async fn landing(
         chrome,
     )
     .await;
-    let register_href = register_href(
-        &state.cfg.self_.url,
-        &state.cfg.kratos.public_url,
-        &slug,
-        is_signup_org,
-    );
+    let register_href = register_href(&state.cfg.self_.url, &state.identity, &slug, is_signup_org);
     let login_href = org_name.as_ref().map(|_| login_href(&slug));
     let mut resp = render(&PublicLandingTemplate {
         chrome,
@@ -181,6 +177,16 @@ mod tests {
 
     const TEST_MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations/sqlite");
     const SECRET: &[u8] = b"public-landing-test-secret";
+
+    fn kratos() -> std::sync::Arc<IdentityImpl> {
+        crate::ory::test_backends(
+            "http://kratos:4433",
+            "http://kratos:4434",
+            "http://hydra:4444",
+            "http://hydra:4445",
+        )
+        .0
+    }
 
     /// Single-connection `:memory:` pool, mirroring `orgs::db`'s test helper.
     async fn test_pool() -> DbPool {
@@ -310,14 +316,9 @@ mod tests {
         let (_, _, _, is_signup_org) =
             resolve(&db, &brand(), SECRET, false, "acme", chrome()).await;
         assert!(is_signup_org);
-        let href = register_href(
-            "http://localhost:3000",
-            "http://kratos:4433",
-            "acme",
-            is_signup_org,
-        );
+        let href = register_href("http://localhost:3000", &kratos(), "acme", is_signup_org);
         assert!(href.contains("return_to="));
-        assert!(href.contains(&ory_client::apis::urlencode(
+        assert!(href.contains(&crate::web::urlencode(
             "http://localhost:3000/join/confirm?org=acme"
         )));
     }
@@ -335,12 +336,7 @@ mod tests {
             resolve(&db, &brand(), SECRET, false, "acme", chrome()).await;
         assert!(!is_signup_org);
         assert_eq!(
-            register_href(
-                "http://localhost:3000",
-                "http://kratos:4433",
-                "acme",
-                is_signup_org,
-            ),
+            register_href("http://localhost:3000", &kratos(), "acme", is_signup_org,),
             DEFAULT_REGISTER_HREF
         );
     }
@@ -348,7 +344,7 @@ mod tests {
     #[test]
     fn login_href_points_at_branded_login_by_slug() {
         assert_eq!(super::login_href("acme"), "/login?organization_id=acme");
-        // ory_client::apis::urlencode is form-urlencoded (matches oauth/login.rs's use), so space -> `+`.
+        // crate::web::urlencode is form-urlencoded (matches oauth/login.rs's use), so space -> `+`.
         assert_eq!(super::login_href("a b"), "/login?organization_id=a+b");
     }
 

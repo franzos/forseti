@@ -41,9 +41,9 @@ pub(crate) fn auth_origin(provider_id: &str) -> Option<&'static str> {
 /// Covers sign-in/sign-up (`provider` nodes) and linking an account (`link`),
 /// whose values are raw provider ids. `unlink` is excluded: it resolves at
 /// Kratos and never bounces to the provider.
-pub(crate) fn flow_auth_origins(flow: &serde_json::Value) -> Vec<String> {
+pub(crate) fn flow_auth_origins(flow: &crate::flow_view::Flow) -> Vec<String> {
     let mut origins: Vec<String> = Vec::new();
-    for node in crate::flow_view::collect_input_nodes(flow, "oidc") {
+    for node in flow.inputs("oidc") {
         if !matches!(node.name.as_str(), "provider" | "link") {
             continue;
         }
@@ -99,11 +99,11 @@ mod tests {
 
     #[test]
     fn flow_auth_origins_maps_provider_buttons() {
-        let flow = serde_json::json!({"ui": {"nodes": [
+        let flow = crate::ory::flow_json::project(&serde_json::json!({"ui": {"nodes": [
             {"group": "default", "type": "input", "attributes": {"name": "csrf_token", "type": "hidden", "value": "x"}},
             {"group": "oidc", "type": "input", "attributes": {"name": "provider", "type": "submit", "value": "google"}},
             {"group": "oidc", "type": "input", "attributes": {"name": "provider", "type": "submit", "value": "github"}},
-        ]}});
+        ]}}));
         let origins = flow_auth_origins(&flow);
         assert!(origins.iter().any(|o| o == "https://accounts.google.com"));
         assert!(origins.iter().any(|o| o == "https://github.com"));
@@ -114,10 +114,10 @@ mod tests {
     /// upstream Forseti can't map contributes nothing rather than a bad source.
     #[test]
     fn flow_auth_origins_covers_link_nodes_and_skips_unknown() {
-        let flow = serde_json::json!({"ui": {"nodes": [
+        let flow = crate::ory::flow_json::project(&serde_json::json!({"ui": {"nodes": [
             {"group": "oidc", "type": "input", "attributes": {"name": "link", "type": "submit", "value": "apple"}},
             {"group": "oidc", "type": "input", "attributes": {"name": "unlink", "type": "submit", "value": "okta"}},
-        ]}});
+        ]}}));
         assert_eq!(flow_auth_origins(&flow), vec!["https://appleid.apple.com"]);
     }
 

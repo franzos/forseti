@@ -15,10 +15,12 @@ use serde::Deserialize;
 
 use crate::audit::{self, AuditCtx, AuditEvent, action, target_kind};
 use crate::audit_metadata;
+use crate::backend::IdentityBackend;
+use crate::backend::identity::FlowInit;
+use crate::backend::identity::FlowKind;
 use crate::csrf::CsrfForm;
 use crate::extractors::{Csrf, OptionalSession};
 use crate::orgs::{self, Role};
-use crate::ory;
 use crate::page_chrome::{PageChrome, ReqLocale};
 use crate::render::render;
 use crate::state::AppState;
@@ -224,10 +226,7 @@ async fn back_to_members(db: &crate::db::DbPool, org_id: &str, msg: &str) -> Red
     if msg.is_empty() {
         Redirect::to(&base)
     } else {
-        Redirect::to(&format!(
-            "{base}?error={}",
-            ory_client::apis::urlencode(msg)
-        ))
+        Redirect::to(&format!("{base}?error={}", crate::web::urlencode(msg)))
     }
 }
 
@@ -322,10 +321,12 @@ async fn invite_accept_get(
             state.cfg.self_.url.trim_end_matches('/'),
             token
         );
-        let reg_url = ory::kratos::browser_init_url(
-            ory::FlowKind::Registration,
-            &state.cfg.kratos.public_url,
-            Some(&return_to),
+        let reg_url = state.identity.flow_init_url(
+            FlowKind::Registration,
+            FlowInit {
+                return_to: Some(&return_to),
+                ..Default::default()
+            },
         );
         let chrome = theme(PageChrome::from_parts(
             &state,
@@ -346,26 +347,26 @@ async fn invite_accept_get(
             token: String::new(),
             sign_in_url: format!(
                 "/login?return_to={}&login_hint={}",
-                ory_client::apis::urlencode(&return_to),
-                ory_client::apis::urlencode(&invite.email)
+                crate::web::urlencode(&return_to),
+                crate::web::urlencode(&invite.email)
             ),
         });
     };
 
-    let session_email = crate::flow_view::session_email(&session);
+    let session_email = session.email();
     if session_email.to_lowercase() == invite.email.to_lowercase() {
         // Force email verification before joining any org (spec mitigation #3).
-        let addrs = crate::ory::session_addresses(&session);
-        if !crate::ory::address_is_verified(addrs, &session_email) {
+        let addrs = session.addresses();
+        if !crate::backend::identity::address_is_verified(addrs, &session_email) {
             // Verify, then land back here: the verified page continues to it.
             let back = format!(
                 "{}/invite/accept?token={}",
                 state.cfg.self_.url.trim_end_matches('/'),
-                ory_client::apis::urlencode(&token)
+                crate::web::urlencode(&token)
             );
             return Redirect::to(&format!(
                 "/verification?return_to={}",
-                ory_client::apis::urlencode(&back)
+                crate::web::urlencode(&back)
             ))
             .into_response();
         }
@@ -394,7 +395,7 @@ async fn invite_accept_get(
     let chrome = theme(PageChrome::from_parts(
         &state,
         session_email,
-        crate::ory::session_addresses(&session),
+        session.addresses(),
         csrf_token,
         locale,
     ));
@@ -407,7 +408,7 @@ async fn invite_accept_get(
         cta_label,
         cta_url: format!(
             "/logout?return_to=/invite/accept?token={}",
-            ory_client::apis::urlencode(&token)
+            crate::web::urlencode(&token)
         ),
         can_accept_now: false,
         token: String::new(),
@@ -452,12 +453,12 @@ async fn invite_accept_post(
         _ => {
             return Redirect::to(&format!(
                 "/invite/accept?token={}",
-                ory_client::apis::urlencode(&form.token)
+                crate::web::urlencode(&form.token)
             ))
             .into_response();
         }
     };
-    let session_email = crate::flow_view::session_email(&session);
+    let session_email = session.email();
     if session_email.to_lowercase() != invite.email.to_lowercase() {
         return render_invalid_invite(
             &state,
@@ -467,8 +468,8 @@ async fn invite_accept_post(
         )
         .into_response();
     }
-    let addrs = crate::ory::session_addresses(&session);
-    if !crate::ory::address_is_verified(addrs, &session_email) {
+    let addrs = session.addresses();
+    if !crate::backend::identity::address_is_verified(addrs, &session_email) {
         return render_invalid_invite(
             &state,
             &csrf_token,
@@ -513,7 +514,7 @@ async fn invite_finalize_get(
     };
     Redirect::to(&format!(
         "/invite/accept?token={}",
-        ory_client::apis::urlencode(&token)
+        crate::web::urlencode(&token)
     ))
     .into_response()
 }
@@ -526,7 +527,7 @@ async fn finalize_membership(
     invite: &orgs::OrgInvite,
     identity_id: &str,
     session_email: &str,
-    addrs: Option<&[crate::ory::VerifiableIdentityAddress]>,
+    addrs: Option<&[crate::backend::identity::VerifiableAddress]>,
     actx: &AuditCtx,
 ) -> Response {
     let role: Role = match invite.role.parse() {

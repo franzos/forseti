@@ -313,7 +313,7 @@ pub async fn ensure_default_floor(
     admin_cfg: &crate::config::AdminConfig,
     identity_id: &str,
     email: &str,
-    addrs: Option<&[crate::ory::VerifiableIdentityAddress]>,
+    addrs: Option<&[crate::backend::identity::VerifiableAddress]>,
 ) {
     let (default_present, non_default_count) =
         match db::floor_membership_facts(db, identity_id).await {
@@ -422,12 +422,12 @@ mod tests {
 
     /// One verifiable address for `email`, verified or not, as the identity's
     /// address list would carry it.
-    fn addrs(email: &str, verified: bool) -> Vec<crate::ory::VerifiableIdentityAddress> {
-        vec![crate::ory::VerifiableIdentityAddress {
+    fn addrs(email: &str, verified: bool) -> Vec<crate::backend::identity::VerifiableAddress> {
+        vec![crate::backend::identity::VerifiableAddress {
             id: Some("addr-1".to_string()),
             value: email.to_string(),
             verified,
-            via: ory_client::models::verifiable_identity_address::ViaEnum::Email,
+            via: "email".to_string(),
             status: "completed".to_string(),
             verified_at: None,
             created_at: None,

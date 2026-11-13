@@ -8,9 +8,9 @@ use axum::{
 use crate::admin::with_org;
 use crate::admin::{AdminSection, ConfirmForm, ConfirmTemplate, render_admin_error};
 use crate::audit::{self, AuditCtx, action, target_kind};
+use crate::backend::OAuthBackend;
 use crate::csrf::CsrfForm;
 use crate::extractors::Csrf;
-use crate::ory;
 use crate::render::render;
 use crate::state::AppState;
 
@@ -24,8 +24,8 @@ pub async fn delete_confirm(client_in_scope: RequireClientInScope, csrf: Csrf) -
         admin_active: AdminSection::Clients,
         title: format!("Delete client {id}?"),
         body: "This permanently removes the OAuth2 client. Existing tokens issued by Hydra remain valid until their expiry — Hydra does not invalidate them on client deletion.".to_string(),
-        action_url: format!("/admin/clients/{}/delete", ory_client::apis::urlencode(&id)),
-        cancel_url: format!("/admin/clients/{}", ory_client::apis::urlencode(&id)),
+        action_url: format!("/admin/clients/{}/delete", crate::web::urlencode(&id)),
+        cancel_url: format!("/admin/clients/{}", crate::web::urlencode(&id)),
         submit_label: "Delete client",
     })
 }
@@ -38,12 +38,12 @@ pub async fn delete(
 ) -> Response {
     let RequireClientInScope { id, ctx, scope } = client_in_scope;
     if let Some(r) = form.bounce_unless_confirmed(&with_org(
-        &format!("/admin/clients/{}", ory_client::apis::urlencode(&id)),
+        &format!("/admin/clients/{}", crate::web::urlencode(&id)),
         &scope,
     )) {
         return r;
     }
-    match ory::hydra::delete_client(&state.ory, &id).await {
+    match state.oauth.delete_client(&id).await {
         Ok(()) => {
             // Best-effort: an orphaned blob is only wasted storage, not a
             // reason to fail a delete Hydra already accepted.

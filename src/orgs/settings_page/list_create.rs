@@ -171,7 +171,7 @@ pub(super) async fn orgs_create(
     let drop_default = !state
         .cfg
         .admin
-        .is_admin_actor(&email, crate::ory::session_addresses(&sess.session));
+        .is_admin_actor(&email, sess.session.addresses());
     if let Err(e) =
         orgs::db::join_org_race_safe(&state.db, &identity_id, &id, Role::Owner, drop_default).await
     {

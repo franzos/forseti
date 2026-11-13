@@ -43,11 +43,7 @@ async fn privileged_gate(
         locale,
     )
     .await?;
-    Ok(flow
-        .get("id")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_string())
+    Ok(flow.id)
 }
 
 #[derive(Template)]

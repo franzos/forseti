@@ -5,10 +5,12 @@ use axum::extract::{Query, State};
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Redirect, Response};
 
+use crate::backend::IdentityBackend;
+use crate::backend::identity::FlowInit;
+use crate::backend::identity::FlowKind;
+use crate::backend::identity::FlowOutcome;
 use crate::cookies;
 use crate::flow_view::*;
-use crate::ory::kratos::FlowOutcome;
-use crate::ory::{self, FlowKind};
 use crate::page_chrome::{Chrome, PageChrome};
 use crate::render::render;
 use crate::state::AppState;
@@ -31,14 +33,20 @@ pub(crate) async fn recovery(
     let cookie = cookies::cookie_header(&headers);
     let flow_id = query.flow.as_deref();
     let init_url = || {
-        ory::kratos::browser_init_url(
+        state.identity.flow_init_url(
             FlowKind::Recovery,
-            &state.cfg.kratos.public_url,
-            query.return_to.as_deref(),
+            FlowInit {
+                return_to: query.return_to.as_deref(),
+                ..Default::default()
+            },
         )
     };
 
-    match ory::kratos::resolve_flow(&state.ory, FlowKind::Recovery, flow_id, &cookie).await {
+    match state
+        .identity
+        .resolve_flow(FlowKind::Recovery, flow_id, &cookie)
+        .await
+    {
         FlowOutcome::Init | FlowOutcome::Reinit | FlowOutcome::Privileged(_) => {
             Redirect::to(&init_url()).into_response()
         }
@@ -58,15 +66,11 @@ pub(crate) async fn recovery(
     }
 }
 
-fn render_recovery(
-    chrome: PageChrome,
-    flow: &serde_json::Value,
-    return_to: Option<&str>,
-) -> Response {
+fn render_recovery(chrome: PageChrome, flow: &Flow, return_to: Option<&str>) -> Response {
     let form = FlowFormView::from_flow(flow, FlowKind::Recovery, return_to, &chrome.locale);
     render(&RecoveryTemplate {
         chrome,
         form,
-        state: flow_state(flow).to_string(),
+        state: flow.state.clone(),
     })
 }

@@ -15,9 +15,9 @@ use diesel::prelude::*;
 use futures_util::StreamExt;
 use tokio_util::sync::CancellationToken;
 
+use crate::backend::IdentityImpl;
 use crate::db::DbPool;
 use crate::db_interact;
-use crate::ory::OryClients;
 use crate::schema::webhook_outbox;
 
 use super::outbox::{OutboxRow, reconcile_pending, state};
@@ -56,10 +56,10 @@ impl WorkerHandle {
 /// `CONFIRMED` rows (delivery), the reconciler resolves `PENDING`
 /// rows stranded by a crash between outbox write and Kratos delete.
 /// Different responsibilities, different cadences, no shared state
-/// beyond the `DbPool` + `OryClients` handles.
+/// beyond the `DbPool` + identity backend handles.
 pub fn spawn_reconcile(
     db: DbPool,
-    ory: Arc<OryClients>,
+    identity: Arc<IdentityImpl>,
     shutdown: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -76,7 +76,7 @@ pub fn spawn_reconcile(
                     break;
                 }
                 _ = ticker.tick() => {
-                    if let Err(e) = reconcile_pending(&db, &ory).await {
+                    if let Err(e) = reconcile_pending(&db, &identity).await {
                         tracing::warn!(error = %e, "periodic webhook reconcile failed");
                     }
                 }

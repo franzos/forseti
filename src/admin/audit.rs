@@ -15,9 +15,9 @@ use serde::Deserialize;
 
 use crate::admin::{AdminSection, render_admin_error};
 use crate::audit;
+use crate::backend::{IdentityBackend, OAuthBackend};
 use crate::extractors::{Csrf, RequireAdminScoped};
 use crate::format::humanise_timestamp;
-use crate::ory;
 use crate::page_chrome::PageChrome;
 use crate::render::render;
 use crate::state::AppState;
@@ -240,8 +240,8 @@ fn filter_query_string(
         if !v.is_empty() {
             parts.push(format!(
                 "{}={}",
-                ory_client::apis::urlencode(k),
-                ory_client::apis::urlencode(v)
+                crate::web::urlencode(k),
+                crate::web::urlencode(v)
             ));
         }
     };
@@ -396,38 +396,34 @@ async fn resolve_target_label(
         return (String::new(), false);
     }
     match target_kind {
-        audit::target_kind::OAUTH_CLIENT => {
-            match ory::hydra::get_client(&state.ory, target_id).await {
-                Ok(c) => {
-                    let name = c.client_name.unwrap_or_default();
-                    if name.is_empty() {
-                        (target_id.to_string(), true)
-                    } else {
-                        (name, true)
-                    }
+        audit::target_kind::OAUTH_CLIENT => match state.oauth.get_client(target_id).await {
+            Ok(c) => {
+                let name = c.client_name.unwrap_or_default();
+                if name.is_empty() {
+                    (target_id.to_string(), true)
+                } else {
+                    (name, true)
                 }
-                Err(_) => (target_id.to_string(), false),
             }
-        }
-        audit::target_kind::IDENTITY => {
-            match ory::kratos::admin_get_identity(&state.ory, target_id).await {
-                Ok(ident) => {
-                    let email = ident
-                        .traits
-                        .as_ref()
-                        .and_then(|t| t.get("email"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    if email.is_empty() {
-                        (target_id.to_string(), true)
-                    } else {
-                        (email, true)
-                    }
+            Err(_) => (target_id.to_string(), false),
+        },
+        audit::target_kind::IDENTITY => match state.identity.admin_get_identity(target_id).await {
+            Ok(ident) => {
+                let email = ident
+                    .traits
+                    .as_ref()
+                    .and_then(|t| t.get("email"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if email.is_empty() {
+                    (target_id.to_string(), true)
+                } else {
+                    (email, true)
                 }
-                Err(_) => (target_id.to_string(), false),
             }
-        }
+            Err(_) => (target_id.to_string(), false),
+        },
         // Sessions/webhook rows have no label to resolve; raw id is fine.
         _ => (target_id.to_string(), true),
     }
@@ -441,7 +437,7 @@ fn target_admin_link(target_kind: &str, target_id: &str) -> String {
     match target_kind {
         audit::target_kind::IDENTITY => format!("/admin/identities/{target_id}"),
         audit::target_kind::OAUTH_CLIENT => {
-            format!("/admin/clients/{}", ory_client::apis::urlencode(target_id))
+            format!("/admin/clients/{}", crate::web::urlencode(target_id))
         }
         audit::target_kind::WEBHOOK_OUTBOX => format!("/admin/webhooks/{target_id}"),
         // sessions/system have no detail page

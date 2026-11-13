@@ -3,7 +3,7 @@
 
 use axum::http::HeaderMap;
 
-/// Raw `Cookie` header value, or empty string when absent (the shape `ory_client`'s wrappers expect when unauthenticated).
+/// Raw `Cookie` header value, or empty string when absent (the shape the identity backend's cookie-forwarding methods expect when unauthenticated).
 /// HTTP/2 (RFC 9113 §8.2.3) lets a client split the cookies across multiple field lines; join them back with `"; "`.
 pub(crate) fn cookie_header(headers: &HeaderMap) -> String {
     join_cookie_lines(headers)

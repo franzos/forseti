@@ -16,12 +16,13 @@ use axum::response::{IntoResponse, Redirect, Response};
 
 use crate::admin::{AdminSection, ConfirmForm, render_admin_error, with_org};
 use crate::audit::{self, AuditCtx, action, target_kind};
+use crate::backend::OAuthBackend;
+use crate::backend::oauth::OAuthClient;
 use crate::csrf::CsrfForm;
 use crate::extractors::{Csrf, RequireAdminScoped};
 use crate::format::humanise_timestamp;
 use crate::oauth_client_metadata;
 use crate::orgs::AdminScope;
-use crate::ory;
 use crate::page_chrome::PageChrome;
 use crate::render::render;
 use crate::state::AppState;
@@ -366,15 +367,15 @@ async fn resolve_client_names(
     const MAX_CONCURRENT: usize = 8;
     let mut out = HashMap::with_capacity(client_ids.len());
     let mut pending: Vec<String> = client_ids.into_iter().map(|s| s.to_string()).collect();
-    let mut set: tokio::task::JoinSet<(String, anyhow::Result<ory::OAuth2Client>)> =
+    let mut set: tokio::task::JoinSet<(String, anyhow::Result<OAuthClient>)> =
         tokio::task::JoinSet::new();
 
     let initial = MAX_CONCURRENT.min(pending.len());
     for _ in 0..initial {
         if let Some(cid) = pending.pop() {
-            let ory = state.ory.clone();
+            let oauth = state.oauth.clone();
             set.spawn(async move {
-                let res = ory::hydra::get_client(&ory, &cid).await;
+                let res = oauth.get_client(&cid).await;
                 (cid, res)
             });
         }
@@ -396,9 +397,9 @@ async fn resolve_client_names(
             }
         }
         if let Some(next) = pending.pop() {
-            let ory = state.ory.clone();
+            let oauth = state.oauth.clone();
             set.spawn(async move {
-                let res = ory::hydra::get_client(&ory, &next).await;
+                let res = oauth.get_client(&next).await;
                 (next, res)
             });
         }

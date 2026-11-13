@@ -11,12 +11,14 @@ use serde::Deserialize;
 
 use crate::audit::{self, AuditCtx, AuditEvent, action, target_kind};
 use crate::audit_metadata;
+use crate::backend::IdentityBackend;
+use crate::backend::identity::FlowInit;
+use crate::backend::identity::FlowKind;
 use crate::csrf::CsrfForm;
 use crate::db::DbPool;
 use crate::extractors::{Csrf, OptionalSession};
 use crate::orgs::db::Org;
 use crate::orgs::{self, Role, parse_access_mode};
-use crate::ory;
 use crate::page_chrome::{PageChrome, ReqLocale};
 use crate::render::render;
 use crate::state::AppState;
@@ -129,21 +131,23 @@ async fn join_confirm_get(
         let mut join_target = format!(
             "{}/join/confirm?org={}",
             state.cfg.self_.url.trim_end_matches('/'),
-            ory_client::apis::urlencode(&slug)
+            crate::web::urlencode(&slug)
         );
         if let Some(rt) = q.return_to.as_deref().filter(|s| !s.is_empty()) {
             let safe = crate::web::safe_return_to(&state.cfg, rt);
             if safe != "/" {
-                join_target.push_str(&format!("&return_to={}", ory_client::apis::urlencode(safe)));
+                join_target.push_str(&format!("&return_to={}", crate::web::urlencode(safe)));
             }
         }
         if let Some(cid) = q.client_id.as_deref().filter(|s| !s.is_empty()) {
-            join_target.push_str(&format!("&client_id={}", ory_client::apis::urlencode(cid)));
+            join_target.push_str(&format!("&client_id={}", crate::web::urlencode(cid)));
         }
-        let register_url = ory::kratos::browser_init_url(
-            ory::FlowKind::Registration,
-            &state.cfg.kratos.public_url,
-            Some(&join_target),
+        let register_url = state.identity.flow_init_url(
+            FlowKind::Registration,
+            FlowInit {
+                return_to: Some(&join_target),
+                ..Default::default()
+            },
         );
         return render(&JoinConfirmTemplate {
             chrome: themed_chrome(
@@ -161,7 +165,7 @@ async fn join_confirm_get(
         });
     };
 
-    let (identity_id, session_email) = crate::flow_view::session_principal(&session);
+    let (identity_id, session_email) = session.principal();
     if orgs::org_role(&state.db, &identity_id, &org.id)
         .await
         .is_some()
@@ -176,7 +180,7 @@ async fn join_confirm_get(
             PageChrome::from_parts(
                 &state,
                 session_email,
-                crate::ory::session_addresses(&session),
+                session.addresses(),
                 csrf_token,
                 locale,
             ),
@@ -219,12 +223,12 @@ async fn join_confirm_post(
         _ => {
             return Redirect::to(&format!(
                 "/join/confirm?org={}",
-                ory_client::apis::urlencode(&form.org)
+                crate::web::urlencode(&form.org)
             ))
             .into_response();
         }
     };
-    let (identity_id, session_email) = crate::flow_view::session_principal(&session);
+    let (identity_id, session_email) = session.principal();
     if orgs::org_role(&state.db, &identity_id, &org.id)
         .await
         .is_some()
@@ -233,17 +237,14 @@ async fn join_confirm_post(
             .into_response();
     }
     // Same bar as accepting an invite: an unproven address joins nothing.
-    if !crate::ory::address_is_verified(crate::ory::session_addresses(&session), &session_email) {
-        let mut back = format!(
-            "/join/confirm?org={}",
-            ory_client::apis::urlencode(&form.org)
-        );
+    if !crate::backend::identity::address_is_verified(session.addresses(), &session_email) {
+        let mut back = format!("/join/confirm?org={}", crate::web::urlencode(&form.org));
         if let Some(rt) = form.return_to.as_deref().filter(|s| !s.is_empty()) {
-            back.push_str(&format!("&return_to={}", ory_client::apis::urlencode(rt)));
+            back.push_str(&format!("&return_to={}", crate::web::urlencode(rt)));
         }
         return Redirect::to(&format!(
             "/verification?return_to={}",
-            ory_client::apis::urlencode(&back)
+            crate::web::urlencode(&back)
         ))
         .into_response();
     }
@@ -251,7 +252,7 @@ async fn join_confirm_post(
     let drop_default = !state
         .cfg
         .admin
-        .is_admin_actor(&session_email, crate::ory::session_addresses(&session));
+        .is_admin_actor(&session_email, session.addresses());
     if let Err(e) = crate::orgs::db::join_org_race_safe(
         &state.db,
         &identity_id,

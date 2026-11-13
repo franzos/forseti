@@ -9,10 +9,10 @@ use axum::response::{IntoResponse, Response};
 
 use crate::audit::{self, AuditCtx, AuditEvent, action, target_kind};
 use crate::audit_metadata;
+use crate::backend::IdentityBackend;
 use crate::cookies;
 use crate::csrf::CsrfForm;
 use crate::flash;
-use crate::ory;
 use crate::page_chrome::{PageChrome, ThemedChrome};
 use crate::render::render;
 use crate::render_error_boundary;
@@ -41,11 +41,10 @@ pub(crate) async fn settings_sessions(
     let cookie = cookies::cookie_header(&headers);
     let session = sess.session;
 
-    let other_sessions = match ory::kratos::list_my_sessions(
-        &state.ory,
-        (!cookie.is_empty()).then_some(cookie.as_str()),
-    )
-    .await
+    let other_sessions = match state
+        .identity
+        .list_my_sessions((!cookie.is_empty()).then_some(cookie.as_str()))
+        .await
     {
         Ok(s) => s,
         Err(e) => {
@@ -97,15 +96,16 @@ pub(crate) async fn settings_sessions_revoke(
     let actor_email = sess.email;
 
     // Kratos answers 204 for another identity's session id without revoking it.
-    let owned = ory::kratos::is_session_active(&state.ory, &actor_id, &session_id).await;
+    let owned = state
+        .identity
+        .is_session_active(&actor_id, &session_id)
+        .await;
     let revoked = match owned {
         Ok(true) => {
-            ory::kratos::revoke_session(
-                &state.ory,
-                &session_id,
-                (!cookie.is_empty()).then_some(cookie.as_str()),
-            )
-            .await
+            state
+                .identity
+                .revoke_session(&session_id, (!cookie.is_empty()).then_some(cookie.as_str()))
+                .await
         }
         Ok(false) => Err(anyhow::anyhow!("session is not one of the actor's")),
         Err(e) => Err(e),
@@ -126,7 +126,7 @@ pub(crate) async fn settings_sessions_revoke(
     if ok {
         crate::oauth::op_sessions::end_op_sessions_for_browser(
             &state.db,
-            &state.ory,
+            &state.oauth,
             &actor_id,
             &session_id,
             crate::oauth::op_sessions::GrantRevocation::Revoke,
@@ -156,16 +156,15 @@ pub(crate) async fn settings_sessions_revoke_others(
     let actor_id = sess.identity_id;
     let actor_email = sess.email;
 
-    let msg = match ory::kratos::revoke_other_sessions(
-        &state.ory,
-        (!cookie.is_empty()).then_some(cookie.as_str()),
-    )
-    .await
+    let msg = match state
+        .identity
+        .revoke_other_sessions((!cookie.is_empty()).then_some(cookie.as_str()))
+        .await
     {
         Ok(n) => {
             crate::oauth::op_sessions::end_op_sessions_for_subject(
                 &state.db,
-                &state.ory,
+                &state.oauth,
                 &actor_id,
                 Some(&sess.session.id),
                 crate::oauth::op_sessions::GrantRevocation::Revoke,

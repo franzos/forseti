@@ -13,6 +13,11 @@ use crate::state::AppState;
 /// Package version surfaced in the layout footer, resolved at compile time from `Cargo.toml`.
 pub(crate) const FORSETI_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Form-urlencode one path segment or query value.
+pub(crate) fn urlencode<T: AsRef<str>>(s: T) -> String {
+    url::form_urlencoded::byte_serialize(s.as_ref().as_bytes()).collect()
+}
+
 /// Validate a `?return_to=` before redirecting to it, guarding the post-login short-circuit
 /// against open redirects (e.g. `/login?return_to=https://attacker.example/phish`).
 /// Safe when path-only (`/` but not `//` or `/\`) or an absolute URL whose origin matches

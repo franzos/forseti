@@ -19,7 +19,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::ory;
+use crate::backend::identity::Session;
 use crate::signed_cookie::SignedCookie;
 
 /// Longer than a Kratos login flow's 10m lifespan, so a user who takes their
@@ -124,7 +124,7 @@ pub(crate) fn parse_reauth_ask(request_url: &str) -> ReauthAsk {
 /// session's `authenticated_at` and the newest `completed_at` across its
 /// authentication methods. Kratos updates `authenticated_at` on an AAL2
 /// step-up, but taking the max means a step-up counts even if it did not.
-pub(crate) fn session_auth_time(session: &ory::Session) -> Option<DateTime<Utc>> {
+pub(crate) fn session_auth_time(session: &Session) -> Option<DateTime<Utc>> {
     let authenticated_at = session.authenticated_at.as_deref().and_then(parse_rfc3339);
     let newest_method = session.authentication_methods.as_ref().and_then(|methods| {
         methods
@@ -214,6 +214,7 @@ pub(crate) fn decide(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::identity::AuthMethod;
 
     fn t(s: &str) -> DateTime<Utc> {
         parse_rfc3339(s).expect("test timestamp parses")
@@ -496,13 +497,20 @@ mod tests {
 
     #[test]
     fn auth_time_takes_the_newest_of_session_and_methods() {
-        let mut session = ory::Session::new("sess-1".to_string());
-        session.authenticated_at = Some("2026-01-01T10:00:00Z".to_string());
-        let mut totp = ory::SessionAuthenticationMethod::new();
-        totp.completed_at = Some("2026-01-01T11:30:00Z".to_string());
-        let mut pwd = ory::SessionAuthenticationMethod::new();
-        pwd.completed_at = Some("2026-01-01T10:00:00Z".to_string());
-        session.authentication_methods = Some(vec![pwd, totp]);
+        let totp = AuthMethod {
+            completed_at: Some("2026-01-01T11:30:00Z".to_string()),
+            ..Default::default()
+        };
+        let pwd = AuthMethod {
+            completed_at: Some("2026-01-01T10:00:00Z".to_string()),
+            ..Default::default()
+        };
+        let session = Session {
+            id: "sess-1".to_string(),
+            authenticated_at: Some("2026-01-01T10:00:00Z".to_string()),
+            authentication_methods: Some(vec![pwd, totp]),
+            ..Default::default()
+        };
         assert_eq!(
             session_auth_time(&session),
             Some(t("2026-01-01T11:30:00Z")),
@@ -512,7 +520,10 @@ mod tests {
 
     #[test]
     fn auth_time_is_none_without_any_timestamp() {
-        let session = ory::Session::new("sess-1".to_string());
+        let session = Session {
+            id: "sess-1".to_string(),
+            ..Default::default()
+        };
         assert_eq!(session_auth_time(&session), None);
     }
 }

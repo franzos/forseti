@@ -147,7 +147,7 @@ async fn render_teams(
     if let Some(sel) = selected
         && let Some((team, n)) = counts.iter().find(|(t, _)| t.id == sel)
     {
-        let roster = orgs::list_member_profiles(&state.db, &state.ory, org_id)
+        let roster = orgs::list_member_profiles(&state.db, &state.identity, org_id)
             .await
             .unwrap_or_default();
         let member_ids: HashSet<String> = teams::team_member_ids(&state.db, &team.id)

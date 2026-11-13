@@ -7,10 +7,11 @@
 use axum::{extract::State, response::Response};
 
 use crate::admin::{AdminSection, FORSETI_VERSION};
+use crate::backend::identity::CourierStatus;
+use crate::backend::{IdentityBackend, OAuthBackend};
 use crate::config::{DatabaseBackend, DatabaseConfig};
 use crate::extractors::RequireAdmin;
 use crate::format::humanise_timestamp;
-use crate::ory;
 use crate::page_chrome::PageChrome;
 use crate::render::render;
 use crate::state::AppState;
@@ -91,22 +92,16 @@ pub async fn show(State(state): State<AppState>, admin: RequireAdmin) -> Respons
         hydra_version_res,
         (disc, discovery_ok),
     ) = tokio::join!(
-        ory::kratos::health_alive(&state.ory),
-        ory::kratos::health_ready(&state.ory),
-        ory::hydra::health_alive(&state.ory),
-        ory::hydra::health_ready(&state.ory),
-        ory::kratos::list_courier_messages(
-            &state.ory,
-            100,
-            Some(ory::CourierMessageStatus::Queued)
-        ),
-        ory::kratos::list_courier_messages(
-            &state.ory,
-            100,
-            Some(ory::CourierMessageStatus::Abandoned)
-        ),
-        ory::kratos::version(&state.ory),
-        ory::hydra::version(&state.ory),
+        state.identity.health_alive(),
+        state.identity.health_ready(),
+        state.oauth.health_alive(),
+        state.oauth.health_ready(),
+        state.identity.courier_backlog(CourierStatus::Queued, 100),
+        state
+            .identity
+            .courier_backlog(CourierStatus::Abandoned, 100),
+        state.identity.version(),
+        state.oauth.version(),
         state.openid_configuration(),
     );
 
@@ -224,9 +219,9 @@ fn probe(name: &'static str, base: &str, result: anyhow::Result<()>) -> ServiceS
     }
 }
 
-fn count_courier(result: anyhow::Result<Vec<ory::Message>>) -> Option<u64> {
+fn count_courier(result: anyhow::Result<u64>) -> Option<u64> {
     match result {
-        Ok(msgs) => Some(msgs.len() as u64),
+        Ok(count) => Some(count),
         Err(e) => {
             tracing::warn!(error = ?e, "courier list failed");
             None

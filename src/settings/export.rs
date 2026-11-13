@@ -15,8 +15,10 @@ use serde_json::{Value, json};
 use crate::FlowQuery;
 use crate::audit::{self, AuditCtx, AuditEvent, AuditFilter, AuditRow, action, target_kind};
 use crate::audit_metadata;
+use crate::backend::identity::{Identity, Session};
+use crate::backend::oauth::ConsentSession;
+use crate::backend::{IdentityBackend, OAuthBackend};
 use crate::db::DbPool;
-use crate::ory::{self, Identity, OAuth2ConsentSession, Session};
 use crate::state::AppState;
 
 use super::{SettingsSection, fetch_settings_subpage};
@@ -85,9 +87,10 @@ pub(crate) async fn settings_account_export(
 #[allow(clippy::disallowed_methods)]
 pub(crate) async fn build_export(state: &AppState, identity_id: &str) -> anyhow::Result<Value> {
     let db = &state.db;
-    let ory = &state.ory;
 
-    let identity = ory::kratos::admin_get_identity_full(ory, identity_id)
+    let identity = state
+        .identity
+        .admin_get_identity_full(identity_id)
         .await
         .context("kratos identity")?;
     let emails = identity_emails(&identity);
@@ -97,11 +100,15 @@ pub(crate) async fn build_export(state: &AppState, identity_id: &str) -> anyhow:
     let oidc_links = super::oidc_links_db::list_for_identity(db, identity_id)
         .await
         .context("oidc links")?;
-    let sessions = ory::kratos::list_identity_sessions_all(ory, identity_id)
+    let sessions = state
+        .identity
+        .list_identity_sessions_all(identity_id)
         .await
         .context("kratos sessions")?;
     let (as_actor, as_target) = audit_rows(db, identity_id).await.context("audit")?;
-    let consents = ory::hydra::list_consent_sessions_by_subject(ory, identity_id)
+    let consents = state
+        .oauth
+        .list_consent_sessions_by_subject(identity_id)
         .await
         .context("hydra consents")?;
     let hydra_local = crate::oauth::op_sessions::rows_for_subject(db, identity_id)
@@ -268,9 +275,9 @@ fn project_identity(identity: &Identity) -> Value {
         "created_at": identity.created_at,
         "updated_at": identity.updated_at,
         "external_id": identity.external_id,
-        "organization_id": identity.organization_id.clone().flatten(),
+        "organization_id": identity.organization_id,
         "traits": identity.traits,
-        "metadata_public": identity.metadata_public.clone().flatten(),
+        "metadata_public": identity.metadata_public,
         "verifiable_addresses": verifiable_addresses,
         "recovery_addresses": recovery_addresses,
         "credentials": credentials.into_values().collect::<Vec<_>>(),
@@ -358,7 +365,7 @@ fn project_sessions(sessions: &[Session]) -> Vec<Value> {
 }
 
 /// One row per Hydra consent session, flattened to the grant and the client.
-fn project_consents(sessions: Vec<OAuth2ConsentSession>) -> Vec<Value> {
+fn project_consents(sessions: Vec<ConsentSession>) -> Vec<Value> {
     sessions
         .into_iter()
         .map(|s| {
@@ -485,7 +492,11 @@ fn merge_audit(as_actor: Vec<AuditRow>, as_target: Vec<AuditRow>) -> Vec<Value> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ory_client::models::IdentityCredentials;
+    use crate::backend::identity::{
+        Aal, AuthMethod, Credential, IdentityState, RecoveryAddress, SessionDevice,
+        VerifiableAddress,
+    };
+    use crate::backend::oauth::{ConsentRequest, OAuthClient};
 
     const SECRET_KEYS: &[&str] = &[
         "verifier",
@@ -569,23 +580,27 @@ mod tests {
 
     #[test]
     fn project_identity_drops_credential_config_and_admin_metadata() {
-        let mut identity = Identity::new(
-            "ident-1".to_string(),
-            "default".to_string(),
-            "http://kratos/schemas/default".to_string(),
-            Some(json!({"email": "A@example.com"})),
-        );
-        identity.metadata_admin = Some(Some(json!({"note": "operator only"})));
-        let mut password = IdentityCredentials::new();
-        password.config = Some(json!({"hashed_password": "$argon2id$v=19$m=65536$SECRET-HASH"}));
-        password.identifiers = Some(vec!["a@example.com".to_string()]);
-        password.created_at = Some("2026-01-01T00:00:00Z".to_string());
-        password.version = Some(1);
-        let mut oidc = IdentityCredentials::new();
-        oidc.config = Some(json!({
-            "providers": [{"provider": "github", "subject": "123", "initial_access_token": "gho_SECRET"}]
-        }));
-        oidc.identifiers = Some(vec!["github:123".to_string()]);
+        let mut identity = Identity {
+            id: "ident-1".to_string(),
+            schema_id: "default".to_string(),
+            traits: Some(json!({"email": "A@example.com"})),
+            ..Default::default()
+        };
+        identity.metadata_admin = Some(json!({"note": "operator only"}));
+        let password = Credential {
+            config: Some(json!({"hashed_password": "$argon2id$v=19$m=65536$SECRET-HASH"})),
+            identifiers: Some(vec!["a@example.com".to_string()]),
+            created_at: Some("2026-01-01T00:00:00Z".to_string()),
+            version: Some(1),
+            ..Default::default()
+        };
+        let oidc = Credential {
+            config: Some(json!({
+                "providers": [{"provider": "github", "subject": "123", "initial_access_token": "gho_SECRET"}]
+            })),
+            identifiers: Some(vec!["github:123".to_string()]),
+            ..Default::default()
+        };
         identity.credentials = Some(HashMap::from([
             ("password".to_string(), password),
             ("oidc".to_string(), oidc),
@@ -621,4 +636,519 @@ mod tests {
             vec!["a@example.com".to_string()]
         );
     }
+
+    fn credential(
+        identifiers: Option<&[&str]>,
+        created_at: Option<&str>,
+        updated_at: Option<&str>,
+        version: Option<i64>,
+        config: Value,
+    ) -> Credential {
+        Credential {
+            identifiers: identifiers.map(|ids| ids.iter().map(ToString::to_string).collect()),
+            created_at: created_at.map(str::to_string),
+            updated_at: updated_at.map(str::to_string),
+            version,
+            config: Some(config),
+        }
+    }
+
+    fn rich_identity() -> Identity {
+        let mut identity = Identity {
+            id: "9f1c2d3e-0000-4000-8000-000000000001".to_string(),
+            schema_id: "default".to_string(),
+            traits: Some(
+                json!({"email": "Ada@example.com", "name": {"first": "Ada", "last": "Lovelace"}}),
+            ),
+            ..Default::default()
+        };
+        identity.state = Some(IdentityState::Active);
+        identity.state_changed_at = Some("2026-01-01T00:00:01Z".to_string());
+        identity.created_at = Some("2026-01-01T00:00:00Z".to_string());
+        identity.updated_at = Some("2026-03-04T05:06:07Z".to_string());
+        identity.external_id = Some("ext-42".to_string());
+        identity.organization_id = Some("org-7".to_string());
+        identity.metadata_public = Some(json!({"plan": "team", "flags": [1, 2]}));
+        identity.metadata_admin = Some(json!({"note": "operator only"}));
+        identity.credentials = Some(HashMap::from([
+            (
+                "password".to_string(),
+                credential(
+                    Some(&["ada@example.com"]),
+                    Some("2026-01-01T00:00:00Z"),
+                    Some("2026-02-01T00:00:00Z"),
+                    Some(1),
+                    json!({"hashed_password": "$argon2id$SECRET"}),
+                ),
+            ),
+            (
+                "totp".to_string(),
+                credential(
+                    Some(&["9f1c2d3e-0000-4000-8000-000000000001"]),
+                    Some("2026-01-02T00:00:00Z"),
+                    None,
+                    Some(0),
+                    json!({"totp_url": "otpauth://totp/SECRET"}),
+                ),
+            ),
+            (
+                "oidc".to_string(),
+                credential(
+                    Some(&["github:123", "google:abc", "malformed"]),
+                    Some("2026-01-03T00:00:00Z"),
+                    Some("2026-01-04T00:00:00Z"),
+                    None,
+                    json!({"providers": [{"provider": "github", "initial_access_token": "gho_SECRET"}]}),
+                ),
+            ),
+            (
+                "webauthn".to_string(),
+                credential(
+                    Some(&[]),
+                    Some("2026-01-05T00:00:00Z"),
+                    Some("2026-01-05T00:00:00Z"),
+                    Some(2),
+                    json!({"credentials": [{"id": "SECRET-ID", "public_key": "SECRET-KEY"}]}),
+                ),
+            ),
+            (
+                "lookup_secret".to_string(),
+                credential(
+                    None,
+                    None,
+                    None,
+                    None,
+                    json!({"recovery_codes": [{"code": "SECRET"}]}),
+                ),
+            ),
+        ]));
+        let email = VerifiableAddress {
+            id: Some("va-1".to_string()),
+            value: "ada@example.com".to_string(),
+            via: "email".to_string(),
+            status: "completed".to_string(),
+            verified: true,
+            verified_at: Some("2026-01-01T00:10:00Z".to_string()),
+            created_at: Some("2026-01-01T00:00:00Z".to_string()),
+            updated_at: Some("2026-01-01T00:10:00Z".to_string()),
+        };
+        let sms = VerifiableAddress {
+            value: "+15550100".to_string(),
+            via: "sms".to_string(),
+            status: "pending".to_string(),
+            verified: false,
+            ..Default::default()
+        };
+        identity.verifiable_addresses = Some(vec![email, sms]);
+        let recovery = RecoveryAddress {
+            id: Some("ra-1".to_string()),
+            value: "ada@example.com".to_string(),
+            via: "email".to_string(),
+            created_at: Some("2026-01-01T00:00:00Z".to_string()),
+            updated_at: Some("2026-01-02T00:00:00Z".to_string()),
+        };
+        let recovery_bare = RecoveryAddress {
+            value: "backup@example.com".to_string(),
+            via: "email".to_string(),
+            ..Default::default()
+        };
+        identity.recovery_addresses = Some(vec![recovery, recovery_bare]);
+        identity
+    }
+
+    fn sparse_identity() -> Identity {
+        Identity {
+            id: "9f1c2d3e-0000-4000-8000-000000000002".to_string(),
+            schema_id: "minimal".to_string(),
+            state: Some(IdentityState::Inactive),
+            ..Default::default()
+        }
+    }
+
+    fn sessions_fixture() -> Vec<Session> {
+        let full_method = AuthMethod {
+            aal: Some(Aal::Aal1),
+            completed_at: Some("2026-04-01T10:00:00Z".to_string()),
+            method: Some("oidc".to_string()),
+            organization: Some("org-7".to_string()),
+            provider: Some("github".to_string()),
+            upstream_acr: Some("urn:mace:incommon:iap:silver".to_string()),
+            upstream_amr: Some(vec!["pwd".to_string(), "mfa".to_string()]),
+        };
+        let totp_method = AuthMethod {
+            aal: Some(Aal::Aal2),
+            method: Some("totp".to_string()),
+            ..Default::default()
+        };
+        let empty_method = AuthMethod::default();
+
+        let device = SessionDevice {
+            ip_address: Some("203.0.113.7".to_string()),
+            user_agent: Some("Mozilla/5.0 (X11; Linux x86_64)".to_string()),
+            location: Some("Berlin, DE".to_string()),
+        };
+        let bare_device = SessionDevice::default();
+
+        let full = Session {
+            id: "sess-1".to_string(),
+            active: Some(true),
+            issued_at: Some("2026-04-01T10:00:00Z".to_string()),
+            authenticated_at: Some("2026-04-01T10:00:05Z".to_string()),
+            expires_at: Some("2026-04-02T10:00:00Z".to_string()),
+            authenticator_assurance_level: Some(Aal::Aal2),
+            authentication_methods: Some(vec![full_method, totp_method, empty_method]),
+            devices: Some(vec![device, bare_device]),
+            identity: Some(Box::new(sparse_identity())),
+        };
+
+        let inactive = Session {
+            id: "sess-2".to_string(),
+            active: Some(false),
+            authenticator_assurance_level: Some(Aal::Aal1),
+            authentication_methods: Some(vec![]),
+            devices: Some(vec![]),
+            ..Default::default()
+        };
+
+        let bare = Session {
+            id: "sess-3".to_string(),
+            ..Default::default()
+        };
+        vec![full, inactive, bare]
+    }
+
+    fn consents_fixture() -> Vec<ConsentSession> {
+        let client = OAuthClient {
+            client_id: Some("client-a".to_string()),
+            client_name: Some("Stackpit".to_string()),
+            client_secret: Some("SECRET".to_string()),
+            ..Default::default()
+        };
+        let full = ConsentSession {
+            consent_request_id: Some("consent-1".to_string()),
+            consent_request: Some(ConsentRequest {
+                client: Some(client),
+                login_session_id: Some("login-sess-1".to_string()),
+                ..Default::default()
+            }),
+            grant_scope: Some(vec!["openid".to_string(), "email".to_string()]),
+            grant_access_token_audience: Some(vec!["https://api.example.com".to_string()]),
+            handled_at: Some("2026-05-01T12:00:00Z".to_string()),
+            remember: Some(true),
+            remember_for: Some(0),
+        };
+
+        let nameless_client = OAuthClient {
+            client_id: Some("client-b".to_string()),
+            ..Default::default()
+        };
+        let partial = ConsentSession {
+            consent_request_id: Some("consent-2".to_string()),
+            consent_request: Some(ConsentRequest {
+                client: Some(nameless_client),
+                ..Default::default()
+            }),
+            grant_scope: Some(vec![]),
+            remember: Some(false),
+            remember_for: Some(3600),
+            ..Default::default()
+        };
+
+        let clientless = ConsentSession {
+            consent_request: Some(ConsentRequest::default()),
+            ..Default::default()
+        };
+
+        vec![full, partial, clientless, ConsentSession::default()]
+    }
+
+    fn pretty(v: &Value) -> String {
+        serde_json::to_string_pretty(v).expect("serde_json::Value always serialises")
+    }
+
+    #[test]
+    fn export_identity_projection_is_pinned() {
+        let out = json!([
+            project_identity(&rich_identity()),
+            project_identity(&sparse_identity()),
+        ]);
+        assert_eq!(pretty(&out), EXPECTED_IDENTITY);
+    }
+
+    #[test]
+    fn export_linked_identities_projection_is_pinned() {
+        let out = json!(linked_identities(
+            &rich_identity(),
+            &[("github".into(), "2026-02-01T00:00:00Z".into())],
+        ));
+        assert_eq!(pretty(&out), EXPECTED_LINKED_IDENTITIES);
+    }
+
+    #[test]
+    fn export_sessions_projection_is_pinned() {
+        let out = json!(project_sessions(&sessions_fixture()));
+        assert_eq!(pretty(&out), EXPECTED_SESSIONS);
+    }
+
+    #[test]
+    fn export_consents_projection_is_pinned() {
+        let out = json!(project_consents(consents_fixture()));
+        assert_eq!(pretty(&out), EXPECTED_CONSENTS);
+    }
+
+    // The export format is a published contract: adapt the fixtures, never these literals.
+    const EXPECTED_IDENTITY: &str = r#"[
+  {
+    "id": "9f1c2d3e-0000-4000-8000-000000000001",
+    "schema_id": "default",
+    "state": "active",
+    "state_changed_at": "2026-01-01T00:00:01Z",
+    "created_at": "2026-01-01T00:00:00Z",
+    "updated_at": "2026-03-04T05:06:07Z",
+    "external_id": "ext-42",
+    "organization_id": "org-7",
+    "traits": {
+      "email": "Ada@example.com",
+      "name": {
+        "first": "Ada",
+        "last": "Lovelace"
+      }
+    },
+    "metadata_public": {
+      "plan": "team",
+      "flags": [
+        1,
+        2
+      ]
+    },
+    "verifiable_addresses": [
+      {
+        "id": "va-1",
+        "value": "ada@example.com",
+        "via": "email",
+        "status": "completed",
+        "verified": true,
+        "verified_at": "2026-01-01T00:10:00Z",
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:10:00Z"
+      },
+      {
+        "id": null,
+        "value": "+15550100",
+        "via": "sms",
+        "status": "pending",
+        "verified": false,
+        "verified_at": null,
+        "created_at": null,
+        "updated_at": null
+      }
+    ],
+    "recovery_addresses": [
+      {
+        "id": "ra-1",
+        "value": "ada@example.com",
+        "via": "email",
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-02T00:00:00Z"
+      },
+      {
+        "id": null,
+        "value": "backup@example.com",
+        "via": "email",
+        "created_at": null,
+        "updated_at": null
+      }
+    ],
+    "credentials": [
+      {
+        "type": "lookup_secret",
+        "identifiers": [],
+        "created_at": null,
+        "updated_at": null,
+        "version": null
+      },
+      {
+        "type": "oidc",
+        "identifiers": [
+          "github:123",
+          "google:abc",
+          "malformed"
+        ],
+        "created_at": "2026-01-03T00:00:00Z",
+        "updated_at": "2026-01-04T00:00:00Z",
+        "version": null
+      },
+      {
+        "type": "password",
+        "identifiers": [
+          "ada@example.com"
+        ],
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-02-01T00:00:00Z",
+        "version": 1
+      },
+      {
+        "type": "totp",
+        "identifiers": [
+          "9f1c2d3e-0000-4000-8000-000000000001"
+        ],
+        "created_at": "2026-01-02T00:00:00Z",
+        "updated_at": null,
+        "version": 0
+      },
+      {
+        "type": "webauthn",
+        "identifiers": [],
+        "created_at": "2026-01-05T00:00:00Z",
+        "updated_at": "2026-01-05T00:00:00Z",
+        "version": 2
+      }
+    ]
+  },
+  {
+    "id": "9f1c2d3e-0000-4000-8000-000000000002",
+    "schema_id": "minimal",
+    "state": "inactive",
+    "state_changed_at": null,
+    "created_at": null,
+    "updated_at": null,
+    "external_id": null,
+    "organization_id": null,
+    "traits": null,
+    "metadata_public": null,
+    "verifiable_addresses": [],
+    "recovery_addresses": [],
+    "credentials": []
+  }
+]"#;
+    const EXPECTED_LINKED_IDENTITIES: &str = r#"[
+  {
+    "iss": null,
+    "sub": "123",
+    "provider": "github",
+    "first_seen_at": "2026-02-01T00:00:00Z",
+    "email": null,
+    "name": null
+  },
+  {
+    "iss": null,
+    "sub": "abc",
+    "provider": "google",
+    "first_seen_at": null,
+    "email": null,
+    "name": null
+  }
+]"#;
+    const EXPECTED_SESSIONS: &str = r#"[
+  {
+    "id": "sess-1",
+    "active": true,
+    "issued_at": "2026-04-01T10:00:00Z",
+    "authenticated_at": "2026-04-01T10:00:05Z",
+    "expires_at": "2026-04-02T10:00:00Z",
+    "aal": "aal2",
+    "methods": [
+      {
+        "aal": "aal1",
+        "completed_at": "2026-04-01T10:00:00Z",
+        "method": "oidc",
+        "organization": "org-7",
+        "provider": "github",
+        "upstream_acr": "urn:mace:incommon:iap:silver",
+        "upstream_amr": [
+          "pwd",
+          "mfa"
+        ]
+      },
+      {
+        "aal": "aal2",
+        "method": "totp"
+      },
+      {}
+    ],
+    "devices": [
+      {
+        "ip_address": "203.0.113.7",
+        "user_agent": "Mozilla/5.0 (X11; Linux x86_64)",
+        "location": "Berlin, DE"
+      },
+      {
+        "ip_address": null,
+        "user_agent": null,
+        "location": null
+      }
+    ]
+  },
+  {
+    "id": "sess-2",
+    "active": false,
+    "issued_at": null,
+    "authenticated_at": null,
+    "expires_at": null,
+    "aal": "aal1",
+    "methods": [],
+    "devices": []
+  },
+  {
+    "id": "sess-3",
+    "active": null,
+    "issued_at": null,
+    "authenticated_at": null,
+    "expires_at": null,
+    "aal": null,
+    "methods": null,
+    "devices": []
+  }
+]"#;
+    const EXPECTED_CONSENTS: &str = r#"[
+  {
+    "consent_request_id": "consent-1",
+    "client_id": "client-a",
+    "client_name": "Stackpit",
+    "scopes": [
+      "openid",
+      "email"
+    ],
+    "audience": [
+      "https://api.example.com"
+    ],
+    "granted_at": "2026-05-01T12:00:00Z",
+    "remember": true,
+    "remember_for": 0,
+    "login_session_id": "login-sess-1"
+  },
+  {
+    "consent_request_id": "consent-2",
+    "client_id": "client-b",
+    "client_name": null,
+    "scopes": [],
+    "audience": [],
+    "granted_at": null,
+    "remember": false,
+    "remember_for": 3600,
+    "login_session_id": null
+  },
+  {
+    "consent_request_id": null,
+    "client_id": null,
+    "client_name": null,
+    "scopes": [],
+    "audience": [],
+    "granted_at": null,
+    "remember": null,
+    "remember_for": null,
+    "login_session_id": null
+  },
+  {
+    "consent_request_id": null,
+    "client_id": null,
+    "client_name": null,
+    "scopes": [],
+    "audience": [],
+    "granted_at": null,
+    "remember": null,
+    "remember_for": null,
+    "login_session_id": null
+  }
+]"#;
 }

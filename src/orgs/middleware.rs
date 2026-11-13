@@ -10,11 +10,10 @@ use axum::extract::{Request, State};
 use axum::middleware::Next;
 use axum::response::Response;
 
+use crate::backend::IdentityBackend;
+use crate::backend::identity::WhoamiOutcome;
 use crate::cookies;
-use crate::ory;
 use crate::state::AppState;
-
-pub(crate) const KRATOS_SESSION_COOKIE: &str = "ory_kratos_session";
 
 /// A request to this exact path is mid external-self-serve join; force-
 /// joining Default here first would strand the user in the wrong org.
@@ -29,20 +28,23 @@ pub async fn auto_join_default_org(
     mut req: Request,
     next: Next,
 ) -> Response {
-    if cookies::read_cookie(req.headers(), KRATOS_SESSION_COOKIE).is_some() {
+    if state.identity.has_session_cookie(req.headers()) {
         let cookie = cookies::cookie_header(req.headers());
-        match ory::kratos::whoami(&state.ory, (!cookie.is_empty()).then_some(cookie.as_str())).await
+        match state
+            .identity
+            .whoami((!cookie.is_empty()).then_some(cookie.as_str()))
+            .await
         {
             Ok(outcome) => {
-                if let ory::kratos::WhoamiOutcome::Ok(session) = &outcome {
-                    let (identity_id, email) = crate::flow_view::session_principal(session);
+                if let WhoamiOutcome::Ok(session) = &outcome {
+                    let (identity_id, email) = session.principal();
                     if !identity_id.is_empty() && !is_join_confirm_path(req.uri().path()) {
                         super::ensure_default_floor(
                             &state.db,
                             &state.cfg.admin,
                             &identity_id,
                             &email,
-                            ory::session_addresses(session),
+                            session.addresses(),
                         )
                         .await;
                     }
@@ -58,7 +60,7 @@ pub async fn auto_join_default_org(
 }
 
 #[derive(Clone)]
-pub(crate) struct CachedWhoami(pub(crate) ory::kratos::WhoamiOutcome);
+pub(crate) struct CachedWhoami(pub(crate) WhoamiOutcome);
 
 #[cfg(test)]
 mod tests {

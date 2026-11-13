@@ -6,12 +6,14 @@ use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Redirect, Response};
 use serde::Deserialize;
 
+use crate::backend::IdentityBackend;
+use crate::backend::identity::FlowInit;
+use crate::backend::identity::FlowKind;
+use crate::backend::identity::FlowOutcome;
 use crate::cookies;
 use crate::csrf;
 use crate::extractors::OptionalSession;
 use crate::flow_view::*;
-use crate::ory::kratos::FlowOutcome;
-use crate::ory::{self, FlowKind};
 use crate::page_chrome::{Chrome, PageChrome};
 use crate::render::render;
 use crate::state::AppState;
@@ -80,10 +82,12 @@ pub(crate) async fn registration(
 
     let flow_id = query.flow.as_deref();
     let init_url = || {
-        ory::kratos::browser_init_url(
+        state.identity.flow_init_url(
             FlowKind::Registration,
-            &state.cfg.kratos.public_url,
-            query.return_to.as_deref(),
+            FlowInit {
+                return_to: query.return_to.as_deref(),
+                ..Default::default()
+            },
         )
     };
 
@@ -93,7 +97,11 @@ pub(crate) async fn registration(
         .as_deref()
         .and_then(crate::auth::email_login_hint);
     let hint_cookie_name = crate::auth::login::LOGIN_HINT_COOKIE;
-    match ory::kratos::resolve_flow(&state.ory, FlowKind::Registration, flow_id, &cookie).await {
+    match state
+        .identity
+        .resolve_flow(FlowKind::Registration, flow_id, &cookie)
+        .await
+    {
         FlowOutcome::Init => {
             let mut resp = csrf::attach_csrf(
                 Redirect::to(&init_url()).into_response(),
@@ -117,7 +125,7 @@ pub(crate) async fn registration(
             resp
         }
         FlowOutcome::Ready(flow) => {
-            let return_to = query.return_to.as_deref().or_else(|| flow_return_to(&flow));
+            let return_to = query.return_to.as_deref().or(flow.return_to.as_deref());
             let cookie_hint = cookies::read_cookie(&headers, hint_cookie_name);
             // An OIDC `login_hint` is the weakest source: an explicit prefill
             // or the invite's address wins.
@@ -133,7 +141,7 @@ pub(crate) async fn registration(
             });
             let app = crate::auth::continuing_app_name(
                 &state,
-                query.return_to.as_deref().or_else(|| flow_return_to(&flow)),
+                query.return_to.as_deref().or(flow.return_to.as_deref()),
             )
             .await;
             let idp =
@@ -242,7 +250,7 @@ fn attach_prefill_clear_cookie(resp: &mut Response, secure: bool) {
 
 fn render_registration(
     chrome: PageChrome,
-    flow: &serde_json::Value,
+    flow: &Flow,
     return_to: Option<&str>,
     prefill_email: Option<&str>,
     continue_to_app: Option<String>,
@@ -264,7 +272,7 @@ fn render_registration(
             }
         }
     }
-    let webauthn_scripts = collect_webauthn_scripts(flow);
+    let webauthn_scripts = flow.webauthn_scripts();
     let credential_step = form
         .groups
         .profile

@@ -17,6 +17,8 @@ use serde::Deserialize;
 
 use crate::admin::{AdminSection, ConfirmForm, ConfirmTemplate, render_admin_error};
 use crate::audit::{self, AuditCtx, action, target_kind};
+use crate::backend::IdentityBackend;
+use crate::backend::identity::Identity;
 use crate::csrf::CsrfForm;
 use crate::extractors::{Csrf, RequireAdmin};
 use crate::flash::{self, SecretReveal, attach_set_cookie as attach_cookie_if_some};
@@ -24,7 +26,6 @@ use crate::format::{humanise_timestamp, looks_like_uuid};
 use crate::identity::delete::{
     DeleteActor, DeleteError, DeleteReason, DeleteRequest, delete_identity_detached,
 };
-use crate::ory;
 use crate::page_chrome::PageChrome;
 use crate::render::render;
 use crate::state::AppState;
@@ -38,7 +39,7 @@ pub(crate) struct IdentityRow {
     pub created_at_pretty: String,
 }
 
-fn project_row(locale: &crate::locale::LanguageIdentifier, id: &ory::Identity) -> IdentityRow {
+fn project_row(locale: &crate::locale::LanguageIdentifier, id: &Identity) -> IdentityRow {
     let email = id
         .traits
         .as_ref()
@@ -145,7 +146,7 @@ pub(crate) async fn search_identities(
     // UUID-shaped query: single-identity admin GET, because Kratos's
     // `credentials_identifier` filter is name/email-only and won't match IDs.
     let identities = if looks_like_uuid(filter_q) {
-        match ory::kratos::admin_get_identity_full(&state.ory, filter_q).await {
+        match state.identity.admin_get_identity_full(filter_q).await {
             Ok(id) => vec![id],
             // A 404 here is just an empty result, not a render error.
             Err(e) => {
@@ -159,13 +160,10 @@ pub(crate) async fn search_identities(
         } else {
             Some(filter_q)
         };
-        match ory::kratos::list_identities(
-            &state.ory,
-            IDENTITIES_PAGE_SIZE,
-            page_token,
-            email_filter,
-        )
-        .await
+        match state
+            .identity
+            .list_identities(IDENTITIES_PAGE_SIZE, page_token, email_filter)
+            .await
         {
             Ok(c) => c,
             Err(e) => {
@@ -280,7 +278,7 @@ struct IdentityPickerTemplate {
 
 fn append_query(url: &str, key: &str, value: &str) -> String {
     let sep = if url.contains('?') { '&' } else { '?' };
-    format!("{url}{sep}{key}={}", ory_client::apis::urlencode(value))
+    format!("{url}{sep}{key}={}", crate::web::urlencode(value))
 }
 
 pub async fn pick(
@@ -387,7 +385,7 @@ pub async fn show(
 ) -> Response {
     let RequireAdmin { ctx } = admin;
 
-    let identity = match ory::kratos::admin_get_identity_full(&state.ory, &id).await {
+    let identity = match state.identity.admin_get_identity_full(&id).await {
         Ok(i) => i,
         Err(e) => {
             tracing::error!(error = ?e, id, "admin: get_identity_full failed");
@@ -432,8 +430,7 @@ pub async fn show(
         })
         .unwrap_or_default();
 
-    let sessions: Vec<SessionRow> = match ory::kratos::list_identity_sessions(&state.ory, &id).await
-    {
+    let sessions: Vec<SessionRow> = match state.identity.list_identity_sessions(&id).await {
         Ok(s) => s
             .iter()
             .map(|s| SessionRow::from_kratos(&ctx.locale, s, false))
@@ -495,7 +492,7 @@ pub async fn recovery(
     _: CsrfForm<crate::csrf::NoPayload>,
 ) -> Response {
     let RequireAdmin { ctx } = admin;
-    match ory::kratos::admin_create_recovery_code(&state.ory, &id).await {
+    match state.identity.admin_create_recovery_code(&id).await {
         Ok(code) => {
             let _ = audit::log(
                 &state.db,
@@ -529,8 +526,8 @@ pub async fn recovery(
             // stays in the DB behind it.
             let url = format!(
                 "/admin/identities/{}?reveal={}",
-                ory_client::apis::urlencode(&id),
-                ory_client::apis::urlencode(&token),
+                crate::web::urlencode(&id),
+                crate::web::urlencode(&token),
             );
             Redirect::to(&url).into_response()
         }
@@ -547,11 +544,8 @@ pub async fn recovery(
 
 pub async fn disable_confirm(Path(id): Path<String>, admin: RequireAdmin, csrf: Csrf) -> Response {
     let RequireAdmin { ctx } = admin;
-    let action_url = format!(
-        "/admin/identities/{}/disable",
-        ory_client::apis::urlencode(&id)
-    );
-    let cancel_url = format!("/admin/identities/{}", ory_client::apis::urlencode(&id));
+    let action_url = format!("/admin/identities/{}/disable", crate::web::urlencode(&id));
+    let cancel_url = format!("/admin/identities/{}", crate::web::urlencode(&id));
     let chrome = ctx.chrome(&csrf);
     render(&ConfirmTemplate {
         chrome,
@@ -572,21 +566,19 @@ pub async fn disable(
     CsrfForm(form): CsrfForm<ConfirmForm>,
 ) -> Response {
     let RequireAdmin { ctx } = admin;
-    let target = format!("/admin/identities/{}", ory_client::apis::urlencode(&id));
+    let target = format!("/admin/identities/{}", crate::web::urlencode(&id));
     if let Some(r) = form.bounce_unless_confirmed(&target) {
         return r;
     }
-    match ory::kratos::admin_update_identity_state(
-        &state.ory,
-        &id,
-        ory_client::models::update_identity_body::StateEnum::Inactive,
-    )
-    .await
+    match state
+        .identity
+        .admin_update_identity_state(&id, crate::backend::identity::IdentityState::Inactive)
+        .await
     {
         Ok(_) => {
             crate::oauth::op_sessions::end_op_sessions_for_subject(
                 &state.db,
-                &state.ory,
+                &state.oauth,
                 &id,
                 None,
                 crate::oauth::op_sessions::GrantRevocation::Keep,
@@ -622,13 +614,11 @@ pub async fn enable(
     _: CsrfForm<crate::csrf::NoPayload>,
 ) -> Response {
     let RequireAdmin { ctx } = admin;
-    let target = format!("/admin/identities/{}", ory_client::apis::urlencode(&id));
-    match ory::kratos::admin_update_identity_state(
-        &state.ory,
-        &id,
-        ory_client::models::update_identity_body::StateEnum::Active,
-    )
-    .await
+    let target = format!("/admin/identities/{}", crate::web::urlencode(&id));
+    match state
+        .identity
+        .admin_update_identity_state(&id, crate::backend::identity::IdentityState::Active)
+        .await
     {
         Ok(_) => {
             let _ = audit::log(
@@ -655,11 +645,8 @@ pub async fn enable(
 
 pub async fn delete_confirm(Path(id): Path<String>, admin: RequireAdmin, csrf: Csrf) -> Response {
     let RequireAdmin { ctx } = admin;
-    let action_url = format!(
-        "/admin/identities/{}/delete",
-        ory_client::apis::urlencode(&id)
-    );
-    let cancel_url = format!("/admin/identities/{}", ory_client::apis::urlencode(&id));
+    let action_url = format!("/admin/identities/{}/delete", crate::web::urlencode(&id));
+    let cancel_url = format!("/admin/identities/{}", crate::web::urlencode(&id));
     let chrome = ctx.chrome(&csrf);
     render(&ConfirmTemplate {
         chrome,
@@ -680,7 +667,7 @@ pub async fn delete(
     CsrfForm(form): CsrfForm<ConfirmForm>,
 ) -> Response {
     let RequireAdmin { ctx } = admin;
-    let show_target = format!("/admin/identities/{}", ory_client::apis::urlencode(&id));
+    let show_target = format!("/admin/identities/{}", crate::web::urlencode(&id));
     if let Some(r) = form.bounce_unless_confirmed(&show_target) {
         return r;
     }

@@ -11,13 +11,13 @@ use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 
 use crate::audit::{self, AuditCtx, AuditEvent, action, target_kind};
+use crate::backend::IdentityBackend;
 use crate::claim_template;
 use crate::csrf::{CsrfForm, NoPayload};
 use crate::extractors::{OptionalSession, RequireSession};
 use crate::flash;
 use crate::locale::LanguageIdentifier;
 use crate::oidc_rp;
-use crate::ory;
 use crate::page_chrome::{PageChrome, ThemedChrome};
 use crate::render::render;
 use crate::render_error_boundary;
@@ -145,7 +145,7 @@ pub(crate) async fn settings_resource_claims(
     let identity = if rows.is_empty() {
         None
     } else {
-        match ory::kratos::admin_get_identity(&state.ory, &sess.identity_id).await {
+        match state.identity.admin_get_identity(&sess.identity_id).await {
             Ok(identity) => Some(identity),
             Err(e) => {
                 tracing::error!(error = ?e, "resource claims: identity lookup failed");
@@ -169,7 +169,7 @@ pub(crate) async fn settings_resource_claims(
         };
         let has_value = identity
             .as_ref()
-            .is_some_and(|i| ory::kratos::metadata_admin_has_key(i, &ss.claim));
+            .is_some_and(|i| i.metadata_admin_has_key(&ss.claim));
         issuers.push(ss.issuer);
         views.push(ResourceClaimView {
             id: row.id,
@@ -548,8 +548,10 @@ async fn finish_link(
     if template.has_uuid() && value != link.value {
         return fail(attempt, "value_mismatch", "flash-claim-mismatch").await;
     }
-    if let Err(e) =
-        ory::kratos::admin_set_metadata_admin_key(&state.ory, &identity_id, &ss.claim, &value).await
+    if let Err(e) = state
+        .identity
+        .admin_set_metadata_admin_key(&identity_id, &ss.claim, &value)
+        .await
     {
         tracing::error!(error = ?e, "resource claims: metadata_admin write failed");
         return fail(attempt, "write_failed", "flash-claim-failed").await;
@@ -577,7 +579,9 @@ pub(crate) async fn settings_resource_claims_remove(
     let Some((row, ss)) = usable_row(&state, &sess.identity_id, id).await else {
         return flash("flash-claim-not-available");
     };
-    match ory::kratos::admin_remove_metadata_admin_key(&state.ory, &sess.identity_id, &ss.claim)
+    match state
+        .identity
+        .admin_remove_metadata_admin_key(&sess.identity_id, &ss.claim)
         .await
     {
         Ok(true) => {

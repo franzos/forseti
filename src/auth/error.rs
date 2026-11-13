@@ -8,7 +8,7 @@ use axum::extract::{Query, State};
 use axum::response::Response;
 use serde::Deserialize;
 
-use crate::ory;
+use crate::backend::IdentityBackend;
 use crate::page_chrome::{Chrome, PageChrome};
 use crate::render::render;
 use crate::state::AppState;
@@ -63,8 +63,8 @@ pub(crate) async fn error_page(
             String::new(),
         )
     } else {
-        match ory::kratos::get_self_service_error(&state.ory, &error_id).await {
-            Ok(Some(body)) => extract_error_strings(&body, locale),
+        match state.identity.get_self_service_error(&error_id).await {
+            Ok(Some(err)) => error_strings(&err, locale),
             Ok(None) => (
                 crate::i18n::lookup(locale, "error-page-link-expired-title"),
                 crate::i18n::lookup(locale, "error-page-link-expired-body"),
@@ -93,35 +93,23 @@ pub(crate) async fn error_page(
     })
 }
 
-/// Older Kratos versions put the error at the top level, newer ones wrap it
-/// under `error.{id,message,reason,...}`. Handle both.
-fn extract_error_strings(
-    body: &serde_json::Value,
+fn error_strings(
+    err: &crate::backend::identity::SelfServiceError,
     locale: &crate::locale::LanguageIdentifier,
 ) -> (String, String, String) {
-    let inner = body.get("error").unwrap_or(body);
-    let title_key = inner
-        .get("id")
-        .and_then(|v| v.as_str())
-        .map(|s| match s {
-            "self_service_flow_expired" => "error-page-link-expired-title",
-            "security_csrf_violation" => "error-page-security-title",
-            "session_already_available" => "error-page-already-signed-in-title",
-            _ => "error-page-generic-title",
-        })
-        .unwrap_or("error-page-generic-title");
+    let title_key = match err.id.as_deref() {
+        Some("self_service_flow_expired") => "error-page-link-expired-title",
+        Some("security_csrf_violation") => "error-page-security-title",
+        Some("session_already_available") => "error-page-already-signed-in-title",
+        _ => "error-page-generic-title",
+    };
     let title = crate::i18n::lookup(locale, title_key);
     // `message` is Kratos's own localized error text; only the absent case
     // falls back to a Forseti string.
-    let message = inner
-        .get("message")
-        .and_then(|v| v.as_str())
-        .map(str::to_string)
+    let message = err
+        .message
+        .clone()
         .unwrap_or_else(|| crate::i18n::lookup(locale, "error-page-default-message"));
-    let reason = inner
-        .get("reason")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+    let reason = err.reason.clone().unwrap_or_default();
     (title, message, reason)
 }

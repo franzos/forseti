@@ -11,12 +11,12 @@ use serde::Deserialize;
 
 use crate::audit::{self, AuditCtx, AuditEvent, action, target_kind};
 use crate::audit_metadata;
+use crate::backend::identity::{Session, address_is_verified};
 use crate::csrf::CsrfForm;
 use crate::db::DbPool;
 use crate::extractors::OptionalSession;
 use crate::orgs::db::Org;
 use crate::orgs::{self, Role};
-use crate::ory;
 use crate::state::AppState;
 
 /// The resolved profile prompt: the proven `auto_join` org the caller may join,
@@ -36,13 +36,13 @@ pub(crate) fn router() -> Router<AppState> {
 /// One `org_allowed_domains` lookup per call.
 pub(crate) async fn resolve_prompt(
     db: &DbPool,
-    session: &ory::Session,
+    session: &Session,
     identity_id: &str,
     email: &str,
 ) -> Option<ProvenJoin> {
     if identity_id.is_empty()
         || email.is_empty()
-        || !ory::address_is_verified(ory::session_addresses(session), email)
+        || !address_is_verified(session.addresses(), email)
     {
         return None;
     }
@@ -80,7 +80,7 @@ async fn domain_join_post(
         OptionalSession::Ok { session, .. } => *session,
         _ => return Redirect::to("/").into_response(),
     };
-    let (identity_id, email) = crate::flow_view::session_principal(&session);
+    let (identity_id, email) = session.principal();
     let Some(proven) = resolve_prompt(&state.db, &session, &identity_id, &email).await else {
         return (StatusCode::NOT_FOUND, "not found").into_response();
     };
@@ -90,10 +90,7 @@ async fn domain_join_post(
     {
         return (StatusCode::BAD_REQUEST, "org mismatch").into_response();
     }
-    let drop_default = !state
-        .cfg
-        .admin
-        .is_admin_actor(&email, ory::session_addresses(&session));
+    let drop_default = !state.cfg.admin.is_admin_actor(&email, session.addresses());
     if let Err(e) = orgs::db::join_org_race_safe(
         &state.db,
         &identity_id,
@@ -125,29 +122,31 @@ async fn domain_join_post(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::identity::VerifiableAddress;
+    use crate::backend::identity::{Identity, Session};
     use crate::orgs::db::{self, test_pool};
     use crate::orgs::{AccessMode, DEFAULT_ORG_ID, DomainJoinPolicy};
-    use ory_client::models::verifiable_identity_address::ViaEnum;
-    use ory_client::models::{Identity, Session, VerifiableIdentityAddress};
 
     fn session_with(email: &str, verified: bool) -> Session {
-        let addr = VerifiableIdentityAddress::new(
-            "completed".to_string(),
-            email.to_string(),
+        let addr = VerifiableAddress {
+            status: "completed".to_string(),
+            value: email.to_string(),
             verified,
-            ViaEnum::Email,
-        );
-        let mut identity = Identity::new(
-            "ident-1".to_string(),
-            "default".to_string(),
-            String::new(),
-            None,
-        );
-        identity.traits = Some(serde_json::json!({ "email": email }));
-        identity.verifiable_addresses = Some(vec![addr]);
-        let mut session = Session::new("sess-1".to_string());
-        session.identity = Some(Box::new(identity));
-        session
+            via: "email".to_string(),
+            ..Default::default()
+        };
+        let identity = Identity {
+            id: "ident-1".to_string(),
+            schema_id: "default".to_string(),
+            traits: Some(serde_json::json!({ "email": email })),
+            verifiable_addresses: Some(vec![addr]),
+            ..Default::default()
+        };
+        Session {
+            id: "sess-1".to_string(),
+            identity: Some(Box::new(identity)),
+            ..Default::default()
+        }
     }
 
     async fn auto_join_org(db: &DbPool, id: &str, slug: &str, domain: &str) {

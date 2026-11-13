@@ -5,6 +5,7 @@ use askama::Template;
 use axum::http::{HeaderMap, HeaderValue, header};
 use axum::response::Response;
 
+use crate::flow_view::Flow;
 use crate::page_chrome::PageChrome;
 
 /// One-shot cookie carrying the hint across Kratos's flow-init hop.
@@ -84,17 +85,13 @@ impl Requested {
 
 /// The provider to hand off to: `hint`, when this flow offers it. Never for
 /// an AAL2 step-up or a refresh, whose known user must not be sent upstream.
-pub(crate) fn matching_provider(flow: &serde_json::Value, hint: Option<&str>) -> Option<String> {
+pub(crate) fn matching_provider(flow: &Flow, hint: Option<&str>) -> Option<String> {
     let hint = hint?;
-    let step_up = flow.get("requested_aal").and_then(|v| v.as_str()) == Some("aal2");
-    let refresh = flow.get("refresh").and_then(|v| v.as_bool()) == Some(true);
-    if step_up || refresh {
+    let step_up = flow.requested_aal.as_deref() == Some("aal2");
+    if step_up || flow.refresh {
         return None;
     }
-    if crate::flow_view::oidc_provider_ids(flow)
-        .iter()
-        .any(|id| id == hint)
-    {
+    if flow.oidc_provider_ids().iter().any(|id| id == hint) {
         Some(hint.to_string())
     } else {
         tracing::warn!(hint, "idp_hint not offered by this flow; showing sign-in");
@@ -116,22 +113,17 @@ struct HandoffTemplate {
 
 /// Auto-submitting page that POSTs the flow's OIDC form for `provider`
 /// straight at Kratos.
-pub(crate) fn render_handoff(
-    chrome: PageChrome,
-    flow: &serde_json::Value,
-    provider: &str,
-) -> Response {
-    let (form_action, form_method) = crate::flow_view::form_target(flow);
+pub(crate) fn render_handoff(chrome: PageChrome, flow: &Flow, provider: &str) -> Response {
     let hidden = ["default", "oidc"]
         .into_iter()
-        .flat_map(|group| crate::flow_view::collect_input_nodes(flow, group))
+        .flat_map(|group| flow.inputs(group))
         .filter(|n| n.input_type == "hidden" && !matches!(n.name.as_str(), "method" | "provider"))
-        .map(|n| (n.name, n.value))
+        .map(|n| (n.name.clone(), n.value.clone()))
         .collect();
     let mut resp = crate::render::render(&HandoffTemplate {
         chrome,
-        form_action,
-        form_method,
+        form_action: flow.form_action.clone(),
+        form_method: flow.form_method.clone(),
         hidden,
         provider_id: provider.to_string(),
         provider_name: crate::oidc_providers::display_name(provider),
@@ -243,7 +235,7 @@ mod tests {
         assert_eq!(decode_cookie(""), None);
     }
 
-    fn flow(requested_aal: &str, refresh: bool) -> serde_json::Value {
+    fn flow(requested_aal: &str, refresh: bool) -> crate::flow_view::Flow {
         let input = |group: &str, name: &str, ty: &str, value: &str| {
             serde_json::json!({
                 "type": "input",
@@ -251,7 +243,7 @@ mod tests {
                 "attributes": { "name": name, "type": ty, "value": value },
             })
         };
-        serde_json::json!({
+        crate::ory::flow_json::project(&serde_json::json!({
             "requested_aal": requested_aal,
             "refresh": refresh,
             "ui": {
@@ -264,7 +256,7 @@ mod tests {
                     input("oidc", "provider", "submit", "github"),
                 ],
             },
-        })
+        }))
     }
 
     fn chrome() -> crate::page_chrome::PageChrome {

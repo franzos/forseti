@@ -3,43 +3,26 @@
 use super::*;
 use ory_client::apis::{Error as OryError, courier_api, frontend_api, identity_api, metadata_api};
 
-/// Outcome of a `/sessions/whoami` call. Keeps Kratos's 401 (no session) and 403 (session below required AAL)
-/// distinct so callers route the step-up case to `/login?aal=aal2`; collapsing both livelocks AAL2-enrolled users.
-#[derive(Clone, Debug)]
-pub enum WhoamiOutcome {
-    /// No session at all (401); send to /login.
-    None,
-    /// Session exists but doesn't satisfy the required AAL; send to `/login?aal=aal2&return_to=...`.
-    InsufficientAal,
-    /// Valid session satisfying the whoami AAL requirement.
-    Ok(Box<Session>),
+use crate::backend::identity::{
+    CourierStatus, FlowOutcome, IdentityState, RecoveryCode, SelfServiceError, WhoamiOutcome,
+};
+use crate::flow_view::Flow;
+
+fn sessions(batch: Vec<ory_client::models::Session>) -> Vec<Session> {
+    batch.into_iter().map(Session::from).collect()
 }
 
-/// `true` iff the session's AAL is `aal2`; a missing AAL is treated as AAL1 (fails closed).
-pub(crate) fn session_satisfies_aal2(session: &Session) -> bool {
-    matches!(
-        session.authenticator_assurance_level,
-        Some(AuthenticatorAssuranceLevel::Aal2)
-    )
-}
-
-/// The session's AAL as a string, defaulting to `"aal1"` when omitted (fails closed). Use when comparing
-/// against a requested `aal`; prefer [`session_satisfies_aal2`] for a plain check.
-pub(crate) fn session_aal_string(session: &Session) -> String {
-    session
-        .authenticator_assurance_level
-        .as_ref()
-        .map(|aal| aal.to_string())
-        .unwrap_or_else(|| "aal1".to_string())
+fn identities(batch: Vec<ory_client::models::Identity>) -> Vec<Identity> {
+    batch.into_iter().map(Identity::from).collect()
 }
 
 /// Resolve the current session via `/sessions/whoami` with the user's
 /// forwarded `Cookie` header. See [`WhoamiOutcome`] for the three
-/// outcomes; `Err` is reserved for transport / unexpected upstream
-/// failures.
+/// outcomes (Kratos 401 is `None`, 403 is `InsufficientAal`); `Err` is
+/// reserved for transport / unexpected upstream failures.
 pub async fn whoami(clients: &OryClients, cookie: Option<&str>) -> Result<WhoamiOutcome> {
     match frontend_api::to_session(&clients.kratos_public, None, cookie, None).await {
-        Ok(session) => Ok(WhoamiOutcome::Ok(Box::new(session))),
+        Ok(session) => Ok(WhoamiOutcome::Ok(Box::new(session.into()))),
         Err(OryError::ResponseError(resp)) if resp.status == reqwest::StatusCode::UNAUTHORIZED => {
             Ok(WhoamiOutcome::None)
         }
@@ -66,7 +49,7 @@ pub async fn get_flow(
     let url = format!(
         "{}/self-service/{}/flows",
         clients.kratos_public.base_path.trim_end_matches('/'),
-        kind.path_segment(),
+        path_segment(kind),
     );
     let mut req = clients
         .kratos_public
@@ -107,7 +90,7 @@ pub async fn get_flow(
         let body = resp.text().await.unwrap_or_default();
         return Err(anyhow::anyhow!(
             "kratos get_flow ({}) returned {status}: {body}",
-            kind.path_segment()
+            path_segment(kind)
         ));
     }
 
@@ -115,7 +98,7 @@ pub async fn get_flow(
         .json()
         .await
         .map_err(|e| anyhow::anyhow!("kratos get_flow body decode failed: {e}"))?;
-    Ok(FlowFetch::Ok(Box::new(value)))
+    Ok(FlowFetch::Ok(Box::new(flow_json::project(&value))))
 }
 
 /// Kratos path whose API flow carries the `oidc` provider nodes; probed
@@ -144,27 +127,7 @@ pub async fn probe_oidc_provider_ids(clients: &OryClients) -> Result<Vec<String>
         .json()
         .await
         .map_err(|e| anyhow::anyhow!("kratos provider probe body decode failed: {e}"))?;
-    Ok(crate::flow_view::oidc_provider_ids(&flow))
-}
-
-/// Classified result of resolving a self-service flow from the request's
-/// `?flow=` id. Lets the four self-service handlers (login, registration,
-/// recovery, verification) and the settings sub-page gate share the
-/// fetch + 404/410/403 mapping while each keeps its own redirects: callers
-/// build the (CSRF-attaching, param-carrying, settings-specific) responses
-/// themselves, which differ enough that folding them in here would change
-/// behaviour (e.g. login attaches a CSRF cookie on `Init` but not `Reinit`).
-pub enum FlowOutcome {
-    /// No flow id present: start a fresh browser flow.
-    Init,
-    /// Flow fetched; render it.
-    Ready(Box<serde_json::Value>),
-    /// Flow unknown/expired (404/410): re-init the browser flow.
-    Reinit,
-    /// Settings-flow 403: privileged step-up required (see [`PrivilegedReason`]).
-    Privileged(PrivilegedReason),
-    /// Transport/upstream failure: render an error boundary.
-    Error(anyhow::Error),
+    Ok(flow_json::project(&flow).oidc_provider_ids())
 }
 
 /// Resolve the `?flow=` id into a [`FlowOutcome`]: `None` short-circuits to
@@ -187,11 +150,34 @@ pub async fn resolve_flow(
     }
 }
 
+/// Submit `method=code&email=…` to a verification flow's form action, so the
+/// browser lands straight on code entry. `Err` on a missing action or CSRF
+/// token, transport failure, or any non-2xx, so callers can fall through to
+/// rendering the form unchanged.
+pub async fn verify_known_email(
+    clients: &OryClients,
+    flow: &Flow,
+    email: &str,
+    cookie: &str,
+) -> Result<()> {
+    if flow.form_action.is_empty() {
+        return Err(anyhow::anyhow!("verification flow missing ui.action"));
+    }
+    let csrf = flow
+        .csrf_token
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("verification flow missing csrf_token node"))?;
+    let body = serde_json::json!({
+        "method": "code",
+        "email": email,
+        "csrf_token": csrf,
+    });
+    submit_flow(clients, &flow.form_action, &body, cookie).await
+}
+
 /// POST a self-service flow submission to its `ui.action`, forwarding the
-/// user's cookie. Used for server-side flow completion (e.g. verification's
-/// auto-submit of the already-known email). `Err` on transport failure or any
-/// non-2xx, so callers can fall through to rendering the form unchanged.
-pub async fn submit_flow(
+/// user's cookie. `Err` on transport failure or any non-2xx.
+async fn submit_flow(
     clients: &OryClients,
     action: &str,
     body: &serde_json::Value,
@@ -218,12 +204,8 @@ pub async fn submit_flow(
 }
 
 /// Build the browser redirect URL that starts a new Kratos browser flow; Kratos creates the flow, sets its
-/// continuity cookie, and 303s back to Forseti with `?flow=<id>`. `return_to` lands the user back on the original page.
-pub fn browser_init_url(kind: FlowKind, public_url: &str, return_to: Option<&str>) -> String {
-    browser_init_url_with(kind, public_url, return_to, None, None)
-}
-
-/// Like [`browser_init_url`] but forwards optional `aal` step-up and `refresh` to Kratos.
+/// continuity cookie, and 303s back to Forseti with `?flow=<id>`. `return_to` lands the user back on the
+/// original page; optional `aal` step-up and `refresh` are forwarded to Kratos.
 pub fn browser_init_url_with(
     kind: FlowKind,
     public_url: &str,
@@ -232,7 +214,7 @@ pub fn browser_init_url_with(
     refresh: Option<bool>,
 ) -> String {
     let base = public_url.trim_end_matches('/');
-    let segment = kind.path_segment();
+    let segment = path_segment(kind);
     let mut params: Vec<(&str, String)> = Vec::new();
     if let Some(rt) = return_to
         && !rt.is_empty()
@@ -252,16 +234,16 @@ pub fn browser_init_url_with(
     }
     let qs: Vec<String> = params
         .iter()
-        .map(|(k, v)| format!("{}={}", k, ory_client::apis::urlencode(v)))
+        .map(|(k, v)| format!("{}={}", k, crate::web::urlencode(v)))
         .collect();
     format!("{base}/self-service/{segment}/browser?{}", qs.join("&"))
 }
 
-/// Fetch the raw JSON for a Kratos self-service error (the `/error?id=...` landing), avoiding the SDK model.
+/// Fetch a Kratos self-service error (the `/error?id=...` landing) as raw JSON, avoiding the SDK model.
 pub async fn get_self_service_error(
     clients: &OryClients,
     error_id: &str,
-) -> Result<Option<serde_json::Value>> {
+) -> Result<Option<SelfServiceError>> {
     let url = format!(
         "{}/self-service/errors",
         clients.kratos_public.base_path.trim_end_matches('/'),
@@ -288,12 +270,29 @@ pub async fn get_self_service_error(
         .json()
         .await
         .map_err(|e| anyhow::anyhow!("kratos get_self_service_error decode failed: {e}"))?;
-    Ok(Some(value))
+    Ok(Some(self_service_error(&value)))
+}
+
+/// Older Kratos versions put the error at the top level, newer ones wrap it
+/// under `error.{id,message,reason,...}`. Handle both.
+fn self_service_error(body: &serde_json::Value) -> SelfServiceError {
+    let inner = body.get("error").unwrap_or(body);
+    let str_at = |key: &str| inner.get(key).and_then(|v| v.as_str()).map(str::to_string);
+    SelfServiceError {
+        id: str_at("id"),
+        message: str_at("message"),
+        reason: str_at("reason"),
+    }
 }
 
 /// Admin lookup by identity ID. Hits the Kratos admin API which returns
 /// the typed `Identity` model (no `ui.nodes` involved, so the SDK deserializer works fine here).
 pub async fn admin_get_identity(clients: &OryClients, id: &str) -> Result<Identity> {
+    sdk_get_identity(clients, id).await.map(Identity::from)
+}
+
+/// SDK-typed lookup for read-modify-write helpers, so nothing is flattened on the way back to Kratos.
+async fn sdk_get_identity(clients: &OryClients, id: &str) -> Result<ory_client::models::Identity> {
     identity_api::get_identity(&clients.kratos_admin, id, None)
         .await
         .map_err(|e| anyhow::anyhow!("kratos admin get_identity failed: {e}"))
@@ -307,7 +306,7 @@ pub async fn admin_get_identity_optional(
     id: &str,
 ) -> Result<Option<Identity>> {
     match identity_api::get_identity(&clients.kratos_admin, id, None).await {
-        Ok(identity) => Ok(Some(identity)),
+        Ok(identity) => Ok(Some(identity.into())),
         Err(OryError::ResponseError(resp)) if resp.status == reqwest::StatusCode::NOT_FOUND => {
             Ok(None)
         }
@@ -334,6 +333,7 @@ pub fn logout_browser_url(public_url: &str) -> String {
 pub async fn list_my_sessions(clients: &OryClients, cookie: Option<&str>) -> Result<Vec<Session>> {
     frontend_api::list_my_sessions(&clients.kratos_public, None, None, None, None, None, cookie)
         .await
+        .map(sessions)
         .map_err(|e| anyhow::anyhow!("kratos list_my_sessions failed: {e}"))
 }
 
@@ -372,6 +372,7 @@ pub async fn list_identity_sessions(
         None,
     )
     .await
+    .map(sessions)
     .map_err(|e| anyhow::anyhow!("kratos admin list_identity_sessions failed: {e}"))
 }
 
@@ -389,7 +390,7 @@ pub async fn list_identity_sessions_all(
     let base = format!(
         "{}/admin/identities/{}/sessions",
         cfg.base_path.trim_end_matches('/'),
-        ory_client::apis::urlencode(identity_id)
+        crate::web::urlencode(identity_id)
     );
     let mut out: Vec<Session> = Vec::new();
     let mut page_token: Option<String> = None;
@@ -416,12 +417,12 @@ pub async fn list_identity_sessions_all(
             ));
         }
         let next = super::hydra::next_link(resp.headers());
-        let batch: Vec<Session> = resp
+        let batch: Vec<ory_client::models::Session> = resp
             .json()
             .await
             .map_err(|e| anyhow::anyhow!("kratos list_identity_sessions decode: {e}"))?;
         let batch_empty = batch.is_empty();
-        out.extend(batch);
+        out.extend(sessions(batch));
         match next {
             Some(tok) if !batch_empty => page_token = Some(tok),
             _ => return Ok(out),
@@ -471,6 +472,7 @@ pub async fn admin_get_session(clients: &OryClients, id: &str) -> Result<Session
         Some(vec!["identity".to_string()]),
     )
     .await
+    .map(Session::from)
     .map_err(|e| anyhow::anyhow!("kratos admin get_session failed: {e}"))
 }
 
@@ -497,6 +499,7 @@ pub async fn list_identities(
         None,
     )
     .await
+    .map(identities)
     .map_err(|e| anyhow::anyhow!("kratos admin list_identities failed: {e}"))
 }
 
@@ -534,6 +537,7 @@ async fn admin_list_identities_by_ids_inner(
         None,
     )
     .await
+    .map(identities)
     .map_err(|e| anyhow::anyhow!("kratos admin list_identities by ids failed: {e}"))
 }
 
@@ -542,6 +546,7 @@ async fn admin_list_identities_by_ids_inner(
 pub async fn admin_get_identity_full(clients: &OryClients, id: &str) -> Result<Identity> {
     identity_api::get_identity(&clients.kratos_admin, id, Some(full_credential_types()))
         .await
+        .map(Identity::from)
         .map_err(|e| anyhow::anyhow!("kratos admin get_identity_full failed: {e}"))
 }
 
@@ -552,7 +557,7 @@ pub async fn admin_get_identity_full_optional(
 ) -> Result<Option<Identity>> {
     match identity_api::get_identity(&clients.kratos_admin, id, Some(full_credential_types())).await
     {
-        Ok(identity) => Ok(Some(identity)),
+        Ok(identity) => Ok(Some(identity.into())),
         Err(OryError::ResponseError(resp)) if resp.status == reqwest::StatusCode::NOT_FOUND => {
             Ok(None)
         }
@@ -578,7 +583,7 @@ pub async fn admin_set_identity_language(
     id: &str,
     lang: &str,
 ) -> Result<Identity> {
-    let current = admin_get_identity(clients, id).await?;
+    let current = sdk_get_identity(clients, id).await?;
     let mut traits = match current.traits.unwrap_or(serde_json::Value::Null) {
         serde_json::Value::Null => serde_json::Value::Object(serde_json::Map::new()),
         t => t,
@@ -598,6 +603,7 @@ pub async fn admin_set_identity_language(
     };
     identity_api::update_identity(&clients.kratos_admin, id, Some(body))
         .await
+        .map(Identity::from)
         .map_err(|e| anyhow::anyhow!("kratos admin set_identity_language failed: {e}"))
 }
 
@@ -608,9 +614,9 @@ pub async fn admin_set_identity_language(
 pub async fn admin_update_identity_state(
     clients: &OryClients,
     id: &str,
-    state: ory_client::models::update_identity_body::StateEnum,
+    state: IdentityState,
 ) -> Result<Identity> {
-    let current = admin_get_identity(clients, id).await?;
+    let current = sdk_get_identity(clients, id).await?;
     let traits = current.traits.unwrap_or(serde_json::Value::Null);
     let body = UpdateIdentityBody {
         credentials: None,
@@ -619,11 +625,12 @@ pub async fn admin_update_identity_state(
         metadata_public: current.metadata_public,
         region: None,
         schema_id: current.schema_id,
-        state,
+        state: state.into(),
         traits,
     };
     identity_api::update_identity(&clients.kratos_admin, id, Some(body))
         .await
+        .map(Identity::from)
         .map_err(|e| anyhow::anyhow!("kratos admin update_identity (state) failed: {e}"))
 }
 
@@ -631,7 +638,7 @@ pub async fn admin_update_identity_state(
 /// `metadata_admin` and leaves every other key alone. `current` is the
 /// identity's `metadata_admin` as last read; removing an absent key yields no
 /// ops.
-pub(crate) fn metadata_admin_patch(
+fn metadata_admin_patch(
     current: Option<&serde_json::Value>,
     key: &str,
     value: Option<&str>,
@@ -665,26 +672,15 @@ pub(crate) fn metadata_admin_patch(
     Ok(vec![op])
 }
 
-/// True when `metadata_admin` carries a non-null `key`, the same rule consent
-/// applies when copying claims.
-pub(crate) fn metadata_admin_has_key(identity: &Identity, key: &str) -> bool {
-    identity
-        .metadata_admin
-        .as_ref()
-        .and_then(|m| m.as_ref())
-        .and_then(|m| m.get(key))
-        .is_some_and(|v| !v.is_null())
-}
-
 async fn patch_metadata_admin_key(
     clients: &OryClients,
     id: &str,
     key: &str,
     value: Option<&str>,
 ) -> Result<bool> {
-    let identity = admin_get_identity(clients, id).await?;
-    let was_set = metadata_admin_has_key(&identity, key);
+    let identity = sdk_get_identity(clients, id).await?;
     let current = identity.metadata_admin.as_ref().and_then(|m| m.as_ref());
+    let was_set = crate::backend::identity::metadata_has_key(current, key);
     let patch = metadata_admin_patch(current, key, value).map_err(anyhow::Error::msg)?;
     if !patch.is_empty() {
         identity_api::patch_identity(&clients.kratos_admin, id, Some(patch))
@@ -742,10 +738,11 @@ pub async fn list_identity_schemas(clients: &OryClients) -> Result<Vec<String>> 
 pub async fn admin_create_recovery_code(
     clients: &OryClients,
     identity_id: &str,
-) -> Result<RecoveryCodeForIdentity> {
+) -> Result<RecoveryCode> {
     let body = CreateRecoveryCodeForIdentityBody::new(identity_id.to_string());
     identity_api::create_recovery_code_for_identity(&clients.kratos_admin, Some(body))
         .await
+        .map(RecoveryCode::from)
         .map_err(|e| anyhow::anyhow!("kratos admin create_recovery_code failed: {e}"))
 }
 
@@ -784,7 +781,7 @@ pub async fn admin_create_identity_verified(
         "name": { "first": first, "last": last },
     });
     let mut body = CreateIdentityBody::new(schema_id.to_string(), traits);
-    let addr = VerifiableIdentityAddress::new(
+    let addr = ory_client::models::VerifiableIdentityAddress::new(
         "completed".to_string(),
         email.to_string(),
         true,
@@ -792,7 +789,7 @@ pub async fn admin_create_identity_verified(
     );
     body.verifiable_addresses = Some(vec![addr]);
     match identity_api::create_identity(&clients.kratos_admin, Some(body)).await {
-        Ok(identity) => Ok(Some(identity)),
+        Ok(identity) => Ok(Some(identity.into())),
         Err(OryError::ResponseError(resp)) if resp.status == reqwest::StatusCode::CONFLICT => {
             Ok(None)
         }
@@ -813,10 +810,7 @@ pub async fn admin_find_identity_by_email(
             .as_deref()
             .unwrap_or_default()
             .iter()
-            .find(|a| {
-                a.via == ory_client::models::verifiable_identity_address::ViaEnum::Email
-                    && a.value.eq_ignore_ascii_case(email)
-            })
+            .find(|a| a.via == "email" && a.value.eq_ignore_ascii_case(email))
             .map(|a| a.verified);
         if let Some(verified) = verified {
             return Ok(Some((identity, verified)));
@@ -841,6 +835,7 @@ pub async fn admin_list_all_sessions(
         Some(vec!["identity".to_string(), "devices".to_string()]),
     )
     .await
+    .map(sessions)
     .map_err(|e| anyhow::anyhow!("kratos admin list_sessions failed: {e}"))
 }
 
@@ -853,16 +848,23 @@ pub async fn admin_revoke_session(clients: &OryClients, id: &str) -> Result<()> 
         .map_err(|e| anyhow::anyhow!("kratos admin disable_session failed: {e}"))
 }
 
-/// List courier messages. Used by the admin status page to surface
-/// pending / failed counts. `status` filters server-side.
-pub async fn list_courier_messages(
+/// Number of courier messages in `status`, counted over the first page only,
+/// so the result is capped at `page_size`. Admin status page only.
+pub async fn courier_backlog(
     clients: &OryClients,
+    status: CourierStatus,
     page_size: i64,
-    status: Option<CourierMessageStatus>,
-) -> Result<Vec<Message>> {
-    courier_api::list_courier_messages(&clients.kratos_admin, Some(page_size), None, status, None)
-        .await
-        .map_err(|e| anyhow::anyhow!("kratos admin list_courier_messages failed: {e}"))
+) -> Result<u64> {
+    courier_api::list_courier_messages(
+        &clients.kratos_admin,
+        Some(page_size),
+        None,
+        Some(status.into()),
+        None,
+    )
+    .await
+    .map(|msgs| msgs.len() as u64)
+    .map_err(|e| anyhow::anyhow!("kratos admin list_courier_messages failed: {e}"))
 }
 
 /// Hit Kratos's `/health/alive` probe (admin URL). The SDK doesn't expose
@@ -966,6 +968,29 @@ mod tests {
     }
 
     #[test]
+    fn self_service_error_reads_wrapped_and_top_level_shapes() {
+        let wrapped = json!({"id": "e1", "error": {
+            "id": "self_service_flow_expired", "message": "expired", "reason": "too old"
+        }});
+        assert_eq!(
+            self_service_error(&wrapped),
+            SelfServiceError {
+                id: Some("self_service_flow_expired".into()),
+                message: Some("expired".into()),
+                reason: Some("too old".into()),
+            }
+        );
+        let top = json!({"id": "security_csrf_violation", "message": 5});
+        assert_eq!(
+            self_service_error(&top),
+            SelfServiceError {
+                id: Some("security_csrf_violation".into()),
+                ..Default::default()
+            }
+        );
+    }
+
+    #[test]
     fn set_on_absent_or_null_adds_the_object() {
         let want = vec![json!({"op": "add", "path": "/metadata_admin", "value": {"aud": "u:1:x"}})];
         assert_eq!(ops(None, "aud", Some("u:1:x")), want);
@@ -1037,14 +1062,14 @@ mod tests {
     #[test]
     fn has_key_ignores_null_and_absent() {
         let mut identity = Identity::default();
-        assert!(!metadata_admin_has_key(&identity, "aud"));
-        identity.metadata_admin = Some(None);
-        assert!(!metadata_admin_has_key(&identity, "aud"));
-        identity.metadata_admin = Some(Some(json!({"aud": null})));
-        assert!(!metadata_admin_has_key(&identity, "aud"));
-        identity.metadata_admin = Some(Some(json!(["aud"])));
-        assert!(!metadata_admin_has_key(&identity, "aud"));
-        identity.metadata_admin = Some(Some(json!({"aud": "v"})));
-        assert!(metadata_admin_has_key(&identity, "aud"));
+        assert!(!identity.metadata_admin_has_key("aud"));
+        identity.metadata_admin = Some(json!(null));
+        assert!(!identity.metadata_admin_has_key("aud"));
+        identity.metadata_admin = Some(json!({"aud": null}));
+        assert!(!identity.metadata_admin_has_key("aud"));
+        identity.metadata_admin = Some(json!(["aud"]));
+        assert!(!identity.metadata_admin_has_key("aud"));
+        identity.metadata_admin = Some(json!({"aud": "v"}));
+        assert!(identity.metadata_admin_has_key("aud"));
     }
 }

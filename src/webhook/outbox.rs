@@ -18,15 +18,13 @@
 //! background worker drains them with retry/backoff. Worker only ever
 //! touches `CONFIRMED` — `PENDING` rows are invisible to it.
 
-use std::sync::Arc;
-
 use chrono::{DateTime, Utc};
 use diesel::prelude::*;
 use uuid::Uuid;
 
+use crate::backend::{IdentityBackend, IdentityImpl};
 use crate::db::DbPool;
 use crate::db_interact;
-use crate::ory::OryClients;
 use crate::schema::webhook_outbox;
 
 use super::signing::{SetIssuers, SigningKey, extract_subject_from_jws, sign_set};
@@ -251,7 +249,7 @@ pub async fn discard_dead(db: &DbPool, row_id: &str) -> anyhow::Result<bool> {
 /// identity is gone, flip to CONFIRMED; if it still exists, flip to
 /// ABORTED. Bounded to rows older than the 5-minute reconcile window so
 /// in-flight transactions aren't disturbed.
-pub async fn reconcile_pending(db: &DbPool, ory: &Arc<OryClients>) -> anyhow::Result<()> {
+pub async fn reconcile_pending(db: &DbPool, identity: &IdentityImpl) -> anyhow::Result<()> {
     let cutoff = crate::db::rfc3339(Utc::now() - chrono::Duration::minutes(5));
     let stuck = db_interact!(db, |conn| {
         webhook_outbox::table
@@ -285,9 +283,7 @@ pub async fn reconcile_pending(db: &DbPool, ory: &Arc<OryClients>) -> anyhow::Re
             continue;
         };
 
-        let identity_gone = match crate::ory::kratos::admin_get_identity_optional(ory, &user_id)
-            .await
-        {
+        let identity_gone = match identity.admin_get_identity_optional(&user_id).await {
             Ok(Some(_)) => false,
             Ok(None) => true,
             Err(e) => {

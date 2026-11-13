@@ -11,19 +11,18 @@ use askama::Template;
 use axum::extract::{Query, State};
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Redirect, Response};
-use axum_extra::extract::cookie::{Cookie, SameSite};
 use serde::Deserialize;
 
 use crate::FlowQuery;
 use crate::audit::{AuditCtx, SafeMetadata};
+use crate::backend::IdentityBackend;
+use crate::backend::identity::Session;
 use crate::csrf;
-use crate::flow_view::session_email;
 use crate::identity::delete::{
     CollectStep, DeleteActor, DeleteError, DeleteReason, DeleteRequest, delete_identity_detached,
     notified_clients,
 };
 use crate::locale::LanguageIdentifier;
-use crate::ory;
 use crate::page_chrome::{PageChrome, ThemedChrome};
 use crate::render::render;
 use crate::state::AppState;
@@ -100,16 +99,10 @@ pub(crate) async fn settings_account_delete(
         .map(|i| i.id.clone())
         .unwrap_or_default();
     let notified_apps = list_apps_to_notify(&state, &user_id).await;
-    let flow_id = flow
-        .get("id")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_string();
-
     render(&SettingsAccountDeleteConfirmTemplate {
         chrome: themed.chrome,
         notified_apps,
-        flow_id,
+        flow_id: flow.id,
         retention_days: state.cfg.audit.audit_retention_days.to_string(),
         referrer_banner: banner.0,
     })
@@ -149,7 +142,7 @@ pub(crate) async fn settings_account_delete_submit(
     };
 
     // Typed-email confirm must match the session's email.
-    let session_email_str = session_email(&session);
+    let session_email_str = session.email();
     if !form
         .confirm_email
         .trim()
@@ -167,7 +160,7 @@ pub(crate) async fn settings_account_delete_submit(
 
 async fn run_delete_saga(
     state: &AppState,
-    session: &ory::Session,
+    session: &Session,
     actx: &AuditCtx,
     locale: &LanguageIdentifier,
 ) -> Response {
@@ -180,7 +173,7 @@ async fn run_delete_saga(
         );
     };
     let user_id = identity.id.clone();
-    let actor_email = session_email(session);
+    let actor_email = session.email();
 
     let req = DeleteRequest {
         identity_id: user_id.clone(),
@@ -200,7 +193,8 @@ async fn run_delete_saga(
             // observed the 401.
             let mut response = Redirect::to("/login?msg=account_deleted").into_response();
             let secure = state.cfg.self_.is_https();
-            if let Ok(hv) = axum::http::HeaderValue::from_str(&clear_kratos_session_cookie(secure))
+            if let Ok(hv) =
+                axum::http::HeaderValue::from_str(&state.identity.clear_session_cookie(secure))
             {
                 response
                     .headers_mut()
@@ -263,7 +257,7 @@ async fn run_delete_saga(
 /// For the confirm-page card list (names only). A Hydra failure yields an
 /// empty list here; the write path refuses instead.
 async fn list_apps_to_notify(state: &AppState, user_id: &str) -> Vec<NotifiedApp> {
-    match notified_clients(&state.ory, user_id).await {
+    match notified_clients(&state.oauth, user_id).await {
         Ok(clients) => clients
             .into_iter()
             .map(|c| NotifiedApp { name: c.name })
@@ -285,25 +279,4 @@ fn render_delete_failure(state: &AppState, locale: &LanguageIdentifier, body: &s
         crate::i18n::lookup(locale, "error-boundary-cta-back-to-account"),
     )
     .into_response()
-}
-
-/// Clear the `ory_kratos_session` cookie. Attributes match what Kratos emits
-/// in the path-prefixed single-host topology so the browser overwrites it.
-///
-/// In a split-origin deployment (Kratos on a separate host/subdomain) the
-/// browser scopes Kratos's cookie to Kratos's origin, so this is a no-op until
-/// the next request to Kratos returns 401. Documented limitation of the proxy
-/// shape.
-fn clear_kratos_session_cookie(secure: bool) -> String {
-    let mut s = Cookie::build(("ory_kratos_session", ""))
-        .path("/")
-        .same_site(SameSite::Lax)
-        .http_only(true)
-        .secure(secure)
-        .build()
-        .to_string();
-    // Fixed epoch `Expires` (not `Max-Age=0`) to avoid a time-formatting dep,
-    // matching `clear_flash_cookie`.
-    s.push_str("; Expires=Thu, 01 Jan 1970 00:00:00 GMT");
-    s
 }

@@ -3,6 +3,7 @@ mod admin;
 mod app;
 mod audit;
 mod auth;
+mod backend;
 mod claim_template;
 mod cli;
 mod client_ip;
@@ -58,6 +59,7 @@ pub mod fuzz_api;
 
 pub(crate) use web::{FlowQuery, render_error_boundary, safe_return_to};
 
+use backend::OAuthBackend as _;
 use clap::Parser as _;
 use cli::{Cli, Cmd, ConfigCmd, PruneCmd, RotateCmd};
 
@@ -78,23 +80,33 @@ pub async fn run_cli() -> anyhow::Result<()> {
         Some(Cmd::UnverifiedPrune) => {
             let cfg = config::AppConfig::load()?;
             // Deletes go through Kratos's admin API but cascade to the local POSIX tables, so the pool is needed.
-            let ory = ory::OryClients::from_config(&cfg);
+            let (identity_backend, oauth_backend) = backend::build(&cfg);
             let db = bootstrap_db(&cfg).await?;
-            let code = identity::prune_unverified_cli(&cfg, &db, &ory).await;
+            let code =
+                identity::prune_unverified_cli(&cfg, &db, &identity_backend, &oauth_backend).await;
             std::process::exit(code);
         }
         Some(Cmd::DeleteIdentity { id, yes, force }) => {
             let cfg = config::AppConfig::load()?;
-            let ory = ory::OryClients::from_config(&cfg);
+            let (identity_backend, oauth_backend) = backend::build(&cfg);
             let db = bootstrap_db(&cfg).await?;
-            let code = identity::delete_identity_cli(&cfg, &db, &ory, &id, yes, force).await;
+            let code = identity::delete_identity_cli(
+                &cfg,
+                &db,
+                &identity_backend,
+                &oauth_backend,
+                &id,
+                yes,
+                force,
+            )
+            .await;
             std::process::exit(code);
         }
         Some(Cmd::PosixReconcile) => {
             let cfg = config::AppConfig::load()?;
             let db = bootstrap_db(&cfg).await?;
-            let ory = ory::OryClients::from_config(&cfg);
-            match posix::reconcile_orphans(&db, &ory).await {
+            let (identity_backend, _) = backend::build(&cfg);
+            match posix::reconcile_orphans(&db, &identity_backend).await {
                 Ok(n) => {
                     println!("posix-reconcile: removed {n} orphaned posix account(s)");
                     std::process::exit(0);
@@ -107,8 +119,8 @@ pub async fn run_cli() -> anyhow::Result<()> {
         }
         Some(Cmd::PosixInitClient) => {
             let cfg = config::AppConfig::load()?;
-            let ory = ory::OryClients::from_config(&cfg);
-            match oauth::device::ensure_pam_client(&ory, &cfg.posix).await {
+            let (_, oauth_backend) = backend::build(&cfg);
+            match oauth::device::ensure_pam_client(&oauth_backend, &cfg.posix).await {
                 Ok(oauth::device::EnsureOutcome::AlreadyExists) => {
                     println!(
                         "posix-init-client: client '{}' already exists — left untouched",
@@ -142,9 +154,9 @@ pub async fn run_cli() -> anyhow::Result<()> {
         }
         Some(Cmd::ReconcileClientMetadata) => {
             let cfg = config::AppConfig::load()?;
-            let ory = ory::OryClients::from_config(&cfg);
+            let (_, oauth_backend) = backend::build(&cfg);
             let db = bootstrap_db(&cfg).await?;
-            match reconcile_client_metadata(&db, &ory).await {
+            match reconcile_client_metadata(&db, &oauth_backend).await {
                 Ok((stamped, seen)) => {
                     println!(
                         "reconcile-client-metadata: stamped {stamped} of {seen} Hydra client(s) as source=admin, verification=verified"
@@ -260,10 +272,10 @@ async fn bootstrap_db(cfg: &config::AppConfig) -> anyhow::Result<db::DbPool> {
 /// answer.
 async fn reconcile_client_metadata(
     db: &db::DbPool,
-    ory: &ory::OryClients,
+    oauth: &backend::OAuthImpl,
 ) -> anyhow::Result<(usize, usize)> {
     const PAGE: i64 = 500;
-    let clients = ory::hydra::list_clients(ory, PAGE, None, None).await?;
+    let clients = oauth.list_clients(PAGE, None, None).await?;
     if clients.len() as i64 >= PAGE {
         eprintln!(
             "reconcile-client-metadata: WARNING — Hydra returned a full page of {PAGE} clients, \

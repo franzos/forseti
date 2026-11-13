@@ -12,14 +12,15 @@ use axum::routing::{get, post};
 use askama::Template;
 use serde::Deserialize;
 
+use crate::backend::IdentityBackend;
+use crate::backend::identity::FlowInit;
+use crate::backend::identity::FlowOutcome;
+use crate::backend::identity::{FlowFetch, FlowKind, Session};
 use crate::cookies;
 use crate::flow_view::{
-    flow_messages, flow_state, form_target, group_nodes, mark_settings_primary, session_email,
-    session_needs_verification, translate_inputs, translate_messages,
+    Flow, GroupedNodes, mark_settings_primary, translate_inputs, translate_messages,
 };
 use crate::locale::LanguageIdentifier;
-use crate::ory::kratos::FlowOutcome;
-use crate::ory::{self, FlowFetch, FlowKind};
 use crate::page_chrome::{PageChrome, ThemedChrome};
 use crate::render::render;
 use crate::state::AppState;
@@ -176,18 +177,21 @@ async fn settings_hub(
     // `request_url` to recover the originally-targeted sub-page.
     if let Some(flow_id) = query.flow.as_deref() {
         let cookie = cookies::cookie_header(&headers);
-        let target_section =
-            match ory::kratos::get_flow(&state.ory, FlowKind::Settings, flow_id, &cookie).await {
-                Ok(FlowFetch::Ok(flow)) => settings_section_from_flow(&flow),
-                // Unreadable flow: fall back to /settings/password since
-                // recovery hand-offs (where it's the only finishable action)
-                // dominate this case.
-                _ => SettingsSection::Password,
-            };
+        let target_section = match state
+            .identity
+            .get_flow(FlowKind::Settings, flow_id, &cookie)
+            .await
+        {
+            Ok(FlowFetch::Ok(flow)) => settings_section_from_flow(&flow),
+            // Unreadable flow: fall back to /settings/password since
+            // recovery hand-offs (where it's the only finishable action)
+            // dominate this case.
+            _ => SettingsSection::Password,
+        };
         let url = format!(
             "/settings/{}?flow={}",
             target_section.as_slug(),
-            ory_client::apis::urlencode(flow_id)
+            crate::web::urlencode(flow_id)
         );
         return Redirect::to(&url).into_response();
     }
@@ -279,27 +283,6 @@ impl InlineRenderSection {
     }
 }
 
-/// True when this settings flow was issued by Kratos's `recovery.after.password`
-/// hook (user just completed `/recovery` and is in the privileged
-/// change-password window). Drives focused-mode rendering.
-fn is_recovery_handoff(flow: &serde_json::Value) -> bool {
-    let url = flow
-        .get("request_url")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    if url.contains("/self-service/recovery") {
-        return true;
-    }
-    if let Some(ctx) = flow.get("internal_context")
-        && (ctx.get("recovery_link_token").is_some()
-            || ctx.get("RecoveryFlow").is_some()
-            || ctx.get("recovery_flow").is_some())
-    {
-        return true;
-    }
-    false
-}
-
 /// Kratos's `selfservice.flows.settings.privileged_session_max_age`, as
 /// `config init` writes it. Kratos holds the real value and exposes no API
 /// for it, so Forseti mirrors the shipped default.
@@ -309,31 +292,21 @@ const PRIVILEGED_WINDOW: chrono::Duration = chrono::Duration::minutes(15);
 /// [`PRIVILEGED_WINDOW`]. `None` when `issued_at` is unparseable.
 // Display only; DB timestamps go through crate::db::rfc3339.
 #[allow(clippy::disallowed_methods)]
-fn privileged_deadline_rfc3339(flow: &serde_json::Value) -> Option<String> {
-    let issued = flow.get("issued_at").and_then(|v| v.as_str())?;
+fn privileged_deadline_rfc3339(flow: &Flow) -> Option<String> {
+    let issued = flow.issued_at.as_deref()?;
     let parsed = chrono::DateTime::parse_from_rfc3339(issued).ok()?;
     let deadline = parsed + PRIVILEGED_WINDOW;
     Some(deadline.to_rfc3339())
 }
 
 /// Whether `session` signed in within [`PRIVILEGED_WINDOW`] of `now`.
-fn recently_authenticated(session: &ory::Session, now: chrono::DateTime<chrono::Utc>) -> bool {
+fn recently_authenticated(session: &Session, now: chrono::DateTime<chrono::Utc>) -> bool {
     crate::oauth::reauth::session_auth_time(session).is_some_and(|t| now - t <= PRIVILEGED_WINDOW)
 }
 
-fn settings_section_from_flow(flow: &serde_json::Value) -> SettingsSection {
-    let url = flow
-        .get("request_url")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-
-    // Explicit `return_to` takes precedence: that's how `/settings/profile`
-    // and `/settings/password` advertise their target.
-    let query = url.split_once('?').map(|(_, q)| q).unwrap_or("");
-    let decoded = url::form_urlencoded::parse(query.as_bytes())
-        .find(|(k, _)| k == "return_to")
-        .map(|(_, v)| v.into_owned())
-        .unwrap_or_default();
+fn settings_section_from_flow(flow: &Flow) -> SettingsSection {
+    // The `return_to` each sub-page puts on the flow names its target.
+    let decoded = flow.request_return_to.as_str();
     if decoded.ends_with("/settings/password") {
         return SettingsSection::Password;
     }
@@ -366,24 +339,7 @@ fn settings_section_from_flow(flow: &serde_json::Value) -> SettingsSection {
         return SettingsSection::AccountOverview;
     }
 
-    // No `return_to`: recovery hand-offs land here. Route them to
-    // /settings/password, the only place they can finish (set a new password).
-    if url.contains("/self-service/recovery") {
-        return SettingsSection::Password;
-    }
-    let state = flow_state(flow);
-    if state == "show_form"
-        && let Some(ctx) = flow.get("internal_context")
-        && (ctx.get("recovery_link_token").is_some()
-            || ctx.get("RecoveryFlow").is_some()
-            || ctx.get("recovery_flow").is_some())
-    {
-        return SettingsSection::Password;
-    }
-
-    // Fall back to password: Kratos's code-based recovery hand-off (v1.3.1)
-    // lands here with no return_to and no `recovery_*` internal_context keys,
-    // and /settings/password is the only place it can be finished.
+    // Recovery hand-offs carry no `return_to` and can only finish at /settings/password.
     SettingsSection::Password
 }
 
@@ -393,15 +349,15 @@ mod tests {
     use crate::config::BrandConfig;
     use askama::Template;
 
-    fn flow_returning_to(path: &str) -> serde_json::Value {
+    fn flow_returning_to(path: &str) -> Flow {
         let return_to =
             url::form_urlencoded::byte_serialize(format!("http://localhost:3000{path}").as_bytes())
                 .collect::<String>();
-        serde_json::json!({
+        crate::ory::flow_json::project(&serde_json::json!({
             "request_url": format!(
                 "http://localhost:4433/self-service/settings/browser?return_to={return_to}"
             )
-        })
+        }))
     }
 
     /// Every probe-only section must route its flow back to itself, or the
@@ -419,8 +375,11 @@ mod tests {
         }
     }
 
-    fn session_signed_in_at(rfc3339: &str) -> ory::Session {
-        let mut s = ory::Session::new("sess-1".to_string());
+    fn session_signed_in_at(rfc3339: &str) -> Session {
+        let mut s = Session {
+            id: "sess-1".to_string(),
+            ..Default::default()
+        };
         s.authenticated_at = Some(rfc3339.to_string());
         s
     }
@@ -445,7 +404,10 @@ mod tests {
 
     #[test]
     fn session_without_a_timestamp_is_not_recent() {
-        let s = ory::Session::new("sess-1".to_string());
+        let s = Session {
+            id: "sess-1".to_string(),
+            ..Default::default()
+        };
         assert!(!recently_authenticated(&s, at("2026-01-01T10:00:00Z")));
     }
 
@@ -485,7 +447,7 @@ mod tests {
 
 /// `Err(resp)` is a fully-formed early-return (redirect / error page) so
 /// callers can `?`-short-circuit; `Ok` lets them run their own renderer.
-pub(crate) type SettingsFlowOutcome = Result<(ory::Session, Box<serde_json::Value>), Response>;
+pub(crate) type SettingsFlowOutcome = Result<(Session, Box<Flow>), Response>;
 
 /// Shared gate + fetch for a settings sub-page: keeps the privileged-refresh
 /// redirect, missing-flow init, and gone-flow re-init consistent across
@@ -508,14 +470,20 @@ pub(crate) async fn fetch_settings_subpage(
 
     let flow_id = query.flow.as_deref();
     let init_url = || {
-        ory::kratos::browser_init_url(
+        state.identity.flow_init_url(
             FlowKind::Settings,
-            &state.cfg.kratos.public_url,
-            Some(&return_to_full),
+            FlowInit {
+                return_to: Some(&return_to_full),
+                ..Default::default()
+            },
         )
     };
 
-    match ory::kratos::resolve_flow(&state.ory, FlowKind::Settings, flow_id, &cookie).await {
+    match state
+        .identity
+        .resolve_flow(FlowKind::Settings, flow_id, &cookie)
+        .await
+    {
         FlowOutcome::Init | FlowOutcome::Reinit => Err(Redirect::to(&init_url()).into_response()),
         // Kratos checks only AAL when a flow is fetched; it enforces the
         // privileged window on submit. Probe-only sections never submit, so
@@ -526,7 +494,7 @@ pub(crate) async fn fetch_settings_subpage(
         {
             Err(Redirect::to(&format!(
                 "/login?refresh=true&return_to={}",
-                ory_client::apis::urlencode(&return_to_full)
+                crate::web::urlencode(&return_to_full)
             ))
             .into_response())
         }
@@ -536,12 +504,12 @@ pub(crate) async fn fetch_settings_subpage(
             // `refresh=true` when Kratos wanted `aal=aal2` livelocks the user
             // on `/settings/*` after a recovery hand-off.
             let url = match reason {
-                crate::ory::PrivilegedReason::Aal2Required => {
+                crate::backend::identity::PrivilegedReason::Aal2Required => {
                     crate::auth::aal2_step_up_url(&return_to_full)
                 }
-                crate::ory::PrivilegedReason::SessionRefresh => format!(
+                crate::backend::identity::PrivilegedReason::SessionRefresh => format!(
                     "/login?refresh=true&return_to={}",
-                    ory_client::apis::urlencode(&return_to_full)
+                    crate::web::urlencode(&return_to_full)
                 ),
             };
             Err(Redirect::to(&url).into_response())
@@ -625,8 +593,8 @@ fn render_settings(
     headers: &HeaderMap,
     memberships: &[crate::orgs::Membership],
     csrf_token: &str,
-    session: &ory::Session,
-    flow: &serde_json::Value,
+    session: &Session,
+    flow: &Flow,
     section: InlineRenderSection,
     profile: Option<crate::profiles::Profile>,
     extended_saved: bool,
@@ -634,8 +602,9 @@ fn render_settings(
     referrer_banner: Option<crate::handoff::ReferrerBannerView>,
     locale: LanguageIdentifier,
 ) -> Response {
-    let (form_action, form_method) = form_target(flow);
-    let mut groups = group_nodes(flow);
+    let form_action = flow.form_action.clone();
+    let form_method = flow.form_method.clone();
+    let mut groups = GroupedNodes::from_flow(flow);
     mark_settings_primary(&mut groups, section.group());
 
     // Translate node labels and per-node messages.
@@ -646,7 +615,7 @@ fn render_settings(
     translate_inputs(&mut groups.profile, &locale);
     translate_inputs(&mut groups.other, &locale);
 
-    let mut msgs = flow_messages(flow);
+    let mut msgs = flow.messages.clone();
     translate_messages(&mut msgs, &locale);
     let token = csrf_token.to_string();
 
@@ -659,8 +628,8 @@ fn render_settings(
                     state,
                     memberships,
                     headers,
-                    session_email(session),
-                    crate::ory::session_addresses(session),
+                    session.email(),
+                    session.addresses(),
                     token,
                     locale,
                 ),
@@ -678,16 +647,16 @@ fn render_settings(
                 links_text,
                 extended_saved,
                 username_saved,
-                email_verified: !session_needs_verification(session),
+                email_verified: !session.needs_verification(),
                 referrer_banner,
             })
         }
         InlineRenderSection::Password => {
-            if is_recovery_handoff(flow) {
+            if flow.recovery_handoff {
                 // Land on the dashboard once the new credential is in place;
                 // Kratos's default "changes saved" settings screen is wrong for
                 // focused recovery mode.
-                if flow_state(flow) == "success" {
+                if flow.state == "success" {
                     return Redirect::to("/").into_response();
                 }
                 render(&SettingsPasswordHandoffTemplate {
@@ -712,8 +681,8 @@ fn render_settings(
                         state,
                         memberships,
                         headers,
-                        session_email(session),
-                        crate::ory::session_addresses(session),
+                        session.email(),
+                        session.addresses(),
                         token,
                         locale,
                     ),

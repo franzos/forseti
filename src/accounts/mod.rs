@@ -1,6 +1,7 @@
 //! Device-local remembered-accounts chooser: signed cookie of identity UUIDs, labels resolved server-side.
 
-use crate::ory;
+use crate::backend::IdentityBackend;
+use crate::backend::identity::Identity;
 use crate::state::AppState;
 
 pub(crate) mod cookie;
@@ -16,7 +17,7 @@ pub(crate) struct AccountView {
 }
 
 /// Build a display view from a Kratos identity; falls back email then id.
-pub(crate) fn account_view_from_identity(id: &str, identity: &ory::Identity) -> AccountView {
+pub(crate) fn account_view_from_identity(id: &str, identity: &Identity) -> AccountView {
     let traits = identity.traits.as_ref();
     let email = traits
         .and_then(|t| t.get("email").and_then(|v| v.as_str()))
@@ -56,7 +57,7 @@ pub(crate) fn account_view_from_identity(id: &str, identity: &ory::Identity) -> 
 pub(crate) async fn resolve(state: &AppState, ids: &[String]) -> Vec<AccountView> {
     let mut views = Vec::with_capacity(ids.len());
     for id in ids {
-        if let Ok(identity) = ory::kratos::admin_get_identity(&state.ory, id).await {
+        if let Ok(identity) = state.identity.admin_get_identity(id).await {
             views.push(account_view_from_identity(id, &identity));
         }
     }
@@ -67,8 +68,11 @@ pub(crate) async fn resolve(state: &AppState, ids: &[String]) -> Vec<AccountView
 mod tests {
     use super::*;
 
-    fn identity_with(traits: serde_json::Value) -> ory::Identity {
-        ory::Identity::new(String::new(), String::new(), String::new(), Some(traits))
+    fn identity_with(traits: serde_json::Value) -> Identity {
+        Identity {
+            traits: Some(traits),
+            ..Default::default()
+        }
     }
 
     #[test]

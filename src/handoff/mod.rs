@@ -43,10 +43,10 @@ use serde::Deserialize;
 
 use crate::audit::{self, AuditCtx, AuditEvent, action, target_kind};
 use crate::audit_metadata;
+use crate::backend::OAuthBackend;
 use crate::config::{HandoffConfig, ProxyConfig};
 use crate::csrf::CsrfForm;
 use crate::flash::redirect_with_cookie;
-use crate::ory;
 use crate::rate_limit;
 use crate::state::AppState;
 
@@ -158,7 +158,7 @@ pub(crate) async fn handoff_enter(
         (Some(id), Some(uri)) => (id, uri),
     };
 
-    let client = match ory::hydra::get_client(&state.ory, referrer_id).await {
+    let client = match state.oauth.get_client(referrer_id).await {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(error = ?e, referrer = referrer_id, "handoff: unknown referrer client");
@@ -268,7 +268,7 @@ pub(crate) async fn handoff_return(
     // narrowed or the verification badge pulled. Fall back to `/` either way.
     let target = match &payload {
         Some(p) if referrer_is_vouched(&state, &p.client_id).await => {
-            match ory::hydra::get_client(&state.ory, &p.client_id).await {
+            match state.oauth.get_client(&p.client_id).await {
                 Ok(client) if client_origin_matches(&client, &p.referrer_uri) => {
                     p.referrer_uri.clone()
                 }
@@ -365,7 +365,7 @@ async fn referrer_is_vouched(state: &AppState, client_id: &str) -> bool {
 /// client's `redirect_uris` (and `client_uri`). Origin comparison rather than
 /// full-URL: it gives the same trust guarantee as redirect-URI matching
 /// without forcing the integrator to enumerate every page.
-fn client_origin_matches(client: &ory_client::models::OAuth2Client, candidate_uri: &str) -> bool {
+fn client_origin_matches(client: &crate::backend::oauth::OAuthClient, candidate_uri: &str) -> bool {
     let Some(candidate) = parse_origin(candidate_uri) else {
         return false;
     };
@@ -410,13 +410,13 @@ fn invalid_referrer() -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ory_client::models::OAuth2Client;
+    use crate::backend::oauth::OAuthClient;
 
-    fn client_with(redirect_uris: Vec<&str>, client_uri: Option<&str>) -> OAuth2Client {
-        OAuth2Client {
+    fn client_with(redirect_uris: Vec<&str>, client_uri: Option<&str>) -> OAuthClient {
+        OAuthClient {
             redirect_uris: Some(redirect_uris.into_iter().map(String::from).collect()),
             client_uri: client_uri.map(String::from),
-            ..OAuth2Client::new()
+            ..OAuthClient::default()
         }
     }
 

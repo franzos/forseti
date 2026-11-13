@@ -14,11 +14,9 @@ use axum::http::HeaderMap;
 use axum::response::Response;
 
 use crate::FlowQuery;
-use crate::flow_view::{
-    InputView, MessageView, collect_default_hidden, collect_input_nodes, flow_messages,
-    form_target, session_email, translate_inputs, translate_messages,
-};
-use crate::ory;
+use crate::backend::IdentityBackend;
+use crate::backend::identity::{Identity, Session};
+use crate::flow_view::{Flow, InputView, MessageView, translate_inputs, translate_messages};
 use crate::page_chrome::PageChrome;
 use crate::render::render;
 use crate::state::AppState;
@@ -83,6 +81,8 @@ pub(crate) async fn settings_linked_providers(
     .await
     {
         Ok((session, flow)) => {
+            // Linking POSTs to Kratos, which 303s on to the provider.
+            let auth_origins = crate::oidc_providers::flow_auth_origins(&flow);
             let memberships = crate::orgs::list_memberships(&state.db, &sess.identity_id)
                 .await
                 .unwrap_or_default();
@@ -94,6 +94,7 @@ pub(crate) async fn settings_linked_providers(
                 &sess.identity_id,
                 &session,
                 &flow,
+                &auth_origins,
                 banner.0,
                 locale,
             )
@@ -110,17 +111,17 @@ async fn render_linked_providers(
     headers: &HeaderMap,
     csrf_token: &str,
     identity_id: &str,
-    session: &ory::Session,
-    flow: &serde_json::Value,
+    session: &Session,
+    flow: &Flow,
+    auth_origins: &[String],
     referrer_banner: Option<crate::handoff::ReferrerBannerView>,
     locale: crate::locale::LanguageIdentifier,
 ) -> Response {
-    let (form_action, form_method) = form_target(flow);
-    let mut hidden_defaults = collect_default_hidden(flow);
-    let mut oidc_nodes = collect_input_nodes(flow, "oidc");
+    let mut hidden_defaults = flow.default_hidden();
+    let mut oidc_nodes: Vec<InputView> = flow.inputs("oidc").cloned().collect();
     translate_inputs(&mut hidden_defaults, &locale);
     translate_inputs(&mut oidc_nodes, &locale);
-    let mut msgs = flow_messages(flow);
+    let mut msgs = flow.messages.clone();
     translate_messages(&mut msgs, &locale);
 
     // Kratos names oidc submit nodes `link` / `unlink`, with the provider id as
@@ -144,15 +145,16 @@ async fn render_linked_providers(
 
     // Full identity (admin API) reveals the actual linked set + whether OIDC is
     // the sole credential. Degrade to flow-nodes-only if it can't be fetched.
-    let identity_json = ory::kratos::admin_get_identity_full(&state.ory, identity_id)
+    let identity = state
+        .identity
+        .admin_get_identity_full(identity_id)
         .await
-        .ok()
-        .and_then(|id| serde_json::to_value(id).ok());
-    let (linked_set, sole_credential_flag) = match &identity_json {
+        .ok();
+    let (linked_set, sole_credential_flag) = match &identity {
         Some(id) => (linked_provider_ids(id), sole_credential(id)),
         None => (BTreeSet::new(), false),
     };
-    let identity_available = identity_json.is_some();
+    let identity_available = identity.is_some();
 
     // Record link dates for the currently-linked providers, then read them back.
     for provider in &linked_set {
@@ -223,39 +225,33 @@ async fn render_linked_providers(
             state,
             memberships,
             headers,
-            session_email(session),
-            crate::ory::session_addresses(session),
+            session.email(),
+            session.addresses(),
             csrf_token.to_string(),
             locale,
         ),
-        form_action,
-        form_method,
+        form_action: flow.form_action.clone(),
+        form_method: flow.form_method.clone(),
         flow_messages: msgs,
         hidden_defaults,
         rows,
         referrer_banner,
     });
-    // Linking POSTs to Kratos, which 303s on to the provider.
-    crate::app::allow_form_action_to(&mut resp, &crate::oidc_providers::flow_auth_origins(flow));
+    crate::app::allow_form_action_to(&mut resp, auth_origins);
     resp
-}
-
-fn credentials_obj(
-    identity: &serde_json::Value,
-) -> Option<&serde_json::Map<String, serde_json::Value>> {
-    identity.get("credentials").and_then(|c| c.as_object())
 }
 
 /// Linked provider ids from the identity's `oidc` credential. Reads both the
 /// typed `config.providers[].provider` and the `identifiers` ("provider:subject")
 /// shapes, since Kratos versions vary in which they populate.
-pub(crate) fn linked_provider_ids(identity: &serde_json::Value) -> BTreeSet<String> {
+pub(crate) fn linked_provider_ids(identity: &Identity) -> BTreeSet<String> {
     let mut set = BTreeSet::new();
-    let Some(oidc) = credentials_obj(identity).and_then(|c| c.get("oidc")) else {
+    let Some(oidc) = identity.credentials.as_ref().and_then(|c| c.get("oidc")) else {
         return set;
     };
     if let Some(arr) = oidc
-        .get("config")
+        .config
+        .as_ref()
         .and_then(|c| c.get("providers"))
         .and_then(|p| p.as_array())
     {
@@ -267,9 +263,9 @@ pub(crate) fn linked_provider_ids(identity: &serde_json::Value) -> BTreeSet<Stri
             }
         }
     }
-    if let Some(ids) = oidc.get("identifiers").and_then(|v| v.as_array()) {
+    if let Some(ids) = oidc.identifiers.as_ref() {
         for id in ids {
-            if let Some((prov, _)) = id.as_str().and_then(|s| s.split_once(':'))
+            if let Some((prov, _)) = id.split_once(':')
                 && !prov.is_empty()
             {
                 set.insert(prov.to_string());
@@ -282,8 +278,8 @@ pub(crate) fn linked_provider_ids(identity: &serde_json::Value) -> BTreeSet<Stri
 /// True when a credential method carries real enrolment data, not just the
 /// identifier reservation Kratos seeds for an OIDC-created identity (whose
 /// password/webauthn/code entries exist with empty `config`).
-fn credential_enrolled(method: &str, cred: &serde_json::Value) -> bool {
-    let config = cred.get("config");
+fn credential_enrolled(method: &str, cred: &crate::backend::identity::Credential) -> bool {
+    let config = cred.config.as_ref();
     let non_empty_str = |key: &str| {
         config
             .and_then(|c| c.get(key))
@@ -309,11 +305,11 @@ fn credential_enrolled(method: &str, cred: &serde_json::Value) -> bool {
 
 /// True when OIDC is the identity's only real sign-in method: at least one OIDC
 /// provider is linked and no other credential is actually enrolled.
-pub(crate) fn sole_credential(identity: &serde_json::Value) -> bool {
+pub(crate) fn sole_credential(identity: &Identity) -> bool {
     if linked_provider_ids(identity).is_empty() {
         return false;
     }
-    let Some(creds) = credentials_obj(identity) else {
+    let Some(creds) = identity.credentials.as_ref() else {
         return false;
     };
     !creds
@@ -324,35 +320,61 @@ pub(crate) fn sole_credential(identity: &serde_json::Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::identity::Credential;
     use serde_json::json;
+
+    fn cred(identifiers: &[&str], config: serde_json::Value) -> Credential {
+        Credential {
+            identifiers: Some(identifiers.iter().map(ToString::to_string).collect()),
+            config: Some(config),
+            ..Default::default()
+        }
+    }
+
+    fn identity(creds: Vec<(&str, Credential)>) -> Identity {
+        Identity {
+            credentials: Some(creds.into_iter().map(|(k, c)| (k.to_string(), c)).collect()),
+            ..Default::default()
+        }
+    }
 
     /// OIDC-created identity: oidc linked, and password/webauthn present only as
     /// identifier reservations (empty config).
-    fn oidc_only() -> serde_json::Value {
-        json!({
-            "credentials": {
-                "oidc": {
-                    "type": "oidc",
-                    "identifiers": ["github:12345"],
-                    "config": { "providers": [{ "provider": "github", "subject": "12345" }] }
-                },
-                "password": { "type": "password", "identifiers": ["user@example.com"], "config": {} },
-                "webauthn": { "type": "webauthn", "identifiers": ["user@example.com"], "config": { "user_handle": "abc=" } }
-            }
-        })
+    fn oidc_only() -> Identity {
+        identity(vec![
+            (
+                "oidc",
+                cred(
+                    &["github:12345"],
+                    json!({ "providers": [{ "provider": "github", "subject": "12345" }] }),
+                ),
+            ),
+            ("password", cred(&["user@example.com"], json!({}))),
+            (
+                "webauthn",
+                cred(&["user@example.com"], json!({ "user_handle": "abc=" })),
+            ),
+        ])
     }
 
     /// Same identity but with a real password enrolled.
-    fn oidc_plus_password() -> serde_json::Value {
-        json!({
-            "credentials": {
-                "oidc": {
-                    "identifiers": ["github:12345"],
-                    "config": { "providers": [{ "provider": "github", "subject": "12345" }] }
+    fn oidc_plus_password() -> Identity {
+        identity(vec![
+            (
+                "oidc",
+                cred(
+                    &["github:12345"],
+                    json!({ "providers": [{ "provider": "github", "subject": "12345" }] }),
+                ),
+            ),
+            (
+                "password",
+                Credential {
+                    config: Some(json!({ "hashed_password": "$argon2id$..." })),
+                    ..Default::default()
                 },
-                "password": { "config": { "hashed_password": "$argon2id$..." } }
-            }
-        })
+            ),
+        ])
     }
 
     #[test]

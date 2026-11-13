@@ -26,9 +26,9 @@ pub fn authorize_url(cfg: &SamlConfig, self_url: &str, org_id: &str, state: &str
     let base = cfg.jackson_url.trim_end_matches('/');
     format!(
         "{base}/api/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&state={}",
-        ory_client::apis::urlencode(dyn_client_id(org_id)),
-        ory_client::apis::urlencode(redirect_uri(self_url)),
-        ory_client::apis::urlencode(state),
+        crate::web::urlencode(dyn_client_id(org_id)),
+        crate::web::urlencode(redirect_uri(self_url)),
+        crate::web::urlencode(state),
     )
 }
 
@@ -188,7 +188,7 @@ pub async fn delete_connection(
     let url = format!(
         "{}/api/v1/connections?tenant={}&product={PRODUCT}",
         cfg.internal_url().trim_end_matches('/'),
-        ory_client::apis::urlencode(org_id),
+        crate::web::urlencode(org_id),
     );
     let resp = client
         .delete(&url)

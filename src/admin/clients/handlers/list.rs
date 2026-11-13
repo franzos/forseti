@@ -7,11 +7,11 @@ use axum::{
 use serde::Deserialize;
 
 use crate::admin::{AdminSection, render_admin_error};
+use crate::backend::OAuthBackend;
 use crate::extractors::Csrf;
 use crate::format::looks_like_uuid;
 use crate::oauth_client_metadata;
 use crate::orgs::AdminScope;
-use crate::ory;
 use crate::page_chrome::PageChrome;
 use crate::render::render;
 use crate::state::AppState;
@@ -101,7 +101,7 @@ pub async fn list(
     // `list_o_auth2_clients` `client_name` filter doesn't match IDs,
     // so without this branch a paste-the-ID lookup returns empty.
     let clients = if looks_like_uuid(&filter_q) {
-        match ory::hydra::get_client(&state.ory, &filter_q).await {
+        match state.oauth.get_client(&filter_q).await {
             Ok(c) => vec![c],
             Err(e) => {
                 tracing::info!(error = ?e, "admin: client ID lookup miss");
@@ -114,7 +114,10 @@ pub async fn list(
         } else {
             Some(filter_q.as_str())
         };
-        match ory::hydra::list_clients(&state.ory, CLIENTS_PAGE_SIZE, page_token, name_filter).await
+        match state
+            .oauth
+            .list_clients(CLIENTS_PAGE_SIZE, page_token, name_filter)
+            .await
         {
             Ok(c) => c,
             Err(e) => {

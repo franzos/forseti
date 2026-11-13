@@ -176,7 +176,7 @@ impl PageChrome {
     pub(crate) fn from_parts(
         state: &AppState,
         user_email: String,
-        addrs: Option<&[crate::ory::VerifiableIdentityAddress]>,
+        addrs: Option<&[crate::backend::identity::VerifiableAddress]>,
         csrf_token: String,
         locale: LanguageIdentifier,
     ) -> Self {
@@ -218,7 +218,7 @@ impl PageChrome {
         memberships: &[crate::orgs::Membership],
         headers: &axum::http::HeaderMap,
         user_email: String,
-        addrs: Option<&[crate::ory::VerifiableIdentityAddress]>,
+        addrs: Option<&[crate::backend::identity::VerifiableAddress]>,
         csrf_token: String,
         locale: LanguageIdentifier,
     ) -> Self {

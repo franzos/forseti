@@ -5,9 +5,11 @@ use axum::http::{HeaderMap, Uri};
 use axum::response::{IntoResponse, Redirect, Response};
 use serde::Deserialize;
 
+use crate::backend::identity::{WhoamiOutcome, address_is_verified};
+use crate::backend::oauth::LoginRequest;
+use crate::backend::{IdentityBackend, OAuthBackend};
 use crate::db::DbPool;
 use crate::extractors::OptionalSession;
-use crate::ory;
 use crate::signed_cookie::unix_seconds_now;
 use crate::state::AppState;
 
@@ -35,7 +37,7 @@ pub(crate) async fn oauth_login(
     let skip_org_join = query.skip_org_join.is_some();
     let skipped_username_now = query.skip_username.is_some();
     let challenge = query.login_challenge;
-    let req = match ory::hydra::get_login_request(&state.ory, &challenge).await {
+    let req = match state.oauth.get_login_request(&challenge).await {
         Ok(r) => r,
         Err(e) => {
             tracing::error!(error = ?e, "hydra get_login_request failed");
@@ -69,9 +71,11 @@ pub(crate) async fn oauth_login(
         // of every app, so confirm the session is really gone first.
         if matches!(session, OptionalSession::None)
             && !matches!(
-                ory::kratos::whoami(&state.ory, Some(&crate::cookies::cookie_header(&headers)))
+                state
+                    .identity
+                    .whoami(Some(&crate::cookies::cookie_header(&headers)))
                     .await,
-                Ok(ory::kratos::WhoamiOutcome::None)
+                Ok(WhoamiOutcome::None)
             )
         {
             return reject(
@@ -117,7 +121,7 @@ pub(crate) async fn oauth_login(
         }
         if let Err(e) = super::op_sessions::end_sid(
             &state.db,
-            &state.ory,
+            &state.oauth,
             sid,
             super::op_sessions::GrantRevocation::Keep,
         )
@@ -138,7 +142,7 @@ pub(crate) async fn oauth_login(
     let self_login_url = format!(
         "{}/oauth/login?login_challenge={}",
         state.cfg.self_.url.trim_end_matches('/'),
-        ory_client::apis::urlencode(&challenge),
+        crate::web::urlencode(&challenge),
     );
 
     // Resolve the display locale for the login surface honoring ui_locales (D1).
@@ -236,7 +240,7 @@ pub(crate) async fn oauth_login(
                 let encoded = reauth_cookie.encode(&state.cookie_secret, &payload, now_secs);
                 let url = format!(
                     "/login?refresh=true&return_to={}&lang={}",
-                    ory_client::apis::urlencode(&self_login_url),
+                    crate::web::urlencode(&self_login_url),
                     login_locale.language.as_str(),
                 );
                 let mut resp = Redirect::to(&url).into_response();
@@ -260,8 +264,8 @@ pub(crate) async fn oauth_login(
         .as_ref()
         .and_then(|ctx| ctx.acr_values.clone())
         .unwrap_or_default();
-    let session_is_aal2 = ory::kratos::session_satisfies_aal2(&session);
-    let session_aal = ory::kratos::session_aal_string(&session);
+    let session_is_aal2 = session.satisfies_aal2();
+    let session_aal = session.aal_string();
     if acr_values_need_aal2_step_up(&requested_acrs, session_is_aal2) {
         if prompt_none {
             return reject(
@@ -295,21 +299,13 @@ pub(crate) async fn oauth_login(
         return resp;
     }
 
-    // The SDK's `MethodEnum` has no `Display`; round-trip through serde to
-    // recover the wire string (`"password"`, `"oidc"`, …), then map it onto
-    // RFC 8176 so relying parties reading `amr` get the registered values
-    // rather than Kratos's internal names.
+    // Map Kratos's method names onto RFC 8176 so relying parties reading
+    // `amr` get the registered values.
     let kratos_methods: Vec<String> = session
         .authentication_methods
         .iter()
         .flatten()
-        .filter_map(|m| {
-            m.method.as_ref().and_then(|x| {
-                serde_json::to_value(x)
-                    .ok()
-                    .and_then(|v| v.as_str().map(str::to_string))
-            })
-        })
+        .filter_map(|m| m.method.clone())
         .collect();
     let amr = amr_for(&kratos_methods);
 
@@ -340,14 +336,14 @@ pub(crate) async fn oauth_login(
             PinAction::Interstitial { slug } => {
                 let mut url = format!(
                     "/join/confirm?org={}&return_to={}",
-                    ory_client::apis::urlencode(&slug),
-                    ory_client::apis::urlencode(&self_login_url),
+                    crate::web::urlencode(&slug),
+                    crate::web::urlencode(&self_login_url),
                 );
                 // Advisory attribution: the OAuth client that routed the user here
                 // (`req.client` is non-optional on the login request; `client_id`
                 // is `Option<String>`).
                 if let Some(cid) = req.client.client_id.as_deref().filter(|s| !s.is_empty()) {
-                    url.push_str(&format!("&client_id={}", ory_client::apis::urlencode(cid)));
+                    url.push_str(&format!("&client_id={}", crate::web::urlencode(cid)));
                 }
                 return Redirect::to(&url).into_response();
             }
@@ -362,10 +358,10 @@ pub(crate) async fn oauth_login(
     // An app that asked for `email` gets `email_verified: false` for an
     // unproven address and has to drop it, so the user verifies here first and
     // comes back; the alternative is an account the app cannot match by email.
-    let email = crate::flow_view::session_email(&session);
+    let email = session.email();
     if wants_email(req.requested_scope.as_deref())
         && !email.is_empty()
-        && !ory::address_is_verified(ory::session_addresses(&session), &email)
+        && !address_is_verified(session.addresses(), &email)
     {
         if prompt_none {
             return reject(
@@ -378,7 +374,7 @@ pub(crate) async fn oauth_login(
         }
         return Redirect::to(&format!(
             "/verification?return_to={}",
-            ory_client::apis::urlencode(&self_login_url)
+            crate::web::urlencode(&self_login_url)
         ))
         .into_response();
     }
@@ -392,7 +388,7 @@ pub(crate) async fn oauth_login(
             == Some(subject.as_str());
     if !skip_username
         && wants_profile(req.requested_scope.as_deref())
-        && crate::flow_view::is_new_account(&session, chrono::Utc::now())
+        && session.is_new_account(chrono::Utc::now())
         && crate::profiles::fetch(&state.db, &subject)
             .await
             .ok()
@@ -414,7 +410,7 @@ pub(crate) async fn oauth_login(
         }
         return Redirect::to(&format!(
             "/onboarding/username?return_to={}",
-            ory_client::apis::urlencode(&back)
+            crate::web::urlencode(&back)
         ))
         .into_response();
     }
@@ -435,16 +431,17 @@ pub(crate) async fn oauth_login(
         .await;
     }
 
-    match ory::hydra::accept_login_request(
-        &state.ory,
-        &challenge,
-        &subject,
-        true,
-        remember_for,
-        amr,
-        Some(session_aal),
-    )
-    .await
+    match state
+        .oauth
+        .accept_login_request(
+            &challenge,
+            &subject,
+            true,
+            remember_for,
+            amr,
+            Some(session_aal),
+        )
+        .await
     {
         Ok(redirect) => {
             let mut resp = Redirect::to(&redirect.redirect_to).into_response();
@@ -491,7 +488,11 @@ pub(crate) async fn oauth_login(
 /// Reject the challenge back to the relying party (OIDC Core 3.1.2.6), or land
 /// on `/error` when Hydra can't take the rejection either.
 async fn reject(state: &AppState, challenge: &str, error: &str, description: &str) -> Response {
-    match ory::hydra::reject_login_request(&state.ory, challenge, error, description).await {
+    match state
+        .oauth
+        .reject_login_request(challenge, error, description)
+        .await
+    {
         Ok(r) => Redirect::to(&r.redirect_to).into_response(),
         Err(e) => {
             tracing::error!(error = ?e, "hydra reject_login_request failed");
@@ -515,7 +516,7 @@ fn wants_email(scopes: Option<&[String]>) -> bool {
 const USERNAME_SKIPPED_COOKIE: &str = "forseti_username_skipped";
 
 /// The request's OIDC `login_hint`, when it's an email worth showing.
-fn login_hint(req: &ory::OAuth2LoginRequest) -> Option<&str> {
+fn login_hint(req: &LoginRequest) -> Option<&str> {
     req.oidc_context
         .as_ref()
         .and_then(|c| c.login_hint.as_deref())
@@ -525,7 +526,7 @@ fn login_hint(req: &ory::OAuth2LoginRequest) -> Option<&str> {
 /// The request's `idp_hint`. One missing from the cached provider list is
 /// still forwarded: the flow's own provider nodes decide, so a newly enabled
 /// provider works before the cache refreshes.
-async fn idp_hint(state: &AppState, req: &ory::OAuth2LoginRequest) -> Option<String> {
+async fn idp_hint(state: &AppState, req: &LoginRequest) -> Option<String> {
     let hint = parse_idp_hint_param(req.request_url.as_str())?;
     if !state.idp_provider_ids().await.contains(&hint) {
         let client_id = req.client.client_id.as_deref().unwrap_or_default();
@@ -548,17 +549,17 @@ fn anonymous_login_redirect_url(
 ) -> String {
     let org_q = parse_organization_id_param(request_url)
         .filter(|id: &String| !id.is_empty())
-        .map(|id| format!("&organization_id={}", ory_client::apis::urlencode(&id)))
+        .map(|id| format!("&organization_id={}", crate::web::urlencode(&id)))
         .unwrap_or_default();
     let hint_q = login_hint
-        .map(|h| format!("&login_hint={}", ory_client::apis::urlencode(h)))
+        .map(|h| format!("&login_hint={}", crate::web::urlencode(h)))
         .unwrap_or_default();
     let idp_q = idp_hint
-        .map(|h| format!("&idp_hint={}", ory_client::apis::urlencode(h)))
+        .map(|h| format!("&idp_hint={}", crate::web::urlencode(h)))
         .unwrap_or_default();
     format!(
         "{page}?return_to={}&lang={}{}{}{}",
-        ory_client::apis::urlencode(self_login_url),
+        crate::web::urlencode(self_login_url),
         lang,
         org_q,
         hint_q,
@@ -583,7 +584,7 @@ pub(crate) async fn oauth_register(
     session: OptionalSession,
 ) -> Response {
     let challenge = query.login_challenge;
-    let req = match ory::hydra::get_login_request(&state.ory, &challenge).await {
+    let req = match state.oauth.get_login_request(&challenge).await {
         Ok(r) => r,
         Err(e) => {
             tracing::error!(error = ?e, "hydra get_login_request failed");
@@ -593,7 +594,7 @@ pub(crate) async fn oauth_register(
     let self_login_url = format!(
         "{}/oauth/login?login_challenge={}",
         state.cfg.self_.url.trim_end_matches('/'),
-        ory_client::apis::urlencode(&challenge),
+        crate::web::urlencode(&challenge),
     );
     // Already signed in: there's nothing to register; carry on as a login.
     if !matches!(session, OptionalSession::None) {
@@ -692,7 +693,7 @@ pub(super) async fn stale_sid_is_abandoned(
     match super::op_sessions::recorded_kratos_session(&state.db, sid).await? {
         RecordedKratosSession::Unknown | RecordedKratosSession::None => Ok(true),
         RecordedKratosSession::Some(ksid) => {
-            Ok(!ory::kratos::is_session_active(&state.ory, subject, &ksid).await?)
+            Ok(!state.identity.is_session_active(subject, &ksid).await?)
         }
     }
 }

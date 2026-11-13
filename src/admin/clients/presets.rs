@@ -1,6 +1,6 @@
 //! Application-type presets surfaced on the `/admin/clients/new` picker.
 //!
-//! Every preset still produces the same `OAuth2Client` — Hydra has no
+//! Every preset still produces the same `OAuthClient` — Hydra has no
 //! notion of "MCP client". The slug travels as a hidden form input and
 //! gets stamped into `metadata.forseti.client_type` so the show page,
 //! list filter, and audit log can identify the operator's original

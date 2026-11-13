@@ -1,8 +1,8 @@
 //! Hydra wire → Forseti view-model projection for OAuth2 clients.
 
+use crate::backend::oauth::OAuthClient;
 use crate::format::humanise_timestamp;
 use crate::oauth_client_metadata;
-use crate::ory;
 
 use super::presets::Preset;
 
@@ -46,7 +46,7 @@ pub(super) struct ClientRow {
 /// Read `metadata.forseti.client_type` off a Hydra client. Returns the raw
 /// slug ("mcp" etc.) or empty if not stamped. Clients created before this
 /// feature shipped won't have it.
-pub(super) fn read_client_type(c: &ory::OAuth2Client) -> String {
+pub(super) fn read_client_type(c: &OAuthClient) -> String {
     c.metadata
         .as_ref()
         .and_then(|m| m.get("forseti"))
@@ -57,7 +57,7 @@ pub(super) fn read_client_type(c: &ory::OAuth2Client) -> String {
 }
 
 /// Read `metadata.forseti.require_pkce` as a bool. Defaults to false.
-pub(super) fn read_require_pkce(c: &ory::OAuth2Client) -> bool {
+pub(super) fn read_require_pkce(c: &OAuthClient) -> bool {
     c.metadata
         .as_ref()
         .and_then(|m| m.get("forseti"))
@@ -72,7 +72,7 @@ pub(super) fn read_require_pkce(c: &ory::OAuth2Client) -> bool {
 /// clients with no Forseti row are not verified.
 pub(super) fn project_row(
     locale: &crate::locale::LanguageIdentifier,
-    c: &ory::OAuth2Client,
+    c: &OAuthClient,
     meta: Option<&oauth_client_metadata::Row>,
 ) -> ClientRow {
     let created_at = c.created_at.clone().unwrap_or_default();
@@ -117,7 +117,7 @@ mod tests {
     #[test]
     fn rowless_client_projects_unverified() {
         let locale: crate::locale::LanguageIdentifier = "en".parse().unwrap();
-        let client = crate::ory::OAuth2Client::new();
+        let client = super::OAuthClient::default();
         assert!(!super::project_row(&locale, &client, None).verified);
     }
 }

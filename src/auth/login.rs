@@ -5,12 +5,14 @@ use axum::extract::{Query, State};
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Redirect, Response};
 
+use crate::backend::IdentityBackend;
+use crate::backend::identity::FlowInit;
+use crate::backend::identity::FlowKind;
+use crate::backend::identity::FlowOutcome;
 use crate::cookies;
 use crate::csrf;
 use crate::extractors::OptionalSession;
 use crate::flow_view::*;
-use crate::ory::kratos::FlowOutcome;
-use crate::ory::{self, FlowKind};
 use crate::page_chrome::{Chrome, PageChrome};
 use crate::render::render;
 use crate::state::AppState;
@@ -59,7 +61,7 @@ pub(crate) async fn login(
     // livelocks at `privileged_session_max_age`. Both fall through to the
     // Kratos init redirect with the params preserved.
     if let Some(session) = session.ok() {
-        let session_aal = ory::kratos::session_aal_string(session);
+        let session_aal = session.aal_string();
         let aal_mismatch = requested_aal.map(|a| a != session_aal).unwrap_or(false);
         // A flow ID present means Kratos baked `refresh=true` into the flow's
         // server-side context (not the URL), so always render it.
@@ -78,12 +80,13 @@ pub(crate) async fn login(
 
     let flow_id = query.flow.as_deref();
     let init_url = || {
-        ory::kratos::browser_init_url_with(
+        state.identity.flow_init_url(
             FlowKind::Login,
-            &state.cfg.kratos.public_url,
-            safe_return,
-            requested_aal,
-            query.refresh,
+            FlowInit {
+                return_to: safe_return,
+                aal: requested_aal,
+                refresh: query.refresh.unwrap_or_default(),
+            },
         )
     };
 
@@ -92,7 +95,11 @@ pub(crate) async fn login(
         .login_hint
         .as_deref()
         .and_then(crate::auth::email_login_hint);
-    match ory::kratos::resolve_flow(&state.ory, FlowKind::Login, flow_id, &cookie).await {
+    match state
+        .identity
+        .resolve_flow(FlowKind::Login, flow_id, &cookie)
+        .await
+    {
         FlowOutcome::Init => {
             let mut resp = csrf::attach_csrf(
                 Redirect::to(&init_url()).into_response(),
@@ -119,7 +126,7 @@ pub(crate) async fn login(
         FlowOutcome::Ready(flow) => {
             let app = crate::auth::continuing_app_name(
                 &state,
-                query.return_to.as_deref().or_else(|| flow_return_to(&flow)),
+                query.return_to.as_deref().or(flow.return_to.as_deref()),
             )
             .await;
             let cookie_hint = cookies::read_cookie(&headers, LOGIN_HINT_COOKIE);
@@ -187,7 +194,7 @@ pub(crate) const LOGIN_HINT_COOKIE: &str = "forseti_login_hint";
 
 fn render_login(
     chrome: PageChrome,
-    flow: &serde_json::Value,
+    flow: &Flow,
     return_to: Option<&str>,
     continue_to_app: Option<String>,
     login_hint: Option<&str>,
@@ -208,16 +215,12 @@ fn render_login(
             }
         }
     }
-    let webauthn_scripts = collect_webauthn_scripts(flow);
+    let webauthn_scripts = flow.webauthn_scripts();
 
     // AAL2 requested but no second factor available: Kratos emits the
     // challenge message with no actionable input, so surface a CTA to enrol
     // 2FA instead of a blank form.
-    let requested_aal2 = flow
-        .get("requested_aal")
-        .and_then(|v| v.as_str())
-        .map(|s| s == "aal2")
-        .unwrap_or(false);
+    let requested_aal2 = flow.requested_aal.as_deref() == Some("aal2");
     let any_actionable_method = !form.groups.oidc.is_empty()
         || !form.groups.code.is_empty()
         || !form.groups.password.is_empty()
@@ -227,7 +230,7 @@ fn render_login(
             .iter()
             .any(|n| n.input_type != "hidden" && n.name != "method");
     let aal2_unavailable = requested_aal2 && !any_actionable_method;
-    let reauth = requested_aal2 || flow.get("refresh").and_then(|v| v.as_bool()) == Some(true);
+    let reauth = requested_aal2 || flow.refresh;
 
     render(&LoginTemplate {
         chrome,

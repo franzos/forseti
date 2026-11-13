@@ -9,10 +9,10 @@ use axum::response::{IntoResponse, Response};
 
 use crate::audit::{self, AuditCtx, AuditEvent, action, target_kind};
 use crate::audit_metadata;
+use crate::backend::OAuthBackend;
 use crate::csrf::CsrfForm;
 use crate::flash;
 use crate::format::humanise_timestamp;
-use crate::ory;
 use crate::page_chrome::{PageChrome, ThemedChrome};
 use crate::render::render;
 use crate::render_error_boundary;
@@ -66,7 +66,7 @@ pub(crate) async fn settings_authorized_apps(
         .into_response();
     }
 
-    let sessions = match ory::hydra::list_consent_sessions_by_subject(&state.ory, &subject).await {
+    let sessions = match state.oauth.list_consent_sessions_by_subject(&subject).await {
         Ok(s) => s,
         Err(e) => {
             tracing::error!(error = ?e, "list_consent_sessions failed");
@@ -110,7 +110,7 @@ pub(crate) async fn settings_authorized_apps(
 fn collapse_sessions_to_apps(
     state: &AppState,
     locale: &crate::locale::LanguageIdentifier,
-    sessions: Vec<ory_client::models::OAuth2ConsentSession>,
+    sessions: Vec<crate::backend::oauth::ConsentSession>,
 ) -> Vec<AuthorizedAppView> {
     use std::collections::BTreeMap;
 
@@ -198,22 +198,23 @@ pub(crate) async fn settings_authorized_apps_revoke(
     let actor_id = sess.identity_id;
     let actor_email = sess.email;
 
-    let (msg, ok) =
-        match ory::hydra::revoke_consent_sessions_for_client(&state.ory, &actor_id, &client_id)
-            .await
-        {
-            Ok(()) => (
-                crate::i18n::lookup(&locale, "flash-app-access-revoked"),
-                true,
-            ),
-            Err(e) => {
-                tracing::error!(error = ?e, client_id, "revoke_consent_for_client failed");
-                (
-                    crate::i18n::lookup(&locale, "flash-app-access-revoke-failed"),
-                    false,
-                )
-            }
-        };
+    let (msg, ok) = match state
+        .oauth
+        .revoke_consent_sessions_for_client(&actor_id, &client_id)
+        .await
+    {
+        Ok(()) => (
+            crate::i18n::lookup(&locale, "flash-app-access-revoked"),
+            true,
+        ),
+        Err(e) => {
+            tracing::error!(error = ?e, client_id, "revoke_consent_for_client failed");
+            (
+                crate::i18n::lookup(&locale, "flash-app-access-revoke-failed"),
+                false,
+            )
+        }
+    };
     if ok {
         let _ = audit::log(
             &state.db,

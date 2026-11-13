@@ -5,11 +5,13 @@ use axum::extract::{Query, State};
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Redirect, Response};
 
+use crate::backend::IdentityBackend;
+use crate::backend::identity::FlowInit;
+use crate::backend::identity::FlowKind;
+use crate::backend::identity::FlowOutcome;
 use crate::cookies;
 use crate::extractors::OptionalSession;
 use crate::flow_view::*;
-use crate::ory::kratos::FlowOutcome;
-use crate::ory::{self, FlowKind};
 use crate::page_chrome::{Chrome, PageChrome};
 use crate::render::render;
 use crate::state::AppState;
@@ -40,31 +42,39 @@ pub(crate) async fn verification(
     let is_logged_in = session_opt.is_some();
     let flow_id = query.flow.as_deref();
     let init_url = || {
-        ory::kratos::browser_init_url(
+        state.identity.flow_init_url(
             FlowKind::Verification,
-            &state.cfg.kratos.public_url,
-            query.return_to.as_deref(),
+            FlowInit {
+                return_to: query.return_to.as_deref(),
+                ..Default::default()
+            },
         )
     };
 
-    match ory::kratos::resolve_flow(&state.ory, FlowKind::Verification, flow_id, &cookie).await {
+    match state
+        .identity
+        .resolve_flow(FlowKind::Verification, flow_id, &cookie)
+        .await
+    {
         FlowOutcome::Ready(flow) => {
             // Logged-in user at `choose_method`: auto-submit the known address
             // server-side so the browser lands straight on code entry. Any
             // failure falls through to render the original form unchanged.
             if let Some(session) = session_opt
-                && flow_state(&flow) == "choose_method"
-                && session_needs_verification(session)
+                && flow.state == "choose_method"
+                && session.needs_verification()
             {
-                let email = session_email(session);
+                let email = session.email();
                 if !email.is_empty()
-                    && submit_email_method(&state, &flow, &email, &cookie)
+                    && state
+                        .identity
+                        .verify_known_email(&flow, &email, &cookie)
                         .await
                         .is_ok()
                 {
                     return Redirect::to(&format!(
                         "/verification?flow={}",
-                        ory_client::apis::urlencode(flow_id.unwrap_or_default())
+                        crate::web::urlencode(flow_id.unwrap_or_default())
                     ))
                     .into_response();
                 }
@@ -98,13 +108,13 @@ pub(crate) async fn verification(
 fn render_verification(
     cfg: &crate::config::AppConfig,
     chrome: PageChrome,
-    flow: &serde_json::Value,
+    flow: &Flow,
     return_to: Option<&str>,
     is_logged_in: bool,
 ) -> Response {
     let form = FlowFormView::from_flow(flow, FlowKind::Verification, return_to, &chrome.locale);
-    let state = flow_state(flow).to_string();
-    let continue_href = continue_href(cfg, &state, return_to.or_else(|| flow_return_to(flow)));
+    let state = flow.state.clone();
+    let continue_href = continue_href(cfg, &state, return_to.or(flow.return_to.as_deref()));
     render(&VerificationTemplate {
         chrome,
         form,
@@ -128,44 +138,6 @@ fn continue_href(
     }
     let href = crate::web::safe_return_to(cfg, return_to?);
     (href != "/").then(|| href.to_string())
-}
-
-/// Server-side submit of `method=code&email=…` to the flow's `ui.action`,
-/// skipping the manual "type your email" step. `Err` on any non-2xx so the
-/// caller can fall through to the regular template render.
-async fn submit_email_method(
-    state: &AppState,
-    flow: &serde_json::Value,
-    email: &str,
-    cookie: &str,
-) -> anyhow::Result<()> {
-    let action = flow
-        .pointer("/ui/action")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("verification flow missing ui.action"))?;
-    let csrf = flow
-        .pointer("/ui/nodes")
-        .and_then(|n| n.as_array())
-        .and_then(|nodes| {
-            nodes.iter().find_map(|node| {
-                if node.pointer("/attributes/name")?.as_str()? == "csrf_token" {
-                    node.pointer("/attributes/value")?
-                        .as_str()
-                        .map(str::to_string)
-                } else {
-                    None
-                }
-            })
-        })
-        .ok_or_else(|| anyhow::anyhow!("verification flow missing csrf_token node"))?;
-
-    let body = serde_json::json!({
-        "method": "code",
-        "email": email,
-        "csrf_token": csrf,
-    });
-
-    ory::kratos::submit_flow(&state.ory, action, &body, cookie).await
 }
 
 #[cfg(test)]

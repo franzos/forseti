@@ -9,6 +9,7 @@ use serde::Deserialize;
 
 use crate::audit::{self, AuditCtx, AuditEvent, action, target_kind};
 use crate::audit_metadata;
+use crate::backend::IdentityBackend;
 use crate::csrf::CsrfForm;
 use crate::extractors::{Csrf, RequireSession};
 use crate::orgs::{self, Org, Role};
@@ -156,7 +157,9 @@ async fn render_overview_info(
     let mut owner_emails: Vec<String> = if owner_ids.is_empty() {
         Vec::new()
     } else {
-        crate::ory::kratos::admin_list_identities_by_ids(&state.ory, owner_ids)
+        state
+            .identity
+            .admin_list_identities_by_ids(owner_ids)
             .await
             .unwrap_or_default()
             .into_iter()

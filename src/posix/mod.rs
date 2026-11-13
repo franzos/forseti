@@ -36,8 +36,8 @@ use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
+use crate::backend::{IdentityBackend, IdentityImpl};
 use crate::db::DbPool;
-use crate::ory::OryClients;
 
 /// One `?ids=` Kratos query per batch; kept modest so a single Kratos error
 /// only forces skipping a small slice rather than the whole sweep.
@@ -49,7 +49,7 @@ const RECONCILE_BATCH: usize = 100;
 /// A missing id is purged ONLY when the Kratos lookup for its batch succeeds
 /// and the id is absent: a "don't know" (Kratos outage) must never purge a
 /// live user's account. Returns the number of accounts removed.
-pub async fn reconcile_orphans(db: &DbPool, ory: &Arc<OryClients>) -> anyhow::Result<usize> {
+pub async fn reconcile_orphans(db: &DbPool, identity: &IdentityImpl) -> anyhow::Result<usize> {
     match db::lazy_prune_expired(db, &crate::db::now_rfc3339()).await {
         Ok(n) if n > 0 => tracing::info!(
             pruned = n,
@@ -81,7 +81,7 @@ pub async fn reconcile_orphans(db: &DbPool, ory: &Arc<OryClients>) -> anyhow::Re
 
     for batch in ids.chunks(RECONCILE_BATCH) {
         let batch_vec: Vec<String> = batch.to_vec();
-        let present = match crate::ory::kratos::admin_list_identities_by_ids(ory, batch_vec).await {
+        let present = match identity.admin_list_identities_by_ids(batch_vec).await {
             Ok(found) => found,
             Err(e) => {
                 // Kratos failure is "don't know", never purge.
@@ -126,7 +126,7 @@ pub async fn reconcile_orphans(db: &DbPool, ory: &Arc<OryClients>) -> anyhow::Re
 /// Hourly orphan-purge sweep. Mirrors `webhook::spawn_reconcile`.
 pub fn spawn_reconcile(
     db: DbPool,
-    ory: Arc<OryClients>,
+    identity: Arc<IdentityImpl>,
     shutdown: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -140,7 +140,7 @@ pub fn spawn_reconcile(
                     break;
                 }
                 _ = ticker.tick() => {
-                    if let Err(e) = reconcile_orphans(&db, &ory).await {
+                    if let Err(e) = reconcile_orphans(&db, &identity).await {
                         tracing::warn!(error = %e, "periodic posix reconcile failed");
                     }
                 }

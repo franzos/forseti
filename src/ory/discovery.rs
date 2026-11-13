@@ -1,49 +1,10 @@
 //! Hydra's OIDC discovery document (`/.well-known/openid-configuration`).
 
 use anyhow::Result;
-use serde::Deserialize;
 use serde_json::Value;
 
 use super::OryClients;
-
-/// The subset of OIDC discovery fields the admin UI surfaces.
-#[derive(Clone, Debug, Default, Deserialize)]
-pub struct OidcDiscovery {
-    #[serde(default)]
-    pub issuer: String,
-    #[serde(default)]
-    pub authorization_endpoint: String,
-    #[serde(default)]
-    pub token_endpoint: String,
-    #[serde(default)]
-    pub userinfo_endpoint: String,
-    #[serde(default)]
-    pub jwks_uri: String,
-    #[serde(default)]
-    pub end_session_endpoint: String,
-    #[serde(default)]
-    pub scopes_supported: Vec<String>,
-    #[serde(default)]
-    pub grant_types_supported: Vec<String>,
-    #[serde(default)]
-    pub response_types_supported: Vec<String>,
-    #[serde(default)]
-    pub token_endpoint_auth_methods_supported: Vec<String>,
-    #[serde(default)]
-    pub code_challenge_methods_supported: Vec<String>,
-    #[serde(default)]
-    pub id_token_signing_alg_values_supported: Vec<String>,
-    #[serde(default)]
-    pub subject_types_supported: Vec<String>,
-    #[serde(default)]
-    pub registration_endpoint: String,
-    #[serde(default)]
-    pub revocation_endpoint: String,
-    #[serde(default)]
-    pub backchannel_logout_supported: bool,
-    #[serde(default)]
-    pub frontchannel_logout_supported: bool,
-}
+use crate::backend::oauth::OidcDiscovery;
 
 /// Fetch Hydra's discovery doc, returning the typed projection alongside the raw
 /// JSON (the CIMD augmentation needs the full document, not just the admin-UI

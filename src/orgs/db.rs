@@ -1,12 +1,11 @@
 //! Diesel queries for the organizations / organization_members /
 //! organization_invites tables.
 
-use std::sync::Arc;
-
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use diesel::prelude::*;
 use serde::Serialize;
 
+use crate::backend::{IdentityBackend, IdentityImpl};
 use crate::db::{DbPool, lower};
 use crate::db_interact;
 use crate::schema::{
@@ -280,7 +279,7 @@ pub async fn list_members_paged(
 /// then an in-memory join.
 pub async fn list_member_profiles(
     db: &DbPool,
-    ory: &Arc<crate::ory::OryClients>,
+    identity: &IdentityImpl,
     org_id: &str,
 ) -> anyhow::Result<Vec<(OrgMember, String, String)>> {
     let members = list_members(db, org_id).await?;
@@ -288,7 +287,8 @@ pub async fn list_member_profiles(
         return Ok(Vec::new());
     }
     let ids: Vec<String> = members.iter().map(|m| m.identity_id.clone()).collect();
-    let identities = crate::ory::kratos::admin_list_identities_by_ids(ory, ids)
+    let identities = identity
+        .admin_list_identities_by_ids(ids)
         .await
         .unwrap_or_default();
     let by_id: std::collections::HashMap<&str, &serde_json::Value> = identities

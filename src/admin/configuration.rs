@@ -8,8 +8,9 @@
 use axum::{extract::State, response::Response};
 
 use crate::admin::{AdminSection, FORSETI_VERSION};
+use crate::backend::oauth::{JwkSummary, OidcDiscovery};
+use crate::backend::{IdentityBackend, OAuthBackend};
 use crate::extractors::RequireAdmin;
-use crate::ory::{self, discovery::OidcDiscovery, hydra::JwkSummary};
 use crate::page_chrome::PageChrome;
 use crate::render::render;
 use crate::state::AppState;
@@ -51,7 +52,7 @@ pub async fn show(State(state): State<AppState>, admin: RequireAdmin) -> Respons
         )
     };
 
-    let (signing_keys, jwks_ok) = match ory::hydra::signing_keys(&state.ory).await {
+    let (signing_keys, jwks_ok) = match state.oauth.signing_keys().await {
         Ok(keys) => (keys, true),
         Err(e) => {
             tracing::warn!(error = ?e, "hydra signing-keys fetch failed");
@@ -59,8 +60,7 @@ pub async fn show(State(state): State<AppState>, admin: RequireAdmin) -> Respons
         }
     };
 
-    let (identity_schemas, schemas_ok) = match ory::kratos::list_identity_schemas(&state.ory).await
-    {
+    let (identity_schemas, schemas_ok) = match state.identity.list_identity_schemas().await {
         Ok(ids) => (ids, true),
         Err(e) => {
             tracing::warn!(error = ?e, "kratos identity-schemas fetch failed");

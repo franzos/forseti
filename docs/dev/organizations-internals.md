@@ -335,7 +335,7 @@ The member directory is gated per-org, so a tenant can decide how much its membe
 2. else `target_hidden` → **hidden** (the opt-out trumps `all`/`same_group`).
 3. else by policy: `all` → visible; `admins_only` → hidden; `same_group` → visible **iff** `shares_team`.
 
-`viewer_is_admin` MUST already fold in the AAL2 check at the call site — both call sites compute it as `admin.is_admin(email) && session_satisfies_aal2(session)`. The async wrapper `member_visible_to_in_org()` resolves the policy (`org_by_id`), viewer-owner (`org_role`), target opt-out (`find_member`), and shared-team (`teams::shared_team`) inputs, then applies `visible()`; an unknown org fails closed to not-visible.
+`viewer_is_admin` MUST already fold in the AAL2 check at the call site — both call sites compute it as `admin.is_admin(email) && session.satisfies_aal2()`. The async wrapper `member_visible_to_in_org()` resolves the policy (`org_by_id`), viewer-owner (`org_role`), target opt-out (`find_member`), and shared-team (`teams::shared_team`) inputs, then applies `visible()`; an unknown org fails closed to not-visible.
 
 ### Surface 1 — the members page
 

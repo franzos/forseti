@@ -15,10 +15,11 @@ use uuid::Uuid;
 
 use crate::audit::{self, AuditCtx, AuditEvent, SafeMetadata, action, target_kind};
 use crate::audit_metadata;
+use crate::backend::identity::Identity;
+use crate::backend::{IdentityBackend, IdentityImpl, OAuthBackend, OAuthImpl};
 use crate::config::AppConfig;
 use crate::db::DbPool;
 use crate::oauth::op_sessions::{GrantRevocation, end_op_sessions_for_subject, forget_subject};
-use crate::ory::{self, OryClients};
 use crate::state::AppState;
 use crate::webhook::{self, SetIssuers, SigningKey, WebhookTarget};
 
@@ -26,7 +27,8 @@ use crate::webhook::{self, SetIssuers, SigningKey, WebhookTarget};
 /// and the prune can all supply it.
 pub struct DeleteEnv<'a> {
     pub db: &'a DbPool,
-    pub ory: &'a OryClients,
+    pub identity: &'a IdentityImpl,
+    pub oauth: &'a OAuthImpl,
     pub signing_key: &'a SigningKey,
     /// Envelope `iss` of the SET: Forseti's own URL.
     pub self_url: &'a str,
@@ -38,7 +40,8 @@ impl<'a> DeleteEnv<'a> {
     pub fn from_state(state: &'a AppState) -> Self {
         Self {
             db: &state.db,
-            ory: &state.ory,
+            identity: &state.identity,
+            oauth: &state.oauth,
             signing_key: &state.signing_key,
             self_url: &state.cfg.self_.url,
             issuer: state.cfg.hydra.issuer_or_public(),
@@ -232,10 +235,10 @@ pub(crate) struct NotifiedClient {
 }
 
 pub(crate) async fn notified_clients(
-    ory: &OryClients,
+    oauth: &OAuthImpl,
     user_id: &str,
 ) -> anyhow::Result<Vec<NotifiedClient>> {
-    let sessions = ory::hydra::list_consent_sessions_by_subject(ory, user_id).await?;
+    let sessions = oauth.list_consent_sessions_by_subject(user_id).await?;
     let mut seen: std::collections::HashSet<String> = Default::default();
     let mut out = Vec::new();
     for sess in sessions {
@@ -283,7 +286,7 @@ fn deletion_url_from_metadata(metadata: Option<&serde_json::Value>) -> Option<St
 /// these drive the email-matched deletes: an unverified trait may be someone
 /// else's address, whose invites and provenance must not go with this account.
 /// Recovery addresses carry no verified flag in Kratos and are left out.
-pub(crate) fn verified_emails(identity: &ory_client::models::Identity) -> Vec<String> {
+pub(crate) fn verified_emails(identity: &Identity) -> Vec<String> {
     let mut emails: Vec<String> = Vec::new();
     for addr in identity.verifiable_addresses.iter().flatten() {
         if !addr.verified {
@@ -298,8 +301,12 @@ pub(crate) fn verified_emails(identity: &ory_client::models::Identity) -> Vec<St
 }
 
 /// A missing identity yields an empty set.
-async fn identity_verified_emails(ory: &OryClients, id: &str) -> anyhow::Result<Vec<String>> {
-    Ok(ory::kratos::admin_get_identity_full_optional(ory, id)
+async fn identity_verified_emails(
+    identity: &IdentityImpl,
+    id: &str,
+) -> anyhow::Result<Vec<String>> {
+    Ok(identity
+        .admin_get_identity_full_optional(id)
         .await?
         .as_ref()
         .map(verified_emails)
@@ -341,7 +348,7 @@ pub async fn delete_identity(
     // Reads before any write: a Hydra outage here is a clean refusal, while
     // an empty target list after the delete would leave integrators with a
     // copy nobody told them to drop.
-    let targets: Vec<WebhookTarget> = notified_clients(env.ory, id)
+    let targets: Vec<WebhookTarget> = notified_clients(env.oauth, id)
         .await
         .map_err(|e| DeleteError::Collect(CollectStep::Consents, e))?
         .into_iter()
@@ -350,7 +357,7 @@ pub async fn delete_identity(
             url: c.url,
         })
         .collect();
-    let emails = identity_verified_emails(env.ory, id)
+    let emails = identity_verified_emails(env.identity, id)
         .await
         .map_err(|e| DeleteError::Collect(CollectStep::Identity, e))?;
 
@@ -369,9 +376,9 @@ pub async fn delete_identity(
     .await
     .map_err(DeleteError::Outbox)?;
 
-    end_op_sessions_for_subject(env.db, env.ory, id, None, GrantRevocation::Keep).await;
+    end_op_sessions_for_subject(env.db, env.oauth, id, None, GrantRevocation::Keep).await;
 
-    if let Err(e) = ory::kratos::admin_delete_identity(env.ory, id).await {
+    if let Err(e) = env.identity.admin_delete_identity(id).await {
         if let Err(e2) = webhook::abort_event(env.db, event_id).await {
             tracing::error!(error = %e2, event_id = %event_id, "outbox abort failed");
         }
@@ -583,18 +590,19 @@ mod tests {
 
     #[test]
     fn only_verified_addresses_drive_email_matches() {
-        use ory_client::models::verifiable_identity_address::ViaEnum;
-        use ory_client::models::{Identity, VerifiableIdentityAddress};
-        let addr = |value: &str, verified: bool| {
-            VerifiableIdentityAddress::new(
-                "completed".to_string(),
-                value.to_string(),
-                verified,
-                ViaEnum::Email,
-            )
+        use crate::backend::identity::VerifiableAddress;
+        let addr = |value: &str, verified: bool| VerifiableAddress {
+            status: "completed".to_string(),
+            value: value.to_string(),
+            verified,
+            via: "email".to_string(),
+            ..Default::default()
         };
-        let mut identity =
-            Identity::new("id".to_string(), "default".to_string(), String::new(), None);
+        let mut identity = Identity {
+            id: "id".to_string(),
+            schema_id: "default".to_string(),
+            ..Default::default()
+        };
         identity.traits = Some(serde_json::json!({ "email": "Victim@Example.com" }));
         identity.verifiable_addresses = Some(vec![
             addr("Victim@Example.com", false),

@@ -459,10 +459,7 @@ pub async fn delete_confirm(
              immediately, and the connection (IdP metadata included) is deleted from Jackson.",
             conn.display_name
         ),
-        action_url: format!(
-            "/admin/saml/{}/delete",
-            ory_client::apis::urlencode(&org_id)
-        ),
+        action_url: format!("/admin/saml/{}/delete", crate::web::urlencode(&org_id)),
         cancel_url: "/admin/saml".to_string(),
         submit_label: "Delete connection",
     })

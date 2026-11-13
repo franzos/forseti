@@ -11,11 +11,11 @@ use crate::admin::with_org;
 use crate::admin::{AdminSection, render_admin_error};
 use crate::audit::{self, AuditCtx, action, target_kind};
 use crate::audit_metadata;
+use crate::backend::OAuthBackend;
 use crate::csrf::CsrfForm;
 use crate::extractors::Csrf;
 use crate::flash::{self, SecretReveal, attach_set_cookie};
 use crate::oauth_client_metadata;
-use crate::ory;
 use crate::page_chrome::PageChrome;
 use crate::render::render;
 use crate::state::AppState;
@@ -41,7 +41,7 @@ struct ConnectionDetails {
 }
 
 impl ConnectionDetails {
-    fn from_discovery(d: crate::ory::discovery::OidcDiscovery) -> Self {
+    fn from_discovery(d: crate::backend::oauth::OidcDiscovery) -> Self {
         Self {
             discovery_url: if d.issuer.is_empty() {
                 String::new()
@@ -150,7 +150,7 @@ pub async fn show(
 ) -> Response {
     let RequireClientInScope { id, ctx, .. } = client_in_scope;
 
-    let client = match ory::hydra::get_client(&state.ory, &id).await {
+    let client = match state.oauth.get_client(&id).await {
         Ok(c) => c,
         Err(e) => {
             tracing::error!(error = ?e, id, "admin: get_client failed");
@@ -180,7 +180,7 @@ pub async fn show(
         None => None,
     };
 
-    let show_path = format!("/admin/clients/{}", ory_client::apis::urlencode(&id));
+    let show_path = format!("/admin/clients/{}", crate::web::urlencode(&id));
     let (flash_msg, clear_flash) = state.take_flash(&headers, &show_path);
 
     let has_logo = crate::client_logo::exists(&state.db, &id)
@@ -213,13 +213,13 @@ pub async fn show(
 // struct would only exist to dodge the lint.
 #[allow(clippy::too_many_arguments)]
 fn build_show_view(
-    client: ory_client::models::OAuth2Client,
+    client: crate::backend::oauth::OAuthClient,
     meta: Option<oauth_client_metadata::Row>,
     reveal: Option<SecretReveal>,
     scope_descriptions: &std::collections::HashMap<String, String>,
     chrome: PageChrome,
     flash_msg: String,
-    discovery: crate::ory::discovery::OidcDiscovery,
+    discovery: crate::backend::oauth::OidcDiscovery,
     discovery_ok: bool,
     has_logo: bool,
 ) -> ClientShowTemplate {
@@ -345,7 +345,7 @@ pub async fn update(
     }
 
     // Round-trip the current client so we don't blow away unrelated fields.
-    let existing = match ory::hydra::get_client(&state.ory, &id).await {
+    let existing = match state.oauth.get_client(&id).await {
         Ok(c) => c,
         Err(e) => {
             tracing::error!(error = ?e, id, "admin: get_client for update failed");
@@ -390,7 +390,7 @@ pub async fn update(
     // what actually got persisted (handles legacy edits where the form
     // didn't carry a `client_type` input).
     let client_type = read_client_type(&payload);
-    match ory::hydra::update_client(&state.ory, &id, payload).await {
+    match state.oauth.update_client(&id, payload).await {
         Ok(_) => {
             let _ = audit::log(
                 &state.db,
@@ -400,7 +400,7 @@ pub async fn update(
             )
             .await;
             Redirect::to(&with_org(
-                &format!("/admin/clients/{}", ory_client::apis::urlencode(&id)),
+                &format!("/admin/clients/{}", crate::web::urlencode(&id)),
                 &scope,
             ))
             .into_response()
@@ -419,7 +419,7 @@ pub async fn update(
 #[cfg(test)]
 mod connection_tests {
     use super::*;
-    use crate::ory::discovery::OidcDiscovery;
+    use crate::backend::oauth::OidcDiscovery;
 
     #[test]
     fn from_discovery_populates_endpoints_and_derives_discovery_url() {

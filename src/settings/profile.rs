@@ -3,6 +3,7 @@
 //! Forseti-owned extended profile (bio, website, pronouns, links) when
 //! `[profiles].enabled = true`.
 
+use crate::backend::IdentityBackend;
 use crate::csrf::CsrfForm;
 use askama::Template;
 use axum::extract::{Query, State};
@@ -323,8 +324,10 @@ pub(crate) async fn settings_language_save(
         return Redirect::to("/settings/profile").into_response();
     };
     let lang = tag.language.as_str().to_string();
-    if let Err(e) =
-        crate::ory::kratos::admin_set_identity_language(&state.ory, &sess.identity_id, &lang).await
+    if let Err(e) = state
+        .identity
+        .admin_set_identity_language(&sess.identity_id, &lang)
+        .await
     {
         tracing::error!(error = ?e, "settings_language_save: failed to persist language preference");
         return (

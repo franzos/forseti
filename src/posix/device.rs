@@ -19,7 +19,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::audit::{self, AuditCtx, AuditEvent, action};
 use crate::audit_metadata;
-use crate::ory::hydra;
+use crate::backend::oauth::{DeviceTokenOutcome, TokenSet};
+use crate::backend::{IdentityBackend, OAuthBackend};
 use crate::posix::db::{self, DeviceSession, device_status};
 use crate::posix::host_auth::RequirePosixHost;
 use crate::posix::scope;
@@ -190,7 +191,9 @@ async fn device_init(
         );
         return json_error(StatusCode::INTERNAL_SERVER_ERROR);
     };
-    let authz = match hydra::device_authorization(&state.ory, &cfg.pam_client_id, &secret, "openid")
+    let authz = match state
+        .oauth
+        .device_authorization(&cfg.pam_client_id, &secret, "openid")
         .await
     {
         Ok(a) => a,
@@ -306,13 +309,10 @@ async fn device_poll(
         );
         return json_error(StatusCode::INTERNAL_SERVER_ERROR);
     };
-    let outcome = match hydra::poll_device_token(
-        &state.ory,
-        &cfg.pam_client_id,
-        &secret,
-        &session.device_code,
-    )
-    .await
+    let outcome = match state
+        .oauth
+        .poll_device_token(&cfg.pam_client_id, &secret, &session.device_code)
+        .await
     {
         Ok(o) => o,
         Err(e) => {
@@ -322,26 +322,26 @@ async fn device_poll(
     };
 
     match outcome {
-        hydra::DeviceTokenOutcome::Pending => Json(DevicePollResponse::Pending {
+        DeviceTokenOutcome::Pending => Json(DevicePollResponse::Pending {
             interval: hydra_interval(false),
         })
         .into_response(),
         // On slow_down, hand the daemon a longer interval (R12) so it can't
         // push Forseti to breach Hydra's rate.
-        hydra::DeviceTokenOutcome::SlowDown => Json(DevicePollResponse::Pending {
+        DeviceTokenOutcome::SlowDown => Json(DevicePollResponse::Pending {
             interval: hydra_interval(true),
         })
         .into_response(),
-        hydra::DeviceTokenOutcome::Expired => {
+        DeviceTokenOutcome::Expired => {
             let _ = db::deny_device_session(&state.db, &session.device_code).await;
             Json(DevicePollResponse::Expired).into_response()
         }
-        hydra::DeviceTokenOutcome::Denied => {
+        DeviceTokenOutcome::Denied => {
             let _ = db::deny_device_session(&state.db, &session.device_code).await;
             audit_denied(&state, &actx, &host, &session, "user_denied").await;
             Json(DevicePollResponse::Denied { reason: "denied" }).into_response()
         }
-        hydra::DeviceTokenOutcome::Token(token) => {
+        DeviceTokenOutcome::Token(token) => {
             handle_token(&state, &actx, &host, &session, &token).await
         }
     }
@@ -355,7 +355,7 @@ async fn handle_token(
     actx: &AuditCtx,
     host: &RequirePosixHost,
     session: &DeviceSession,
-    token: &hydra::TokenSet,
+    token: &TokenSet,
 ) -> Response {
     let cfg = &state.cfg.posix;
 
@@ -369,14 +369,15 @@ async fn handle_token(
         .hydra_issuer
         .as_deref()
         .unwrap_or_else(|| state.cfg.hydra.issuer_or_public());
-    let claims = match hydra::verify_id_token(
-        &state.ory,
-        id_token,
-        issuer,
-        &cfg.pam_client_id,
-        cfg.id_token_iat_window_secs,
-    )
-    .await
+    let claims = match state
+        .oauth
+        .verify_id_token(
+            id_token,
+            issuer,
+            &cfg.pam_client_id,
+            cfg.id_token_iat_window_secs,
+        )
+        .await
     {
         Ok(c) => c,
         Err(e) => {
@@ -412,7 +413,7 @@ async fn handle_token(
     // so a days-old AAL2 session would clear the window. Only `force_mfa`
     // hosts pay the extra admin-API call; a lookup failure denies.
     let second_factor_at = if host.force_mfa {
-        match crate::ory::kratos::list_identity_sessions(&state.ory, &claims.sub).await {
+        match state.identity.list_identity_sessions(&claims.sub).await {
             Ok(sessions) => newest_second_factor_at(&sessions),
             Err(e) => {
                 tracing::warn!(error = ?e, "device_poll: session lookup for force_mfa failed");
@@ -533,14 +534,14 @@ struct BindingInputs<'a> {
 /// on that session. Picking a single session rather than scanning all of them
 /// means a stale session's old step-up can't vouch for a fresh one, and vice
 /// versa — the answer describes one coherent authentication.
-fn newest_second_factor_at(sessions: &[crate::ory::Session]) -> Option<i64> {
+fn newest_second_factor_at(sessions: &[crate::backend::identity::Session]) -> Option<i64> {
     let newest_aal2 = sessions
         .iter()
         .filter(|s| s.active == Some(true))
         .filter(|s| {
             matches!(
                 s.authenticator_assurance_level,
-                Some(crate::ory::AuthenticatorAssuranceLevel::Aal2)
+                Some(crate::backend::identity::Aal::Aal2)
             )
         })
         .max_by_key(|s| {
@@ -554,10 +555,8 @@ fn newest_second_factor_at(sessions: &[crate::ory::Session]) -> Option<i64> {
         .iter()
         .filter(|m| {
             m.method
-                .as_ref()
-                .and_then(|x| serde_json::to_value(x).ok())
-                .and_then(|v: serde_json::Value| v.as_str().map(str::to_string))
-                .is_some_and(|name| SECOND_FACTOR_AMR.contains(&name.as_str()))
+                .as_deref()
+                .is_some_and(|name| SECOND_FACTOR_AMR.contains(&name))
         })
         .filter_map(|m| {
             m.completed_at
@@ -652,24 +651,28 @@ mod tests {
         aal2: bool,
         authenticated_at: &str,
         methods: &[(&str, &str)],
-    ) -> crate::ory::Session {
-        let mut s = crate::ory::Session::new(id.to_string());
+    ) -> crate::backend::identity::Session {
+        let mut s = crate::backend::identity::Session {
+            id: id.to_string(),
+            ..Default::default()
+        };
         s.active = Some(active);
         s.authenticator_assurance_level = Some(if aal2 {
-            crate::ory::AuthenticatorAssuranceLevel::Aal2
+            crate::backend::identity::Aal::Aal2
         } else {
-            crate::ory::AuthenticatorAssuranceLevel::Aal1
+            crate::backend::identity::Aal::Aal1
         });
         s.authenticated_at = Some(authenticated_at.to_string());
         s.authentication_methods = Some(
             methods
                 .iter()
-                .map(|(method, completed_at)| {
-                    let mut m = crate::ory::SessionAuthenticationMethod::new();
-                    m.method = serde_json::from_value(serde_json::json!(method)).ok();
-                    m.completed_at = Some((*completed_at).to_string());
-                    m
-                })
+                .map(
+                    |(method, completed_at)| crate::backend::identity::AuthMethod {
+                        method: Some((*method).to_string()),
+                        completed_at: Some((*completed_at).to_string()),
+                        ..Default::default()
+                    },
+                )
                 .collect(),
         );
         s

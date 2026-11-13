@@ -4,6 +4,7 @@
 use axum::Router;
 use axum::routing::{get, post};
 
+use crate::backend::OAuthBackend;
 use crate::config::{AuthConfig, ProxyConfig};
 use crate::rate_limit;
 use crate::state::AppState;
@@ -116,7 +117,7 @@ fn registration_router(proxy_cfg: &ProxyConfig, auth_cfg: &AuthConfig) -> Router
 pub(crate) fn aal2_step_up_url(return_to: &str) -> String {
     format!(
         "/login?aal=aal2&return_to={}",
-        ory_client::apis::urlencode(return_to)
+        crate::web::urlencode(return_to)
     )
 }
 
@@ -129,9 +130,7 @@ pub(crate) async fn continuing_app_name(
     return_to: Option<&str>,
 ) -> Option<String> {
     let challenge = login_challenge_in(&state.cfg, return_to?)?;
-    let req = crate::ory::hydra::get_login_request(&state.ory, &challenge)
-        .await
-        .ok()?;
+    let req = state.oauth.get_login_request(&challenge).await.ok()?;
     let client = req.client;
     let row = crate::oauth_client_metadata::get(&state.db, client.client_id.as_deref()?)
         .await

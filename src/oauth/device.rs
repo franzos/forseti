@@ -10,11 +10,10 @@
 //! TODO: move to `private_key_jwt` (client publishes a JWKS, Forseti holds
 //! the private key) so there's no shared secret at rest.
 
+use crate::backend::oauth::OAuthClient;
+use crate::backend::{OAuthBackend, OAuthImpl};
 use crate::config::PosixConfig;
-use crate::ory::OryClients;
-use crate::ory::hydra;
 use anyhow::Result;
-use ory_client::models::OAuth2Client;
 
 const DEVICE_CODE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
 
@@ -42,8 +41,8 @@ pub fn is_confidential_auth_method(method: &str) -> bool {
 /// can't tell (Hydra still starting, client not provisioned yet), and `Err`
 /// only when Hydra positively reports a public client. A transient Hydra
 /// outage must not stop the portal booting.
-pub async fn pam_client_is_public(ory: &OryClients, posix: &PosixConfig) -> bool {
-    match hydra::get_client(ory, &posix.pam_client_id).await {
+pub async fn pam_client_is_public(oauth: &OAuthImpl, posix: &PosixConfig) -> bool {
+    match oauth.get_client(&posix.pam_client_id).await {
         Ok(c) => !is_confidential_auth_method(
             c.token_endpoint_auth_method.as_deref().unwrap_or_default(),
         ),
@@ -54,21 +53,22 @@ pub async fn pam_client_is_public(ory: &OryClients, posix: &PosixConfig) -> bool
 /// Build the `forseti-linux-pam` client model. `secret` is the plaintext
 /// Hydra hashes on store. Scope is `openid` only: the device path needs just
 /// `sub`/`acr`/`amr` from the id_token.
-fn pam_client_model(client_id: &str, secret: &str) -> OAuth2Client {
-    let mut c = OAuth2Client::new();
-    c.client_id = Some(client_id.to_string());
-    c.client_name = Some("Forseti Linux PAM (device auth)".to_string());
-    c.client_secret = Some(secret.to_string());
-    c.grant_types = Some(vec![DEVICE_CODE_GRANT.to_string()]);
-    // Hydra requires the `code` response type registered for the login/consent
-    // leg the device flow drives internally.
-    c.response_types = Some(vec!["code".to_string(), "id_token".to_string()]);
-    c.scope = Some("openid".to_string());
-    c.token_endpoint_auth_method = Some("client_secret_basic".to_string());
-    // Consent must not auto-skip; belt-and-suspenders alongside the
-    // client_id-keyed guard in consent.rs.
-    c.skip_consent = Some(false);
-    c
+fn pam_client_model(client_id: &str, secret: &str) -> OAuthClient {
+    OAuthClient {
+        client_id: Some(client_id.to_string()),
+        client_name: Some("Forseti Linux PAM (device auth)".to_string()),
+        client_secret: Some(secret.to_string()),
+        grant_types: Some(vec![DEVICE_CODE_GRANT.to_string()]),
+        // Hydra requires the `code` response type registered for the login/consent
+        // leg the device flow drives internally.
+        response_types: Some(vec!["code".to_string(), "id_token".to_string()]),
+        scope: Some("openid".to_string()),
+        token_endpoint_auth_method: Some("client_secret_basic".to_string()),
+        // Consent must not auto-skip; belt-and-suspenders alongside the
+        // client_id-keyed guard in consent.rs.
+        skip_consent: Some(false),
+        ..OAuthClient::default()
+    }
 }
 
 /// Outcome of [`ensure_pam_client`].
@@ -82,12 +82,12 @@ pub enum EnsureOutcome {
 /// Create the `forseti-linux-pam` client if absent. Idempotent and never
 /// overwrites an existing client (the operator may have rotated the secret or
 /// tuned the model). Not called at boot, only by the `posix-init-client` verb.
-pub async fn ensure_pam_client(ory: &OryClients, posix: &PosixConfig) -> Result<EnsureOutcome> {
+pub async fn ensure_pam_client(oauth: &OAuthImpl, posix: &PosixConfig) -> Result<EnsureOutcome> {
     let client_id = &posix.pam_client_id;
 
     // A successful GET means "exists"; an error means "probably absent, try
     // to create" (a colliding create errors, so we can't clobber).
-    if hydra::get_client(ory, client_id).await.is_ok() {
+    if oauth.get_client(client_id).await.is_ok() {
         return Ok(EnsureOutcome::AlreadyExists);
     }
 
@@ -97,7 +97,7 @@ pub async fn ensure_pam_client(ory: &OryClients, posix: &PosixConfig) -> Result<
     };
 
     let model = pam_client_model(client_id, &secret);
-    hydra::create_client(ory, model).await?;
+    oauth.create_client(model).await?;
 
     // Reveal only a minted secret; an operator-supplied one is already in
     // their config.

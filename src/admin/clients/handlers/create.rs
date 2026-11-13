@@ -11,11 +11,11 @@ use crate::admin::AdminSection;
 use crate::admin::with_org;
 use crate::audit::{self, AuditCtx, action, target_kind};
 use crate::audit_metadata;
+use crate::backend::OAuthBackend;
 use crate::csrf::CsrfForm;
 use crate::extractors::Csrf;
 use crate::flash::{self, SecretReveal};
 use crate::oauth_client_metadata;
-use crate::ory;
 use crate::page_chrome::PageChrome;
 use crate::render::render;
 use crate::state::AppState;
@@ -330,7 +330,7 @@ pub async fn create(
     if let Err(msg) = constrain_org_scoped_client(&state, &scope, &mut payload, None).await {
         return rerender(msg);
     }
-    match ory::hydra::create_client(&state.ory, payload).await {
+    match state.oauth.create_client(payload).await {
         Ok(mut new) => {
             let id = new.client_id.clone().unwrap_or_default();
             let template = AppTemplate::from_slug(&form.template);
@@ -347,7 +347,7 @@ pub async fn create(
                     audience.push(id.clone());
                 }
                 new.audience = Some(audience);
-                match ory::hydra::update_client(&state.ory, &id, new.clone()).await {
+                match state.oauth.update_client(&id, new.clone()).await {
                     Ok(_) => audience_set = true,
                     Err(e) => {
                         tracing::error!(
@@ -441,7 +441,7 @@ pub async fn create(
                     // recover the secret on the next click.
                     tracing::error!(error = ?e, id, "admin: client_created reveal store failed");
                     let target = with_org(
-                        &format!("/admin/clients/{}", ory_client::apis::urlencode(&id)),
+                        &format!("/admin/clients/{}", crate::web::urlencode(&id)),
                         &scope,
                     );
                     return state.flash_redirect(
@@ -453,8 +453,8 @@ pub async fn create(
             let url = with_org(
                 &format!(
                     "/admin/clients/{}?reveal={}",
-                    ory_client::apis::urlencode(&id),
-                    ory_client::apis::urlencode(&token),
+                    crate::web::urlencode(&id),
+                    crate::web::urlencode(&token),
                 ),
                 &scope,
             );

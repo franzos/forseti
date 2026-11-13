@@ -6,6 +6,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use std::collections::HashSet;
 
+use crate::backend::IdentityBackend;
 use crate::commercial::FeatureStatus;
 use crate::commercial::license::Feature;
 use crate::extractors::{Csrf, RequireSession};
@@ -89,8 +90,8 @@ pub(crate) async fn show_profile(
     let admin_aal2 = state
         .cfg
         .admin
-        .is_admin_actor(&sess.email, crate::ory::session_addresses(&sess.session))
-        && crate::ory::kratos::session_satisfies_aal2(&sess.session);
+        .is_admin_actor(&sess.email, sess.session.addresses())
+        && sess.session.satisfies_aal2();
 
     // Chips derive from the visible-to-viewer subset, never the raw
     // intersection, so a restrictive org membership doesn't leak.
@@ -184,7 +185,7 @@ pub(crate) async fn show_profile(
     };
     let show_hosts = linux_licensed && (is_self || admin_aal2);
 
-    let target = match crate::ory::kratos::admin_get_identity(&state.ory, &identity_id).await {
+    let target = match state.identity.admin_get_identity(&identity_id).await {
         Ok(id) => id,
         Err(_) => return (StatusCode::NOT_FOUND, "not found").into_response(),
     };
@@ -220,7 +221,7 @@ pub(crate) async fn show_profile(
         &viewer_memberships,
         &headers,
         sess.email.clone(),
-        crate::ory::session_addresses(&sess.session),
+        sess.session.addresses(),
         token,
         locale,
     );

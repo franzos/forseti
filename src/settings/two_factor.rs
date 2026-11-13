@@ -9,12 +9,10 @@ use axum::http::HeaderMap;
 use axum::response::Response;
 
 use crate::FlowQuery;
+use crate::backend::identity::Session;
 use crate::flow_view::{
-    InputView, MessageView, ScriptView, collect_default_hidden, collect_input_nodes,
-    collect_webauthn_scripts, flow_messages, form_target, group_has_node, lookup_codes,
-    session_email, totp_qr_and_secret, translate_inputs, translate_messages,
+    Flow, InputView, MessageView, ScriptView, translate_inputs, translate_messages,
 };
-use crate::ory;
 use crate::page_chrome::PageChrome;
 use crate::render::render;
 use crate::state::AppState;
@@ -98,17 +96,17 @@ fn render_2fa(
     memberships: &[crate::orgs::Membership],
     headers: &HeaderMap,
     csrf_token: &str,
-    session: &ory::Session,
-    flow: &serde_json::Value,
+    session: &Session,
+    flow: &Flow,
     referrer_banner: Option<crate::handoff::ReferrerBannerView>,
     locale: crate::locale::LanguageIdentifier,
 ) -> Response {
-    let (form_action, form_method) = form_target(flow);
-    let mut hidden_defaults = collect_default_hidden(flow);
-    let mut totp_nodes = collect_input_nodes(flow, "totp");
-    let mut lookup_nodes = collect_input_nodes(flow, "lookup_secret");
-    let mut webauthn_nodes = collect_input_nodes(flow, "webauthn");
-    let mut passkey_nodes = collect_input_nodes(flow, "passkey");
+    let group = |name: &str| -> Vec<InputView> { flow.inputs(name).cloned().collect() };
+    let mut hidden_defaults = flow.default_hidden();
+    let mut totp_nodes = group("totp");
+    let mut lookup_nodes = group("lookup_secret");
+    let mut webauthn_nodes = group("webauthn");
+    let mut passkey_nodes = group("passkey");
     translate_inputs(&mut hidden_defaults, &locale);
     translate_inputs(&mut totp_nodes, &locale);
     translate_inputs(&mut lookup_nodes, &locale);
@@ -125,42 +123,41 @@ fn render_2fa(
     );
     promote_primary(&mut webauthn_nodes, &["webauthn_register_trigger"]);
 
-    let (totp_qr, totp_secret) = totp_qr_and_secret(flow);
-    let totp_enrolled = group_has_node(flow, "totp", "totp_unlink");
+    let totp_enrolled = flow.has_node("totp", "totp_unlink");
     // `lookup_enrolled`: Kratos emits `lookup_secret_disable` when there's an
     // enrolment to tear down. `lookup_just_regenerated`: the one render where
     // Kratos emits `lookup_secret_reveal` plus the plaintext codes.
-    let lookup_enrolled = group_has_node(flow, "lookup_secret", "lookup_secret_disable");
-    let lookup_codes = lookup_codes(flow);
+    let lookup_enrolled = flow.has_node("lookup_secret", "lookup_secret_disable");
+    let lookup_codes = flow.lookup_codes.clone();
     let lookup_just_regenerated =
-        group_has_node(flow, "lookup_secret", "lookup_secret_reveal") && !lookup_codes.is_empty();
+        flow.has_node("lookup_secret", "lookup_secret_reveal") && !lookup_codes.is_empty();
     let webauthn_enabled = !webauthn_nodes.is_empty();
     // Enrolment (vs merely-enabled) is signalled by the per-credential remove
     // node Kratos emits for each registered authenticator.
-    let webauthn_enrolled = group_has_node(flow, "webauthn", "webauthn_remove")
-        || group_has_node(flow, "passkey", "passkey_remove");
+    let webauthn_enrolled =
+        flow.has_node("webauthn", "webauthn_remove") || flow.has_node("passkey", "passkey_remove");
     let needs_recovery_codes = (totp_enrolled || webauthn_enrolled) && !lookup_enrolled;
-    let webauthn_scripts = collect_webauthn_scripts(flow);
+    let webauthn_scripts = flow.webauthn_scripts();
 
-    let mut msgs = flow_messages(flow);
+    let mut msgs = flow.messages.clone();
     translate_messages(&mut msgs, &locale);
     render(&Settings2faTemplate {
         chrome: PageChrome::from_parts_themed(
             state,
             memberships,
             headers,
-            session_email(session),
-            crate::ory::session_addresses(session),
+            session.email(),
+            session.addresses(),
             csrf_token.to_string(),
             locale,
         ),
-        form_action,
-        form_method,
+        form_action: flow.form_action.clone(),
+        form_method: flow.form_method.clone(),
         flow_messages: msgs,
         hidden_defaults,
         totp_nodes,
-        totp_qr,
-        totp_secret,
+        totp_qr: flow.totp_qr.clone(),
+        totp_secret: flow.totp_secret.clone(),
         totp_enrolled,
         lookup_nodes,
         lookup_codes,

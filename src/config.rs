@@ -612,9 +612,9 @@ impl AdminConfig {
     pub fn is_admin_actor(
         &self,
         email: &str,
-        addrs: Option<&[crate::ory::VerifiableIdentityAddress]>,
+        addrs: Option<&[crate::backend::identity::VerifiableAddress]>,
     ) -> bool {
-        self.is_admin(email) && crate::ory::address_is_verified(addrs, email)
+        self.is_admin(email) && crate::backend::identity::address_is_verified(addrs, email)
     }
 }
 

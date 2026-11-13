@@ -5,12 +5,12 @@
 use askama::Template;
 use axum::{extract::State, http::HeaderMap, response::Response};
 
+use crate::backend::IdentityBackend;
+use crate::backend::identity::Session;
 use crate::config::AppEntry;
 use crate::cookies;
 use crate::extractors::RequireSession;
-use crate::flow_view::{is_new_account, session_needs_verification};
 use crate::format::{humanise_timestamp, humanise_user_agent};
-use crate::ory;
 use crate::page_chrome::PageChrome;
 use crate::page_chrome::{ReqLocale, ThemedChrome};
 use crate::render::render;
@@ -73,12 +73,12 @@ pub(crate) async fn root(
 
     render(&DashboardTemplate {
         chrome: themed.chrome,
-        needs_verification: session_needs_verification(&session),
+        needs_verification: session.needs_verification(),
         apps: state.cfg.apps.clone(),
         activity,
         health,
         domain_prompt,
-        new_account: is_new_account(&session, chrono::Utc::now()),
+        new_account: session.is_new_account(chrono::Utc::now()),
     })
 }
 
@@ -86,13 +86,13 @@ pub(crate) async fn root(
 /// Failures are non-fatal: log and return empty.
 async fn build_activity_feed(
     state: &AppState,
-    session: &ory::Session,
+    session: &Session,
     locale: &crate::locale::LanguageIdentifier,
 ) -> Vec<ActivityEvent> {
     let Some(identity_id) = session.identity.as_ref().map(|id| id.id.clone()) else {
         return Vec::new();
     };
-    let sessions = match ory::kratos::list_identity_sessions(&state.ory, &identity_id).await {
+    let sessions = match state.identity.list_identity_sessions(&identity_id).await {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(error = ?e, identity_id, "list_identity_sessions failed; activity feed empty");
@@ -136,22 +136,20 @@ async fn build_activity_feed(
 
 /// "Account health" tile from the session, admin identity (credentials), and
 /// the user's sessions. Best-effort: failures fold to `false` / `0`.
-async fn build_account_health(
-    state: &AppState,
-    session: &ory::Session,
-    cookie: &str,
-) -> AccountHealth {
-    let email_verified = !session_needs_verification(session);
+async fn build_account_health(state: &AppState, session: &Session, cookie: &str) -> AccountHealth {
+    let email_verified = !session.needs_verification();
 
     let identity_id = session.identity.as_ref().map(|id| id.id.clone());
 
     // Public sessions (user's cookie) plus the admin "full" identity, whose
     // credentials reveal 2FA factors and linked OIDC providers.
     let (sessions_res, identity_res) = tokio::join!(
-        ory::kratos::list_my_sessions(&state.ory, (!cookie.is_empty()).then_some(cookie)),
+        state
+            .identity
+            .list_my_sessions((!cookie.is_empty()).then_some(cookie)),
         async {
             match identity_id.as_deref() {
-                Some(id) => ory::kratos::admin_get_identity_full(&state.ory, id).await,
+                Some(id) => state.identity.admin_get_identity_full(id).await,
                 None => Err(anyhow::anyhow!("session has no identity id")),
             }
         }
@@ -196,7 +194,7 @@ async fn build_account_health(
 /// True when a second factor is enrolled. Kratos seeds `webauthn.identifiers`
 /// on every password identity (not enrolment), so test `config.credentials`.
 fn creds_indicate_second_factor(
-    creds: &std::collections::HashMap<String, ory_client::models::IdentityCredentials>,
+    creds: &std::collections::HashMap<String, crate::backend::identity::Credential>,
 ) -> bool {
     if creds.contains_key("totp") || creds.contains_key("lookup_secret") {
         return true;
@@ -215,7 +213,7 @@ fn creds_indicate_second_factor(
 /// A device second factor (TOTP/WebAuthn) with no `lookup_secret` is the
 /// self-lockout trap; `lookup_secret` present clears it, no factor clears it.
 fn two_factor_without_recovery_codes(
-    creds: &std::collections::HashMap<String, ory_client::models::IdentityCredentials>,
+    creds: &std::collections::HashMap<String, crate::backend::identity::Credential>,
 ) -> bool {
     creds_indicate_second_factor(creds) && !creds.contains_key("lookup_secret")
 }
@@ -227,30 +225,32 @@ mod tests {
     //! user's email on every password identity, so an `identifiers.is_empty()`
     //! check flips the badge on for users who never enrolled.
     use super::{creds_indicate_second_factor, two_factor_without_recovery_codes};
-    use ory_client::models::IdentityCredentials;
+    use crate::backend::identity::Credential;
     use std::collections::HashMap;
 
-    fn empty_cred() -> IdentityCredentials {
-        IdentityCredentials::new()
+    fn empty_cred() -> Credential {
+        Credential::default()
     }
 
     /// Pre-stub: `identifiers` seeded but `config` carries no `credentials`
     /// array, so 2FA is off.
-    fn webauthn_pre_stub() -> IdentityCredentials {
-        let mut c = IdentityCredentials::new();
-        c.identifiers = Some(vec!["user@example.com".to_string()]);
-        c.config = Some(serde_json::json!({ "user_handle": "abc=" }));
-        c
+    fn webauthn_pre_stub() -> Credential {
+        Credential {
+            identifiers: Some(vec!["user@example.com".to_string()]),
+            config: Some(serde_json::json!({ "user_handle": "abc=" })),
+            ..Default::default()
+        }
     }
 
     /// Attested credential: non-empty `config.credentials` array.
-    fn webauthn_enrolled() -> IdentityCredentials {
-        let mut c = IdentityCredentials::new();
-        c.config = Some(serde_json::json!({
-            "user_handle": "abc=",
-            "credentials": [{ "id": "..." }],
-        }));
-        c
+    fn webauthn_enrolled() -> Credential {
+        Credential {
+            config: Some(serde_json::json!({
+                "user_handle": "abc=",
+                "credentials": [{ "id": "..." }],
+            })),
+            ..Default::default()
+        }
     }
 
     #[test]

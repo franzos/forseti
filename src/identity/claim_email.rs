@@ -21,17 +21,17 @@ use axum::Router;
 use axum::extract::{Query, State};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::get;
-use ory_client::models::Identity;
 use rand::RngExt;
 use serde::Deserialize;
 
 use super::delete::{DeleteActor, DeleteReason, DeleteRequest, delete_identity_detached};
 use crate::audit_metadata;
+use crate::backend::IdentityBackend;
+use crate::backend::identity::Identity;
 use crate::config::{ClaimEmailConfig, ProxyConfig};
 use crate::csrf::CsrfForm;
 use crate::extractors::Csrf;
 use crate::flash::{self, SecretReveal};
-use crate::ory;
 use crate::page_chrome::PageChrome;
 use crate::rate_limit;
 use crate::render::render;
@@ -114,7 +114,9 @@ async fn claim_post(
     // SMTP delivery is fire-and-forget for the same reason: SMTP latency
     // is the loudest timing signal between branches. The legitimate user
     // gets the email asynchronously; the attacker can't time the delivery.
-    let identities = ory::kratos::list_identities(&state.ory, 50, None, Some(&email))
+    let identities = state
+        .identity
+        .list_identities(50, None, Some(&email))
         .await
         .unwrap_or_default();
     let unverified = identities.iter().find(|i| {
@@ -352,7 +354,10 @@ async fn confirm_post(
         return render_claim_confirm_error(&state, &csrf.0, locale.clone(), &form.token, &msg);
     }
     // After the code match (no lookup oracle), before the take (outage keeps the code).
-    let lookup = ory::kratos::admin_get_identity_optional(&state.ory, &target_identity).await;
+    let lookup = state
+        .identity
+        .admin_get_identity_optional(&target_identity)
+        .await;
     let lookup_error = lookup.as_ref().err().map(|e| format!("{e:#}"));
     let target_email = match claim_gate(lookup, |e| state.cfg.admin.is_admin(e)) {
         ClaimGate::Unavailable => {
@@ -434,7 +439,7 @@ async fn confirm_post(
         .build();
     let redirect_url = format!(
         "/registration?prefill_email={}",
-        ory_client::apis::urlencode(target_email)
+        crate::web::urlencode(target_email)
     );
     let mut resp = Redirect::to(&redirect_url).into_response();
     if let Ok(v) = axum::http::HeaderValue::from_str(&cookie.to_string()) {
@@ -537,19 +542,22 @@ fn claim_recipient_quota(state: &AppState) -> &'static crate::rate_limit::KeyedQ
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ory_client::models::VerifiableIdentityAddress;
-    use ory_client::models::verifiable_identity_address::ViaEnum;
+    use crate::backend::identity::VerifiableAddress;
 
     fn identity(email: &str, verified: bool) -> Identity {
-        let mut id = Identity::new("id".to_string(), "default".to_string(), String::new(), None);
-        id.traits = Some(serde_json::json!({ "email": email }));
-        id.verifiable_addresses = Some(vec![VerifiableIdentityAddress::new(
-            "completed".to_string(),
-            email.to_string(),
-            verified,
-            ViaEnum::Email,
-        )]);
-        id
+        Identity {
+            id: "id".to_string(),
+            schema_id: "default".to_string(),
+            traits: Some(serde_json::json!({ "email": email })),
+            verifiable_addresses: Some(vec![VerifiableAddress {
+                status: "completed".to_string(),
+                value: email.to_string(),
+                verified,
+                via: "email".to_string(),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        }
     }
 
     fn admin(e: &str) -> bool {

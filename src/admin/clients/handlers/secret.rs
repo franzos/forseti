@@ -8,10 +8,10 @@ use axum::{
 use crate::admin::with_org;
 use crate::admin::{AdminSection, ConfirmForm, ConfirmTemplate, render_admin_error};
 use crate::audit::{self, AuditCtx, action, target_kind};
+use crate::backend::OAuthBackend;
 use crate::csrf::CsrfForm;
 use crate::extractors::Csrf;
 use crate::flash::{self, SecretReveal};
-use crate::ory;
 use crate::render::render;
 use crate::state::AppState;
 
@@ -25,8 +25,8 @@ pub async fn rotate_confirm(client_in_scope: RequireClientInScope, csrf: Csrf) -
         admin_active: AdminSection::Clients,
         title: format!("Rotate client secret for {id}?"),
         body: "The current secret will stop working immediately. Any deployments using it will need the new secret.".to_string(),
-        action_url: format!("/admin/clients/{}/rotate-secret", ory_client::apis::urlencode(&id)),
-        cancel_url: format!("/admin/clients/{}", ory_client::apis::urlencode(&id)),
+        action_url: format!("/admin/clients/{}/rotate-secret", crate::web::urlencode(&id)),
+        cancel_url: format!("/admin/clients/{}", crate::web::urlencode(&id)),
         submit_label: "Rotate secret",
     })
 }
@@ -39,12 +39,12 @@ pub async fn rotate(
 ) -> Response {
     let RequireClientInScope { id, ctx, scope } = client_in_scope;
     if let Some(r) = form.bounce_unless_confirmed(&with_org(
-        &format!("/admin/clients/{}", ory_client::apis::urlencode(&id)),
+        &format!("/admin/clients/{}", crate::web::urlencode(&id)),
         &scope,
     )) {
         return r;
     }
-    match ory::hydra::rotate_client_secret(&state.ory, &id).await {
+    match state.oauth.rotate_client_secret(&id).await {
         Ok(updated) => {
             let _ = audit::log(
                 &state.db,
@@ -77,8 +77,8 @@ pub async fn rotate(
             Redirect::to(&with_org(
                 &format!(
                     "/admin/clients/{}?reveal={}",
-                    ory_client::apis::urlencode(&id),
-                    ory_client::apis::urlencode(&token),
+                    crate::web::urlencode(&id),
+                    crate::web::urlencode(&token),
                 ),
                 &scope,
             ))

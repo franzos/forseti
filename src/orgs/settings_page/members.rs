@@ -96,10 +96,11 @@ pub(super) async fn members(
         return r;
     }
     let role = orgs::org_role(&state.db, &ctx.identity_id, &target.org.id).await;
-    let admin_aal2 = state.cfg.admin.is_admin_actor(
-        &ctx.user_email,
-        crate::ory::session_addresses(&sess.session),
-    ) && crate::ory::kratos::session_satisfies_aal2(&sess.session);
+    let admin_aal2 = state
+        .cfg
+        .admin
+        .is_admin_actor(&ctx.user_email, sess.session.addresses())
+        && sess.session.satisfies_aal2();
     if role.is_none() && !admin_aal2 {
         return (StatusCode::NOT_FOUND, "unknown organization").into_response();
     }
@@ -140,7 +141,7 @@ async fn render_members(
         } else {
             std::collections::HashSet::new()
         };
-    let triples = orgs::list_member_profiles(&state.db, &state.ory, org_id)
+    let triples = orgs::list_member_profiles(&state.db, &state.identity, org_id)
         .await
         .unwrap_or_default();
     let profiles_enabled = state.cfg.profiles.enabled;

@@ -1,4 +1,4 @@
-//! Shared projection of a Kratos [`ory::Session`] into the row shape
+//! Shared projection of a Kratos [`Session`] into the row shape
 //! consumed by `templates/partials/session_meta.html`.
 //!
 //! Used by `/settings/sessions` (the user-facing list) and the
@@ -7,8 +7,8 @@
 //! projection function ensures the two pages can't drift on
 //! humanised-field rules.
 
+use crate::backend::identity::Session;
 use crate::format::{humanise_timestamp, humanise_user_agent};
-use crate::ory;
 
 /// Per-session view-model. `is_current` is `true` only for the row whose
 /// cookie made the request — the partial reads it through a `show_current`
@@ -36,7 +36,7 @@ impl SessionView {
     /// cookie (always `false` from admin views).
     pub(crate) fn from_kratos(
         locale: &crate::locale::LanguageIdentifier,
-        s: &ory::Session,
+        s: &Session,
         is_current: bool,
     ) -> Self {
         let device = s

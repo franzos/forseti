@@ -302,10 +302,11 @@ pub(super) async fn require_org_read_access(
     {
         return Ok(());
     }
-    let admin_aal2 = state.cfg.admin.is_admin_actor(
-        &ctx.user_email,
-        crate::ory::session_addresses(&sess.session),
-    ) && crate::ory::kratos::session_satisfies_aal2(&sess.session);
+    let admin_aal2 = state
+        .cfg
+        .admin
+        .is_admin_actor(&ctx.user_email, sess.session.addresses())
+        && sess.session.satisfies_aal2();
     if admin_aal2 {
         return Ok(());
     }

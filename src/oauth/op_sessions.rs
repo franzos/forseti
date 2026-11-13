@@ -7,9 +7,9 @@ use diesel::prelude::*;
 
 use serde::Serialize;
 
+use crate::backend::{IdentityBackend, IdentityImpl, OAuthBackend, OAuthImpl};
 use crate::db::DbPool;
 use crate::db_interact;
-use crate::ory::{self, OryClients};
 use crate::schema::{hydra_consent_grants, hydra_login_sessions};
 
 /// Rows outlive Hydra's remembered login by this much before pruning.
@@ -237,7 +237,7 @@ async fn forget(db: &DbPool, sid: &str) -> anyhow::Result<()> {
 /// The consent request ids granted under `sid`: the recorded ones, else the
 /// consents Hydra lists for the login session. Empty when neither lookup
 /// works.
-async fn grant_ids_for_sid(db: &DbPool, ory: &OryClients, sid: &str) -> Vec<String> {
+async fn grant_ids_for_sid(db: &DbPool, oauth: &OAuthImpl, sid: &str) -> Vec<String> {
     match consent_grants_for_sid(db, sid).await {
         Ok(recorded) if !recorded.is_empty() => return recorded,
         Ok(_) => {}
@@ -254,7 +254,10 @@ async fn grant_ids_for_sid(db: &DbPool, ory: &OryClients, sid: &str) -> Vec<Stri
             return Vec::new();
         }
     };
-    match ory::hydra::list_consent_sessions_by_login_session(ory, &subject, sid).await {
+    match oauth
+        .list_consent_sessions_by_login_session(&subject, sid)
+        .await
+    {
         Ok(sessions) => sessions
             .into_iter()
             .filter_map(|s| s.consent_request_id)
@@ -274,18 +277,19 @@ async fn grant_ids_for_sid(db: &DbPool, ory: &OryClients, sid: &str) -> Vec<Stri
 /// stays so a later logout can retry it.
 pub(crate) async fn end_sid(
     db: &DbPool,
-    ory: &OryClients,
+    oauth: &OAuthImpl,
     sid: &str,
     grants: GrantRevocation,
 ) -> anyhow::Result<()> {
     let grant_ids = match grants {
-        GrantRevocation::Revoke => grant_ids_for_sid(db, ory, sid).await,
+        GrantRevocation::Revoke => grant_ids_for_sid(db, oauth, sid).await,
         GrantRevocation::Keep => Vec::new(),
     };
-    ory::hydra::revoke_login_session_by_sid(ory, sid).await?;
+    oauth.revoke_login_session_by_sid(sid).await?;
     for consent_request_id in grant_ids {
-        if let Err(e) =
-            ory::hydra::revoke_consent_sessions_by_request_id(ory, &consent_request_id).await
+        if let Err(e) = oauth
+            .revoke_consent_sessions_by_request_id(&consent_request_id)
+            .await
         {
             tracing::warn!(error = %e, "hydra consent revoke by request id failed");
         }
@@ -296,9 +300,9 @@ pub(crate) async fn end_sid(
     Ok(())
 }
 
-async fn revoke_sids(db: &DbPool, ory: &OryClients, sids: Vec<String>, grants: GrantRevocation) {
+async fn revoke_sids(db: &DbPool, oauth: &OAuthImpl, sids: Vec<String>, grants: GrantRevocation) {
     for sid in sids {
-        if let Err(e) = end_sid(db, ory, &sid, grants).await {
+        if let Err(e) = end_sid(db, oauth, &sid, grants).await {
             tracing::warn!(error = %e, "hydra login-session revoke by sid failed");
         }
     }
@@ -309,13 +313,13 @@ async fn revoke_sids(db: &DbPool, ory: &OryClients, sids: Vec<String>, grants: G
 /// `grants` says otherwise.
 pub(crate) async fn end_op_sessions_for_browser(
     db: &DbPool,
-    ory: &OryClients,
+    oauth: &OAuthImpl,
     subject: &str,
     kratos_session_id: &str,
     grants: GrantRevocation,
 ) {
     match sids_for_browser(db, subject, kratos_session_id).await {
-        Ok(sids) => revoke_sids(db, ory, sids, grants).await,
+        Ok(sids) => revoke_sids(db, oauth, sids, grants).await,
         Err(e) => tracing::warn!(error = %e, "hydra login session lookup failed"),
     }
 }
@@ -323,7 +327,12 @@ pub(crate) async fn end_op_sessions_for_browser(
 /// End the subject's `sid`s whose recorded Kratos session is no longer active,
 /// such as one a browser rotated away from. Grants stay, as on logout. A
 /// failed Kratos lookup skips the sweep.
-pub(crate) async fn sweep_dead_browser_sessions(db: &DbPool, ory: &OryClients, subject: &str) {
+pub(crate) async fn sweep_dead_browser_sessions(
+    db: &DbPool,
+    identity: &IdentityImpl,
+    oauth: &OAuthImpl,
+    subject: &str,
+) {
     let recorded = match sids_with_kratos_session_for_subject(db, subject).await {
         Ok(r) if !r.is_empty() => r,
         Ok(_) => return,
@@ -332,7 +341,7 @@ pub(crate) async fn sweep_dead_browser_sessions(db: &DbPool, ory: &OryClients, s
             return;
         }
     };
-    let active = match ory::kratos::active_session_ids(ory, subject).await {
+    let active = match identity.active_session_ids(subject).await {
         Ok(a) => a,
         Err(e) => {
             tracing::warn!(error = %e, "kratos session lookup failed; skipping the sid sweep");
@@ -344,7 +353,7 @@ pub(crate) async fn sweep_dead_browser_sessions(db: &DbPool, ory: &OryClients, s
         .filter(|(_, ksid)| !active.contains(ksid))
         .map(|(sid, _)| sid)
         .collect();
-    revoke_sids(db, ory, dead, GrantRevocation::Keep).await;
+    revoke_sids(db, oauth, dead, GrantRevocation::Keep).await;
 }
 
 /// End every app session of a subject, optionally sparing one browser's
@@ -353,22 +362,22 @@ pub(crate) async fn sweep_dead_browser_sessions(db: &DbPool, ory: &OryClients, s
 /// back-channel logout but kill the grants.
 pub(crate) async fn end_op_sessions_for_subject(
     db: &DbPool,
-    ory: &OryClients,
+    oauth: &OAuthImpl,
     subject: &str,
     except_kratos_session: Option<&str>,
     grants: GrantRevocation,
 ) {
     match sids_for_subject(db, subject, except_kratos_session).await {
-        Ok(sids) => revoke_sids(db, ory, sids, grants).await,
+        Ok(sids) => revoke_sids(db, oauth, sids, grants).await,
         Err(e) => tracing::warn!(error = %e, "hydra login session lookup failed"),
     }
     if except_kratos_session.is_some() {
         return;
     }
-    if let Err(e) = ory::hydra::revoke_login_sessions_for_subject(ory, subject).await {
+    if let Err(e) = oauth.revoke_login_sessions_for_subject(subject).await {
         tracing::warn!(error = %e, "hydra login-session revoke failed");
     }
-    if let Err(e) = ory::hydra::revoke_consent_sessions_for_subject(ory, subject).await {
+    if let Err(e) = oauth.revoke_consent_sessions_for_subject(subject).await {
         tracing::warn!(error = %e, "hydra consent-session revoke failed");
     }
 }

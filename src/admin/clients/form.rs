@@ -7,7 +7,7 @@
 
 use serde::Deserialize;
 
-use crate::ory;
+use crate::backend::oauth::OAuthClient;
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct ClientForm {
@@ -83,10 +83,7 @@ impl ClientForm {
         )
     }
 
-    pub(super) fn to_oauth2_client(
-        &self,
-        existing: Option<ory::OAuth2Client>,
-    ) -> ory::OAuth2Client {
+    pub(super) fn to_oauth2_client(&self, existing: Option<OAuthClient>) -> OAuthClient {
         let editing = existing.is_some();
         let mut c = existing.unwrap_or_default();
         self.merge_form_into_client(&mut c, editing);
@@ -101,7 +98,7 @@ impl ClientForm {
     /// show page after editing only the name would wipe out grant_types,
     /// scope, redirect_uris, etc. Create-time still accepts empty fields
     /// (they round-trip to Hydra as-is).
-    fn merge_form_into_client(&self, c: &mut ory::OAuth2Client, editing: bool) {
+    fn merge_form_into_client(&self, c: &mut OAuthClient, editing: bool) {
         let trim_list = |s: &str| -> Vec<String> {
             s.split(|c: char| c == ',' || c.is_whitespace())
                 .map(str::trim)
@@ -179,7 +176,7 @@ impl ClientForm {
     /// Merge Forseti-owned fields into `metadata.forseti.*`, preserving
     /// anything else the operator (or future Forseti feature) has stashed
     /// in metadata.
-    fn merge_forseti_metadata(&self, c: &mut ory::OAuth2Client) {
+    fn merge_forseti_metadata(&self, c: &mut OAuthClient) {
         let url_input = self.account_deletion_url.trim();
         let require_pkce_input = self.require_pkce_flag();
         let client_type_input = self.client_type.trim();

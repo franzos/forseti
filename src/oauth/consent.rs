@@ -10,12 +10,13 @@ use serde::Deserialize;
 
 use crate::audit::{self, AuditCtx, AuditEvent, action, severity, target_kind};
 use crate::audit_metadata;
+use crate::backend::identity::{Identity, WhoamiOutcome};
+use crate::backend::{IdentityBackend, OAuthBackend};
 use crate::csrf::CsrfForm;
 use crate::extractors::{Csrf, OptionalSession};
 use crate::locale::LanguageIdentifier;
 use crate::oauth::continue_nav;
 use crate::oauth_client_metadata;
-use crate::ory;
 use crate::page_chrome::PageChrome;
 use crate::render::render;
 use crate::state::AppState;
@@ -115,7 +116,7 @@ pub(crate) async fn oauth_consent(
     actx: AuditCtx,
 ) -> Response {
     let challenge = query.consent_challenge;
-    let req = match ory::hydra::get_consent_request(&state.ory, &challenge).await {
+    let req = match state.oauth.get_consent_request(&challenge).await {
         Ok(r) => r,
         Err(e) => {
             tracing::error!(error = ?e, "hydra get_consent_request failed");
@@ -328,7 +329,7 @@ pub(crate) async fn oauth_consent(
 
     // Subject email for the "Signed in as ..." line, via the admin API; the
     // session was checked against `subject` above.
-    let subject_identity = match ory::kratos::admin_get_identity(&state.ory, &subject).await {
+    let subject_identity = match state.identity.admin_get_identity(&subject).await {
         Ok(id) => Some(id),
         Err(e) => {
             tracing::warn!(error = ?e, subject, "failed to fetch identity for consent display");
@@ -388,7 +389,7 @@ pub(crate) async fn oauth_consent(
         PageChrome::from_parts(
             &state,
             subject_email.clone(),
-            subject_identity.as_ref().and_then(ory::identity_addresses),
+            subject_identity.as_ref().and_then(Identity::addresses),
             csrf.0,
             locale,
         ),
@@ -484,7 +485,11 @@ pub(crate) async fn oauth_consent_submit(
 
     // The browser's session must own the challenge before any decision on it,
     // deny included.
-    let req = match ory::hydra::get_consent_request(&state.ory, &form.consent_challenge).await {
+    let req = match state
+        .oauth
+        .get_consent_request(&form.consent_challenge)
+        .await
+    {
         Ok(r) => r,
         Err(e) => {
             tracing::error!(error = ?e, "hydra get_consent_request failed during submit");
@@ -520,13 +525,14 @@ pub(crate) async fn oauth_consent_submit(
             .and_then(|c| c.client_id.clone())
             .unwrap_or_default();
         let actor_email = lookup_identity_email(&state, &subject).await;
-        match ory::hydra::reject_consent_request(
-            &state.ory,
-            &form.consent_challenge,
-            "access_denied",
-            "The resource owner denied the request.",
-        )
-        .await
+        match state
+            .oauth
+            .reject_consent_request(
+                &form.consent_challenge,
+                "access_denied",
+                "The resource owner denied the request.",
+            )
+            .await
         {
             Ok(redirect) => {
                 let mut ev = AuditEvent::new(action::OAUTH_CONSENT_DENIED).with_ctx(&actx);
@@ -713,7 +719,11 @@ async fn reject_to_client(
     description: &str,
     locale: &LanguageIdentifier,
 ) -> Response {
-    match ory::hydra::reject_consent_request(&state.ory, challenge, error, description).await {
+    match state
+        .oauth
+        .reject_consent_request(challenge, error, description)
+        .await
+    {
         Ok(redirect) => continue_nav::continue_to(&redirect.redirect_to, locale),
         Err(e) => {
             tracing::error!(error = ?e, "hydra reject_consent_request failed");
@@ -784,7 +794,7 @@ async fn switch_account(
     challenge: &str,
     login_hint: Option<&str>,
 ) -> Response {
-    let req = match ory::hydra::get_consent_request(&state.ory, challenge).await {
+    let req = match state.oauth.get_consent_request(challenge).await {
         Ok(r) => r,
         Err(e) => {
             tracing::error!(error = ?e, "hydra get_consent_request failed during account switch");
@@ -800,17 +810,17 @@ async fn switch_account(
     let request_url = req.request_url.clone().unwrap_or_default();
 
     let cookie = crate::cookies::cookie_header(headers);
-    let kratos_session_id = match ory::kratos::whoami(&state.ory, Some(&cookie)).await {
-        Ok(ory::kratos::WhoamiOutcome::Ok(s)) => Some(s.id.clone()),
+    let kratos_session_id = match state.identity.whoami(Some(&cookie)).await {
+        Ok(WhoamiOutcome::Ok(s)) => Some(s.id.clone()),
         _ => None,
     };
-    ory::kratos::tear_down_session(&state.ory, &cookie).await;
+    state.identity.tear_down_session(&cookie).await;
     if !subject.is_empty()
         && let Some(ksid) = &kratos_session_id
     {
         super::op_sessions::end_op_sessions_for_browser(
             &state.db,
-            &state.ory,
+            &state.oauth,
             &subject,
             ksid,
             super::op_sessions::GrantRevocation::Keep,
@@ -1046,7 +1056,7 @@ impl ClientAudience {
 /// Operators of out-of-band clients register the audience at
 /// `/admin/resources` instead.
 async fn read_client_audience(state: &AppState, client_id: &str) -> ClientAudience {
-    let on_record = match ory::hydra::get_client(&state.ory, client_id).await {
+    let on_record = match state.oauth.get_client(client_id).await {
         Ok(c) => c.audience.unwrap_or_default(),
         Err(e) => {
             tracing::warn!(
@@ -1117,7 +1127,7 @@ async fn lookup_identity_email(state: &AppState, subject: &str) -> String {
     if subject.is_empty() {
         return String::new();
     }
-    match ory::kratos::admin_get_identity(&state.ory, subject).await {
+    match state.identity.admin_get_identity(subject).await {
         Ok(id) => id
             .traits
             .and_then(|t| t.get("email").and_then(|v| v.as_str()).map(str::to_string))
@@ -1325,13 +1335,10 @@ async fn finalize_consent(
     }
     if !client_id.is_empty()
         && !healable.is_empty()
-        && let Err(e) = ory::hydra::add_client_audiences(
-            &state.ory,
-            client_id,
-            &client_audience.on_record,
-            &healable,
-        )
-        .await
+        && let Err(e) = state
+            .oauth
+            .add_client_audiences(client_id, &client_audience.on_record, &healable)
+            .await
     {
         tracing::error!(
             error = ?e,
@@ -1344,7 +1351,7 @@ async fn finalize_consent(
     let needs_org_claims = grant_scope
         .iter()
         .any(|s| s == "org" || s == "orgs" || s == "groups");
-    let identity_fut = ory::kratos::admin_get_identity(&state.ory, subject);
+    let identity_fut = state.identity.admin_get_identity(subject);
     let scope_org = claim_org_scope(state, client_id, needs_org_claims).await;
     let (identity_res, memberships) = if needs_org_claims {
         // A scoped client filters the full set: capping first could drop the
@@ -1489,16 +1496,17 @@ async fn finalize_consent(
     let claim_keys = access_token_claim_keys(state, &grant_audience).await;
     let access_token_session = build_access_token_claims(identity.as_ref(), &claim_keys);
 
-    match ory::hydra::accept_consent_request(
-        &state.ory,
-        challenge,
-        grant_scope.clone(),
-        grant_audience,
-        remember,
-        id_token_session,
-        access_token_session,
-    )
-    .await
+    match state
+        .oauth
+        .accept_consent_request(
+            challenge,
+            grant_scope.clone(),
+            grant_audience,
+            remember,
+            id_token_session,
+            access_token_session,
+        )
+        .await
     {
         Ok(redirect) => {
             match (login_session_id, consent_request_id) {
@@ -1634,12 +1642,11 @@ async fn access_token_claim_keys(state: &AppState, granted: &[String]) -> Vec<St
 /// The given keys present in the identity's `metadata_admin`, which only
 /// admins can write. Absent or null keys are left out.
 fn build_access_token_claims(
-    identity: Option<&ory::Identity>,
+    identity: Option<&Identity>,
     keys: &[String],
 ) -> serde_json::Map<String, serde_json::Value> {
     let Some(metadata) = identity
         .and_then(|i| i.metadata_admin.as_ref())
-        .and_then(|m| m.as_ref())
         .and_then(|m| m.as_object())
     else {
         return serde_json::Map::new();
@@ -1661,7 +1668,7 @@ fn build_access_token_claims(
 /// object; `orgs` adds the (capped) membership list; "groups" adds the active-org team slugs.
 #[allow(clippy::too_many_arguments)]
 fn build_id_token_claims(
-    identity: Option<&ory::Identity>,
+    identity: Option<&Identity>,
     grant_scope: &[String],
     memberships: &[crate::orgs::Membership],
     active_org: Option<&crate::orgs::Membership>,
@@ -1894,7 +1901,7 @@ mod tests {
         resolve_claim_active_org, resolve_granted_audience, resource_params, subject_is_signed_in,
         with_prompt_login,
     };
-    use crate::ory;
+    use crate::backend::identity::Identity;
 
     fn en() -> crate::locale::LanguageIdentifier {
         crate::locale::default_locale()
@@ -2321,15 +2328,6 @@ mod tests {
             .is_empty(),
             "an unregistered resource must stay denied even when it sits on the client record"
         );
-        assert!(
-            crate::ory::hydra::audience_patch(
-                "client-1",
-                &audience.on_record,
-                &[self_written.to_string()]
-            )
-            .is_empty(),
-            "...and the same record must still suppress a duplicate write"
-        );
     }
 
     #[test]
@@ -2679,16 +2677,11 @@ mod tests {
         );
     }
 
-    fn bare_identity() -> ory::Identity {
-        ory::Identity {
+    fn bare_identity() -> Identity {
+        Identity {
             id: "id".to_string(),
             traits: Some(serde_json::json!({"email": "x@example.com"})),
-            ..ory::Identity::new(
-                "id".to_string(),
-                Default::default(),
-                Default::default(),
-                Default::default(),
-            )
+            ..Default::default()
         }
     }
 
@@ -2798,19 +2791,15 @@ mod tests {
 
     #[test]
     fn access_token_claims_copy_only_listed_metadata_admin_keys() {
-        let identity = ory::Identity {
-            metadata_admin: Some(Some(serde_json::json!({
+        let identity = Identity {
+            id: "id".to_string(),
+            metadata_admin: Some(serde_json::json!({
                 "forgejo_aud": "u:1:abc",
                 "note": "operator only",
                 "cleared": null,
-            }))),
-            metadata_public: Some(Some(serde_json::json!({"forgejo_aud": "u:2:public"}))),
-            ..ory::Identity::new(
-                "id".to_string(),
-                Default::default(),
-                Default::default(),
-                Default::default(),
-            )
+            })),
+            metadata_public: Some(serde_json::json!({"forgejo_aud": "u:2:public"})),
+            ..Default::default()
         };
         let keys = [
             "forgejo_aud".to_string(),
@@ -2825,15 +2814,13 @@ mod tests {
         assert!(build_access_token_claims(Some(&identity), &[]).is_empty());
         assert!(build_access_token_claims(None, &keys).is_empty());
 
-        let no_metadata = ory::Identity::new(
-            "id".to_string(),
-            Default::default(),
-            Default::default(),
-            Default::default(),
-        );
+        let no_metadata = Identity {
+            id: "id".to_string(),
+            ..Default::default()
+        };
         assert!(build_access_token_claims(Some(&no_metadata), &keys).is_empty());
-        let not_an_object = ory::Identity {
-            metadata_admin: Some(Some(serde_json::json!(["forgejo_aud"]))),
+        let not_an_object = Identity {
+            metadata_admin: Some(serde_json::json!(["forgejo_aud"])),
             ..no_metadata.clone()
         };
         assert!(build_access_token_claims(Some(&not_an_object), &keys).is_empty());
@@ -2890,15 +2877,10 @@ mod tests {
         // identity with preferred_language set, but profile not granted
         let mut traits = serde_json::Map::new();
         traits.insert("preferred_language".to_string(), serde_json::json!("de"));
-        let identity = ory::Identity {
+        let identity = Identity {
             id: "id".to_string(),
             traits: Some(serde_json::Value::Object(traits)),
-            ..ory::Identity::new(
-                "id".to_string(),
-                Default::default(),
-                Default::default(),
-                Default::default(),
-            )
+            ..Default::default()
         };
         let v = build_id_token_claims(
             Some(&identity),
@@ -2920,15 +2902,10 @@ mod tests {
         let mut traits = serde_json::Map::new();
         traits.insert("email".to_string(), serde_json::json!("x@example.com"));
         traits.insert("preferred_language".to_string(), serde_json::json!("de"));
-        let identity = ory::Identity {
+        let identity = Identity {
             id: "id".to_string(),
             traits: Some(serde_json::Value::Object(traits)),
-            ..ory::Identity::new(
-                "id".to_string(),
-                Default::default(),
-                Default::default(),
-                Default::default(),
-            )
+            ..Default::default()
         };
         let v = build_id_token_claims(
             Some(&identity),
@@ -2949,15 +2926,10 @@ mod tests {
         // no preferred_language trait; consent_locale="de" is used
         let mut traits = serde_json::Map::new();
         traits.insert("email".to_string(), serde_json::json!("x@example.com"));
-        let identity = ory::Identity {
+        let identity = Identity {
             id: "id".to_string(),
             traits: Some(serde_json::Value::Object(traits)),
-            ..ory::Identity::new(
-                "id".to_string(),
-                Default::default(),
-                Default::default(),
-                Default::default(),
-            )
+            ..Default::default()
         };
         let v = build_id_token_claims(
             Some(&identity),
@@ -2978,15 +2950,10 @@ mod tests {
         // preferred_language="ja" is not supported; consent_locale="de" is used
         let mut traits = serde_json::Map::new();
         traits.insert("preferred_language".to_string(), serde_json::json!("ja"));
-        let identity = ory::Identity {
+        let identity = Identity {
             id: "id".to_string(),
             traits: Some(serde_json::Value::Object(traits)),
-            ..ory::Identity::new(
-                "id".to_string(),
-                Default::default(),
-                Default::default(),
-                Default::default(),
-            )
+            ..Default::default()
         };
         let v = build_id_token_claims(
             Some(&identity),

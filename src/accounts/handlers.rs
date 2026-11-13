@@ -8,11 +8,11 @@ use axum::routing::post;
 use serde::Deserialize;
 
 use crate::audit::{self, AuditCtx, AuditEvent, action, target_kind};
+use crate::backend::IdentityBackend;
+use crate::backend::identity::WhoamiOutcome;
 use crate::cookies;
 use crate::csrf::CsrfForm;
 use crate::orgs;
-use crate::ory;
-use crate::ory::kratos::WhoamiOutcome;
 use crate::state::AppState;
 use crate::web::append_set_cookie;
 
@@ -36,7 +36,7 @@ pub(crate) async fn switch(
 
     // Capture the actor's identity before teardown so the audit row records who
     // initiated the switch even after the session is gone.
-    let (actor_id, kratos_session_id) = match ory::kratos::whoami(&state.ory, Some(&cookie)).await {
+    let (actor_id, kratos_session_id) = match state.identity.whoami(Some(&cookie)).await {
         Ok(WhoamiOutcome::Ok(session)) => (
             session
                 .identity
@@ -48,12 +48,12 @@ pub(crate) async fn switch(
         _ => (String::new(), String::new()),
     };
 
-    ory::kratos::tear_down_session(&state.ory, &cookie).await;
+    state.identity.tear_down_session(&cookie).await;
 
     // Security gate: re-check whoami after teardown. If the session is still
     // live, something is wrong on the Kratos side; do NOT redirect to login
     // (that would re-grant the old account). Abort to /error instead.
-    match ory::kratos::whoami(&state.ory, Some(&cookie)).await {
+    match state.identity.whoami(Some(&cookie)).await {
         Ok(WhoamiOutcome::None) | Ok(WhoamiOutcome::InsufficientAal) => {}
         Ok(WhoamiOutcome::Ok(_)) => {
             tracing::error!(
@@ -71,7 +71,7 @@ pub(crate) async fn switch(
     if !actor_id.is_empty() {
         crate::oauth::op_sessions::end_op_sessions_for_browser(
             &state.db,
-            &state.ory,
+            &state.oauth,
             &actor_id,
             &kratos_session_id,
             crate::oauth::op_sessions::GrantRevocation::Keep,
@@ -104,7 +104,7 @@ fn build_login_redirect(state: &AppState, identity_id: &str, return_to: Option<&
         .map(|r| crate::safe_return_to(&state.cfg, r));
     if let Some(rt) = rt {
         qs.push_str("?return_to=");
-        qs.push_str(&ory_client::apis::urlencode(rt));
+        qs.push_str(&crate::web::urlencode(rt));
     }
 
     if !identity_id.is_empty() {
@@ -114,7 +114,7 @@ fn build_login_redirect(state: &AppState, identity_id: &str, return_to: Option<&
             qs.push('&');
         }
         qs.push_str("login_hint=");
-        qs.push_str(&ory_client::apis::urlencode(identity_id));
+        qs.push_str(&crate::web::urlencode(identity_id));
     }
 
     Redirect::to(&format!("/login{qs}")).into_response()

@@ -19,10 +19,10 @@ use axum::routing::get;
 use super::cimd_fetch::{self, CimdDocument};
 use crate::audit::{self, AuditCtx, AuditEvent, action};
 use crate::audit_metadata;
+use crate::backend::OAuthBackend;
+use crate::backend::oauth::OAuthClient;
 use crate::config::{HydraConfig, OAuthConfig, ProxyConfig};
 use crate::oauth_client_metadata::{self, source};
-use crate::ory::OAuth2Client;
-use crate::ory::hydra;
 use crate::protected_resource;
 use crate::rate_limit;
 use crate::resource_registry;
@@ -305,7 +305,7 @@ async fn authorize_core(
     // One Hydra read per authorize, shared by the warm-path check and the
     // upsert. Trade-off: the warm path could avoid it by also persisting the
     // known redirect set Forseti-side, but a second copy would drift.
-    let existing = match hydra::get_client_opt(&state.ory, &client_id).await {
+    let existing = match state.oauth.get_client_opt(&client_id).await {
         Ok(c) => c,
         Err(e) => {
             tracing::error!(client_id, error = %e, "cimd: hydra client lookup failed");
@@ -935,7 +935,7 @@ async fn upsert_hydra_client(
     state: &AppState,
     client_id: &str,
     doc: &CimdDocument,
-    existing: Option<OAuth2Client>,
+    existing: Option<OAuthClient>,
     requested_scope: &str,
     loopback_literal: Option<&str>,
 ) -> anyhow::Result<()> {
@@ -999,9 +999,9 @@ async fn upsert_hydra_client(
     }
 
     if is_update {
-        hydra::update_client(&state.ory, client_id, c).await?;
+        state.oauth.update_client(client_id, c).await?;
     } else {
-        hydra::create_client(&state.ory, c).await?;
+        state.oauth.create_client(c).await?;
     }
     Ok(())
 }

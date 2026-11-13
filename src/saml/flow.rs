@@ -20,11 +20,11 @@ use serde::Deserialize;
 
 use crate::audit::{self, AuditCtx, AuditEvent, action, target_kind};
 use crate::audit_metadata;
+use crate::backend::IdentityBackend;
+use crate::backend::identity::Identity;
 use crate::commercial::license::{Feature, FeatureStatus};
 use crate::config::SamlConfig;
 use crate::orgs;
-use crate::ory::Identity;
-use crate::ory::kratos;
 use crate::page_chrome::PageChrome;
 use crate::render::render;
 use crate::saml::{db, jackson, state_cookie};
@@ -304,7 +304,7 @@ pub async fn callback(
             let encoded = codec.encode(&state.cookie_secret, &payload, unix_seconds_now());
             let mut resp = Redirect::to(&format!(
                 "/login?refresh=true&return_to={}",
-                ory_client::apis::urlencode(format!(
+                crate::web::urlencode(format!(
                     "{}/sso/confirm",
                     state.cfg.self_.url.trim_end_matches('/')
                 ))
@@ -355,10 +355,7 @@ pub async fn callback(
         Ok(None) => {
             // Race-safe join that drops the Default floor for non-allowlisted
             // identities in the same txn (H1 — SAML is a floor site).
-            let drop_default = !state
-                .cfg
-                .admin
-                .is_admin_actor(&email, crate::ory::identity_addresses(&identity));
+            let drop_default = !state.cfg.admin.is_admin_actor(&email, identity.addresses());
             if let Err(e) = orgs::db::join_org_race_safe(
                 &state.db,
                 &identity_id,
@@ -380,14 +377,17 @@ pub async fn callback(
     // history, and redeeming it opens Kratos' password-change window. One
     // minute is the shortest Kratos honours exactly; it's consumed on the next
     // hop, so there's nothing to gain from a longer window.
-    let link =
-        match kratos::admin_create_recovery_link(&state.ory, &identity_id, "1m", Some("/")).await {
-            Ok(l) => l,
-            Err(e) => {
-                tracing::error!(error = ?e, "saml callback: recovery link mint failed");
-                return fail_upstream(&state, &actx, &org_id, "recovery_link", clear).await;
-            }
-        };
+    let link = match state
+        .identity
+        .admin_create_recovery_link(&identity_id, "1m", Some("/"))
+        .await
+    {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::error!(error = ?e, "saml callback: recovery link mint failed");
+            return fail_upstream(&state, &actx, &org_id, "recovery_link", clear).await;
+        }
+    };
     let _ = audit::log(
         &state.db,
         AuditEvent::new(action::SAML_LOGIN_SUCCEEDED)
@@ -767,7 +767,7 @@ async fn resolve_established_link(
     let matched_is_member = orgs::db::find_member(&state.db, &identity.id, org_id)
         .await?
         .is_some();
-    let addrs = crate::ory::identity_addresses(&identity);
+    let addrs = identity.addresses();
     let is_admin_email = addrs
         .unwrap_or_default()
         .iter()
@@ -831,7 +831,7 @@ async fn resolve_identity(
     if let Some(subject) = subject_opt
         && let Some((linked, row_email)) = db::link_subject(&state.db, org_id, subject).await?
     {
-        match kratos::admin_get_identity_optional(&state.ory, &linked).await? {
+        match state.identity.admin_get_identity_optional(&linked).await? {
             Some(identity) => return resolve_established_link(state, org_id, identity).await,
             None => db::delete_link(&state.db, org_id, &row_email).await?,
         }
@@ -839,7 +839,7 @@ async fn resolve_identity(
 
     // Legacy/bootstrap: existing email-keyed link.
     if let Some(linked) = db::link_for(&state.db, org_id, email).await? {
-        match kratos::admin_get_identity_optional(&state.ory, &linked).await? {
+        match state.identity.admin_get_identity_optional(&linked).await? {
             // Backfill the subject onto the legacy row.
             Some(identity) => {
                 db::upsert_link(&state.db, org_id, email, subject_opt, &identity.id).await?;
@@ -851,7 +851,7 @@ async fn resolve_identity(
 
     // Nothing is linked yet. Gather the facts and let the policy decide; the
     // IdP's word alone never reaches a pre-existing identity.
-    let matched = kratos::admin_find_identity_by_email(&state.ory, email).await?;
+    let matched = state.identity.admin_find_identity_by_email(email).await?;
     let matched_is_member = match matched.as_ref() {
         Some((identity, _)) => orgs::db::find_member(&state.db, &identity.id, org_id)
             .await?
@@ -897,14 +897,15 @@ async fn resolve_identity(
         LinkDecision::JitCreate => {}
     }
 
-    match kratos::admin_create_identity_verified(
-        &state.ory,
-        &cfg.identity_schema_id,
-        email,
-        &profile.first_name,
-        &profile.last_name,
-    )
-    .await?
+    match state
+        .identity
+        .admin_create_identity_verified(
+            &cfg.identity_schema_id,
+            email,
+            &profile.first_name,
+            &profile.last_name,
+        )
+        .await?
     {
         Some(identity) => {
             db::upsert_link(&state.db, org_id, email, subject_opt, &identity.id).await?;
@@ -933,7 +934,10 @@ async fn resolve_identity(
 const CONFIRM_CLOCK_SKEW_SECS: i64 = 60;
 
 /// Whether `session` authenticated no earlier than `minted_at` (unix seconds).
-fn authenticated_since(session: Option<&crate::ory::Session>, minted_at: u64) -> bool {
+fn authenticated_since(
+    session: Option<&crate::backend::identity::Session>,
+    minted_at: u64,
+) -> bool {
     let Ok(minted_at) = i64::try_from(minted_at) else {
         return false;
     };
@@ -946,8 +950,11 @@ fn authenticated_since(session: Option<&crate::ory::Session>, minted_at: u64) ->
 mod confirm_freshness_tests {
     use super::*;
 
-    fn session_at(rfc3339: Option<&str>) -> crate::ory::Session {
-        let mut s = crate::ory::Session::new("sess-1".to_string());
+    fn session_at(rfc3339: Option<&str>) -> crate::backend::identity::Session {
+        let mut s = crate::backend::identity::Session {
+            id: "sess-1".to_string(),
+            ..Default::default()
+        };
         s.authenticated_at = rfc3339.map(str::to_string);
         s
     }
@@ -1147,7 +1154,7 @@ mod link_decision_tests {
             .expect("resolve_identity");
         let body = &src[body_start..];
         let fresh_match = body
-            .find("kratos::admin_find_identity_by_email(")
+            .find("state.identity.admin_find_identity_by_email(")
             .expect("the fresh-match lookup");
         let fast_paths = &body[..fresh_match];
         for anchor in [

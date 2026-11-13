@@ -9,11 +9,10 @@ pub mod delete;
 pub mod pseudonymise;
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
-use ory_client::apis::identity_api;
 
+use crate::backend::{IdentityBackend, IdentityImpl, OAuthImpl};
 use crate::config::AppConfig;
 use crate::db::DbPool;
-use crate::ory::{self, OryClients};
 use crate::webhook::SigningKey;
 use delete::{DeleteActor, DeleteEnv, DeleteError, DeleteReason, DeleteRequest, delete_identity};
 
@@ -41,7 +40,8 @@ fn cli_signing_key(cfg: &AppConfig, verb: &str) -> Option<SigningKey> {
 pub async fn delete_identity_cli(
     cfg: &AppConfig,
     db: &DbPool,
-    ory: &OryClients,
+    identity: &IdentityImpl,
+    oauth: &OAuthImpl,
     id: &str,
     yes: bool,
     force: bool,
@@ -55,8 +55,8 @@ pub async fn delete_identity_cli(
             );
             return 2;
         }
-        let identity = match ory::kratos::admin_get_identity_full_optional(ory, id).await {
-            Ok(Some(identity)) => identity,
+        let found = match identity.admin_get_identity_full_optional(id).await {
+            Ok(Some(found)) => found,
             Ok(None) => {
                 eprintln!("delete-identity: identity {id} not found");
                 return 1;
@@ -66,7 +66,7 @@ pub async fn delete_identity_cli(
                 return 1;
             }
         };
-        let email = delete::verified_emails(&identity).into_iter().next();
+        let email = delete::verified_emails(&found).into_iter().next();
         match &email {
             Some(email) => {
                 print!("Delete identity {id} ({email})? Type the id or the email to confirm: ")
@@ -94,7 +94,8 @@ pub async fn delete_identity_cli(
     };
     let env = DeleteEnv {
         db,
-        ory,
+        identity,
+        oauth,
         signing_key: &signing_key,
         self_url: &cfg.self_.url,
         issuer: cfg.hydra.issuer_or_public(),
@@ -149,13 +150,19 @@ pub async fn delete_identity_cli(
 /// reads `[identity].unverified_ttl_days`, deletes Kratos identities that
 /// have at least one unverified address AND were created more than N days
 /// ago. Returns the process exit code (0 on success, 1 on failure).
-pub async fn prune_unverified_cli(cfg: &AppConfig, db: &DbPool, ory: &OryClients) -> i32 {
+pub async fn prune_unverified_cli(
+    cfg: &AppConfig,
+    db: &DbPool,
+    identity: &IdentityImpl,
+    oauth: &OAuthImpl,
+) -> i32 {
     let Some(signing_key) = cli_signing_key(cfg, "unverified-prune") else {
         return 1;
     };
     let env = DeleteEnv {
         db,
-        ory,
+        identity,
+        oauth,
         signing_key: &signing_key,
         self_url: &cfg.self_.url,
         issuer: cfg.hydra.issuer_or_public(),
@@ -213,22 +220,8 @@ pub async fn prune_unverified(
     let page_size: i64 = 250;
 
     let batch = match only {
-        Some(id) => vec![crate::ory::kratos::admin_get_identity(env.ory, id).await?],
-        None => identity_api::list_identities(
-            &env.ory.kratos_admin,
-            None,
-            None,
-            Some(page_size),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!("kratos list_identities failed: {e}"))?,
+        Some(id) => vec![env.identity.admin_get_identity(id).await?],
+        None => env.identity.list_identities(page_size, None, None).await?,
     };
 
     let mut outcome = PruneOutcome {
@@ -291,7 +284,7 @@ pub async fn prune_unverified(
 /// would lose access otherwise. Identities with no verifiable addresses
 /// are ignored too: they're typically API-only identities (or test
 /// fixtures) that have no concept of "verified".
-fn should_prune(ident: &ory_client::models::Identity, cutoff: DateTime<Utc>) -> bool {
+fn should_prune(ident: &crate::backend::identity::Identity, cutoff: DateTime<Utc>) -> bool {
     // Kratos returns `created_at` as an ISO-8601 string in the SDK
     // (`Option<String>`). Parse it; an unparseable timestamp is suspicious
     // enough that we skip rather than delete.
@@ -316,28 +309,27 @@ fn should_prune(ident: &ory_client::models::Identity, cutoff: DateTime<Utc>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ory_client::models::verifiable_identity_address::ViaEnum;
-    use ory_client::models::{Identity, VerifiableIdentityAddress};
+    use crate::backend::identity::Identity;
+    use crate::backend::identity::VerifiableAddress;
 
-    fn addr(value: &str, verified: bool) -> VerifiableIdentityAddress {
-        VerifiableIdentityAddress::new(
-            "completed".to_string(),
-            value.to_string(),
+    fn addr(value: &str, verified: bool) -> VerifiableAddress {
+        VerifiableAddress {
+            status: "completed".to_string(),
+            value: value.to_string(),
             verified,
-            ViaEnum::Email,
-        )
+            via: "email".to_string(),
+            ..Default::default()
+        }
     }
 
-    fn ident(created_at: Option<&str>, addrs: Option<Vec<VerifiableIdentityAddress>>) -> Identity {
-        let mut id = Identity::new(
-            "test-id".to_string(),
-            "default".to_string(),
-            String::new(),
-            None,
-        );
-        id.created_at = created_at.map(str::to_string);
-        id.verifiable_addresses = addrs;
-        id
+    fn ident(created_at: Option<&str>, addrs: Option<Vec<VerifiableAddress>>) -> Identity {
+        Identity {
+            id: "test-id".to_string(),
+            schema_id: "default".to_string(),
+            created_at: created_at.map(str::to_string),
+            verifiable_addresses: addrs,
+            ..Default::default()
+        }
     }
 
     fn cutoff() -> DateTime<Utc> {
@@ -429,7 +421,7 @@ mod tests {
             .unwrap_or_else(|_| "http://localhost:4434".to_string());
         let hydra_admin = std::env::var("FORSETI_TEST_HYDRA_ADMIN_URL")
             .unwrap_or_else(|_| "http://localhost:4445".to_string());
-        let http = ory_reqwest::Client::builder()
+        let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(5))
             .build()
             .expect("http client");
@@ -445,38 +437,25 @@ mod tests {
                 return;
             }
         }
-        let mk = |base: &str| ory_client::apis::configuration::Configuration {
-            base_path: base.to_string(),
-            client: http.clone(),
-            ..Default::default()
-        };
-        let ory = OryClients {
-            kratos_public: mk(&kratos_admin),
-            kratos_admin: mk(&kratos_admin),
-            hydra_public: mk(&hydra_admin),
-            hydra_admin: mk(&hydra_admin),
-        };
+        let (identity, oauth) =
+            crate::ory::test_backends(&kratos_admin, &kratos_admin, &hydra_admin, &hydra_admin);
         let db = crate::orgs::db::test_pool().await;
         let key_path = std::env::temp_dir().join(format!("forseti-prune-{}.pem", Uuid::new_v4()));
         let signing_key =
             crate::webhook::SigningKey::load_or_generate(&key_path).expect("signing key");
         let env = DeleteEnv {
             db: &db,
-            ory: &ory,
+            identity: &identity,
+            oauth: &oauth,
             signing_key: &signing_key,
             self_url: "http://localhost:3000",
             issuer: "http://localhost:3000/hydra",
         };
 
         let email = format!("prune-{}@example.com", Uuid::new_v4().simple());
-        let body = ory_client::models::CreateIdentityBody::new(
-            "default".to_string(),
-            serde_json::json!({ "email": email, "name": { "first": "Prune", "last": "Test" } }),
-        );
-        let created = identity_api::create_identity(&ory.kratos_admin, Some(body))
+        let id = crate::ory::create_unverified_test_identity(&identity, &email)
             .await
             .expect("create unverified identity");
-        let id = created.id.clone();
         crate::profiles::set_username(&db, &id, &format!("prune-{}", &id[..8]))
             .await
             .expect("seed profile row");
@@ -490,7 +469,8 @@ mod tests {
         );
         assert!(outcome.orphans.is_empty(), "{:?}", outcome.orphans);
         assert!(
-            crate::ory::kratos::admin_get_identity_optional(&ory, &id)
+            identity
+                .admin_get_identity_optional(&id)
                 .await
                 .expect("kratos lookup")
                 .is_none(),

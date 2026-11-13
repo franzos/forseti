@@ -24,7 +24,6 @@ use crate::discovery;
 use crate::handoff;
 use crate::identity;
 use crate::orgs;
-use crate::ory::OryClients;
 use crate::profiles;
 use crate::state::AppState;
 use crate::static_assets;
@@ -123,14 +122,14 @@ pub(crate) async fn run() -> anyhow::Result<()> {
     // Reject overlapping posix uid/gid bands at boot before a team gid can collide with a user gid on a host.
     cfg.posix.validate_bands()?;
 
-    let ory = OryClients::from_config(&cfg);
+    let (identity, oauth) = crate::backend::build(&cfg);
 
     // Refuse to serve POSIX device auth against a PAM client Hydra reports as
     // public: Forseti holds the `device_code` on every host's behalf, so a
     // credential-less token endpoint hands that grant to anyone. Only fires
     // when device auth is actually configured and Hydra positively answers.
     if cfg.posix.pam_client_secret.is_some()
-        && crate::oauth::device::pam_client_is_public(&ory, &cfg.posix).await
+        && crate::oauth::device::pam_client_is_public(&oauth, &cfg.posix).await
     {
         eprintln!(
             "config error: OAuth client '{}' has token_endpoint_auth_method = none. \
@@ -167,7 +166,7 @@ pub(crate) async fn run() -> anyhow::Result<()> {
     }
 
     // Reconcile PENDING rows stranded by a crash between writing the rows and the Kratos delete, then drain CONFIRMED rows.
-    if let Err(e) = webhook::reconcile_pending(&db, &ory).await {
+    if let Err(e) = webhook::reconcile_pending(&db, &identity).await {
         tracing::warn!(error = %e, "webhook reconcile_pending failed at startup");
     }
     // Every background task hands back its JoinHandle; `run` awaits them after
@@ -180,7 +179,7 @@ pub(crate) async fn run() -> anyhow::Result<()> {
     // Periodic reconcile (every 60s, rows older than 5 minutes) so stuck PENDING rows don't wait for the next restart.
     background.push(webhook::spawn_reconcile(
         db.clone(),
-        ory.clone(),
+        identity.clone(),
         shutdown.clone(),
     ));
 
@@ -197,7 +196,7 @@ pub(crate) async fn run() -> anyhow::Result<()> {
     // Hourly POSIX reconcile for identities deleted out-of-band via the Kratos admin API; never purges on a Kratos lookup error.
     background.push(crate::posix::spawn_reconcile(
         db.clone(),
-        ory.clone(),
+        identity.clone(),
         shutdown.clone(),
     ));
 
@@ -211,7 +210,8 @@ pub(crate) async fn run() -> anyhow::Result<()> {
 
     let state = AppState {
         cfg: Arc::new(cfg),
-        ory,
+        identity,
+        oauth,
         db,
         webhook_worker,
         signing_key,

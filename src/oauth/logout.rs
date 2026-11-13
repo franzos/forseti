@@ -8,11 +8,12 @@ use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Redirect, Response};
 use serde::Deserialize;
 
+use crate::backend::oauth::LogoutRequest;
+use crate::backend::{IdentityBackend, OAuthBackend};
 use crate::csrf::CsrfForm;
 
 use crate::cookies;
 use crate::extractors::OptionalSession;
-use crate::ory;
 use crate::page_chrome::{Chrome, PageChrome};
 use crate::render::render;
 use crate::state::AppState;
@@ -44,7 +45,7 @@ pub(crate) async fn oauth_logout(
 
     // Validate the challenge before rendering: there's no recovery from a
     // confirm-then-submit on a stale challenge.
-    let req = match ory::hydra::get_logout_request(&state.ory, &challenge).await {
+    let req = match state.oauth.get_logout_request(&challenge).await {
         Ok(r) => r,
         Err(e) => {
             tracing::error!(error = ?e, "hydra get_logout_request failed");
@@ -75,7 +76,7 @@ pub(crate) async fn oauth_logout_submit(
 ) -> Response {
     let challenge = form.logout_challenge;
 
-    let req = match ory::hydra::get_logout_request(&state.ory, &challenge).await {
+    let req = match state.oauth.get_logout_request(&challenge).await {
         Ok(r) => r,
         Err(e) => {
             tracing::error!(error = ?e, "hydra get_logout_request failed");
@@ -96,9 +97,9 @@ pub(crate) async fn oauth_logout_submit(
 
     // Best-effort Kratos teardown; the user may already be signed out.
     let cookie = cookies::cookie_header(&headers);
-    ory::kratos::tear_down_session(&state.ory, &cookie).await;
+    state.identity.tear_down_session(&cookie).await;
 
-    match ory::hydra::accept_logout_request(&state.ory, &challenge).await {
+    match state.oauth.accept_logout_request(&challenge).await {
         Ok(redirect) => crate::oauth::continue_nav::continue_to(&redirect.redirect_to, &locale),
         Err(e) => {
             tracing::error!(error = ?e, "hydra accept_logout_request failed");
@@ -112,7 +113,7 @@ pub(crate) async fn oauth_logout_submit(
 async fn caller_may_end(
     state: &AppState,
     session: &OptionalSession,
-    req: &ory::OAuth2LogoutRequest,
+    req: &LogoutRequest,
 ) -> anyhow::Result<bool> {
     // Hydra copies the subject from a confirmed login session, so it's never empty.
     let Some(subject) = req.subject.as_deref().filter(|s| !s.is_empty()) else {

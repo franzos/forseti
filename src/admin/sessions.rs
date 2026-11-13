@@ -17,11 +17,11 @@ use serde::Deserialize;
 
 use crate::admin::{AdminSection, ConfirmForm, ConfirmTemplate, render_admin_error};
 use crate::audit::{self, AuditCtx, action, target_kind};
+use crate::backend::IdentityBackend;
 use crate::csrf::CsrfForm;
 use crate::extractors::{Csrf, RequireAdmin};
 use crate::flash;
 use crate::format::{humanise_timestamp, humanise_user_agent};
-use crate::ory;
 use crate::page_chrome::PageChrome;
 use crate::render::render;
 use crate::state::AppState;
@@ -84,13 +84,14 @@ pub async fn list(
     );
     let page_token = query.page_token.as_deref().filter(|s| !s.is_empty());
 
-    let sessions = match ory::kratos::admin_list_all_sessions(
-        &state.ory,
-        SESSIONS_PAGE_SIZE,
-        page_token,
-        if active_only { Some(true) } else { None },
-    )
-    .await
+    let sessions = match state
+        .identity
+        .admin_list_all_sessions(
+            SESSIONS_PAGE_SIZE,
+            page_token,
+            if active_only { Some(true) } else { None },
+        )
+        .await
     {
         Ok(s) => s,
         Err(e) => {
@@ -169,10 +170,7 @@ pub async fn list(
 
 pub async fn revoke_confirm(Path(id): Path<String>, admin: RequireAdmin, csrf: Csrf) -> Response {
     let RequireAdmin { ctx } = admin;
-    let action_url = format!(
-        "/admin/sessions/{}/revoke",
-        ory_client::apis::urlencode(&id)
-    );
+    let action_url = format!("/admin/sessions/{}/revoke", crate::web::urlencode(&id));
     let cancel_url = "/admin/sessions".to_string();
     let chrome = ctx.chrome(&csrf);
     render(&ConfirmTemplate {
@@ -199,19 +197,19 @@ pub async fn revoke(
         return r;
     }
     // Looked up first: the session may 404 once revoked.
-    let identity_id = match ory::kratos::admin_get_session(&state.ory, &id).await {
+    let identity_id = match state.identity.admin_get_session(&id).await {
         Ok(s) => s.identity.map(|i| i.id),
         Err(e) => {
             tracing::warn!(error = %e, id, "admin: session lookup failed; app sessions stay");
             None
         }
     };
-    match ory::kratos::admin_revoke_session(&state.ory, &id).await {
+    match state.identity.admin_revoke_session(&id).await {
         Ok(()) => {
             if let Some(identity_id) = &identity_id {
                 crate::oauth::op_sessions::end_op_sessions_for_browser(
                     &state.db,
-                    &state.ory,
+                    &state.oauth,
                     identity_id,
                     &id,
                     crate::oauth::op_sessions::GrantRevocation::Revoke,

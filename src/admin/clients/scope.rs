@@ -11,10 +11,10 @@ use axum::http::request::Parts;
 use axum::response::Response;
 
 use crate::admin::{AdminCtx, render_admin_error};
+use crate::backend::oauth::OAuthClient;
 use crate::extractors::RequireAdminScoped;
 use crate::oauth_client_metadata;
 use crate::orgs::AdminScope;
-use crate::ory;
 use crate::state::AppState;
 
 /// Enforce that `client_id` belongs to the org named by `scope`. Forseti
@@ -107,7 +107,7 @@ where
 pub(super) async fn constrain_org_scoped_client(
     state: &AppState,
     scope: &AdminScope,
-    payload: &mut ory::OAuth2Client,
+    payload: &mut OAuthClient,
     existing_grant_types: Option<&[String]>,
 ) -> Result<(), String> {
     let AdminScope::Org { id: org_id, .. } = scope else {
@@ -175,7 +175,7 @@ const DEVICE_CODE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
 const OPERATOR_ONLY_SCOPES: &[&str] = &["orgs", "groups"];
 
 fn check_org_client_protocol(
-    payload: &ory::OAuth2Client,
+    payload: &OAuthClient,
     existing_grant_types: Option<&[String]>,
     scope_descriptions: &std::collections::HashMap<String, String>,
 ) -> Result<(), String> {
@@ -270,8 +270,8 @@ pub(super) async fn resolve_create_target_org(
 mod tests {
     use super::*;
 
-    fn client(grants: &[&str], responses: &[&str], scope: &str) -> ory::OAuth2Client {
-        ory::OAuth2Client {
+    fn client(grants: &[&str], responses: &[&str], scope: &str) -> OAuthClient {
+        OAuthClient {
             grant_types: Some(grants.iter().map(|s| s.to_string()).collect()),
             response_types: Some(responses.iter().map(|s| s.to_string()).collect()),
             scope: Some(scope.to_string()),
@@ -279,7 +279,7 @@ mod tests {
         }
     }
 
-    fn check(c: &ory::OAuth2Client, existing: Option<&[String]>) -> Result<(), String> {
+    fn check(c: &OAuthClient, existing: Option<&[String]>) -> Result<(), String> {
         check_org_client_protocol(c, existing, &Default::default())
     }
 

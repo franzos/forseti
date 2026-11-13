@@ -16,6 +16,7 @@ use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Redirect, Response};
 use serde::Deserialize;
 
+use crate::backend::IdentityBackend;
 use crate::csrf::CsrfForm;
 
 use crate::admin::{AdminSection, ConfirmForm, ConfirmTemplate, render_admin_error};
@@ -25,7 +26,6 @@ use crate::commercial::FeatureStatus;
 use crate::commercial::license::{Feature, seat_cap_allows};
 use crate::extractors::{Csrf, RequireAdmin};
 use crate::format::humanise_timestamp;
-use crate::ory;
 use crate::page_chrome::PageChrome;
 use crate::posix::allocate::{is_valid_shell, is_valid_username};
 use crate::posix::db as posix_db;
@@ -190,7 +190,7 @@ pub async fn new(
     let (identity_id, identity_email, username) = if raw.is_empty() {
         (String::new(), String::new(), String::new())
     } else {
-        match ory::kratos::admin_get_identity_optional(&state.ory, &raw).await {
+        match state.identity.admin_get_identity_optional(&raw).await {
             Ok(Some(id)) => {
                 let email = id
                     .traits
@@ -303,7 +303,7 @@ pub async fn provision(
     // Resolve the submitted value to a canonical UUID; the target must exist,
     // else we'd create an orphan the reconcile sweep deletes.
     let identity_id = if crate::format::looks_like_uuid(&submitted) {
-        match ory::kratos::admin_get_identity_optional(&state.ory, &submitted).await {
+        match state.identity.admin_get_identity_optional(&submitted).await {
             Ok(Some(_)) => submitted.clone(),
             Ok(None) => return rerender(format!("No Kratos identity with ID '{submitted}'.")),
             Err(e) => {
@@ -314,7 +314,10 @@ pub async fn provision(
             }
         }
     } else {
-        match ory::kratos::admin_find_identity_by_email(&state.ory, &submitted.to_lowercase()).await
+        match state
+            .identity
+            .admin_find_identity_by_email(&submitted.to_lowercase())
+            .await
         {
             Ok(Some((id, _verified))) => id.id,
             Ok(None) => return rerender(format!("No identity found for '{submitted}'.")),
@@ -379,7 +382,7 @@ pub async fn provision(
 
     Redirect::to(&format!(
         "/admin/posix/{}",
-        ory_client::apis::urlencode(&identity_id)
+        crate::web::urlencode(&identity_id)
     ))
     .into_response()
 }
@@ -421,7 +424,7 @@ async fn render_account(
         }
     };
 
-    let email = match ory::kratos::admin_get_identity_optional(&state.ory, id).await {
+    let email = match state.identity.admin_get_identity_optional(id).await {
         Ok(Some(i)) => i
             .traits
             .as_ref()
@@ -566,11 +569,7 @@ pub async fn add_key(
         }
     }
 
-    Redirect::to(&format!(
-        "/admin/posix/{}",
-        ory_client::apis::urlencode(&id)
-    ))
-    .into_response()
+    Redirect::to(&format!("/admin/posix/{}", crate::web::urlencode(&id))).into_response()
 }
 
 pub async fn remove_key(
@@ -581,7 +580,7 @@ pub async fn remove_key(
     _: CsrfForm<crate::csrf::NoPayload>,
 ) -> Response {
     let ctx = admin.ctx;
-    let target = format!("/admin/posix/{}", ory_client::apis::urlencode(&id));
+    let target = format!("/admin/posix/{}", crate::web::urlencode(&id));
     match posix_db::delete_ssh_key(&state.db, &id, &key_id).await {
         Ok(false) => render_admin_error(
             &state,
@@ -636,7 +635,7 @@ async fn set_enabled(
     id: &str,
     enabled: bool,
 ) -> Response {
-    let target = format!("/admin/posix/{}", ory_client::apis::urlencode(id));
+    let target = format!("/admin/posix/{}", crate::web::urlencode(id));
     match posix_db::set_account_enabled(&state.db, id, enabled).await {
         Ok(()) => {
             let act = if enabled {
@@ -673,8 +672,8 @@ pub async fn delete_confirm(Path(id): Path<String>, admin: RequireAdmin, csrf: C
         body: "This removes the account, its primary group, group memberships, and every SSH \
                key — the Kratos identity itself is untouched. The action cannot be undone."
             .to_string(),
-        action_url: format!("/admin/posix/{}/delete", ory_client::apis::urlencode(&id)),
-        cancel_url: format!("/admin/posix/{}", ory_client::apis::urlencode(&id)),
+        action_url: format!("/admin/posix/{}/delete", crate::web::urlencode(&id)),
+        cancel_url: format!("/admin/posix/{}", crate::web::urlencode(&id)),
         submit_label: "Delete account",
     })
 }
@@ -687,7 +686,7 @@ pub async fn delete(
     CsrfForm(form): CsrfForm<ConfirmForm>,
 ) -> Response {
     let ctx = admin.ctx;
-    let target = format!("/admin/posix/{}", ory_client::apis::urlencode(&id));
+    let target = format!("/admin/posix/{}", crate::web::urlencode(&id));
     if let Some(r) = form.bounce_unless_confirmed(&target) {
         return r;
     }

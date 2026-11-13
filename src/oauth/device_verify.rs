@@ -16,9 +16,9 @@ use axum::extract::{Query, State};
 use axum::response::{IntoResponse, Redirect, Response};
 use serde::Deserialize;
 
+use crate::backend::OAuthBackend;
 use crate::csrf::CsrfForm;
 use crate::extractors::RequireSession;
-use crate::ory;
 use crate::page_chrome::{Chrome, PageChrome, ReqLocale};
 use crate::posix::db;
 use crate::render::render;
@@ -159,7 +159,9 @@ pub(crate) async fn device_verify_submit(
         return render(&DeviceDoneTemplate::error(anon_chrome(&state, locale)));
     }
 
-    match ory::hydra::accept_user_code_request(&state.ory, &form.device_challenge, &form.user_code)
+    match state
+        .oauth
+        .accept_user_code_request(&form.device_challenge, &form.user_code)
         .await
     {
         Ok(redirect) if !redirect.redirect_to.is_empty() => {

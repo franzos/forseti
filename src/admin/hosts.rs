@@ -536,7 +536,7 @@ pub async fn revoke_confirm(Path(id): Path<String>, admin: RequireAdmin, csrf: C
         admin_active: AdminSection::Hosts,
         title: format!("Revoke host {id}?"),
         body: "After revocation this host can no longer authenticate to the resolver. Its secret stops working immediately. Re-enrolling mints a fresh host id and secret.".to_string(),
-        action_url: format!("/admin/hosts/{}/revoke", ory_client::apis::urlencode(&id)),
+        action_url: format!("/admin/hosts/{}/revoke", crate::web::urlencode(&id)),
         cancel_url: "/admin/hosts".to_string(),
         submit_label: "Revoke host",
     })
@@ -599,7 +599,7 @@ pub async fn rotate_confirm(Path(id): Path<String>, admin: RequireAdmin, csrf: C
         admin_active: AdminSection::Hosts,
         title: format!("Rotate secret for host {id}?"),
         body: "A fresh secret is minted and revealed once. The old secret stops working immediately server-side, but already-connected clients keep using their cached secret until it expires (up to their configured TTL).".to_string(),
-        action_url: format!("/admin/hosts/{}/rotate", ory_client::apis::urlencode(&id)),
+        action_url: format!("/admin/hosts/{}/rotate", crate::web::urlencode(&id)),
         cancel_url: "/admin/hosts".to_string(),
         submit_label: "Rotate secret",
     })
@@ -681,10 +681,7 @@ async fn reveal_and_redirect(state: &AppState, reveal: SecretReveal) -> Response
                 );
             }
         };
-    let url = format!(
-        "/admin/hosts?reveal={}",
-        ory_client::apis::urlencode(&token)
-    );
+    let url = format!("/admin/hosts?reveal={}", crate::web::urlencode(&token));
     Redirect::to(&url).into_response()
 }
 

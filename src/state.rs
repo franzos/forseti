@@ -1,5 +1,5 @@
 //! Shared application state passed to every handler via `State<AppState>`.
-//! Intentionally tiny: heavy state lives in `AppConfig` / `OryClients`, both cheap to `Clone`.
+//! Intentionally tiny: heavy state lives in `AppConfig` and the identity/OAuth backends, all behind `Arc`.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -8,12 +8,12 @@ use axum::http::HeaderMap;
 use axum::response::Response;
 use tokio::sync::Mutex;
 
+use crate::backend::oauth::OidcDiscovery;
+use crate::backend::{IdentityBackend, IdentityImpl, OAuthBackend, OAuthImpl};
 use crate::commercial::LicenseHandle;
 use crate::config::AppConfig;
 use crate::db::DbPool;
 use crate::logo_cache::LogoCache;
-use crate::ory::OryClients;
-use crate::ory::discovery::OidcDiscovery;
 use crate::webhook::{SigningKey, WorkerHandle};
 
 /// TTL for the cached Hydra discovery doc.
@@ -50,7 +50,8 @@ pub struct ProviderCache(Arc<Mutex<Option<CachedProviders>>>);
 #[derive(Clone)]
 pub struct AppState {
     pub cfg: Arc<AppConfig>,
-    pub ory: Arc<OryClients>,
+    pub identity: Arc<IdentityImpl>,
+    pub oauth: Arc<OAuthImpl>,
     pub db: DbPool,
     /// Heartbeat for the background webhook worker; `/readyz` reports degraded (still 200) when it hasn't ticked recently.
     pub webhook_worker: WorkerHandle,
@@ -102,7 +103,7 @@ impl AppState {
                 return Some(c.clone());
             }
         }
-        match crate::ory::discovery::fetch(&self.ory, &self.cfg.hydra.public_url).await {
+        match self.oauth.fetch_discovery().await {
             Ok((doc, raw)) => {
                 let cached = CachedDiscovery {
                     next_refresh_at: Instant::now() + DISCOVERY_TTL,
@@ -147,7 +148,7 @@ impl AppState {
                 c.next_refresh_at = Instant::now() + DISCOVERY_RETRY;
             }
         }
-        let fetched = crate::ory::kratos::probe_oidc_provider_ids(&self.ory).await;
+        let fetched = self.identity.probe_oidc_provider_ids().await;
         let mut guard = self.idp_providers.0.lock().await;
         match fetched {
             Ok(ids) => {

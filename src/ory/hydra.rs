@@ -1,18 +1,29 @@
 //! Hydra OAuth2 bridge wrappers (admin-API operations).
 //!
 //! Hydra's admin API does not produce the broken `ui.nodes` shape that the
-//! Kratos flow models do, so the SDK types are usable directly here.
+//! Kratos flow models do, so the SDK models deserialize directly and convert
+//! to domain types; request bodies are built from SDK models.
 
+use super::convert::{
+    client_from_sdk, client_to_sdk, consent_request_from_sdk, consent_session_from_sdk,
+    login_request_from_sdk, logout_request_from_sdk,
+};
 use super::*;
+use crate::backend::oauth::JwkSummary;
+use crate::backend::oauth::{
+    ConsentRequest, ConsentSession, LoginRequest, LogoutRequest, OAuthClient, RedirectTo,
+};
 use ory_client::apis::o_auth2_api;
+use ory_client::models::{
+    AcceptOAuth2ConsentRequest, AcceptOAuth2ConsentRequestSession, AcceptOAuth2LoginRequest,
+    OAuth2ConsentSession, RejectOAuth2Request,
+};
 
-pub async fn get_login_request(
-    clients: &OryClients,
-    challenge: &str,
-) -> Result<OAuth2LoginRequest> {
+pub async fn get_login_request(clients: &OryClients, challenge: &str) -> Result<LoginRequest> {
     o_auth2_api::get_o_auth2_login_request(&clients.hydra_admin, challenge)
         .await
         .map_err(|e| anyhow::anyhow!("hydra get_login_request failed: {e}"))
+        .and_then(login_request_from_sdk)
 }
 
 /// Accept a Hydra login challenge for a Kratos subject. `amr`/`acr` mirror the OIDC claims RPs see;
@@ -26,7 +37,7 @@ pub async fn accept_login_request(
     remember_for: i64,
     amr: Vec<String>,
     acr: Option<String>,
-) -> Result<OAuth2RedirectTo> {
+) -> Result<RedirectTo> {
     let mut body = AcceptOAuth2LoginRequest::new(subject.to_string());
     body.remember = Some(remember);
     body.remember_for = Some(remember_for);
@@ -36,6 +47,7 @@ pub async fn accept_login_request(
     body.acr = acr;
     o_auth2_api::accept_o_auth2_login_request(&clients.hydra_admin, challenge, Some(body))
         .await
+        .map(RedirectTo::from)
         .map_err(|e| anyhow::anyhow!("hydra accept_login_request failed: {e}"))
 }
 
@@ -46,7 +58,7 @@ pub async fn reject_login_request(
     challenge: &str,
     error: &str,
     error_description: &str,
-) -> Result<OAuth2RedirectTo> {
+) -> Result<RedirectTo> {
     let body = RejectOAuth2Request {
         error: Some(error.to_string()),
         error_debug: None,
@@ -56,16 +68,15 @@ pub async fn reject_login_request(
     };
     o_auth2_api::reject_o_auth2_login_request(&clients.hydra_admin, challenge, Some(body))
         .await
+        .map(RedirectTo::from)
         .map_err(|e| anyhow::anyhow!("hydra reject_login_request failed: {e}"))
 }
 
-pub async fn get_consent_request(
-    clients: &OryClients,
-    challenge: &str,
-) -> Result<OAuth2ConsentRequest> {
+pub async fn get_consent_request(clients: &OryClients, challenge: &str) -> Result<ConsentRequest> {
     o_auth2_api::get_o_auth2_consent_request(&clients.hydra_admin, challenge)
         .await
         .map_err(|e| anyhow::anyhow!("hydra get_consent_request failed: {e}"))
+        .and_then(consent_request_from_sdk)
 }
 
 /// Accept a Hydra consent challenge with the granted scopes and the id_token and access-token claim payloads (Hydra's `session.id_token` / `session.access_token`).
@@ -78,7 +89,7 @@ pub async fn accept_consent_request(
     remember: bool,
     id_token_session: serde_json::Value,
     access_token_session: serde_json::Map<String, serde_json::Value>,
-) -> Result<OAuth2RedirectTo> {
+) -> Result<RedirectTo> {
     let mut session = AcceptOAuth2ConsentRequestSession::new();
     // `Option<Option<Value>>` mirrors openapi-generator's "nullable optional"
     // shape; the outer `Some` says "field present", the inner `Some` says
@@ -97,6 +108,7 @@ pub async fn accept_consent_request(
 
     o_auth2_api::accept_o_auth2_consent_request(&clients.hydra_admin, challenge, Some(body))
         .await
+        .map(RedirectTo::from)
         .map_err(|e| anyhow::anyhow!("hydra accept_consent_request failed: {e}"))
 }
 
@@ -107,7 +119,7 @@ pub async fn reject_consent_request(
     challenge: &str,
     error: &str,
     error_description: &str,
-) -> Result<OAuth2RedirectTo> {
+) -> Result<RedirectTo> {
     let body = RejectOAuth2Request {
         error: Some(error.to_string()),
         error_debug: None,
@@ -117,24 +129,21 @@ pub async fn reject_consent_request(
     };
     o_auth2_api::reject_o_auth2_consent_request(&clients.hydra_admin, challenge, Some(body))
         .await
+        .map(RedirectTo::from)
         .map_err(|e| anyhow::anyhow!("hydra reject_consent_request failed: {e}"))
 }
 
-pub async fn get_logout_request(
-    clients: &OryClients,
-    challenge: &str,
-) -> Result<OAuth2LogoutRequest> {
+pub async fn get_logout_request(clients: &OryClients, challenge: &str) -> Result<LogoutRequest> {
     o_auth2_api::get_o_auth2_logout_request(&clients.hydra_admin, challenge)
         .await
         .map_err(|e| anyhow::anyhow!("hydra get_logout_request failed: {e}"))
+        .and_then(logout_request_from_sdk)
 }
 
-pub async fn accept_logout_request(
-    clients: &OryClients,
-    challenge: &str,
-) -> Result<OAuth2RedirectTo> {
+pub async fn accept_logout_request(clients: &OryClients, challenge: &str) -> Result<RedirectTo> {
     o_auth2_api::accept_o_auth2_logout_request(&clients.hydra_admin, challenge)
         .await
+        .map(RedirectTo::from)
         .map_err(|e| anyhow::anyhow!("hydra accept_logout_request failed: {e}"))
 }
 
@@ -143,21 +152,8 @@ pub async fn accept_logout_request(
 // Wrappers driven by the Part-B device endpoints (`src/posix/device.rs`)
 // and the browser verification UI (`src/oauth/device_verify.rs`).
 mod device_grant {
-    use super::{OAuth2RedirectTo, OryClients, Result, o_auth2_api};
-
-    /// Projected device-authz response (RFC 8628 §3.2). All fields are
-    /// required on a real Hydra response; we surface concrete types so the
-    /// device endpoints don't carry `Option`s the protocol guarantees.
-    #[derive(Debug, Clone)]
-    pub struct DeviceAuthorization {
-        pub device_code: String,
-        pub user_code: String,
-        pub verification_uri: String,
-        pub verification_uri_complete: Option<String>,
-        pub expires_in: i64,
-        /// Minimum poll interval Hydra asks for; RFC 8628 default 5s.
-        pub interval: i64,
-    }
+    use super::{OryClients, RedirectTo, Result, o_auth2_api};
+    use crate::backend::oauth::{DeviceAuthorization, DeviceTokenOutcome, IdTokenClaims, TokenSet};
 
     /// Start the device grant against Hydra's public `/oauth2/device/auth`. POSTs directly with HTTP Basic
     /// client auth because the SDK's `o_auth2_device_flow` sends none, and the confidential client must authenticate.
@@ -205,38 +201,6 @@ mod device_grant {
             expires_in: raw.expires_in.unwrap_or(600),
             interval: raw.interval.unwrap_or(5),
         })
-    }
-
-    /// The token set returned once a device flow is approved. `id_token` is
-    /// always present for the `openid` scope; the access token is carried for
-    /// completeness but the device path validates-and-discards the id_token
-    /// and never persists either (R3 / R10).
-    #[derive(Debug, Clone)]
-    pub struct TokenSet {
-        // Carried for protocol completeness; the device path binds on `id_token`
-        // only and never introspects (R10), so these two are intentionally unread.
-        #[allow(dead_code)]
-        pub access_token: String,
-        pub id_token: Option<String>,
-        #[allow(dead_code)]
-        pub expires_in: i64,
-    }
-
-    /// Outcome of one device-code token poll (RFC 8628 §3.5). The error
-    /// strings Hydra returns at `/oauth2/token` map onto these so callers
-    /// pattern-match instead of string-sniffing.
-    #[derive(Debug, Clone)]
-    pub enum DeviceTokenOutcome {
-        /// `authorization_pending`: keep polling at the current interval.
-        Pending,
-        /// `slow_down`: Hydra wants a longer interval; back off (+5s per RFC).
-        SlowDown,
-        /// Approved: the token set is ready.
-        Token(Box<TokenSet>),
-        /// `expired_token`: the device_code is dead; restart the flow.
-        Expired,
-        /// `access_denied`: the user rejected the request.
-        Denied,
     }
 
     /// Hydra's `/oauth2/token` error body shape (RFC 6749 §5.2).
@@ -325,31 +289,17 @@ mod device_grant {
         clients: &OryClients,
         device_challenge: &str,
         user_code: &str,
-    ) -> Result<OAuth2RedirectTo> {
+    ) -> Result<RedirectTo> {
         let body = ory_client::models::AcceptDeviceUserCodeRequest {
             user_code: Some(user_code.to_string()),
         };
         o_auth2_api::accept_user_code_request(&clients.hydra_admin, device_challenge, Some(body))
             .await
+            .map(RedirectTo::from)
             .map_err(|e| anyhow::anyhow!("hydra accept_user_code_request failed: {e}"))
     }
 
     // --- id_token verification -------------------------------------------
-
-    /// The subset of OIDC id_token claims the device path binds against. The
-    /// token is validated then discarded; these are read once at poll time and never persisted (R3).
-    #[derive(Debug, Clone)]
-    pub struct IdTokenClaims {
-        pub sub: String,
-        pub acr: Option<String>,
-        pub amr: Vec<String>,
-        /// Hydra stamps this when Forseti accepts the login request, so it is
-        /// not a freshness signal for the PAM `force_mfa` window — that reads
-        /// the second factor's `completed_at` off Kratos instead
-        /// (`posix::device::newest_second_factor_at`).
-        #[allow(dead_code)]
-        pub auth_time: Option<i64>,
-    }
 
     /// Raw id_token claim shape for deserialization. `aud` is string-or-array
     /// in OIDC; jsonwebtoken checks membership for us, but we keep the field so
@@ -545,11 +495,10 @@ mod device_grant {
 } // mod device_grant
 
 pub use device_grant::{
-    DeviceTokenOutcome, TokenSet, accept_user_code_request, device_authorization,
-    poll_device_token, verify_id_token,
+    accept_user_code_request, device_authorization, poll_device_token, verify_id_token,
 };
 #[cfg(test)]
-use device_grant::{IdTokenClaims, map_device_token_error, verify_id_token_with_jwks};
+use device_grant::{map_device_token_error, verify_id_token_with_jwks};
 
 // --- Admin surface ---------------------------------------------------
 
@@ -559,7 +508,7 @@ pub async fn list_clients(
     page_size: i64,
     page_token: Option<&str>,
     client_name: Option<&str>,
-) -> Result<Vec<OAuth2Client>> {
+) -> Result<Vec<OAuthClient>> {
     o_auth2_api::list_o_auth2_clients(
         &clients.hydra_admin,
         Some(page_size),
@@ -568,28 +517,33 @@ pub async fn list_clients(
         None,
     )
     .await
-    .map_err(|e| anyhow::anyhow!("hydra list_clients failed: {e}"))
+    .map_err(|e| anyhow::anyhow!("hydra list_clients failed: {e}"))?
+    .into_iter()
+    .map(client_from_sdk)
+    .collect()
 }
 
-pub async fn get_client(clients: &OryClients, id: &str) -> Result<OAuth2Client> {
+pub async fn get_client(clients: &OryClients, id: &str) -> Result<OAuthClient> {
     o_auth2_api::get_o_auth2_client(&clients.hydra_admin, id)
         .await
         .map_err(|e| anyhow::anyhow!("hydra get_client failed: {e}"))
+        .and_then(client_from_sdk)
 }
 
 /// [`get_client`] with Hydra's 404 mapped to `None`, so upsert callers can branch on existence.
-pub async fn get_client_opt(clients: &OryClients, id: &str) -> Result<Option<OAuth2Client>> {
+pub async fn get_client_opt(clients: &OryClients, id: &str) -> Result<Option<OAuthClient>> {
     match o_auth2_api::get_o_auth2_client(&clients.hydra_admin, id).await {
-        Ok(c) => Ok(Some(c)),
+        Ok(c) => client_from_sdk(c).map(Some),
         Err(ory_client::apis::Error::ResponseError(rc)) if rc.status.as_u16() == 404 => Ok(None),
         Err(e) => Err(anyhow::anyhow!("hydra get_client failed: {e}")),
     }
 }
 
-pub async fn create_client(clients: &OryClients, client: OAuth2Client) -> Result<OAuth2Client> {
-    o_auth2_api::create_o_auth2_client(&clients.hydra_admin, client)
+pub async fn create_client(clients: &OryClients, client: OAuthClient) -> Result<OAuthClient> {
+    o_auth2_api::create_o_auth2_client(&clients.hydra_admin, client_to_sdk(client)?)
         .await
         .map_err(|e| anyhow::anyhow!("hydra create_client failed: {e}"))
+        .and_then(client_from_sdk)
 }
 
 /// Replace a client. Hydra's `set_o_auth2_client` is PUT-shaped (the body fully overrides the stored client),
@@ -597,11 +551,12 @@ pub async fn create_client(clients: &OryClients, client: OAuth2Client) -> Result
 pub async fn update_client(
     clients: &OryClients,
     id: &str,
-    client: OAuth2Client,
-) -> Result<OAuth2Client> {
-    o_auth2_api::set_o_auth2_client(&clients.hydra_admin, id, client)
+    client: OAuthClient,
+) -> Result<OAuthClient> {
+    o_auth2_api::set_o_auth2_client(&clients.hydra_admin, id, client_to_sdk(client)?)
         .await
         .map_err(|e| anyhow::anyhow!("hydra update_client failed: {e}"))
+        .and_then(client_from_sdk)
 }
 
 pub async fn delete_client(clients: &OryClients, id: &str) -> Result<()> {
@@ -620,7 +575,7 @@ const CLIENT_AUDIENCE_CAP: usize = 20;
 /// source-filtered view (say, only what an operator wrote) makes every entry
 /// look new, so the same resource is re-appended on every consent and the cap
 /// never binds.
-pub(crate) fn audience_patch(
+fn audience_patch(
     client_id: &str,
     on_record: &[String],
     granted: &[String],
@@ -675,7 +630,7 @@ pub async fn add_client_audiences(
 
 /// Rotate a client's secret. Hydra has no dedicated rotate endpoint, so we POST a JSON Patch asking it to
 /// regenerate `client_secret`. The response carries the new plaintext secret (the admin UI shows it once).
-pub async fn rotate_client_secret(clients: &OryClients, id: &str) -> Result<OAuth2Client> {
+pub async fn rotate_client_secret(clients: &OryClients, id: &str) -> Result<OAuthClient> {
     let patch = vec![ory_client::models::JsonPatch {
         from: None,
         op: ory_client::models::json_patch::OpEnum::Replace,
@@ -685,6 +640,7 @@ pub async fn rotate_client_secret(clients: &OryClients, id: &str) -> Result<OAut
     o_auth2_api::patch_o_auth2_client(&clients.hydra_admin, id, patch)
         .await
         .map_err(|e| anyhow::anyhow!("hydra rotate_client_secret failed: {e}"))
+        .and_then(client_from_sdk)
 }
 
 /// Enumerate Hydra consent sessions with an active grant for `subject`, paging the `Link: rel="next"` header
@@ -696,7 +652,7 @@ const CONSENT_LIST_MAX_PAGES: usize = 50; // 12,500 grants per subject, well pas
 pub async fn list_consent_sessions_by_subject(
     clients: &OryClients,
     subject: &str,
-) -> Result<Vec<OAuth2ConsentSession>> {
+) -> Result<Vec<ConsentSession>> {
     let cfg = &clients.hydra_admin;
     let base = format!(
         "{}/admin/oauth2/auth/sessions/consent",
@@ -737,7 +693,7 @@ pub async fn list_consent_sessions_by_subject(
         out.extend(batch);
         match next {
             Some(tok) if !batch_empty => page_token = Some(tok),
-            _ => return Ok(out),
+            _ => return out.into_iter().map(consent_session_from_sdk).collect(),
         }
         if page + 1 == CONSENT_LIST_MAX_PAGES {
             tracing::error!(
@@ -747,7 +703,7 @@ pub async fn list_consent_sessions_by_subject(
             );
         }
     }
-    Ok(out)
+    out.into_iter().map(consent_session_from_sdk).collect()
 }
 
 /// Parse `Link: <…?page_token=XYZ&…>; rel="next"` and return the
@@ -825,7 +781,7 @@ pub async fn list_consent_sessions_by_login_session(
     clients: &OryClients,
     subject: &str,
     sid: &str,
-) -> Result<Vec<OAuth2ConsentSession>> {
+) -> Result<Vec<ConsentSession>> {
     o_auth2_api::list_o_auth2_consent_sessions(
         &clients.hydra_admin,
         subject,
@@ -834,7 +790,10 @@ pub async fn list_consent_sessions_by_login_session(
         Some(sid),
     )
     .await
-    .map_err(|e| anyhow::anyhow!("hydra list_consent_sessions by login session failed: {e}"))
+    .map_err(|e| anyhow::anyhow!("hydra list_consent_sessions by login session failed: {e}"))?
+    .into_iter()
+    .map(consent_session_from_sdk)
+    .collect()
 }
 
 /// Revoke all consent grants for a single (subject, client) pair.
@@ -896,14 +855,6 @@ pub async fn version(clients: &OryClients) -> Result<String> {
     Ok(v.version)
 }
 
-/// One row of the configuration page's JWKS table: the public signing keys Hydra advertises at its `jwks_uri`.
-pub struct JwkSummary {
-    pub kid: String,
-    pub alg: String,
-    pub kty: String,
-    pub use_: String,
-}
-
 /// Fetch Hydra's public signing keys (the `jwks_uri` contents) and project
 /// each down to the fields the admin UI shows. Order is whatever Hydra
 /// returns.
@@ -938,6 +889,7 @@ fn generate_client_secret() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::oauth::{DeviceTokenOutcome, IdTokenClaims};
     use reqwest::header::{HeaderMap, HeaderValue};
 
     // --- device-token error mapping --------------------------------------

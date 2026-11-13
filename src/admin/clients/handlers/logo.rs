@@ -158,7 +158,7 @@ async fn invalidate(state: &AppState, id: &str) {
 
 fn show_url(id: &str, scope: &AdminScope) -> String {
     with_org(
-        &format!("/admin/clients/{}", ory_client::apis::urlencode(id)),
+        &format!("/admin/clients/{}", crate::web::urlencode(id)),
         scope,
     )
 }

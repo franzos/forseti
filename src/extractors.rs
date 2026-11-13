@@ -6,17 +6,18 @@ use axum::http::request::Parts;
 use axum::response::{IntoResponse, Redirect, Response};
 
 use crate::admin::{AdminCtx, require_admin, require_admin_with_scope};
+use crate::backend::IdentityBackend;
+use crate::backend::identity::{Session, WhoamiOutcome};
 use crate::commercial::license::{Feature, FeatureStatus};
 use crate::commercial::upsell::render_upsell;
 use crate::cookies;
 use crate::csrf;
-use crate::ory;
 use crate::state::AppState;
 
 /// Resolve the caller's Kratos session, or short-circuit with a `/login` redirect (current path as `return_to`).
 /// Rejection is a fully-formed `Response`, so handlers use `?` against it.
 pub(crate) struct RequireSession {
-    pub(crate) session: ory::Session,
+    pub(crate) session: Session,
     pub(crate) identity_id: String,
     pub(crate) email: String,
 }
@@ -32,18 +33,18 @@ pub(crate) enum SessionFailure {
     KratosError(anyhow::Error),
 }
 
-/// Project a [`ory::kratos::WhoamiOutcome`] into the required-session shape, keeping the InsufficientAal / None mapping in one place.
+/// Project a [`WhoamiOutcome`] into the required-session shape, keeping the InsufficientAal / None mapping in one place.
 fn required_session_from_outcome(
-    outcome: ory::kratos::WhoamiOutcome,
+    outcome: WhoamiOutcome,
     path: &str,
-) -> Result<Box<ory::Session>, SessionFailure> {
+) -> Result<Box<Session>, SessionFailure> {
     match outcome {
-        ory::kratos::WhoamiOutcome::Ok(s) => Ok(s),
-        ory::kratos::WhoamiOutcome::InsufficientAal => Err(SessionFailure::InsufficientAal(
-            Redirect::to(&crate::auth::aal2_step_up_url(path)),
-        )),
-        ory::kratos::WhoamiOutcome::None => {
-            let url = format!("/login?return_to={}", ory_client::apis::urlencode(path));
+        WhoamiOutcome::Ok(s) => Ok(s),
+        WhoamiOutcome::InsufficientAal => Err(SessionFailure::InsufficientAal(Redirect::to(
+            &crate::auth::aal2_step_up_url(path),
+        ))),
+        WhoamiOutcome::None => {
+            let url = format!("/login?return_to={}", crate::web::urlencode(path));
             Err(SessionFailure::NoSession(Redirect::to(&url)))
         }
     }
@@ -55,12 +56,14 @@ pub(crate) async fn resolve_session_from_parts(
     state: &AppState,
     parts: &mut Parts,
     path: &str,
-) -> Result<Box<ory::Session>, SessionFailure> {
+) -> Result<Box<Session>, SessionFailure> {
     if let Some(outcome) = cached_whoami(&parts.extensions) {
         return required_session_from_outcome(outcome, path);
     }
     let cookie = cookies::cookie_header(&parts.headers);
-    let outcome = ory::kratos::whoami(&state.ory, (!cookie.is_empty()).then_some(cookie.as_str()))
+    let outcome = state
+        .identity
+        .whoami((!cookie.is_empty()).then_some(cookie.as_str()))
         .await
         .map_err(SessionFailure::KratosError)?;
     parts
@@ -108,7 +111,7 @@ where
             }
         };
 
-        let (identity_id, email) = crate::flow_view::session_principal(&session);
+        let (identity_id, email) = session.principal();
 
         Ok(RequireSession {
             session,
@@ -119,7 +122,7 @@ where
 }
 
 /// Pull the middleware-cached whoami out of request extensions; `None` means fall back to a direct whoami call.
-fn cached_whoami(extensions: &axum::http::Extensions) -> Option<ory::kratos::WhoamiOutcome> {
+fn cached_whoami(extensions: &axum::http::Extensions) -> Option<WhoamiOutcome> {
     extensions
         .get::<crate::orgs::middleware::CachedWhoami>()
         .map(|c| c.0.clone())
@@ -146,7 +149,7 @@ pub(crate) enum OptionalSession {
     InsufficientAal,
     /// Valid session, with the identity fields pre-extracted.
     Ok {
-        session: Box<ory::Session>,
+        session: Box<Session>,
         identity_id: String,
         email: String,
     },
@@ -155,7 +158,7 @@ pub(crate) enum OptionalSession {
 impl OptionalSession {
     /// Borrow the session when [`OptionalSession::Ok`], else `None`.
     /// Convenience for the common "I only care about the Ok case" path.
-    pub(crate) fn ok(&self) -> Option<&ory::Session> {
+    pub(crate) fn ok(&self) -> Option<&Session> {
         match self {
             OptionalSession::Ok { session, .. } => Some(session),
             _ => None,
@@ -180,29 +183,29 @@ impl OptionalSession {
 
     /// The session identity's verifiable addresses, for
     /// [`crate::config::AdminConfig::is_admin_actor`].
-    pub(crate) fn addresses(&self) -> Option<&[ory::VerifiableIdentityAddress]> {
-        self.ok().and_then(ory::session_addresses)
+    pub(crate) fn addresses(&self) -> Option<&[crate::backend::identity::VerifiableAddress]> {
+        self.ok().and_then(Session::addresses)
     }
 }
 
-/// Project a [`ory::kratos::WhoamiOutcome`] into [`OptionalSession`], pre-extracting identity fields on `Ok`.
-fn optional_session_from_outcome(outcome: ory::kratos::WhoamiOutcome) -> OptionalSession {
+/// Project a [`WhoamiOutcome`] into [`OptionalSession`], pre-extracting identity fields on `Ok`.
+fn optional_session_from_outcome(outcome: WhoamiOutcome) -> OptionalSession {
     match outcome {
-        ory::kratos::WhoamiOutcome::Ok(session) => {
-            let (identity_id, email) = crate::flow_view::session_principal(&session);
+        WhoamiOutcome::Ok(session) => {
+            let (identity_id, email) = session.principal();
             OptionalSession::Ok {
                 session,
                 identity_id,
                 email,
             }
         }
-        ory::kratos::WhoamiOutcome::InsufficientAal => OptionalSession::InsufficientAal,
-        ory::kratos::WhoamiOutcome::None => OptionalSession::None,
+        WhoamiOutcome::InsufficientAal => OptionalSession::InsufficientAal,
+        WhoamiOutcome::None => OptionalSession::None,
     }
 }
 
 /// Free-function form of [`OptionalSession`] for helpers not running inside an extractor; consults the
-/// middleware-cached whoami first, falling back to a direct [`ory::kratos::whoami`] on a cache miss.
+/// middleware-cached whoami first, falling back to a direct [`IdentityBackend::whoami`] on a cache miss.
 pub(crate) async fn optional_session(
     state: &AppState,
     headers: &axum::http::HeaderMap,
@@ -212,11 +215,15 @@ pub(crate) async fn optional_session(
         return optional_session_from_outcome(outcome);
     }
     // No Kratos session cookie means whoami is a guaranteed 401; skip the round-trip.
-    if cookies::read_cookie(headers, crate::orgs::middleware::KRATOS_SESSION_COOKIE).is_none() {
+    if !state.identity.has_session_cookie(headers) {
         return OptionalSession::None;
     }
     let cookie = cookies::cookie_header(headers);
-    match ory::kratos::whoami(&state.ory, (!cookie.is_empty()).then_some(cookie.as_str())).await {
+    match state
+        .identity
+        .whoami((!cookie.is_empty()).then_some(cookie.as_str()))
+        .await
+    {
         Ok(outcome) => optional_session_from_outcome(outcome),
         Err(e) => {
             tracing::warn!(error = ?e, "optional_session: whoami transport error, treating as None");

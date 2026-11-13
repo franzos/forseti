@@ -6,10 +6,10 @@ use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Redirect, Response};
 
 use crate::audit::{self, AuditCtx, AuditEvent, action};
+use crate::backend::IdentityBackend;
 use crate::cookies;
 use crate::csrf;
 use crate::extractors::OptionalSession;
-use crate::ory;
 use crate::page_chrome::{Chrome, PageChrome};
 use crate::render::render;
 use crate::state::AppState;
@@ -51,13 +51,13 @@ pub(crate) async fn logout(
     let kratos_session_id = session.ok().map(|s| s.id.clone());
 
     let secure = state.cfg.self_.is_https();
-    match ory::kratos::fetch_logout_url(&state.ory, &cookie).await {
+    match state.identity.fetch_logout_url(&cookie).await {
         Ok(Some(url)) => {
             if let Some((actor_id, actor_email)) = &actor {
                 if let Some(ksid) = &kratos_session_id {
                     crate::oauth::op_sessions::end_op_sessions_for_browser(
                         &state.db,
-                        &state.ory,
+                        &state.oauth,
                         actor_id,
                         ksid,
                         crate::oauth::op_sessions::GrantRevocation::Keep,
@@ -65,7 +65,10 @@ pub(crate) async fn logout(
                     .await;
                 }
                 crate::oauth::op_sessions::sweep_dead_browser_sessions(
-                    &state.db, &state.ory, actor_id,
+                    &state.db,
+                    &state.identity,
+                    &state.oauth,
+                    actor_id,
                 )
                 .await;
                 let _ = audit::log(

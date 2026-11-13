@@ -6,11 +6,11 @@ use crate::admin::with_org;
 use crate::admin::{AdminSection, ConfirmForm, ConfirmTemplate, render_admin_error};
 use crate::audit::{self, AuditCtx, AuditEvent, action, target_kind};
 use crate::audit_metadata;
+use crate::backend::OAuthBackend;
 use crate::csrf::CsrfForm;
 use crate::extractors::Csrf;
 use crate::oauth_client_metadata;
 use crate::orgs::AdminScope;
-use crate::ory;
 use crate::render::render;
 use crate::state::AppState;
 
@@ -48,8 +48,8 @@ pub async fn unverify_confirm(client_in_scope: RequireClientInScope, csrf: Csrf)
         admin_active: AdminSection::Clients,
         title: format!("Revoke verification for {id}?"),
         body: "End-users will see a caution banner on the consent screen for this client until it is verified again.".to_string(),
-        action_url: format!("/admin/clients/{}/unverify", ory_client::apis::urlencode(&id)),
-        cancel_url: format!("/admin/clients/{}", ory_client::apis::urlencode(&id)),
+        action_url: format!("/admin/clients/{}/unverify", crate::web::urlencode(&id)),
+        cancel_url: format!("/admin/clients/{}", crate::web::urlencode(&id)),
         submit_label: "Revoke verification",
     })
 }
@@ -93,7 +93,7 @@ async fn set_verification(
     // verification if Hydra is temporarily unreachable — the trust
     // state lives Forseti-side now, and the audit row's `target_id`
     // still resolves later via the same `get_client` call.
-    let client_name = match ory::hydra::get_client(&state.ory, id).await {
+    let client_name = match state.oauth.get_client(id).await {
         Ok(c) => c.client_name.clone().unwrap_or_default(),
         Err(e) => {
             tracing::warn!(error = ?e, id, "admin: get_client for verify audit failed; proceeding with empty client_name");
@@ -157,7 +157,7 @@ async fn set_verification(
     let _ = audit::log(&state.db, event).await;
 
     let target = with_org(
-        &format!("/admin/clients/{}", ory_client::apis::urlencode(id)),
+        &format!("/admin/clients/{}", crate::web::urlencode(id)),
         scope,
     );
     let msg = if verify_now {
