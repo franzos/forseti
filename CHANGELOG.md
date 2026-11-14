@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.2.29] - 2026-11-14
+
+### Fixed
+- Container image build (0.2.28 has no image)
+
 ## [0.2.28] - 2026-11-14
 
 ### Added
