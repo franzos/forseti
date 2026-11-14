@@ -694,26 +694,13 @@ impl DatabaseConfig {
             return false;
         };
         match host {
-            url::Host::Domain(name) => {
-                if name == "localhost" {
-                    return false;
-                }
-                true
-            }
-            url::Host::Ipv4(v4) => {
-                if v4.is_loopback() || v4.is_private() {
-                    return false;
-                }
-                true
-            }
+            url::Host::Domain(name) => name != "localhost",
+            url::Host::Ipv4(v4) => !(v4.is_loopback() || v4.is_private()),
+            // Note: 2001:db8::/32 (documentation prefix) is intentionally
+            // NOT treated as non-prod: it's reserved for examples, not
+            // private deployments.
             url::Host::Ipv6(v6) => {
-                if v6.is_loopback() || v6.is_unique_local() || v6.is_unicast_link_local() {
-                    return false;
-                }
-                // Note: 2001:db8::/32 (documentation prefix) is intentionally
-                // NOT treated as non-prod: it's reserved for examples, not
-                // private deployments.
-                true
+                !(v6.is_loopback() || v6.is_unique_local() || v6.is_unicast_link_local())
             }
         }
     }

@@ -45,6 +45,8 @@ COPY --from=css /styles.css ./static/styles.css
 # before it builds, so the manifest has to be present even for a release build
 # that never compiles it.
 COPY forseti-unix/proto ./forseti-unix/proto
+# The manifest names an example, so cargo needs the file to parse it.
+COPY examples ./examples
 RUN cargo build --release --locked
 
 # --- Runtime image.
