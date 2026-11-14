@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.2.28] - 2026-11-14
+
+### Added
+- Native identity backend: a build that runs without Kratos (`--no-default-features --features identity-native`)
+- Native build covers registration, login, verification, recovery, settings, TOTP and backup codes
+- `[identity].privileged_session_minutes` sets the re-authentication window (default 15)
+- `make check-native`, `run-native`, `stack-up-native`, `test-integration-native`, `e2e-native`
+
+### Changed
+- Native build needs `[security].cookie_secret` and `[email].enabled = true`
+- Native build has no SAML, upstream OIDC sign-in, WebAuthn or `forseti config` verbs
+
 ## [0.2.27] - 2026-11-12
 
 ### Added
