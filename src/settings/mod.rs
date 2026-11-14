@@ -283,25 +283,24 @@ impl InlineRenderSection {
     }
 }
 
-/// Kratos's `selfservice.flows.settings.privileged_session_max_age`, as
-/// `config init` writes it. Kratos holds the real value and exposes no API
-/// for it, so Forseti mirrors the shipped default.
-const PRIVILEGED_WINDOW: chrono::Duration = chrono::Duration::minutes(15);
-
-/// Privileged-session deadline as RFC3339: flow `issued_at` plus
-/// [`PRIVILEGED_WINDOW`]. `None` when `issued_at` is unparseable.
+/// Privileged-session deadline as RFC3339: flow `issued_at` plus the
+/// privileged `window`. `None` when `issued_at` is unparseable.
 // Display only; DB timestamps go through crate::db::rfc3339.
 #[allow(clippy::disallowed_methods)]
-fn privileged_deadline_rfc3339(flow: &Flow) -> Option<String> {
+fn privileged_deadline_rfc3339(flow: &Flow, window: chrono::Duration) -> Option<String> {
     let issued = flow.issued_at.as_deref()?;
     let parsed = chrono::DateTime::parse_from_rfc3339(issued).ok()?;
-    let deadline = parsed + PRIVILEGED_WINDOW;
+    let deadline = parsed + window;
     Some(deadline.to_rfc3339())
 }
 
-/// Whether `session` signed in within [`PRIVILEGED_WINDOW`] of `now`.
-fn recently_authenticated(session: &Session, now: chrono::DateTime<chrono::Utc>) -> bool {
-    crate::oauth::reauth::session_auth_time(session).is_some_and(|t| now - t <= PRIVILEGED_WINDOW)
+/// Whether `session` signed in within the privileged `window` of `now`.
+fn recently_authenticated(
+    session: &Session,
+    now: chrono::DateTime<chrono::Utc>,
+    window: chrono::Duration,
+) -> bool {
+    crate::oauth::reauth::session_auth_time(session).is_some_and(|t| now - t <= window)
 }
 
 fn settings_section_from_flow(flow: &Flow) -> SettingsSection {
@@ -353,7 +352,7 @@ mod tests {
         let return_to =
             url::form_urlencoded::byte_serialize(format!("http://localhost:3000{path}").as_bytes())
                 .collect::<String>();
-        crate::ory::flow_json::project(&serde_json::json!({
+        crate::flow_json::project(&serde_json::json!({
             "request_url": format!(
                 "http://localhost:4433/self-service/settings/browser?return_to={return_to}"
             )
@@ -384,6 +383,8 @@ mod tests {
         s
     }
 
+    const WINDOW: chrono::Duration = chrono::Duration::minutes(15);
+
     fn at(rfc3339: &str) -> chrono::DateTime<chrono::Utc> {
         chrono::DateTime::parse_from_rfc3339(rfc3339)
             .unwrap()
@@ -393,13 +394,21 @@ mod tests {
     #[test]
     fn sign_in_inside_the_window_is_recent() {
         let s = session_signed_in_at("2026-01-01T10:00:00Z");
-        assert!(recently_authenticated(&s, at("2026-01-01T10:14:59Z")));
+        assert!(recently_authenticated(
+            &s,
+            at("2026-01-01T10:14:59Z"),
+            WINDOW
+        ));
     }
 
     #[test]
     fn sign_in_outside_the_window_is_not_recent() {
         let s = session_signed_in_at("2026-01-01T10:00:00Z");
-        assert!(!recently_authenticated(&s, at("2026-01-01T10:15:01Z")));
+        assert!(!recently_authenticated(
+            &s,
+            at("2026-01-01T10:15:01Z"),
+            WINDOW
+        ));
     }
 
     #[test]
@@ -408,7 +417,11 @@ mod tests {
             id: "sess-1".to_string(),
             ..Default::default()
         };
-        assert!(!recently_authenticated(&s, at("2026-01-01T10:00:00Z")));
+        assert!(!recently_authenticated(
+            &s,
+            at("2026-01-01T10:00:00Z"),
+            WINDOW
+        ));
     }
 
     #[test]
@@ -490,7 +503,11 @@ pub(crate) async fn fetch_settings_subpage(
         // they enforce it here.
         FlowOutcome::Ready(_)
             if section.is_probe_only()
-                && !recently_authenticated(&sess.session, chrono::Utc::now()) =>
+                && !recently_authenticated(
+                    &sess.session,
+                    chrono::Utc::now(),
+                    state.cfg.identity.privileged_window(),
+                ) =>
         {
             Err(Redirect::to(&format!(
                 "/login?refresh=true&return_to={}",
@@ -673,7 +690,10 @@ fn render_settings(
                     form_method,
                     flow_messages: msgs,
                     groups,
-                    privileged_deadline: privileged_deadline_rfc3339(flow),
+                    privileged_deadline: privileged_deadline_rfc3339(
+                        flow,
+                        state.cfg.identity.privileged_window(),
+                    ),
                 })
             } else {
                 render(&SettingsPasswordTemplate {

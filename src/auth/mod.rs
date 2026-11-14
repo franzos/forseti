@@ -88,27 +88,48 @@ pub(crate) fn router(proxy_cfg: &ProxyConfig, auth_cfg: &AuthConfig) -> Router<A
 /// sees it), so this only bounds page renders — see the operator guide.
 fn registration_router(proxy_cfg: &ProxyConfig, auth_cfg: &AuthConfig) -> Router<AppState> {
     let r = Router::new().route("/registration", get(registration::registration));
+    registration_rate_limit(r, proxy_cfg, auth_cfg)
+}
 
-    let per_minute = auth_cfg
-        .registration_ip_rate_per_minute
-        .unwrap_or(DEFAULT_REGISTRATION_IP_RATE_PER_MINUTE);
-    let per_hour = auth_cfg
-        .registration_ip_rate_per_hour
-        .unwrap_or(DEFAULT_REGISTRATION_IP_RATE_PER_HOUR);
-    let global_per_minute = auth_cfg
-        .registration_global_rate_per_minute
-        .unwrap_or(DEFAULT_REGISTRATION_GLOBAL_RATE_PER_MINUTE);
-    let global_per_hour = auth_cfg
-        .registration_global_rate_per_hour
-        .unwrap_or(DEFAULT_REGISTRATION_GLOBAL_RATE_PER_HOUR);
+/// The `[auth].registration_*` bucket sizes, defaults applied.
+pub(crate) struct RegistrationLimits {
+    pub(crate) ip_per_minute: u32,
+    pub(crate) ip_per_hour: u32,
+    pub(crate) global_per_minute: u32,
+    pub(crate) global_per_hour: u32,
+}
 
+pub(crate) fn registration_limits(auth_cfg: &AuthConfig) -> RegistrationLimits {
+    RegistrationLimits {
+        ip_per_minute: auth_cfg
+            .registration_ip_rate_per_minute
+            .unwrap_or(DEFAULT_REGISTRATION_IP_RATE_PER_MINUTE),
+        ip_per_hour: auth_cfg
+            .registration_ip_rate_per_hour
+            .unwrap_or(DEFAULT_REGISTRATION_IP_RATE_PER_HOUR),
+        global_per_minute: auth_cfg
+            .registration_global_rate_per_minute
+            .unwrap_or(DEFAULT_REGISTRATION_GLOBAL_RATE_PER_MINUTE),
+        global_per_hour: auth_cfg
+            .registration_global_rate_per_hour
+            .unwrap_or(DEFAULT_REGISTRATION_GLOBAL_RATE_PER_HOUR),
+    }
+}
+
+/// The `[auth].registration_*` per-IP and global buckets, with their defaults, on `r`.
+fn registration_rate_limit(
+    r: Router<AppState>,
+    proxy_cfg: &ProxyConfig,
+    auth_cfg: &AuthConfig,
+) -> Router<AppState> {
+    let limits = registration_limits(auth_cfg);
     rate_limit::dual_window_with_global(
         r,
         proxy_cfg,
-        per_minute,
-        per_hour,
-        global_per_minute,
-        global_per_hour,
+        limits.ip_per_minute,
+        limits.ip_per_hour,
+        limits.global_per_minute,
+        limits.global_per_hour,
         rate_limit::plain_text_error("registration"),
     )
 }

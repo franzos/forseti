@@ -66,6 +66,26 @@ async fn recovery_email_code_lands_on_settings_password() {
         .as_str()
         .expect("ui.action (step 2)")
         .to_string();
+    // Native: the code goes to the flow's own action, which answers with the browser redirect.
+    if is_native() {
+        let res = anon
+            .post(&action)
+            .form(&[
+                ("code", code.as_str()),
+                ("method", "code"),
+                ("csrf_token", csrf.as_str()),
+            ])
+            .send()
+            .await
+            .expect("submit code");
+        let final_url = res.url().to_string();
+        assert!(
+            final_url.contains("/settings/password"),
+            "post-recovery should land on /settings/password (Bug 3); got {final_url}"
+        );
+        user.cleanup().await;
+        return;
+    }
     // Kratos returns 422 on a successful recovery submit (it wants the JSON
     // client to redirect to `redirect_browser_to`). We follow that manually
     // to assert on the landing page.

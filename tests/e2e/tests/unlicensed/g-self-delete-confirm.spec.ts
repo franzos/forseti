@@ -9,19 +9,17 @@
 //   (b) the form REQUIRES typing the email (HTML5 `required` + server-
 //       side equality check, both observed)
 //   (c) submitting the right value clears the session, redirects to
-//       /login, and the identity actually goes from Kratos.
+//       /login, and the identity actually goes from the identity backend.
 //
 // Skips when admin env vars aren't set.
 import { test, expect } from '@playwright/test';
 import { adminCredsFromEnv, signInAdminAal2 } from '../../helpers/admin';
 import { logout, registerUser } from '../../helpers/register';
-import { markEmailVerified } from '../../helpers/orgs';
+import { identityIdByEmail, markEmailVerified, sessionIsActive } from '../../helpers/identity';
 import { createOAuthClient } from '../../helpers/clients';
 import { generatePkcePair } from '../../helpers/oauth';
 
 const HYDRA_AUTHORIZE = 'http://host.containers.internal:4444/oauth2/auth';
-const KRATOS_PUBLIC = 'http://host.containers.internal:4433';
-const KRATOS_ADMIN = 'http://host.containers.internal:4434';
 
 const REDIRECT_URI = 'http://localhost:9876/cb';
 
@@ -128,14 +126,10 @@ test('self-delete confirm page lists granted apps, enforces email confirm, and d
     page.locator('form[action^="/settings/account/delete"] button[type="submit"]').click(),
   ]);
   // Identity must still exist.
-  const stillThere = await request.get(
-    `${KRATOS_ADMIN}/admin/identities?credentials_identifier=${encodeURIComponent(endUser.email)}`,
-  );
-  expect(stillThere.ok()).toBeTruthy();
-  expect(((await stillThere.json()) as Array<unknown>).length).toBe(1);
+  expect(await identityIdByEmail(request, endUser.email)).toBeTruthy();
 
   // 8. Type the CORRECT email + submit. The saga writes outbox rows,
-  //    deletes the Kratos identity, clears `ory_kratos_session`, and
+  //    deletes the identity, clears the session cookie, and
   //    303s to /login?msg=account_deleted.
   await page.goto('/settings/account/delete');
   // Privileged gate again — the wrong-email submit may have aged the
@@ -153,34 +147,24 @@ test('self-delete confirm page lists granted apps, enforces email confirm, and d
     page.locator('form[action^="/settings/account/delete"] button[type="submit"]').click(),
   ]);
 
-  // 9. Assert: the Kratos identity is gone from the admin index.
-  //    Kratos may take a moment to surface the deletion to the
-  //    admin index after the delete API returns — poll briefly.
+  // 9. Assert: the identity is gone. Kratos may take a moment to
+  //    surface the deletion to the admin index after the delete API
+  //    returns — poll briefly.
   const deadline = Date.now() + 5000;
   let identityGone = false;
   while (Date.now() < deadline) {
-    const lookup = await request.get(
-      `${KRATOS_ADMIN}/admin/identities?credentials_identifier=${encodeURIComponent(endUser.email)}`,
-    );
-    if (lookup.ok()) {
-      const arr = (await lookup.json()) as Array<unknown>;
-      if (arr.length === 0) {
-        identityGone = true;
-        break;
-      }
+    if ((await identityIdByEmail(request, endUser.email)) === undefined) {
+      identityGone = true;
+      break;
     }
     await new Promise((r) => setTimeout(r, 250));
   }
-  expect(identityGone, `Kratos identity for ${endUser.email} should be gone`).toBe(true);
+  expect(identityGone, `identity for ${endUser.email} should be gone`).toBe(true);
 
-  // 10. Assert: whoami with the surviving cookie jar returns 401 (the
-  //     portal cleared `ory_kratos_session`, and even if the cookie
-  //     stuck Kratos drops the session server-side on identity delete).
+  // 10. Assert: the surviving cookie jar carries no live session (the
+  //     portal cleared the session cookie, and even if the cookie stuck
+  //     the backend drops the session server-side on identity delete).
   const cookies = await page.context().cookies();
   const cookieHeader = cookies.map((c) => `${c.name}=${c.value}`).join('; ');
-  const whoami = await request.get(`${KRATOS_PUBLIC}/sessions/whoami`, {
-    headers: { cookie: cookieHeader },
-    failOnStatusCode: false,
-  });
-  expect(whoami.status()).toBe(401);
+  expect(await sessionIsActive(request, cookieHeader)).toBe(false);
 });

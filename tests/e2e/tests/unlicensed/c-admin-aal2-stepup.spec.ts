@@ -10,7 +10,8 @@
 import { test, expect } from '@playwright/test';
 import { adminCredsFromEnv } from '../../helpers/admin';
 import { signInAal1 } from '../../helpers/register';
-import { computeTotp } from '../../helpers/totp';
+import { freshTotp } from '../../helpers/totp';
+import { isNative } from '../../helpers/identity';
 
 test('AAL2 step-up triggers at /admin/webhooks for an AAL1-only session', async ({ page }) => {
   const creds = adminCredsFromEnv();
@@ -18,6 +19,7 @@ test('AAL2 step-up triggers at /admin/webhooks for an AAL1-only session', async 
     !creds,
     'Set FORSETI_ADMIN_TEST_{EMAIL,PASSWORD,TOTP_SECRET} to run the admin AAL2 step-up scenario',
   );
+  test.slow(isNative, 'waits up to one TOTP step for an unused code');
 
   // 1. AAL1 sign-in (password only).
   await signInAal1(page, creds!.email, creds!.password);
@@ -42,7 +44,7 @@ test('AAL2 step-up triggers at /admin/webhooks for an AAL1-only session', async 
   // 3. Submit a fresh TOTP code. After success, the flow's `return_to`
   //    (baked in by the /login handler from the original query) drives
   //    the redirect to /admin/webhooks.
-  await totpInput.fill(computeTotp(creds!.totpSecret));
+  await totpInput.fill(await freshTotp(creds!.totpSecret));
   await page.locator('button[name="method"][value="totp"]').click();
   await page.waitForURL((u) => u.pathname === '/admin/webhooks', { timeout: 15_000 });
 

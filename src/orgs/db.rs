@@ -1249,31 +1249,8 @@ pub async fn suggest_slug(db: &DbPool, name: &str) -> anyhow::Result<String> {
     anyhow::bail!("could not find a free slug after 1000 attempts")
 }
 
-/// Single-connection `:memory:` pool: sqlite's `:memory:` database lives
-/// only on the connection that created it, so the pool must never hand out
-/// a second connection or the migrated schema disappears. Shared across
-/// `orgs::db` and sibling test modules (e.g. `orgs::logo`).
 #[cfg(test)]
-pub(crate) async fn test_pool() -> DbPool {
-    use deadpool_diesel::sqlite::{Manager, Pool, Runtime};
-    use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
-
-    const TEST_MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations/sqlite");
-
-    let manager = Manager::new(":memory:", Runtime::Tokio1);
-    let pool = Pool::builder(manager)
-        .max_size(1)
-        .build()
-        .expect("build test sqlite pool");
-    let conn = pool.get().await.expect("get test conn");
-    conn.interact(|c: &mut diesel::sqlite::SqliteConnection| {
-        c.run_pending_migrations(TEST_MIGRATIONS).map(|_| ())
-    })
-    .await
-    .expect("interact panic")
-    .expect("run test migrations");
-    DbPool::Sqlite(pool)
-}
+pub(crate) use crate::db::test_pool;
 
 #[cfg(test)]
 mod tests {
@@ -1298,6 +1275,7 @@ mod tests {
 
     /// C1 (round-3 review): a surviving `saml_links` row let the next SSO
     /// silently re-join a removed member.
+    #[cfg(feature = "identity-ory")]
     #[tokio::test]
     async fn removing_a_member_drops_their_saml_link_for_that_org_only() {
         use crate::saml::db::{link_for, upsert_link};

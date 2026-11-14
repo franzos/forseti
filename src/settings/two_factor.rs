@@ -123,20 +123,14 @@ fn render_2fa(
     );
     promote_primary(&mut webauthn_nodes, &["webauthn_register_trigger"]);
 
-    let totp_enrolled = flow.has_node("totp", "totp_unlink");
-    // `lookup_enrolled`: Kratos emits `lookup_secret_disable` when there's an
-    // enrolment to tear down. `lookup_just_regenerated`: the one render where
-    // Kratos emits `lookup_secret_reveal` plus the plaintext codes.
-    let lookup_enrolled = flow.has_node("lookup_secret", "lookup_secret_disable");
+    let PageFlags {
+        totp_enrolled,
+        lookup_enrolled,
+        lookup_just_regenerated,
+        needs_recovery_codes,
+    } = page_flags(flow);
     let lookup_codes = flow.lookup_codes.clone();
-    let lookup_just_regenerated =
-        flow.has_node("lookup_secret", "lookup_secret_reveal") && !lookup_codes.is_empty();
     let webauthn_enabled = !webauthn_nodes.is_empty();
-    // Enrolment (vs merely-enabled) is signalled by the per-credential remove
-    // node Kratos emits for each registered authenticator.
-    let webauthn_enrolled =
-        flow.has_node("webauthn", "webauthn_remove") || flow.has_node("passkey", "passkey_remove");
-    let needs_recovery_codes = (totp_enrolled || webauthn_enrolled) && !lookup_enrolled;
     let webauthn_scripts = flow.webauthn_scripts();
 
     let mut msgs = flow.messages.clone();
@@ -169,6 +163,39 @@ fn render_2fa(
         webauthn_scripts,
         referrer_banner,
     })
+}
+
+/// What the 2FA page shows, read off the flow's nodes.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct PageFlags {
+    pub(crate) totp_enrolled: bool,
+    pub(crate) lookup_enrolled: bool,
+    pub(crate) lookup_just_regenerated: bool,
+    pub(crate) needs_recovery_codes: bool,
+}
+
+pub(crate) fn page_flags(flow: &Flow) -> PageFlags {
+    let totp_enrolled = flow.has_node("totp", "totp_unlink");
+    // `lookup_enrolled`: Kratos emits `lookup_secret_disable` when there's an
+    // enrolment to tear down. `lookup_just_regenerated`: the one render where
+    // Kratos emits `lookup_secret_reveal` plus the plaintext codes.
+    let lookup_enrolled = flow.has_node("lookup_secret", "lookup_secret_disable");
+    #[cfg(feature = "identity-ory")]
+    let lookup_just_regenerated =
+        flow.has_node("lookup_secret", "lookup_secret_reveal") && !flow.lookup_codes.is_empty();
+    // Native flows carry generated codes, shown to the owning session, until confirm or flow expiry.
+    #[cfg(feature = "identity-native")]
+    let lookup_just_regenerated = !flow.lookup_codes.is_empty();
+    // Enrolment (vs merely-enabled) is signalled by the per-credential remove
+    // node Kratos emits for each registered authenticator.
+    let webauthn_enrolled =
+        flow.has_node("webauthn", "webauthn_remove") || flow.has_node("passkey", "passkey_remove");
+    PageFlags {
+        totp_enrolled,
+        lookup_enrolled,
+        lookup_just_regenerated,
+        needs_recovery_codes: (totp_enrolled || webauthn_enrolled) && !lookup_enrolled,
+    }
 }
 
 /// Mark the input named in `primary_names` as the form's primary CTA, falling

@@ -1,0 +1,161 @@
+{
+  "id": "e44d7966-de1c-4be4-bc69-7693694c348c",
+  "type": "browser",
+  "expires_at": "2026-11-13T17:36:22.011135Z",
+  "issued_at": "2026-11-13T17:26:22.011135Z",
+  "request_url": "http://localhost:4433/self-service/registration/browser",
+  "ui": {
+    "action": "http://localhost:4433/self-service/registration?flow=e44d7966-de1c-4be4-bc69-7693694c348c",
+    "method": "POST",
+    "nodes": [
+      {
+        "type": "input",
+        "group": "oidc",
+        "attributes": {
+          "name": "provider",
+          "type": "submit",
+          "value": "playground",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1040002,
+            "text": "Sign up with Playground",
+            "type": "info",
+            "context": {
+              "provider": "Playground",
+              "provider_id": "playground"
+            }
+          }
+        }
+      },
+      {
+        "type": "input",
+        "group": "default",
+        "attributes": {
+          "name": "csrf_token",
+          "type": "hidden",
+          "value": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+          "required": true,
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {}
+      },
+      {
+        "type": "input",
+        "group": "default",
+        "attributes": {
+          "name": "traits.email",
+          "type": "email",
+          "required": true,
+          "autocomplete": "email",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1070002,
+            "text": "E-Mail",
+            "type": "info",
+            "context": {
+              "name": "traits.email",
+              "title": "E-Mail"
+            }
+          }
+        }
+      },
+      {
+        "type": "input",
+        "group": "default",
+        "attributes": {
+          "name": "traits.name.first",
+          "type": "text",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1070002,
+            "text": "First Name",
+            "type": "info",
+            "context": {
+              "name": "traits.name.first",
+              "title": "First Name"
+            }
+          }
+        }
+      },
+      {
+        "type": "input",
+        "group": "default",
+        "attributes": {
+          "name": "traits.name.last",
+          "type": "text",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1070002,
+            "text": "Last Name",
+            "type": "info",
+            "context": {
+              "name": "traits.name.last",
+              "title": "Last Name"
+            }
+          }
+        }
+      },
+      {
+        "type": "input",
+        "group": "default",
+        "attributes": {
+          "name": "traits.preferred_language",
+          "type": "text",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1070002,
+            "text": "Preferred language",
+            "type": "info",
+            "context": {
+              "name": "traits.preferred_language",
+              "title": "Preferred language"
+            }
+          }
+        }
+      },
+      {
+        "type": "input",
+        "group": "profile",
+        "attributes": {
+          "name": "method",
+          "type": "submit",
+          "value": "profile",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1040001,
+            "text": "Sign up",
+            "type": "info"
+          }
+        }
+      }
+    ]
+  },
+  "organization_id": null,
+  "state": "choose_method"
+}

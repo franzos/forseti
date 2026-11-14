@@ -1,0 +1,40 @@
+{
+  "id": "411a34ae-e942-4f9c-a990-8d374c1767ca",
+  "organization_id": null,
+  "type": "browser",
+  "expires_at": "2026-11-13T17:36:21.908294Z",
+  "issued_at": "2026-11-13T17:26:21.908294Z",
+  "request_url": "http://localhost:4433/self-service/login/browser?aal=aal2",
+  "ui": {
+    "action": "http://localhost:4433/self-service/login?flow=411a34ae-e942-4f9c-a990-8d374c1767ca",
+    "method": "POST",
+    "nodes": [
+      {
+        "type": "input",
+        "group": "default",
+        "attributes": {
+          "name": "csrf_token",
+          "type": "hidden",
+          "value": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+          "required": true,
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {}
+      }
+    ],
+    "messages": [
+      {
+        "id": 1010004,
+        "text": "Please complete the second authentication challenge.",
+        "type": "info"
+      }
+    ]
+  },
+  "created_at": "2026-11-13T17:26:21.917587Z",
+  "updated_at": "2026-11-13T17:26:21.917587Z",
+  "refresh": false,
+  "requested_aal": "aal2",
+  "state": "choose_method"
+}

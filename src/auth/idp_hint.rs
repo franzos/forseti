@@ -243,7 +243,7 @@ mod tests {
                 "attributes": { "name": name, "type": ty, "value": value },
             })
         };
-        crate::ory::flow_json::project(&serde_json::json!({
+        crate::flow_json::project(&serde_json::json!({
             "requested_aal": requested_aal,
             "refresh": refresh,
             "ui": {

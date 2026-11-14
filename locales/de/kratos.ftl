@@ -84,6 +84,7 @@ kratos-4000005 = Das Passwort kann nicht verwendet werden, weil { $reason }.
 kratos-4000006 = Die eingegebenen Zugangsdaten sind ungültig. Überprüfen Sie bitte Tippfehler in Ihrem Passwort, Benutzernamen, Ihrer E-Mail-Adresse oder Telefonnummer.
 kratos-4000007 = Es gibt bereits ein Konto mit dieser Kennung (E-Mail, Telefon, Benutzername, ...).
 kratos-4000008 = Der eingegebene Authentifizierungscode ist ungültig, bitte versuchen Sie es erneut.
+kratos-4000010 = Das Konto ist noch nicht aktiv. Haben Sie vergessen, Ihre E-Mail-Adresse zu bestätigen?
 kratos-4000032 = Das Passwort muss mindestens { $min_length } Zeichen lang sein, enthält aber nur { $actual_length }.
 kratos-4000035 = Dieses Konto existiert nicht oder hat keine Code-Anmeldung konfiguriert.
 
@@ -106,3 +107,6 @@ kratos-4060006 = Der Wiederherstellungscode ist ungültig oder wurde bereits ver
 kratos-4070001 = Das Verifizierungstoken ist ungültig oder wurde bereits verwendet. Bitte starten Sie den Vorgang erneut.
 kratos-4070005 = Der Verifizierungs-Flow ist abgelaufen, bitte versuchen Sie es erneut.
 kratos-4070006 = Der Bestätigungscode ist ungültig oder wurde bereits verwendet. Bitte versuchen Sie es erneut.
+
+# --- Drosselung (9000xxx) ---
+kratos-9000001 = Gerade gibt es zu viele Anmeldeversuche. Bitte versuchen Sie es in ein paar Minuten erneut.

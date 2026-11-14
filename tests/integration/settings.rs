@@ -131,6 +131,9 @@ async fn settings_sessions_shows_current_indicator() {
 
 #[tokio::test]
 async fn settings_linked_providers_offers_the_playground_link() {
+    skip_on_native!(
+        "upstream OIDC sign-in is out of scope on the native build (spec non-goal), so no provider link is offered"
+    );
     assert!(portal_reachable().await);
     let user = register_test_user("settings-linked").await;
 

@@ -12,7 +12,11 @@ pub(crate) fn cookie_header(headers: &HeaderMap) -> String {
 /// Read a single cookie's raw value (no URL-decoding) from the inbound `Cookie` header; first match wins.
 /// `None` when the header is absent, not UTF-8, or has no cookie named `name`.
 pub(crate) fn read_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
-    let raw = join_cookie_lines(headers);
+    read_cookie_from(&join_cookie_lines(headers), name)
+}
+
+/// [`read_cookie`] over a raw `Cookie` header value, as returned by [`cookie_header`].
+pub(crate) fn read_cookie_from(raw: &str, name: &str) -> Option<String> {
     if raw.is_empty() {
         return None;
     }

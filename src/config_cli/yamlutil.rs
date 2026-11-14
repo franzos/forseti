@@ -1,13 +1,17 @@
+#[cfg(feature = "identity-ory")]
 use std::path::Path;
 
-use rand::RngExt;
-use rand::distr::Alphanumeric;
-use serde_json::{Map, Value};
+#[cfg(feature = "identity-ory")]
+use rand::{RngExt, distr::Alphanumeric};
+#[cfg(feature = "identity-ory")]
+use serde_json::Map;
+use serde_json::Value;
 
 // ---------------------------------------------------------------------------
 // YAML navigation helpers (mirror how the codebase walks serde_json::Value).
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "identity-ory")]
 pub(crate) fn dig<'a>(root: &'a Value, path: &[&str]) -> Option<&'a Value> {
     let mut cur = root;
     for key in path {
@@ -16,16 +20,19 @@ pub(crate) fn dig<'a>(root: &'a Value, path: &[&str]) -> Option<&'a Value> {
     Some(cur)
 }
 
+#[cfg(feature = "identity-ory")]
 pub(crate) fn dig_str<'a>(root: &'a Value, path: &[&str]) -> Option<&'a str> {
     dig(root, path).and_then(Value::as_str)
 }
 
+#[cfg(feature = "identity-ory")]
 pub(crate) fn dig_bool(root: &Value, path: &[&str]) -> Option<bool> {
     dig(root, path).and_then(Value::as_bool)
 }
 
 /// Mutable sibling of `dig`: walk `path` through nested mappings, returning the
 /// leaf slot. `None` if any segment is missing or not a mapping.
+#[cfg(feature = "identity-ory")]
 pub(crate) fn dig_mut<'a>(root: &'a mut Value, path: &[&str]) -> Option<&'a mut Value> {
     let mut cur = root;
     for key in path {
@@ -37,6 +44,7 @@ pub(crate) fn dig_mut<'a>(root: &'a mut Value, path: &[&str]) -> Option<&'a mut 
 /// Like `dig_mut`, but creates intermediate mappings (replacing any non-mapping
 /// segment) as it descends, so the leaf slot always exists. Fresh leaves start
 /// as `Value::Null` for the caller to overwrite.
+#[cfg(feature = "identity-ory")]
 pub(crate) fn dig_mut_or_insert<'a>(root: &'a mut Value, path: &[&str]) -> &'a mut Value {
     let mut cur = root;
     for key in path {
@@ -51,6 +59,7 @@ pub(crate) fn dig_mut_or_insert<'a>(root: &'a mut Value, path: &[&str]) -> &'a m
 
 /// A YAML string that is empty, missing, or an obvious placeholder isn't a
 /// real secret/URL. Case-insensitive substring match against known tells.
+#[cfg(feature = "identity-ory")]
 pub(crate) fn is_placeholder(s: &str) -> bool {
     let lower = s.trim().to_ascii_lowercase();
     if lower.is_empty() {
@@ -74,6 +83,7 @@ pub(crate) fn is_placeholder(s: &str) -> bool {
 /// Every entry of a `secrets.*`-shaped node, in document order. Accepts
 /// either the normal sequence form or a bare string (treated as a
 /// single-entry list) so callers don't need to special-case malformed input.
+#[cfg(feature = "identity-ory")]
 pub(crate) fn secret_entries<'a>(root: &'a Value, path: &[&str]) -> Vec<&'a str> {
     match dig(root, path) {
         Some(Value::Array(seq)) => seq.iter().filter_map(Value::as_str).collect(),
@@ -95,6 +105,7 @@ pub fn to_yaml(value: &Value) -> Result<String, serde_saphyr::SerializeError> {
     serde_saphyr::to_string_with_options(value, options)
 }
 
+#[cfg(feature = "identity-ory")]
 pub(crate) fn load_yaml(path: &Path) -> anyhow::Result<Value> {
     let display = path.display();
     let text = std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("{display}: {e}"))?;
@@ -131,6 +142,7 @@ pub fn yaml_scalar(s: &str) -> String {
 /// Reject operator values carrying control chars or newlines before they reach
 /// the templated YAML (single-line URLs/DSNs/SMTP URIs never need them), and
 /// they're the vector for scalar-breakout key injection.
+#[cfg(feature = "identity-ory")]
 pub(crate) fn reject_control_chars(label: &str, value: &str) -> Result<(), String> {
     if value.chars().any(char::is_control) {
         return Err(format!(
@@ -143,6 +155,7 @@ pub(crate) fn reject_control_chars(label: &str, value: &str) -> Result<(), Strin
 /// CSPRNG-backed alphanumeric secret of exactly `len` chars. `rand::rng()` is
 /// `ThreadRng`, seeded from the OS RNG, the same source the rest of the crate
 /// uses for tokens (`csrf.rs`, `admin/hosts.rs`).
+#[cfg(feature = "identity-ory")]
 pub(crate) fn random_secret(len: usize) -> String {
     rand::rng()
         .sample_iter(&Alphanumeric)

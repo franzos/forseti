@@ -16,9 +16,9 @@
 import { test, expect, type Page, type APIRequestContext } from '@playwright/test';
 import { registerUser, logout, skipUsernameStep } from '../../helpers/register';
 import { adminCredsFromEnv } from '../../helpers/admin';
-import { markEmailVerified } from '../../helpers/orgs';
+import { isNative, markEmailVerified } from '../../helpers/identity';
 import { markClientVerified } from '../../helpers/clients';
-import { computeTotp } from '../../helpers/totp';
+import { freshTotp } from '../../helpers/totp';
 import { generatePkcePair } from '../../helpers/oauth';
 
 const HYDRA_AUTHORIZE = 'http://host.containers.internal:4444/oauth2/auth';
@@ -126,6 +126,7 @@ test('second-factor submit inside an authorize chain reaches the callback', asyn
     !creds,
     'Set FORSETI_ADMIN_TEST_{EMAIL,PASSWORD,TOTP_SECRET} to run the second-factor scenario',
   );
+  test.slow(isNative, 'waits up to one TOTP step for an unused code');
 
   const clientId = await createSkipConsentClient(request, 'aal2');
   await markClientVerified(browser, clientId);
@@ -146,7 +147,7 @@ test('second-factor submit inside an authorize chain reaches the callback', asyn
 
   const totpInput = page.locator('input[name="totp_code"]');
   await totpInput.waitFor({ state: 'visible' });
-  await totpInput.fill(computeTotp(creds!.totpSecret));
+  await totpInput.fill(await freshTotp(creds!.totpSecret));
 
   const callback = page.waitForRequest((req) => req.url().startsWith(REDIRECT_URI), {
     timeout: 20_000,

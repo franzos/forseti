@@ -78,28 +78,10 @@ async fn verification_code_flips_verified_status() {
     // Confirm via the admin API that the address is now verified. Kratos
     // commits the flag synchronously on `passed_challenge`, but we poll
     // briefly to be robust against any micro-delay.
-    let admin = browser_client();
     let mut verified = false;
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while std::time::Instant::now() < deadline {
-        let res = admin
-            .get(format!(
-                "{KRATOS_ADMIN}/admin/identities/{}",
-                user.identity_id
-            ))
-            .send()
-            .await
-            .expect("admin get identity");
-        assert!(res.status().is_success());
-        let id: serde_json::Value = res.json().await.expect("identity json");
-        verified = id["verifiable_addresses"]
-            .as_array()
-            .and_then(|arr| {
-                arr.iter()
-                    .find(|a| a["value"].as_str() == Some(&user.email))
-            })
-            .and_then(|a| a["verified"].as_bool())
-            .unwrap_or(false);
+        verified = address_verified(&user.identity_id, &user.email).await;
         if verified {
             break;
         }

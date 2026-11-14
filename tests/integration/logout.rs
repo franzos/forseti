@@ -65,17 +65,9 @@ async fn logout_with_valid_csrf_destroys_session() {
     );
 
     // After logout the session should be gone.
-    let res = user
-        .client
-        .get(format!("{KRATOS_PUBLIC}/sessions/whoami"))
-        .header("Accept", "application/json")
-        .send()
-        .await
-        .expect("whoami after logout");
     assert!(
-        !res.status().is_success(),
-        "whoami should fail after logout: status {}",
-        res.status()
+        !whoami_is_active(&user.client).await,
+        "whoami should fail after logout"
     );
 
     user.cleanup().await;

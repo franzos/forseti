@@ -11,6 +11,7 @@ export default defineConfig({
   // Hydra + portal DB) is shared state.
   workers: 1,
   fullyParallel: false,
+  globalSetup: './global-setup.ts',
   // Browsers are flake-prone; one retry catches transient hiccups without
   // hiding real regressions.
   retries: 1,

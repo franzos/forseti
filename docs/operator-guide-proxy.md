@@ -353,6 +353,17 @@ Bind it to loopback when Kratos and Forseti share a host, or to a private interf
 
 ---
 
+## Native identity build
+
+On the native identity build (see the operator guide's [Native identity build](./operator-guide.md#native-identity-build)) there is no Kratos to route. What changes in the sketches above:
+
+- **`/self-service/*` is Forseti's.** Flow starts (`/self-service/{kind}/browser`), form submits, the verification mail link and logout are served by Forseti at the root of its host. There is no Kratos public URL to expose: drop the `/kratos/*` ACL, rewrite and backend in Shape (1), and the Kratos subdomain in Shape (2). Do not rewrite or strip `/self-service/` in front of Forseti.
+- **The session cookie is Forseti's.** It is `forseti_session`, or `__Host-forseti_session` when `[self].url` is https. The `__Host-` prefix means `Secure`, `Path=/` and no `Domain`, so the cookie is host-only on Forseti's hostname and is never shared with another subdomain. Whether cookies are `Secure` follows the scheme of `[self].url`, not `X-Forwarded-Proto`.
+- **Login throttling is built in.** Forseti limits `POST /self-service/login` per client IP itself (`[identity].login_ip_rate_per_minute` and `login_ip_rate_per_hour`) and password attempts per email address. A proxy-level throttle is optional; the per-IP buckets need `[proxy].trust_forwarded_for` and `trusted_hops` set to tell clients apart behind the proxy.
+- **The internal listener** has no audit webhook receiver; it carries the POSIX resolver and `/metrics`.
+
+---
+
 ## Recommendation
 
 Ship Shape (1). It's the only one that:
@@ -374,7 +385,9 @@ Forseti sets its own `Content-Security-Policy` on every public response:
 and `form-action` — the last one built from Kratos's public URL, Hydra's
 public URL, the issuer origin (`[hydra].issuer`), the built-in social
 providers, and `[security].extra_form_action`. It deliberately omits
-`default-src` / `script-src` / `style-src` / `img-src`.
+`default-src` / `script-src` / `style-src` / `img-src`. On the native
+identity build `form-action` carries no Kratos origin: the flow forms post to
+Forseti itself, which `'self'` covers.
 
 Chrome and Safari check `form-action` against every hop of a form
 submission's redirect chain, Firefox against none. No OAuth client origin

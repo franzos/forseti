@@ -1,0 +1,96 @@
+# Forseti - CI / playground configuration for the native identity backend.
+#
+# For a build with `--no-default-features --features identity-native` against
+# `make stack-up-native` (Hydra, Mailcrab and the mock OIDC upstream, no
+# Kratos). Point at it with FORSETI_CONFIG_PATH=config.ci.native.toml. NOT
+# production values.
+
+[hydra]
+public_url = "http://localhost:4444"
+admin_url  = "http://localhost:4445"
+# Forseti fronts Hydra's issuer origin (infra/hydra/hydra.yml sets the issuer
+# to http://host.containers.internal:3000/hydra).
+front_proxy = true
+issuer = "http://host.containers.internal:3000/hydra"
+
+[self]
+url = "http://localhost:3000"
+
+[security]
+# Key material on the native build (TOTP secrets, codes, session logout tokens),
+# so it is fixed: `make seed-admin-native` seals the admin's TOTP secret with it.
+cookie_secret = "6369206e61746976652074657374206b6579206e6f742061207365637265742e"
+# The mock OIDC upstream the resource-claim tests sign in at.
+extra_form_action = ["http://host.containers.internal:8092"]
+
+[brand]
+name          = "Forseti CI"
+support_email = "support@example.com"
+
+[oauth]
+# Resource the RFC 8707 bridge test binds into the access-token audience.
+allowed_resource_audiences = ["https://mcp.test"]
+
+# Integration fixtures serve CIMD documents from loopback http, so the SSRF
+# guard stands down in CI. Never enable in production. Rate buckets relaxed
+# for the suite's burst traffic.
+[oauth.cimd]
+allow_private_targets = true
+ip_rate_per_minute = 1000
+ip_rate_per_hour   = 10000
+global_rate_per_minute = 1000
+global_rate_per_hour   = 10000
+
+# The suite sends every registration, sign-in and code from one loopback IP.
+[auth]
+registration_ip_rate_per_minute     = 1000
+registration_ip_rate_per_hour        = 10000
+registration_global_rate_per_minute  = 1000
+registration_global_rate_per_hour    = 10000
+
+[identity]
+login_ip_rate_per_minute      = 1000
+login_ip_rate_per_hour        = 10000
+login_identifier_rate_per_15m = 1000
+
+# `make seed-admin-native` plants this identity (password + TOTP). Keep in sync
+# with SEED_ADMIN_EMAIL.
+[admin]
+# `unclaimed-admin@` is allowlisted but deliberately never registered: it is
+# the fixture for the "an allowlisted address nobody has verified is not an
+# operator" regression test.
+allowed_emails = ["admin@example.com", "unclaimed-admin@example.com"]
+
+# The POSIX resolver; the tests reach it on 127.0.0.1:8081.
+[internal]
+bind = "0.0.0.0:8081"
+
+# The native build sends verification and recovery codes itself and refuses to
+# boot with mail off.
+[email]
+enabled = true
+from_address = "no-reply@forseti.test"
+provider = "smtp"
+host = "127.0.0.1"
+port = 1025
+tls = "none"
+
+[audit]
+ip_salt = ""
+audit_retention_days = 90
+
+# Relaxed so the suite's repeat /claim-email hits don't 429 on the shared
+# loopback bucket.
+[claim_email]
+rate_limit_per_minute = 100
+rate_limit_per_hour = 1000
+
+# Public /users/{id} view + members-roster links.
+[profiles]
+enabled = true
+
+# POSIX/Linux-auth device grant; `make seed-posix-client` provisions the client.
+[posix]
+pam_client_id = "forseti-linux-pam"
+pam_client_secret = "dev-posix-pam-secret-change-me"
+hydra_issuer = "http://host.containers.internal:3000/hydra"

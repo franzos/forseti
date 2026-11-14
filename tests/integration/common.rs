@@ -18,6 +18,36 @@ use rusqlite::params;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+#[cfg(feature = "identity-native")]
+pub use crate::native::*;
+
+/// Whether this test binary drives the native identity backend.
+pub fn is_native() -> bool {
+    cfg!(feature = "identity-native")
+}
+
+/// The running test's path, `module::test`, for skip notes.
+pub fn test_name(here: &str) -> String {
+    here.trim_start_matches("integration::")
+        .replace("::{{closure}}", "")
+        .trim_end_matches("::here")
+        .to_string()
+}
+
+/// On the native backend, note `SKIPPED-NATIVE: <test>: <reason>` and return from the test. The
+/// note goes straight to stderr so libtest's output capture does not swallow it.
+macro_rules! skip_on_native {
+    ($reason:expr) => {
+        if $crate::common::is_native() {
+            fn here() {}
+            let name = $crate::common::test_name(std::any::type_name_of_val(&here));
+            use std::io::Write as _;
+            let _ = writeln!(std::io::stderr(), "SKIPPED-NATIVE: {name}: {}", $reason);
+            return;
+        }
+    };
+}
+
 // --- Endpoints -------------------------------------------------------------
 
 // Must match the host used in `config.toml` and Kratos's config — they all
@@ -113,6 +143,7 @@ pub fn unique_email(prefix: &str) -> String {
 /// client (and its existing cookie jar). Returns the identity ID + email.
 /// Used by regression tests that need to reuse a single cookie jar across
 /// successive registrations to reproduce cross-principal cookie leaks.
+#[cfg(feature = "identity-ory")]
 pub async fn register_test_user_with_client(
     client: &Client,
     prefix: &str,
@@ -241,6 +272,7 @@ pub async fn register_test_user_with_email(email: &str) -> RegisteredUser {
 
 /// `verified` marks the address verified afterwards, as a user who followed
 /// the verification mail would be.
+#[cfg(feature = "identity-ory")]
 async fn register_inner(email: &str, skip_username: bool, verified: bool) -> RegisteredUser {
     let (client, manual_client, jar) = paired_clients();
     let email = email.to_string();
@@ -369,6 +401,7 @@ pub fn skip_username_step(jar: &reqwest::cookie::Jar, identity_id: &str) {
 
 /// Look up an identity ID by email via the Kratos admin API. Used as a
 /// fallback when the registration response shape doesn't carry the identity.
+#[cfg(feature = "identity-ory")]
 pub async fn identity_id_by_email(email: &str) -> Option<String> {
     let client = browser_client();
     let url = format!("{KRATOS_ADMIN}/admin/identities?credentials_identifier={email}");
@@ -413,6 +446,7 @@ impl RegisteredUser {
 }
 
 /// Delete an identity via the Kratos admin API. No-op when the ID is empty.
+#[cfg(feature = "identity-ory")]
 pub async fn delete_test_identity(id: &str) -> Result<(), String> {
     if id.is_empty() {
         return Ok(());
@@ -437,6 +471,7 @@ pub async fn delete_test_identity(id: &str) -> Result<(), String> {
 /// than `register_test_user` for tests that don't need the portal to be
 /// exercised end-to-end (e.g. logout / settings nav). Returns the new
 /// identity ID.
+#[cfg(feature = "identity-ory")]
 pub async fn kratos_admin_create_identity(email: &str) -> String {
     let client = browser_client();
     let body = serde_json::json!({
@@ -466,6 +501,7 @@ pub async fn kratos_admin_create_identity(email: &str) -> String {
 /// Like [`kratos_admin_create_password_identity`] but with the address
 /// pre-verified, the way `seed-admin.sh` does it. Flows that refuse to act on
 /// an unverified address (accepting an org invite, for one) need this.
+#[cfg(feature = "identity-ory")]
 pub async fn kratos_admin_create_verified_password_identity(email: &str, password: &str) -> String {
     let client = browser_client();
     let body = serde_json::json!({
@@ -504,6 +540,7 @@ pub async fn kratos_admin_create_verified_password_identity(email: &str, passwor
 /// This is how the PAM `force_mfa` freshness window gets exercised without
 /// waiting it out: the window reads the second factor's `completed_at` off
 /// Kratos, so ageing that value is the whole test.
+#[cfg(feature = "identity-ory")]
 pub fn backdate_second_factor(identity_id: &str, secs: i64) -> u64 {
     let sql = format!(
         "UPDATE sessions SET authentication_methods = ( \
@@ -522,6 +559,7 @@ pub fn backdate_second_factor(identity_id: &str, secs: i64) -> u64 {
 
 /// Run `sql` against Kratos's Postgres through `$COMPOSE exec postgres`, the
 /// same path as [`plant_totp`]. Returns the row count reported by psql.
+#[cfg(feature = "identity-ory")]
 pub fn kratos_psql(sql: &str) -> u64 {
     let compose = compose_engine();
     let compose_file =
@@ -555,6 +593,7 @@ pub fn kratos_psql(sql: &str) -> u64 {
 /// flow start unverified; the login flow's `require_verified_address` hook
 /// refuses to re-authenticate them, so tests that sign the same identity in a
 /// second time call this first.
+#[cfg(feature = "identity-ory")]
 pub async fn mark_identity_verified(identity_id: &str) {
     let client = browser_client();
     let res = client
@@ -611,6 +650,7 @@ pub async fn mark_identity_verified(identity_id: &str) {
 /// — used by the AAL2-enforcement test that needs a second-factor-less user
 /// to prove enforcement doesn't bounce password-only sessions. Returns the
 /// new identity ID.
+#[cfg(feature = "identity-ory")]
 pub async fn kratos_admin_create_password_identity(email: &str, password: &str) -> String {
     let client = browser_client();
     let body = serde_json::json!({
@@ -643,6 +683,7 @@ pub async fn kratos_admin_create_password_identity(email: &str, password: &str) 
 
 /// Fetch a Kratos self-service flow's JSON shape. The client must carry the
 /// flow's continuity cookie (Kratos refuses without it; see CSRF docs).
+#[cfg(feature = "identity-ory")]
 pub async fn fetch_flow(client: &Client, kind: &str, flow_id: &str) -> Value {
     let url = format!("{KRATOS_PUBLIC}/self-service/{kind}/flows?id={flow_id}");
     let res = client
@@ -1026,6 +1067,7 @@ pub async fn hydra_delete_client(client_id: &str) {
 /// any step fails, **panics** with the offending step + status — a
 /// misconfigured admin credential is a loud test failure, not a silent
 /// skip.
+#[cfg(feature = "identity-ory")]
 pub async fn try_admin_signed_in_client() -> Option<Client> {
     let creds = admin_test_credentials()?;
     let client = browser_client();
@@ -1038,6 +1080,7 @@ pub async fn try_admin_signed_in_client() -> Option<Client> {
 /// one follows redirects, the manual one doesn't. Needed whenever a redirect
 /// is itself the thing under test - a `?reveal=` token, say, which the show
 /// page consumes the moment the browser client follows it.
+#[cfg(feature = "identity-ory")]
 pub async fn try_admin_paired_clients() -> Option<(Client, Client)> {
     let creds = admin_test_credentials()?;
     let (browser, manual, _jar) = paired_clients();
@@ -1120,6 +1163,7 @@ pub fn admin_test_credentials() -> Option<AdminTestCredentials> {
 ///
 /// Kratos refuses to init an AAL2 step-up flow without a pre-existing AAL1
 /// session (`Ory-Error-Id: session_aal1_required`), so AAL1 must come first.
+#[cfg(feature = "identity-ory")]
 pub async fn password_login_aal1(client: &Client, email: &str, password: &str) {
     let res = client
         .get(format!("{KRATOS_PUBLIC}/self-service/login/browser"))
@@ -1164,6 +1208,7 @@ pub async fn password_login_aal1(client: &Client, email: &str, password: &str) {
 /// a fresh Kratos `aal=aal2` login flow. Precondition: the jar already
 /// carries an AAL1 `ory_kratos_session` (see [`password_login_aal1`]) and the
 /// identity has TOTP enrolled.
+#[cfg(feature = "identity-ory")]
 pub async fn totp_step_up(client: &Client, totp_code: &str) {
     let res = client
         .get(format!(
@@ -1218,6 +1263,7 @@ pub const TEST_TOTP_SECRET: &str = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP";
 /// per-target, so a plain `make test-integration` hands down `podman-compose`
 /// on a runner that only has `docker compose`. Trusting it unverified is what
 /// broke the v0.2.9 CI run.
+#[cfg(feature = "identity-ory")]
 fn compose_engine() -> String {
     let mut candidates: Vec<String> = Vec::new();
     if let Ok(explicit) = std::env::var("COMPOSE")
@@ -1258,6 +1304,7 @@ fn compose_engine() -> String {
 ///
 /// Goes through `$COMPOSE exec postgres`, so it works under podman-compose
 /// and `docker compose` alike.
+#[cfg(feature = "identity-ory")]
 pub fn plant_totp(identity_id: &str, secret_b32: &str) {
     const SQL: &str = "\
 WITH t AS (SELECT id FROM identity_credential_types WHERE name = 'totp'),
@@ -1339,10 +1386,13 @@ fn compute_totp_now(secret_b32: &str) -> String {
                 secret_b32.len()
             )
         });
+    #[cfg(feature = "identity-ory")]
     let seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("clock before epoch")
         .as_secs();
+    #[cfg(feature = "identity-native")]
+    let seconds = crate::native::fresh_totp_step(secret_b32) * 30;
     totp_lite::totp_custom::<totp_lite::Sha1>(30, 6, &secret_bytes, seconds)
 }
 
@@ -2430,7 +2480,21 @@ pub fn read_registry_resource_claims(resource: &str) -> Option<(i64, String)> {
     .ok()
 }
 
+/// An identity's `metadata_admin` as the Kratos admin API returns it.
+#[cfg(feature = "identity-ory")]
+pub async fn identity_metadata_admin(identity_id: &str) -> Value {
+    let res = browser_client()
+        .get(format!("{KRATOS_ADMIN}/admin/identities/{identity_id}"))
+        .send()
+        .await
+        .expect("GET identity");
+    assert!(res.status().is_success(), "GET identity: {}", res.status());
+    let identity: Value = res.json().await.expect("identity body");
+    identity["metadata_admin"].clone()
+}
+
 /// Replace an identity's `metadata_admin` through the Kratos admin API.
+#[cfg(feature = "identity-ory")]
 pub async fn kratos_set_metadata_admin(identity_id: &str, metadata: Value) {
     let res = browser_client()
         .patch(format!("{KRATOS_ADMIN}/admin/identities/{identity_id}"))
@@ -2772,6 +2836,7 @@ pub fn form_urlencode(s: &str) -> String {
 /// (`GET /admin/identities/{id}/sessions`). Used to grab a victim session ID
 /// to feed the self-service / admin revoke endpoints, and to assert a session
 /// is gone afterwards.
+#[cfg(feature = "identity-ory")]
 pub async fn kratos_identity_session_ids(identity_id: &str) -> Vec<String> {
     let client = browser_client();
     let res = client
@@ -2797,6 +2862,7 @@ pub async fn kratos_identity_session_ids(identity_id: &str) -> Vec<String> {
 /// Whether `client`'s cookie jar still resolves to an active Kratos session
 /// (`/sessions/whoami` → 200). Used to assert a revoke actually killed a
 /// session.
+#[cfg(feature = "identity-ory")]
 pub async fn whoami_is_active(client: &Client) -> bool {
     let res = client
         .get(format!("{KRATOS_PUBLIC}/sessions/whoami"))
@@ -2806,9 +2872,120 @@ pub async fn whoami_is_active(client: &Client) -> bool {
     matches!(res, Ok(r) if r.status().is_success())
 }
 
+/// Start a browser flow of `kind` (`query` is appended to the init URL, e.g. `?refresh=true`)
+/// on `client`; its id.
+#[cfg(feature = "identity-ory")]
+pub async fn browser_flow_id(client: &Client, kind: &str, query: &str) -> String {
+    let res = client
+        .get(format!(
+            "{KRATOS_PUBLIC}/self-service/{kind}/browser{query}"
+        ))
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .expect("flow init transport");
+    assert!(res.status().is_success(), "flow init: {}", res.status());
+    let flow: Value = res.json().await.expect("flow json");
+    flow["id"].as_str().expect("flow id").to_string()
+}
+
+/// The id of some identity the backend holds.
+#[cfg(feature = "identity-ory")]
+pub async fn first_identity_id() -> Option<String> {
+    let body: Value = browser_client()
+        .get(format!("{KRATOS_ADMIN}/admin/identities?page_size=1"))
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    body.as_array()?
+        .first()?
+        .get("id")?
+        .as_str()
+        .map(str::to_string)
+}
+
+/// Whether the backend still holds identity `id`.
+#[cfg(feature = "identity-ory")]
+pub async fn identity_exists(id: &str) -> bool {
+    browser_client()
+        .get(format!("{KRATOS_ADMIN}/admin/identities/{id}"))
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
+}
+
+/// The backend's `state` of identity `id` (`active` / `inactive`).
+#[cfg(feature = "identity-ory")]
+pub async fn identity_state(identity_id: &str) -> Option<String> {
+    let res = browser_client()
+        .get(format!("{KRATOS_ADMIN}/admin/identities/{identity_id}"))
+        .send()
+        .await
+        .ok()?;
+    if !res.status().is_success() {
+        return None;
+    }
+    let v: Value = res.json().await.ok()?;
+    v["state"].as_str().map(String::from)
+}
+
+/// Whether identity `id` has `email` as a verified address.
+#[cfg(feature = "identity-ory")]
+pub async fn address_verified(id: &str, email: &str) -> bool {
+    let Ok(res) = browser_client()
+        .get(format!("{KRATOS_ADMIN}/admin/identities/{id}"))
+        .send()
+        .await
+    else {
+        return false;
+    };
+    let identity: Value = res.json().await.unwrap_or(Value::Null);
+    identity["verifiable_addresses"]
+        .as_array()
+        .and_then(|arr| arr.iter().find(|a| a["value"].as_str() == Some(email)))
+        .and_then(|a| a["verified"].as_bool())
+        .unwrap_or(false)
+}
+
+/// The config file the running Forseti was started with in CI.
+pub fn ci_config_path() -> &'static str {
+    if is_native() {
+        "config.ci.native.toml"
+    } else {
+        "config.ci.toml"
+    }
+}
+
+/// `(identity id, email trait)` of the session `client`'s `/sessions/whoami` answers with.
+#[cfg(feature = "identity-ory")]
+pub async fn whoami_identity(client: &Client) -> Option<(String, String)> {
+    let res = client
+        .get(format!("{KRATOS_PUBLIC}/sessions/whoami"))
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .ok()?;
+    if !res.status().is_success() {
+        return None;
+    }
+    let body: Value = res.json().await.ok()?;
+    Some((
+        body["identity"]["id"].as_str()?.to_string(),
+        body["identity"]["traits"]["email"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+    ))
+}
+
 /// Read the current session ID off a client's `/sessions/whoami`. `None` when
 /// the jar carries no active session. Used to target a specific (non-current)
 /// session for the self-service revoke tests.
+#[cfg(feature = "identity-ory")]
 pub async fn whoami_session_id(client: &Client) -> Option<String> {
     let res = client
         .get(format!("{KRATOS_PUBLIC}/sessions/whoami"))
@@ -3159,6 +3336,7 @@ pub async fn authorize_chase_callback(client: &Client, auth_url: &str) -> Option
 /// End every Kratos session of an identity through Kratos's admin API,
 /// bypassing Forseti: the "Kratos session gone, Hydra still remembers the
 /// login" state a session ended by another route leaves behind.
+#[cfg(feature = "identity-ory")]
 pub async fn kratos_admin_end_sessions(identity_id: &str) {
     let res = Client::new()
         .delete(format!(
@@ -3200,6 +3378,7 @@ pub async fn refresh_tokens(
 
 /// Change the signed-in user's password through a Kratos settings flow in
 /// `client`'s browser.
+#[cfg(feature = "identity-ory")]
 pub async fn kratos_change_password(client: &Client, new_password: &str) {
     let res = client
         .get(format!("{KRATOS_PUBLIC}/self-service/settings/browser"))

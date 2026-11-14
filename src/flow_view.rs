@@ -1,5 +1,5 @@
 //! Flow view-models: [`Flow`] is a self-service flow as the identity backend hands it over
-//! (`crate::ory::flow_json` builds it from Kratos JSON), and the template-iterable structs here shape it
+//! (`crate::flow_json` builds it from Kratos JSON), and the template-iterable structs here shape it
 //! for rendering. Grouping by `node.group` drives the visual layout (OIDC stack, code shortcut,
 //! profile/password form, OR-divider).
 
@@ -130,6 +130,7 @@ pub(crate) struct Flow {
     pub(crate) recovery_handoff: bool,
     pub(crate) form_action: String,
     pub(crate) form_method: String,
+    #[cfg_attr(all(feature = "identity-native", not(test)), expect(dead_code))]
     pub(crate) csrf_token: Option<String>,
     pub(crate) messages: Vec<MessageView>,
     pub(crate) inputs: Vec<(String, InputView)>,

@@ -50,10 +50,13 @@
 //! override inside the same transaction as the DELETE. A crash mid-prune
 //! rolls everything back atomically — no separate boot-time reset needed.
 
+#[cfg(feature = "identity-ory")]
 pub mod kratos_webhook;
 
 use std::convert::Infallible;
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+#[cfg(feature = "identity-ory")]
+use std::sync::atomic::AtomicI64;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::{
     extract::{Request, State},
@@ -85,7 +88,7 @@ pub mod action {
     pub const AUTH_LOGIN: &str = "auth.login";
     pub const AUTH_LOGOUT: &str = "auth.logout";
     pub const AUTH_LOGIN_FAILED: &str = "auth.login_failed";
-    // identity (flow-driven; emitted from Kratos webhook)
+    // identity (flow-driven; emitted from the Kratos webhook or the native flows)
     pub const IDENTITY_CREATED: &str = "identity.created";
     pub const PASSWORD_CHANGED: &str = "password.changed";
     pub const PASSWORD_RECOVERED: &str = "password.recovered";
@@ -94,7 +97,12 @@ pub mod action {
     pub const MFA_TOTP_ENROLLED: &str = "mfa.totp.enrolled";
     pub const MFA_TOTP_DISABLED: &str = "mfa.totp.disabled";
     pub const MFA_LOOKUP_REGENERATED: &str = "mfa.lookup.regenerated";
+    /// Kratos fires no hook when lookup codes are removed, so only the native build writes it.
+    #[cfg(feature = "identity-native")]
+    pub const MFA_LOOKUP_DISABLED: &str = "mfa.lookup.disabled";
+    #[cfg(feature = "identity-ory")]
     pub const MFA_WEBAUTHN_ADDED: &str = "mfa.webauthn.added";
+    #[cfg(feature = "identity-ory")]
     pub const MFA_WEBAUTHN_REMOVED: &str = "mfa.webauthn.removed";
     // session (Forseti-mediated)
     pub const SESSION_REVOKED: &str = "session.revoked";
@@ -220,18 +228,28 @@ pub mod action {
     pub const APP_REFERRER_ENTERED: &str = "app.referrer.entered";
     pub const APP_REFERRER_RETURNED: &str = "app.referrer.returned";
     // saml (commercial SSO bridge — `src/saml/`)
+    #[cfg(feature = "identity-ory")]
     pub const SAML_LOGIN_SUCCEEDED: &str = "saml.login.succeeded";
+    #[cfg(feature = "identity-ory")]
     pub const SAML_LOGIN_FAILED: &str = "saml.login.failed";
+    #[cfg(feature = "identity-ory")]
     pub const SAML_LOGIN_BLOCKED_UNVERIFIED: &str = "saml.login.blocked_unverified";
+    #[cfg(feature = "identity-ory")]
     pub const SAML_IDENTITY_JIT_CREATED: &str = "saml.identity.jit_created";
+    #[cfg(feature = "identity-ory")]
     pub const SAML_IDENTITY_LINKED: &str = "saml.identity.linked";
     /// An assertion matched a pre-existing identity, so the user was sent to
     /// prove they hold it before anything was linked (RFC 9700 §4.16).
+    #[cfg(feature = "identity-ory")]
     pub const SAML_LINK_CONFIRM_REQUIRED: &str = "saml.link.confirm_required";
     /// The user came back from that bounce holding the matched identity.
+    #[cfg(feature = "identity-ory")]
     pub const SAML_LINK_CONFIRMED: &str = "saml.link.confirmed";
+    #[cfg(feature = "identity-ory")]
     pub const ADMIN_SAML_CONNECTION_CREATED: &str = "admin.saml.connection_created";
+    #[cfg(feature = "identity-ory")]
     pub const ADMIN_SAML_CONNECTION_DELETED: &str = "admin.saml.connection_deleted";
+    #[cfg(feature = "identity-ory")]
     pub const ADMIN_SAML_CONNECTION_TOGGLED: &str = "admin.saml.connection_toggled";
 }
 
@@ -247,6 +265,7 @@ pub mod actor_kind {
     pub const USER: &str = "user";
     pub const ADMIN: &str = "admin";
     pub const SYSTEM: &str = "system";
+    #[cfg(feature = "identity-ory")]
     pub const WEBHOOK: &str = "webhook";
 }
 
@@ -264,6 +283,7 @@ pub mod target_kind {
     pub const LICENSE: &str = "license";
     pub const ORG: &str = "org";
     pub const TEAM: &str = "team";
+    #[cfg(feature = "identity-ory")]
     pub const SAML_CONNECTION: &str = "saml_connection";
 }
 
@@ -300,6 +320,7 @@ impl SafeMetadata {
     /// payload). Applies the same sensitive-key deny-list as
     /// [`from_pairs`](Self::from_pairs) — keys are consumed by value so no
     /// surviving entry is cloned.
+    #[cfg(feature = "identity-ory")]
     pub fn from_json_object(map: serde_json::Map<String, serde_json::Value>) -> Self {
         let mut out = serde_json::Map::new();
         for (k, v) in map {
@@ -432,7 +453,7 @@ where
 
 /// Cap a User-Agent header at 512 chars so a hostile client can't bloat
 /// audit rows with the RFC-permitted 64 KB string.
-fn cap_user_agent(raw: &str) -> String {
+pub(crate) fn cap_user_agent(raw: &str) -> String {
     raw.chars().take(512).collect()
 }
 
@@ -599,6 +620,7 @@ impl AuditEvent {
     /// Webhook source (e.g. `"kratos"`). Recorded into `actor_email` for
     /// display so the admin view can show "Kratos" in the actor column
     /// without a special-case render path.
+    #[cfg(feature = "identity-ory")]
     pub fn actor_webhook(mut self, source: impl Into<String>) -> Self {
         self.actor_kind = actor_kind::WEBHOOK;
         self.actor_email = Some(source.into());
@@ -834,10 +856,12 @@ pub fn audit_write_failures_total() -> u64 {
 /// user` — when `actor_id` is present, so querying the table for
 /// `actor_kind = webhook` would show "never" on every healthy deployment.
 /// See `src/audit/kratos_webhook.rs::build_kratos_event`.
+#[cfg(feature = "identity-ory")]
 static LAST_KRATOS_WEBHOOK_EPOCH: AtomicU64 = AtomicU64::new(0);
 
 /// Record that a Kratos webhook payload was just processed. Called from
 /// `src/audit/kratos_webhook.rs::receive` on the success path.
+#[cfg(feature = "identity-ory")]
 pub fn record_kratos_webhook_received() {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -848,6 +872,7 @@ pub fn record_kratos_webhook_received() {
 
 /// Unix-epoch seconds of the most recent Kratos-webhook receipt, or
 /// `None` if no payload has landed since boot.
+#[cfg(feature = "identity-ory")]
 pub fn last_kratos_webhook_epoch() -> Option<u64> {
     let n = LAST_KRATOS_WEBHOOK_EPOCH.load(Ordering::Relaxed);
     if n == 0 { None } else { Some(n) }
@@ -856,16 +881,19 @@ pub fn last_kratos_webhook_epoch() -> Option<u64> {
 /// In-process count of Kratos-webhook payloads rejected for a malformed
 /// body or unknown action — a Kratos contract / config mismatch. Resets
 /// on boot; surfaced on `/admin/status`.
+#[cfg(feature = "identity-ory")]
 static KRATOS_WEBHOOK_REJECTED: AtomicU64 = AtomicU64::new(0);
 
 /// Record a rejected Kratos webhook payload (malformed body / unknown
 /// action). Called from `src/audit/kratos_webhook.rs::receive`.
+#[cfg(feature = "identity-ory")]
 pub fn record_kratos_webhook_rejected() {
     KRATOS_WEBHOOK_REJECTED.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Total Kratos webhook payloads rejected in this process. See
 /// [`KRATOS_WEBHOOK_REJECTED`].
+#[cfg(feature = "identity-ory")]
 pub fn kratos_webhook_rejected_total() -> u64 {
     KRATOS_WEBHOOK_REJECTED.load(Ordering::Relaxed)
 }
@@ -874,16 +902,19 @@ pub fn kratos_webhook_rejected_total() -> u64 {
 /// last authenticated a Kratos webhook request; `-1` = never matched since
 /// boot. Surfaced on `/admin/status` so an operator mid-rotation can see
 /// whether traffic has moved off the old entry yet.
+#[cfg(feature = "identity-ory")]
 static KRATOS_WEBHOOK_LAST_MATCHED_INDEX: AtomicI64 = AtomicI64::new(-1);
 
 /// Record which accept-list entry matched. Called from
 /// `src/audit/kratos_webhook.rs::receive` on successful auth.
+#[cfg(feature = "identity-ory")]
 pub fn record_kratos_webhook_matched(idx: usize) {
     KRATOS_WEBHOOK_LAST_MATCHED_INDEX.store(idx as i64, Ordering::Relaxed);
 }
 
 /// Index of the accept-list entry that last matched, or `None` if none has
 /// matched since boot. See [`KRATOS_WEBHOOK_LAST_MATCHED_INDEX`].
+#[cfg(feature = "identity-ory")]
 pub fn kratos_webhook_last_matched_index() -> Option<usize> {
     match KRATOS_WEBHOOK_LAST_MATCHED_INDEX.load(Ordering::Relaxed) {
         n if n < 0 => None,
@@ -894,16 +925,19 @@ pub fn kratos_webhook_last_matched_index() -> Option<usize> {
 /// In-process count of Kratos-webhook rows written with a freshness flag
 /// (stale / future-dated `issued_at`). Resets on boot; surfaced on
 /// `/admin/status`.
+#[cfg(feature = "identity-ory")]
 static KRATOS_WEBHOOK_FRESHNESS_ANOMALIES: AtomicU64 = AtomicU64::new(0);
 
 /// Record a freshness-flagged Kratos webhook row (stale / future). Called
 /// from `src/audit/kratos_webhook.rs::receive`.
+#[cfg(feature = "identity-ory")]
 pub fn record_kratos_webhook_freshness_anomaly() {
     KRATOS_WEBHOOK_FRESHNESS_ANOMALIES.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Total freshness-flagged Kratos webhook rows in this process. See
 /// [`KRATOS_WEBHOOK_FRESHNESS_ANOMALIES`].
+#[cfg(feature = "identity-ory")]
 pub fn kratos_webhook_freshness_anomalies_total() -> u64 {
     KRATOS_WEBHOOK_FRESHNESS_ANOMALIES.load(Ordering::Relaxed)
 }
@@ -1269,7 +1303,7 @@ mod middleware_sanitiser_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "identity-ory"))]
 mod kratos_webhook_epoch_tests {
     //! Locks the atomic-counter contract for the `last_kratos_webhook_epoch`
     //! signal that drives `/admin/status`'s "last webhook received" row.

@@ -1,5 +1,5 @@
 // Org-directory test helpers: thin wrappers over the real settings forms
-// (members + teams) plus the Kratos-admin email-verify shim the membership
+// (members + teams) plus the email-verify shim (`identity.ts`) the membership
 // writes require. Everything drives the rendered DOM via the page so the
 // hidden `_csrf` field and its cookie travel together — a raw request.post
 // would skip the cookie jar and 403.
@@ -7,58 +7,20 @@ import type { APIRequestContext, Browser, BrowserContext, Page, Response } from 
 import { expect } from '@playwright/test';
 import { registerUserWithEmail } from './register';
 import { waitForMail } from './mailcrab';
+import { markEmailVerified, requireIdentityId } from './identity';
+
+export { markEmailVerified };
 
 const BASE = process.env.BASE_URL || 'http://host.containers.internal:3000';
-const KRATOS_ADMIN = process.env.KRATOS_ADMIN || 'http://host.containers.internal:4434';
 
 /** Settings base path for an org: Default (singular) when `slug` is null. */
 export function orgBase(slug?: string | null): string {
   return slug ? `/settings/organizations/${slug}` : '/settings/organization';
 }
 
-/**
- * Mark an identity's email verified via Kratos admin API. Membership writes
- * (invite accept, in particular) refuse unverified identities and Kratos
- * registration doesn't auto-verify, so flip the flag here. JSON Patch on
- * `/verifiable_addresses/{i}/verified` is the only shape Kratos honours — a
- * whole-object PUT silently drops `verified`. Mirrors the pattern proven in
- * `f-org-invite-redemption.spec.ts`.
- */
-export async function markEmailVerified(request: APIRequestContext, email: string): Promise<void> {
-  const identity = await getIdentity(request, email);
-  const idx = (identity.verifiable_addresses ?? []).findIndex(
-    (a) => a.value.toLowerCase() === email.toLowerCase(),
-  );
-  expect(idx, `no verifiable_address for ${email}`).toBeGreaterThanOrEqual(0);
-  const patch = await request.patch(`${KRATOS_ADMIN}/admin/identities/${identity.id}`, {
-    headers: { 'content-type': 'application/json' },
-    data: [
-      { op: 'replace', path: `/verifiable_addresses/${idx}/verified`, value: true },
-      { op: 'replace', path: `/verifiable_addresses/${idx}/status`, value: 'completed' },
-    ],
-  });
-  expect(patch.ok(), `PATCH identity returned ${patch.status()}: ${await patch.text()}`).toBeTruthy();
-}
-
-/** Resolve a Kratos identity UUID from its login email. */
+/** Resolve an identity UUID from its login email. */
 export async function lookupIdentityId(request: APIRequestContext, email: string): Promise<string> {
-  return (await getIdentity(request, email)).id;
-}
-
-interface KratosIdentity {
-  id: string;
-  verifiable_addresses?: Array<{ id: string; value: string; verified: boolean }>;
-}
-
-async function getIdentity(request: APIRequestContext, email: string): Promise<KratosIdentity> {
-  const res = await request.get(
-    `${KRATOS_ADMIN}/admin/identities?credentials_identifier=${encodeURIComponent(email)}`,
-  );
-  expect(res.ok(), `Kratos identity lookup for ${email} returned ${res.status()}`).toBeTruthy();
-  const ids = (await res.json()) as KratosIdentity[];
-  const identity = ids[0];
-  expect(identity, `no identity for ${email}`).toBeTruthy();
-  return identity;
+  return requireIdentityId(request, email);
 }
 
 /**
@@ -219,7 +181,7 @@ export interface AcceptedInvitee {
 
 /**
  * Redeem an invite in a fresh browser context: click the anonymous CTA →
- * register → verify the email (Kratos admin) → confirm the accept form. The
+ * register → verify the email (`markEmailVerified`) → confirm the accept form. The
  * returned context stays signed in as the invitee so the caller can drive
  * profile / members views from their perspective; caller must close it.
  */

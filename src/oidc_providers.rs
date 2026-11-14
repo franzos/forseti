@@ -99,7 +99,7 @@ mod tests {
 
     #[test]
     fn flow_auth_origins_maps_provider_buttons() {
-        let flow = crate::ory::flow_json::project(&serde_json::json!({"ui": {"nodes": [
+        let flow = crate::flow_json::project(&serde_json::json!({"ui": {"nodes": [
             {"group": "default", "type": "input", "attributes": {"name": "csrf_token", "type": "hidden", "value": "x"}},
             {"group": "oidc", "type": "input", "attributes": {"name": "provider", "type": "submit", "value": "google"}},
             {"group": "oidc", "type": "input", "attributes": {"name": "provider", "type": "submit", "value": "github"}},
@@ -114,7 +114,7 @@ mod tests {
     /// upstream Forseti can't map contributes nothing rather than a bad source.
     #[test]
     fn flow_auth_origins_covers_link_nodes_and_skips_unknown() {
-        let flow = crate::ory::flow_json::project(&serde_json::json!({"ui": {"nodes": [
+        let flow = crate::flow_json::project(&serde_json::json!({"ui": {"nodes": [
             {"group": "oidc", "type": "input", "attributes": {"name": "link", "type": "submit", "value": "apple"}},
             {"group": "oidc", "type": "input", "attributes": {"name": "unlink", "type": "submit", "value": "okta"}},
         ]}}));

@@ -1,31 +1,29 @@
 //! `config-check` / `config-init` operator subcommands. Kratos's API exposes
 //! no live settings (only a version + opaque hash), so these lint/generate the
-//! config FILES directly.
+//! config FILES directly. Only `yamlutil` is built with `identity-native`.
 
+#[cfg(feature = "identity-ory")]
 mod catalog;
+#[cfg(feature = "identity-ory")]
 mod check;
+#[cfg(feature = "identity-ory")]
 mod init;
+#[cfg(feature = "identity-ory")]
 mod io;
+#[cfg(feature = "identity-ory")]
 mod menu;
+#[cfg(feature = "identity-ory")]
 mod modify;
 pub(crate) mod yamlutil;
 
-pub(crate) use check::check;
-pub(crate) use check::redact_uri;
-pub(crate) use check::status;
-pub(crate) use init::init;
-pub(crate) use menu::MenuIo;
-pub(crate) use menu::RealStdout;
-pub(crate) use menu::run_menu;
-pub(crate) use modify::LineSource;
-pub(crate) use modify::StdinLines;
-pub(crate) use modify::run_oidc;
-pub(crate) use modify::run_prune_hydra_system;
-pub(crate) use modify::run_prune_kratos_secrets;
-pub(crate) use modify::run_prune_webhook_token;
-pub(crate) use modify::run_restore;
-pub(crate) use modify::run_rotate_hydra_system;
-pub(crate) use modify::run_rotate_kratos_secrets;
-pub(crate) use modify::run_rotate_pairwise_salt;
-pub(crate) use modify::run_rotate_webhook_token;
-pub(crate) use modify::run_smtp;
+#[cfg(feature = "identity-ory")]
+pub(crate) use {
+    check::{check, redact_uri, status},
+    init::init,
+    menu::{MenuIo, RealStdout, run_menu},
+    modify::{
+        LineSource, StdinLines, run_oidc, run_prune_hydra_system, run_prune_kratos_secrets,
+        run_prune_webhook_token, run_restore, run_rotate_hydra_system, run_rotate_kratos_secrets,
+        run_rotate_pairwise_salt, run_rotate_webhook_token, run_smtp,
+    },
+};

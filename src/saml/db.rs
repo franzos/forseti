@@ -36,6 +36,7 @@ pub async fn get_connection(db: &DbPool, org_id: &str) -> anyhow::Result<Option<
     Ok(row)
 }
 
+#[cfg(feature = "identity-ory")]
 pub async fn list_connections(db: &DbPool) -> anyhow::Result<Vec<SamlConnection>> {
     let rows = db_interact!(db, |conn| {
         saml_connections::table
@@ -58,6 +59,7 @@ struct NewConnection<'a> {
     updated_at: String,
 }
 
+#[cfg(feature = "identity-ory")]
 pub async fn insert_connection(
     db: &DbPool,
     org_id: &str,
@@ -85,6 +87,7 @@ pub async fn insert_connection(
 }
 
 /// Returns true when a row was flipped (false = no connection for org).
+#[cfg(feature = "identity-ory")]
 pub async fn set_enabled(db: &DbPool, org_id: &str, enabled: bool) -> anyhow::Result<bool> {
     let o = org_id.to_string();
     let v = if enabled { 1 } else { 0 };
@@ -100,6 +103,7 @@ pub async fn set_enabled(db: &DbPool, org_id: &str, enabled: bool) -> anyhow::Re
     Ok(affected > 0)
 }
 
+#[cfg(feature = "identity-ory")]
 pub async fn delete_connection(db: &DbPool, org_id: &str) -> anyhow::Result<()> {
     let o = org_id.to_string();
     db_interact!(db, |conn| {
@@ -115,6 +119,7 @@ pub async fn delete_connection(db: &DbPool, org_id: &str) -> anyhow::Result<()> 
 
 // --- links ---------------------------------------------------------------
 
+#[cfg(feature = "identity-ory")]
 pub async fn link_for(db: &DbPool, org_id: &str, email: &str) -> anyhow::Result<Option<String>> {
     let o = org_id.to_string();
     let e = email.to_lowercase();
@@ -132,6 +137,7 @@ pub async fn link_for(db: &DbPool, org_id: &str, email: &str) -> anyhow::Result<
 /// Durable lookup by the stable IdP subject (NameID), org-scoped. Returns
 /// `(identity_id, email)` so a stale row can be pruned by its email key.
 /// The subject is opaque — never lowercased (unlike email).
+#[cfg(feature = "identity-ory")]
 pub async fn link_subject(
     db: &DbPool,
     org_id: &str,
@@ -167,6 +173,7 @@ struct NewLink<'a> {
 /// existing row is always repointed at the new identity, and the subject is
 /// refreshed only when this login carries one — backfilling legacy email-only
 /// rows without letting a subjectless relink NULL out a stored durable key.
+#[cfg(feature = "identity-ory")]
 pub async fn upsert_link(
     db: &DbPool,
     org_id: &str,
@@ -244,6 +251,7 @@ pub async fn links_for_identity(db: &DbPool, identity_id: &str) -> anyhow::Resul
 }
 
 /// Stale-link cleanup when the Kratos identity behind a link is gone.
+#[cfg(feature = "identity-ory")]
 pub async fn delete_link(db: &DbPool, org_id: &str, email: &str) -> anyhow::Result<()> {
     let o = org_id.to_string();
     let e = email.to_lowercase();

@@ -30,8 +30,17 @@
 // Test fixtures write RFC3339 directly; the DB timestamp writer is crate-internal.
 #![allow(clippy::disallowed_methods)]
 
+#[macro_use]
 #[path = "integration/common.rs"]
 mod common;
+
+#[cfg(feature = "identity-native")]
+#[path = "integration/native.rs"]
+mod native;
+
+#[cfg(feature = "identity-native")]
+#[path = "support/native_seed.rs"]
+mod native_seed;
 
 #[path = "integration/aal2_enforcement.rs"]
 mod aal2_enforcement;

@@ -8,6 +8,7 @@ use axum::http::HeaderMap;
 use serde_json::{Map, Value};
 
 use crate::config::AppConfig;
+use crate::db::DbPool;
 use crate::flow_view::Flow;
 
 use identity::{
@@ -22,14 +23,32 @@ use oauth::{
 pub mod identity;
 pub mod oauth;
 
-pub use crate::ory::{HydraBackend, KratosBackend};
+pub use crate::ory::HydraBackend;
+#[cfg(feature = "identity-ory")]
+pub use crate::ory::KratosBackend;
 
+#[cfg(feature = "identity-native")]
+pub use crate::identity_native::NativeBackend;
+
+#[cfg(feature = "identity-ory")]
 pub type IdentityImpl = KratosBackend;
+#[cfg(feature = "identity-native")]
+pub type IdentityImpl = NativeBackend;
 pub type OAuthImpl = HydraBackend;
 
-/// Build both backends over one shared set of upstream clients.
-pub fn build(cfg: &AppConfig) -> (Arc<IdentityImpl>, Arc<OAuthImpl>) {
-    crate::ory::backends(cfg)
+pub fn build_oauth(cfg: &AppConfig) -> Arc<OAuthImpl> {
+    HydraBackend::from_config(cfg)
+}
+
+/// Kratos keeps its own state, so it ignores the pool and the cookie secret.
+#[cfg(feature = "identity-ory")]
+pub fn build_identity(cfg: &AppConfig, _db: &DbPool, _cookie_secret: &[u8]) -> Arc<IdentityImpl> {
+    KratosBackend::from_config(cfg)
+}
+
+#[cfg(feature = "identity-native")]
+pub fn build_identity(cfg: &AppConfig, db: &DbPool, cookie_secret: &[u8]) -> Arc<IdentityImpl> {
+    NativeBackend::new(cfg, db, cookie_secret)
 }
 
 /// Identities, sessions and self-service flows.
@@ -81,6 +100,8 @@ pub trait IdentityBackend: Send + Sync + 'static {
     ) -> Result<Vec<Identity>>;
     async fn admin_list_identities_by_ids(&self, ids: Vec<String>) -> Result<Vec<Identity>>;
     async fn admin_find_identity_by_email(&self, email: &str) -> Result<Option<(Identity, bool)>>;
+    // Only the SAML flow calls these, and it is not built with `identity-native`.
+    #[cfg_attr(feature = "identity-native", expect(dead_code))]
     async fn admin_create_identity_verified(
         &self,
         schema_id: &str,
@@ -95,6 +116,7 @@ pub trait IdentityBackend: Send + Sync + 'static {
     async fn admin_remove_metadata_admin_key(&self, id: &str, key: &str) -> Result<bool>;
     async fn admin_delete_identity(&self, id: &str) -> Result<()>;
     async fn admin_create_recovery_code(&self, identity_id: &str) -> Result<RecoveryCode>;
+    #[cfg_attr(all(feature = "identity-native", not(test)), expect(dead_code))]
     async fn admin_create_recovery_link(
         &self,
         identity_id: &str,

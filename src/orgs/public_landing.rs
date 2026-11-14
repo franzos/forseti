@@ -178,7 +178,8 @@ mod tests {
     const TEST_MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations/sqlite");
     const SECRET: &[u8] = b"public-landing-test-secret";
 
-    fn kratos() -> std::sync::Arc<IdentityImpl> {
+    #[cfg(feature = "identity-ory")]
+    async fn identity() -> std::sync::Arc<IdentityImpl> {
         crate::ory::test_backends(
             "http://kratos:4433",
             "http://kratos:4434",
@@ -186,6 +187,11 @@ mod tests {
             "http://hydra:4445",
         )
         .0
+    }
+
+    #[cfg(feature = "identity-native")]
+    async fn identity() -> std::sync::Arc<IdentityImpl> {
+        crate::backend::NativeBackend::for_test(&crate::db::test_pool().await)
     }
 
     /// Single-connection `:memory:` pool, mirroring `orgs::db`'s test helper.
@@ -316,7 +322,12 @@ mod tests {
         let (_, _, _, is_signup_org) =
             resolve(&db, &brand(), SECRET, false, "acme", chrome()).await;
         assert!(is_signup_org);
-        let href = register_href("http://localhost:3000", &kratos(), "acme", is_signup_org);
+        let href = register_href(
+            "http://localhost:3000",
+            &*identity().await,
+            "acme",
+            is_signup_org,
+        );
         assert!(href.contains("return_to="));
         assert!(href.contains(&crate::web::urlencode(
             "http://localhost:3000/join/confirm?org=acme"
@@ -336,7 +347,12 @@ mod tests {
             resolve(&db, &brand(), SECRET, false, "acme", chrome()).await;
         assert!(!is_signup_org);
         assert_eq!(
-            register_href("http://localhost:3000", &kratos(), "acme", is_signup_org,),
+            register_href(
+                "http://localhost:3000",
+                &*identity().await,
+                "acme",
+                is_signup_org,
+            ),
             DEFAULT_REGISTER_HREF
         );
     }

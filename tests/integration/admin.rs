@@ -439,19 +439,8 @@ async fn admin_happy_identity_show() {
     let Some(client) = admin_client_or_skip().await else {
         return;
     };
-    // Pick an identity via the admin API; iterate over the list and find one.
-    let probe = browser_client();
-    let res = probe
-        .get(format!("{KRATOS_ADMIN}/admin/identities?page_size=1"))
-        .send()
+    let id = first_identity_id()
         .await
-        .expect("kratos admin list identities");
-    let body: serde_json::Value = res.json().await.expect("identities json");
-    let id = body
-        .as_array()
-        .and_then(|a| a.first())
-        .and_then(|v| v["id"].as_str())
-        .map(str::to_string)
         .expect("at least one identity in the playground for the show test");
 
     let res = client
@@ -495,8 +484,13 @@ async fn admin_happy_status_view() {
         .expect("GET status");
     assert_eq!(res.status().as_u16(), 200);
     let body = res.text().await.unwrap_or_default();
+    let identity_row = if is_native() {
+        "Identity (built in, alive)"
+    } else {
+        "Kratos (alive)"
+    };
     assert!(
-        body.contains("Kratos (alive)") || body.contains("services"),
+        body.contains(identity_row) || body.contains("services"),
         "status table should render"
     );
 }

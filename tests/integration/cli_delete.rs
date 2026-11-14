@@ -8,20 +8,11 @@ fn delete_identity_cmd(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_forseti"))
         .arg("delete-identity")
         .args(args)
-        .env("FORSETI_CONFIG_PATH", "config.ci.toml")
+        .env("FORSETI_CONFIG_PATH", ci_config_path())
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .stdin(Stdio::null())
         .output()
         .expect("spawn forseti delete-identity")
-}
-
-async fn kratos_has_identity(id: &str) -> bool {
-    browser_client()
-        .get(format!("{KRATOS_ADMIN}/admin/identities/{id}"))
-        .send()
-        .await
-        .map(|r| r.status().is_success())
-        .unwrap_or(false)
 }
 
 #[tokio::test]
@@ -47,7 +38,7 @@ async fn cli_delete_with_yes_removes_the_identity_and_its_rows() {
     assert!(stdout.contains("removed"), "stdout: {stdout}");
     assert!(stdout.contains("left as orphans: none"), "stdout: {stdout}");
 
-    assert!(!kratos_has_identity(&id).await, "identity must be gone");
+    assert!(!identity_exists(&id).await, "identity must be gone");
     let left = rows_referencing(&id, &user.email);
     assert!(left.is_empty(), "rows left: {left:?}");
     let row = latest_audit_event("admin.identity.deleted", &id).expect("audit row");
@@ -71,7 +62,7 @@ async fn cli_delete_without_yes_off_a_terminal_exits_2_and_keeps_the_identity() 
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(2), "stderr: {stderr}");
     assert!(stderr.contains("--yes"), "stderr: {stderr}");
-    assert!(kratos_has_identity(&id).await, "identity must still exist");
+    assert!(identity_exists(&id).await, "identity must still exist");
     assert!(latest_audit_event("admin.identity.deleted", &id).is_none());
 
     user.cleanup().await;

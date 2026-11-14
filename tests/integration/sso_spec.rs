@@ -1167,6 +1167,9 @@ async fn submit_handoff(manual: &reqwest::Client, body: &str) -> reqwest::Url {
 
 #[tokio::test]
 async fn discovery_lists_idp_hints_supported() {
+    skip_on_native!(
+        "upstream OIDC sign-in is out of scope on the native build (spec non-goal), so there are no idp_hint providers"
+    );
     assert!(portal_reachable().await);
     let doc: serde_json::Value = browser_client()
         .get("http://host.containers.internal:3000/hydra/.well-known/openid-configuration")
@@ -1216,6 +1219,9 @@ async fn discovery_lists_idp_hints_supported() {
 
 #[tokio::test]
 async fn idp_hint_full_round_trip() {
+    skip_on_native!(
+        "upstream OIDC sign-in is out of scope on the native build (spec non-goal), so there are no idp_hint providers"
+    );
     assert!(portal_reachable().await);
     let (id, secret, redirect) = hydra_create_test_client(&["openid"]).await;
     let manual = manual_redirect_client();
@@ -1300,6 +1306,9 @@ async fn idp_hint_full_round_trip() {
 
 #[tokio::test]
 async fn idp_hint_with_prompt_create_hands_off_from_registration() {
+    skip_on_native!(
+        "upstream OIDC sign-in is out of scope on the native build (spec non-goal), so there are no idp_hint providers"
+    );
     assert!(portal_reachable().await);
     let (id, _secret, redirect) = hydra_create_test_client(&["openid"]).await;
     let manual = manual_redirect_client();
@@ -1331,6 +1340,9 @@ async fn idp_hint_with_prompt_create_hands_off_from_registration() {
 
 #[tokio::test]
 async fn unknown_idp_hint_shows_normal_login() {
+    skip_on_native!(
+        "upstream OIDC sign-in is out of scope on the native build (spec non-goal), so there are no idp_hint providers"
+    );
     assert!(portal_reachable().await);
     let (id, _secret, redirect) = hydra_create_test_client(&["openid"]).await;
 
@@ -1364,6 +1376,9 @@ async fn unknown_idp_hint_shows_normal_login() {
 
 #[tokio::test]
 async fn idp_hint_ignored_with_session() {
+    skip_on_native!(
+        "upstream OIDC sign-in is out of scope on the native build (spec non-goal), so there are no idp_hint providers"
+    );
     assert!(portal_reachable().await);
     let user = register_test_user("idp-hint-session").await;
     mark_identity_verified(&user.identity_id).await;

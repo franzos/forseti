@@ -358,6 +358,30 @@ fn sqlite_path(url: &str) -> String {
     }
 }
 
+/// Single-connection `:memory:` pool: sqlite's `:memory:` database lives
+/// only on the connection that created it, so the pool must never hand out
+/// a second connection or the migrated schema disappears. Foreign keys are
+/// enforced, as on the production pool.
+#[cfg(test)]
+pub(crate) async fn test_pool() -> DbPool {
+    let manager = SqliteManager::new(":memory:", SqliteRuntime::Tokio1);
+    let pool = SqlitePool::builder(manager)
+        .max_size(1)
+        .build()
+        .expect("build test sqlite pool");
+    let conn = pool.get().await.expect("get test conn");
+    conn.interact(|c: &mut SqliteConnection| {
+        diesel::sql_query("PRAGMA foreign_keys = ON")
+            .execute(c)
+            .expect("enable foreign keys");
+        c.run_pending_migrations(SQLITE_MIGRATIONS).map(|_| ())
+    })
+    .await
+    .expect("interact panic")
+    .expect("run test migrations");
+    DbPool::Sqlite(pool)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

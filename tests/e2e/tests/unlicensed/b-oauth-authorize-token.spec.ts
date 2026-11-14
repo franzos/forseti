@@ -12,7 +12,7 @@
 import { test, expect } from '@playwright/test';
 import { adminCredsFromEnv, signInAdminAal2 } from '../../helpers/admin';
 import { logout, registerUser } from '../../helpers/register';
-import { markEmailVerified } from '../../helpers/orgs';
+import { identityIdByEmail, markEmailVerified } from '../../helpers/identity';
 import { decodeJwtClaims, generatePkcePair } from '../../helpers/oauth';
 
 // Use the issuer hostname so Hydra's CSRF cookie scopes correctly. The
@@ -21,7 +21,6 @@ import { decodeJwtClaims, generatePkcePair } from '../../helpers/oauth';
 // match Hydra's `issuer` value (see `infra/hydra/hydra.yml`).
 const HYDRA_AUTHORIZE = 'http://host.containers.internal:4444/oauth2/auth';
 const HYDRA_TOKEN = 'http://host.containers.internal:4444/oauth2/token';
-const KRATOS_ADMIN = 'http://host.containers.internal:4434';
 
 // Unreachable callback — Playwright reads the code off `page.url()`
 // before the redirect can actually load.
@@ -138,21 +137,13 @@ test('OAuth authorize → consent → token exchange end-to-end', async ({ page,
     expect(tokens.id_token).toBeTruthy();
 
     // 5. Decode the id_token and confirm `sub` is the registered user's
-    //    Kratos identity_id. Hydra's `sub` for the playground's identity
-    //    schema is the Kratos identity UUID directly.
+    //    identity id (the identity UUID directly).
     const claims = decodeJwtClaims(tokens.id_token);
     const sub = claims.sub as string;
     expect(sub).toMatch(/^[0-9a-f-]{36}$/);
 
-    // Cross-check sub against the live Kratos admin lookup. Kratos's
-    // `?credentials_identifier=<email>` is an exact match on a single
-    // identity.
-    const lookup = await request.get(
-      `${KRATOS_ADMIN}/admin/identities?credentials_identifier=${encodeURIComponent(endUser.email)}`,
-    );
-    expect(lookup.ok()).toBeTruthy();
-    const identities = (await lookup.json()) as Array<{ id: string }>;
-    expect(identities[0]?.id).toBe(sub);
+    // Cross-check sub against the identity backend's lookup by email.
+    expect(await identityIdByEmail(request, endUser.email)).toBe(sub);
   } else {
     throw new Error(
       `expected /oauth/consent after authorize; landed on ${page.url()} — consent may have been auto-granted (skip_consent=true)`,

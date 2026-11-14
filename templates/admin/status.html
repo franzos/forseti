@@ -80,17 +80,19 @@
         {% match courier_failed %}{% when Some with (n) %}{{ n }}{% when None %}—{% endmatch %}
     </p>
   </div>
+  {% if let Some(w) = kratos_webhook %}
   <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4">
     <p class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-status-courier-last-webhook") }}</p>
     <p class="font-headline-md text-headline-md text-on-surface mt-1"
-       {% match last_kratos_webhook_full %}
+       {% match w.last_full %}
        {% when Some with (s) %}
        title="{{ s }}"
        {% when None %}
        {% endmatch %}>
-    {% match last_kratos_webhook_pretty %}{% when Some with (s) %}{{ s }}{% when None %}{{ chrome.t("admin-status-courier-never") }}{% endmatch %}
+    {% match w.last_pretty %}{% when Some with (s) %}{{ s }}{% when None %}{{ chrome.t("admin-status-courier-never") }}{% endmatch %}
 </p>
 </div>
+  {% endif %}
 </div>
 </section>
 
@@ -105,10 +107,11 @@
       </p>
     {% endif %}
   </div>
+  {% if let Some(w) = kratos_webhook %}
   <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4 mt-stack-md">
     <p class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-status-audit-webhook-rejected") }}</p>
-    <p class="font-headline-md text-headline-md text-on-surface mt-1">{{ audit_webhook_rejected }}</p>
-    {% if audit_webhook_rejected > 0 %}
+    <p class="font-headline-md text-headline-md text-on-surface mt-1">{{ w.rejected }}</p>
+    {% if w.rejected > 0 %}
       <p class="font-body-sm text-body-sm text-on-surface-variant mt-2">
         {{ chrome.t("admin-status-audit-webhook-rejected-note-prefix") }} <code>kratos audit webhook</code> {{ chrome.t("admin-status-audit-webhook-rejected-note-suffix") }}
       </p>
@@ -116,8 +119,8 @@
   </div>
   <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4 mt-stack-md">
     <p class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-status-audit-freshness") }}</p>
-    <p class="font-headline-md text-headline-md text-on-surface mt-1">{{ audit_webhook_freshness_anomalies }}</p>
-    {% if audit_webhook_freshness_anomalies > 0 %}
+    <p class="font-headline-md text-headline-md text-on-surface mt-1">{{ w.freshness_anomalies }}</p>
+    {% if w.freshness_anomalies > 0 %}
       <p class="font-body-sm text-body-sm text-on-surface-variant mt-2">
         {{ chrome.t("admin-status-audit-freshness-note") }}
       </p>
@@ -125,14 +128,15 @@
   </div>
   <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4 mt-stack-md">
     <p class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-status-audit-webhook-accept-list") }}</p>
-    <p class="font-headline-md text-headline-md text-on-surface mt-1">{{ audit_webhook_accept_list_len }}</p>
+    <p class="font-headline-md text-headline-md text-on-surface mt-1">{{ w.accept_list_len }}</p>
   </div>
   <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4 mt-stack-md">
     <p class="font-label-sm text-label-sm text-on-surface-variant">{{ chrome.t("admin-status-audit-webhook-last-matched") }}</p>
     <p class="font-headline-md text-headline-md text-on-surface mt-1">
-      {% match audit_webhook_last_matched %}{% when Some with (n) %}{{ n }}{% when None %}{{ chrome.t("admin-status-audit-webhook-last-matched-none") }}{% endmatch %}
+      {% match w.last_matched %}{% when Some with (n) %}{{ n }}{% when None %}{{ chrome.t("admin-status-audit-webhook-last-matched-none") }}{% endmatch %}
     </p>
   </div>
+  {% endif %}
 </section>
 
 <section class="mb-stack-lg">

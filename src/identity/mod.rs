@@ -388,10 +388,12 @@ mod tests {
         assert!(!should_prune(&id, cutoff()));
     }
 
+    #[cfg(feature = "identity-ory")]
     type Leftovers = (i64, Vec<(String, Option<String>)>);
 
     /// Profile rows left for `id` and the `(actor_kind, actor_email)` of its
     /// prune audit rows.
+    #[cfg(feature = "identity-ory")]
     async fn leftovers(db: &DbPool, id: &str) -> anyhow::Result<Leftovers> {
         use crate::schema::{audit_events, member_profiles};
         use diesel::prelude::*;
@@ -413,6 +415,7 @@ mod tests {
 
     /// Runs against the playground's Kratos and Hydra admin APIs with a
     /// private sqlite pool; skipped when they aren't reachable.
+    #[cfg(feature = "identity-ory")]
     #[tokio::test]
     async fn prune_deletes_one_unverified_identity_and_its_rows() {
         use uuid::Uuid;

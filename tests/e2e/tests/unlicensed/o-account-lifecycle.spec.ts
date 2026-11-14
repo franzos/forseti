@@ -9,7 +9,7 @@
 //       settings-flow redirect chain
 //   (b) the confirm page renders the apps card and the "What we keep" card
 //   (c) the completed deletion lands on the signed-out page with no
-//       `ory_kratos_session` left in the cookie jar
+//       session cookie left in the cookie jar
 //   (d) the admin confirm page spells out what is removed and what stays
 //
 // Scenario G already covers the apps card with a consent-granted client;
@@ -19,8 +19,7 @@ import { test, expect } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 import { adminCredsFromEnv, signInAdminAal2 } from '../../helpers/admin';
 import { registerUser, logout } from '../../helpers/register';
-
-const KRATOS_ADMIN = 'http://host.containers.internal:4434';
+import { identityIdByEmail, requireIdentityId, SESSION_COOKIE } from '../../helpers/identity';
 
 const TOP_LEVEL_KEYS = [
   'format',
@@ -79,8 +78,8 @@ test('export downloads a parseable envelope, confirm page shows both cards, dele
     page.getByText('Organizations, teams, hosts and domains you created stay, with your name removed.'),
   ).toBeVisible();
 
-  // 3. Delete: typed email, land on /login, cookie jar without the Kratos
-  //    session.
+  // 3. Delete: typed email, land on /login, cookie jar without the
+  //    session cookie.
   await page.locator('input[name="confirm_email"]').fill(user.email);
   await Promise.all([
     page.waitForURL((u) => u.pathname.startsWith('/login'), { timeout: 20_000 }),
@@ -88,13 +87,9 @@ test('export downloads a parseable envelope, confirm page shows both cards, dele
   ]);
   await expect(page.locator('input[name="identifier"]')).toBeVisible();
   const cookies = await page.context().cookies();
-  expect(cookies.map((c) => c.name)).not.toContain('ory_kratos_session');
+  expect(cookies.map((c) => c.name)).not.toContain(SESSION_COOKIE);
 
-  const lookup = await page.request.get(
-    `${KRATOS_ADMIN}/admin/identities?credentials_identifier=${encodeURIComponent(user.email)}`,
-  );
-  expect(lookup.ok()).toBeTruthy();
-  expect(((await lookup.json()) as Array<unknown>).length).toBe(0);
+  expect(await identityIdByEmail(page.request, user.email)).toBeUndefined();
 });
 
 test('admin delete confirm page lists what is removed and what stays', async ({ page }) => {
@@ -105,11 +100,7 @@ test('admin delete confirm page lists what is removed and what stays', async ({ 
   );
 
   const target = await registerUser(page, 'playwright-lifecycle-target');
-  const res = await page.request.get(
-    `${KRATOS_ADMIN}/admin/identities?credentials_identifier=${encodeURIComponent(target.email)}`,
-  );
-  const targetId = ((await res.json()) as Array<{ id: string }>)[0]?.id;
-  expect(targetId, `no identity for ${target.email}`).toBeTruthy();
+  const targetId = await requireIdentityId(page.request, target.email);
   await logout(page);
 
   await signInAdminAal2(page, adminCreds!);

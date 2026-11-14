@@ -31,10 +31,29 @@ pub struct WorkerHandle {
 }
 
 impl WorkerHandle {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             last_tick: Arc::new(AtomicI64::new(Utc::now().timestamp())),
         }
+    }
+
+    #[cfg(all(test, feature = "identity-native"))]
+    pub(crate) fn for_test() -> Self {
+        Self::new()
+    }
+
+    /// Record a finished tick now.
+    #[cfg(feature = "identity-native")]
+    pub(crate) fn beat(&self) {
+        self.last_tick
+            .store(Utc::now().timestamp(), Ordering::Relaxed);
+    }
+
+    /// Pretend the last tick finished `secs` seconds ago.
+    #[cfg(all(test, feature = "identity-native"))]
+    pub(crate) fn last_beat_ago(&self, secs: i64) {
+        self.last_tick
+            .store(Utc::now().timestamp() - secs, Ordering::Relaxed);
     }
 
     /// Seconds since the worker last finished a tick (whether or not the

@@ -1,6 +1,9 @@
+#[cfg(feature = "identity-ory")]
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand};
+#[cfg(feature = "identity-ory")]
+use clap::Args;
+use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(
@@ -38,13 +41,17 @@ pub enum Cmd {
     /// Run this ONCE before upgrading, while a missing row still reads as verified.
     ReconcileClientMetadata,
     /// Inspect and edit the Kratos, Hydra and Forseti config files
+    #[cfg(feature = "identity-ory")]
     Config(ConfigArgs),
+    #[cfg(feature = "identity-ory")]
     #[command(name = "config-check", hide = true)]
     ConfigCheckAlias(CheckArgs),
+    #[cfg(feature = "identity-ory")]
     #[command(name = "config-init", hide = true)]
     ConfigInitAlias(InitArgs),
 }
 
+#[cfg(feature = "identity-ory")]
 #[derive(Args)]
 pub struct ConfigArgs {
     #[command(subcommand)]
@@ -53,6 +60,7 @@ pub struct ConfigArgs {
     pub paths: PathArgs,
 }
 
+#[cfg(feature = "identity-ory")]
 #[derive(Args, Clone)]
 pub struct PathArgs {
     /// Path to kratos.yml (defaults to infra/kratos/kratos.yml when it exists)
@@ -85,6 +93,7 @@ pub struct PathArgs {
     pub follow_symlink: bool,
 }
 
+#[cfg(feature = "identity-ory")]
 #[derive(Subcommand)]
 pub enum ConfigCmd {
     /// Report the current state of every tracked setting across the config files
@@ -125,6 +134,7 @@ pub enum ConfigCmd {
     },
 }
 
+#[cfg(feature = "identity-ory")]
 #[derive(Args)]
 pub struct CheckArgs {
     #[command(flatten)]
@@ -135,6 +145,7 @@ pub struct CheckArgs {
     pub strict: bool,
 }
 
+#[cfg(feature = "identity-ory")]
 #[derive(Args)]
 pub struct InitArgs {
     /// Public base URL Forseti is served at; also the WebAuthn rp.id host
@@ -178,6 +189,7 @@ pub struct InitArgs {
     pub force: bool,
 }
 
+#[cfg(feature = "identity-ory")]
 #[derive(Clone, Args)]
 pub struct SecretSourceArgs {
     // at most one; none => interactive prompt fallback, enforced post-parse
@@ -196,6 +208,7 @@ pub struct SecretSourceArgs {
 /// a JWT from this key, so it travels on its own flag group rather than
 /// through `SecretSourceArgs`. No prompt fallback — a PEM doesn't survive a
 /// masked single-line read, so one of these is required for `apple`.
+#[cfg(feature = "identity-ory")]
 #[derive(Clone, Args)]
 pub struct AppleKeySourceArgs {
     // at most one; none => rejected post-parse for apple
@@ -210,6 +223,7 @@ pub struct AppleKeySourceArgs {
     pub apple_private_key_stdin: bool,
 }
 
+#[cfg(feature = "identity-ory")]
 #[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)] // parsed once at startup; boxing costs clap's derive
 pub enum OidcCmd {
@@ -244,6 +258,7 @@ pub enum OidcCmd {
     },
 }
 
+#[cfg(feature = "identity-ory")]
 #[derive(Subcommand)]
 pub enum RotateCmd {
     /// Issue a new audit webhook token, staging it alongside the current one
@@ -267,6 +282,7 @@ pub enum RotateCmd {
     },
 }
 
+#[cfg(feature = "identity-ory")]
 #[derive(Subcommand)]
 pub enum PruneCmd {
     /// Drop every accepted audit webhook token except the one kratos.yml presents
@@ -284,6 +300,7 @@ pub enum PruneCmd {
     HydraSystem,
 }
 
+#[cfg(feature = "identity-ory")]
 #[derive(Subcommand)]
 pub enum SmtpCmd {
     /// Set the SMTP URI and/or from address and name in kratos.yml
@@ -311,6 +328,7 @@ mod tests {
     use super::*;
     use clap::Parser;
 
+    #[cfg(feature = "identity-ory")]
     #[test]
     fn config_check_alias_accepts_documented_spellings() {
         let cli = Cli::try_parse_from([
@@ -328,11 +346,13 @@ mod tests {
         assert_eq!(a.paths.kratos.unwrap().to_str().unwrap(), "k.yml");
     }
 
+    #[cfg(feature = "identity-ory")]
     #[test]
     fn kratos_config_alias_also_accepted() {
         Cli::try_parse_from(["forseti", "config", "check", "--kratos-config", "k.yml"]).unwrap();
     }
 
+    #[cfg(feature = "identity-ory")]
     #[test]
     fn secret_source_flags_are_mutually_exclusive() {
         let err = Cli::try_parse_from([
@@ -348,6 +368,7 @@ mod tests {
         assert!(err.is_err());
     }
 
+    #[cfg(feature = "identity-ory")]
     #[test]
     fn apple_key_source_flags_are_mutually_exclusive() {
         let err = Cli::try_parse_from([
@@ -363,6 +384,7 @@ mod tests {
         assert!(err.is_err());
     }
 
+    #[cfg(feature = "identity-ory")]
     #[test]
     fn apple_enable_parses_the_full_flag_set() {
         let cli = Cli::try_parse_from([
@@ -414,6 +436,7 @@ mod tests {
         assert!(Cli::try_parse_from(["forseti"]).unwrap().cmd.is_none());
     }
 
+    #[cfg(feature = "identity-ory")]
     #[test]
     fn smtp_uri_source_flags_are_mutually_exclusive() {
         let err = Cli::try_parse_from([
@@ -428,6 +451,7 @@ mod tests {
         assert!(err.is_err());
     }
 
+    #[cfg(feature = "identity-ory")]
     #[test]
     fn smtp_set_parses_with_no_uri_source() {
         let cli = Cli::try_parse_from(["forseti", "config", "smtp", "set", "--from-name", "Foo"])
@@ -447,6 +471,7 @@ mod tests {
         assert_eq!(from_name.as_deref(), Some("Foo"));
     }
 
+    #[cfg(feature = "identity-ory")]
     #[test]
     fn restore_from_parses() {
         let cli = Cli::try_parse_from(["forseti", "config", "restore", "--from", "12345"]).unwrap();
@@ -459,6 +484,7 @@ mod tests {
         assert_eq!(from.as_deref(), Some("12345"));
     }
 
+    #[cfg(feature = "identity-ory")]
     #[test]
     fn secret_source_may_be_omitted_for_interactive_prompt() {
         let cli = Cli::try_parse_from([

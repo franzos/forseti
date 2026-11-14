@@ -1,0 +1,92 @@
+{
+  "id": "4907e5ee-435e-46b8-8d8f-4d6afb22050a",
+  "organization_id": null,
+  "type": "browser",
+  "expires_at": "2026-11-13T17:36:21.95398Z",
+  "issued_at": "2026-11-13T17:26:21.95398Z",
+  "request_url": "http://localhost:4433/self-service/login/browser?refresh=true",
+  "ui": {
+    "action": "http://localhost:4433/self-service/login?flow=4907e5ee-435e-46b8-8d8f-4d6afb22050a",
+    "method": "POST",
+    "nodes": [
+      {
+        "type": "input",
+        "group": "default",
+        "attributes": {
+          "name": "csrf_token",
+          "type": "hidden",
+          "value": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+          "required": true,
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {}
+      },
+      {
+        "type": "input",
+        "group": "default",
+        "attributes": {
+          "name": "identifier",
+          "type": "hidden",
+          "value": "fixture-login-10288187@example.com",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {}
+      },
+      {
+        "type": "input",
+        "group": "password",
+        "attributes": {
+          "name": "password",
+          "type": "password",
+          "required": true,
+          "autocomplete": "current-password",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1070001,
+            "text": "Password",
+            "type": "info"
+          }
+        }
+      },
+      {
+        "type": "input",
+        "group": "password",
+        "attributes": {
+          "name": "method",
+          "type": "submit",
+          "value": "password",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1010001,
+            "text": "Sign in",
+            "type": "info"
+          }
+        }
+      }
+    ],
+    "messages": [
+      {
+        "id": 1010003,
+        "text": "Please confirm this action by verifying that it is you.",
+        "type": "info"
+      }
+    ]
+  },
+  "created_at": "2026-11-13T17:26:21.961186Z",
+  "updated_at": "2026-11-13T17:26:21.961186Z",
+  "refresh": true,
+  "requested_aal": "aal1",
+  "state": "choose_method"
+}

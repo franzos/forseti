@@ -3,7 +3,16 @@
 # Copy to `config.toml` (gitignored) and adjust for your deployment.
 # Every value is overridable via env var with the `FORSETI_` prefix and a
 # double-underscore section separator, e.g. `FORSETI_KRATOS__PUBLIC_URL`.
+#
+# Two builds read this file. The default (Ory) build fronts Ory Kratos for
+# identities; it reads `[kratos]` and requires `[audit].webhook_token`. The
+# native build (`--no-default-features --features identity-native`) keeps
+# identities, sessions and self-service flows in Forseti's own database; it
+# ignores `[kratos]` and `[audit].webhook_token`, does not mount the SAML routes, and
+# refuses to boot without `[security].cookie_secret` and `[email]` with
+# `enabled = true`. Its settings live under `[identity]` further down.
 
+# Ory build only.
 [kratos]
 # Browser-facing public API. Forseti forwards user cookies to this URL.
 public_url = "http://localhost:4433"
@@ -35,10 +44,15 @@ url = "http://localhost:3000"
 # every Forseti-signed cookie (one-shot flash, active-org switcher, handoff
 # referrer, CSRF double-submit). Supply a LONG random secret — generate with
 # `openssl rand -hex 32` (hex string) or pass raw bytes. Short secrets are a
-# hard startup error. When unset, Forseti derives a per-boot ephemeral key, so
-# every restart invalidates all Forseti-signed cookies and separate instances
-# can't share them (Kratos sessions are unaffected — those are Kratos's). SET
+# hard startup error. On the Ory build an unset secret becomes a per-boot
+# ephemeral key, so every restart invalidates all Forseti-signed cookies and
+# separate instances can't share them (Kratos sessions are unaffected). SET
 # THIS IN PRODUCTION.
+# On the native build it is required and is durable key material: it also
+# encrypts stored TOTP secrets and keys verification, recovery, backup-code
+# and logout MACs. Changing it makes every enrolled authenticator unreadable
+# and invalidates outstanding codes and backup codes. Back it up with the
+# database.
 # [security]
 # cookie_secret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 #
@@ -245,15 +259,41 @@ support_email = "support@example.com"
 # Pool connection create and recycle timeouts are fixed at 5 s.
 
 # Identity-management knobs. `unverified_ttl_days` is the window used by the
-# `forseti unverified-prune` CLI: a Kratos identity that still has an unverified
+# `forseti unverified-prune` CLI: an identity that still has an unverified
 # address and was created more than this many days ago is deleted. Default 7
 # keeps an unverified squatter from blocking the legitimate owner of an address;
-# dial up for slower onboarding flows.
+# dial up for slower onboarding flows. `privileged_session_minutes` (both
+# builds) is how long after sign-in settings changes go through without
+# re-authentication; on the Ory build it must match Kratos's
+# `privileged_session_max_age`.
+#
+# Native build only, with their defaults below:
+# `session_lifespan_hours` (1 to 8760): a session ends this long after sign-in,
+# however active it is.
+# `password_min_length` (8 to 256): shortest accepted password.
+# `password_breach_check`: sends the first five hex characters of the
+# password's SHA-1 to the HaveIBeenPwned range API and lets the password
+# through when the lookup fails.
+# `login_ip_rate_per_minute`, `login_ip_rate_per_hour`: sign-in form submits
+# per client IP (a plain 429 past either bucket).
+# `login_identifier_rate_per_15m`: password attempts per email address per 15
+# minutes, counted whether or not the account exists. Someone who knows an
+# address can use up its password attempts for 15 minutes.
+# Rate values are clamped to the same ceilings as the other rate keys; 0 turns
+# a limit off.
 # [identity]
 # unverified_ttl_days = 7
+# privileged_session_minutes = 15
+# session_lifespan_hours = 24
+# password_min_length = 8
+# password_breach_check = false
+# login_ip_rate_per_minute = 20
+# login_ip_rate_per_hour = 200
+# login_identifier_rate_per_15m = 10
 
-# Internal HTTP listener for machine-to-machine endpoints (today: the
-# Kratos audit webhook receiver). Defaults to loopback so the surface
+# Internal HTTP listener for machine-to-machine endpoints (the POSIX resolver,
+# `/metrics`, and on the Ory build the Kratos audit webhook receiver). Defaults
+# to loopback so the surface
 # stays invisible from outside the host. Override `bind` to e.g.
 # `0.0.0.0:8081` when running inside a container where the trust
 # boundary is the docker / pod network. NEVER expose this listener on
@@ -282,11 +322,13 @@ support_email = "support@example.com"
 # [profiles]
 # enabled = false
 
-# Forseti-originated mail (invite + claim-email). Kratos's courier handles
-# its own self-service mail (verification, recovery, MFA) — this transport
-# is only for mails Forseti itself sends. Omit the section (or set
-# `enabled = false`) to make callers log + skip, leaving the token/code in
-# the DB for hand-delivery.
+# Forseti-originated mail (invite + claim-email). On the Ory build Kratos's
+# courier handles its own self-service mail (verification, recovery, MFA) and
+# this transport is only for mails Forseti itself sends; omit the section (or
+# set `enabled = false`) to make callers log + skip, leaving the token/code in
+# the DB for hand-delivery. On the native build this transport also carries
+# the verification and recovery codes, so it must be configured with
+# `enabled = true`: Forseti refuses to boot otherwise.
 #
 # `provider` selects the transport: `lettermint`, `postmark`, `sendgrid`, or
 # `smtp`. Keep secrets out of this file — leave `token`/`api_key`/`pass`
@@ -317,12 +359,13 @@ support_email = "support@example.com"
 # user = ""
 # pass = ""                      # set via FORSETI_EMAIL__PASS
 
-# Append-only audit log. `webhook_token` is REQUIRED — Forseti refuses
-# to boot with it empty. Kratos's flow webhooks send this token in the
-# Authorization header to the `/internal/audit/kratos` receiver on the
-# internal listener. Rotate by stopping Forseti, updating both this
-# value and the `auth.config.value` fields in `infra/kratos/kratos.yml`,
-# then starting both back up.
+# Append-only audit log. `webhook_token` is read by the Ory build only, and
+# there it is REQUIRED: Forseti refuses to boot with it empty. Kratos's flow
+# webhooks send this token in the Authorization header to the
+# `/internal/audit/kratos` receiver on the internal listener. Rotate by
+# stopping Forseti, updating both this value and the `auth.config.value`
+# fields in `infra/kratos/kratos.yml`, then starting both back up. The native
+# build writes its flow audit rows directly and has no receiver.
 # [audit]
 # webhook_token = "change-me-32-bytes-of-secret-entropy"   # min 32 bytes
 # ip_salt = ""                 # optional; derived from [security].cookie_secret when
@@ -462,6 +505,7 @@ support_email = "support@example.com"
 
 # Enterprise SAML SSO (commercial feature — requires a license with `saml`).
 # Strictly opt-in: omit this whole section and Forseti has no SAML surface.
+# Ory build only: the native build does not mount the SAML routes.
 # Requires a deployed SAML Jackson / Ory Polis instance; see
 # docs/commercial/saml.md.
 # [saml]

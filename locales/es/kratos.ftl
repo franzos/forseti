@@ -88,6 +88,7 @@ kratos-4000005 = La contraseña no se puede usar porque { $reason }.
 kratos-4000006 = Las credenciales proporcionadas no son válidas, revise si hay errores de ortografía en su contraseña o nombre de usuario, dirección de correo electrónico o número de teléfono.
 kratos-4000007 = Ya existe una cuenta con el mismo identificador (correo electrónico, teléfono, nombre de usuario, ...).
 kratos-4000008 = El código de autenticación proporcionado no es válido, inténtelo de nuevo.
+kratos-4000010 = La cuenta aún no está activa. ¿Olvidó verificar su dirección de correo electrónico?
 kratos-4000032 = La contraseña debe tener al menos { $min_length } caracteres, pero se obtuvo { $actual_length }.
 kratos-4000035 = Esta cuenta no existe o no ha configurado el inicio de sesión con código.
 
@@ -111,3 +112,6 @@ kratos-4060006 = El código de recuperación no es válido o ya se ha usado. Int
 kratos-4070001 = El token de verificación no es válido o ya se ha usado. Reintente el flujo.
 kratos-4070005 = El flujo de verificación ha caducado, inténtelo de nuevo.
 kratos-4070006 = El código de verificación no es válido o ya se ha usado. Inténtelo de nuevo.
+
+# --- Limitación de intentos (9000xxx) ---
+kratos-9000001 = Hay demasiados intentos de inicio de sesión en este momento. Inténtelo de nuevo en unos minutos.

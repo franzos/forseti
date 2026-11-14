@@ -11,29 +11,14 @@ async fn registration_two_step_flow_creates_identity_and_signs_in() {
 
     let user = register_test_user("reg-happy").await;
 
-    // The cookie jar should now carry `ory_kratos_session`.
-    let res = user
-        .client
-        .get(format!("{KRATOS_PUBLIC}/sessions/whoami"))
-        .header("Accept", "application/json")
-        .send()
+    // The cookie jar now carries the new session.
+    let (identity_id, email_trait) = whoami_identity(&user.client)
         .await
-        .expect("whoami");
-    assert!(
-        res.status().is_success(),
-        "whoami after register: {}",
-        res.status()
-    );
-    let v: serde_json::Value = res.json().await.expect("whoami body");
+        .expect("whoami after register");
     assert_eq!(
-        v["identity"]["id"].as_str(),
-        Some(user.identity_id.as_str()),
+        identity_id, user.identity_id,
         "session.identity.id should match the newly created identity"
     );
-    let email_trait = v["identity"]["traits"]["email"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
     assert_eq!(
         email_trait, user.email,
         "identity.traits.email should match"

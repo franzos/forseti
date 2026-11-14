@@ -61,6 +61,39 @@ where
     <K as tower_governor::key_extractor::KeyExtractor>::Key: Send + Sync + 'static,
     F: Fn(tower_governor::GovernorError) -> Response + Send + Sync + 'static,
 {
+    attach(
+        r,
+        extractor,
+        total_ms,
+        per_window,
+        error_handler,
+        Scope::Router,
+    )
+}
+
+/// Which requests a bucket counts.
+#[derive(Clone, Copy)]
+enum Scope {
+    /// Every request the router sees, its fallback included (`Router::layer`).
+    Router,
+    /// Only requests that match one of the router's routes (`Router::route_layer`).
+    #[cfg_attr(not(feature = "identity-native"), allow(dead_code))]
+    Routes,
+}
+
+fn attach<K, F>(
+    r: Router<AppState>,
+    extractor: K,
+    total_ms: u64,
+    per_window: u32,
+    error_handler: F,
+    scope: Scope,
+) -> Router<AppState>
+where
+    K: tower_governor::key_extractor::KeyExtractor + Send + Sync + 'static,
+    <K as tower_governor::key_extractor::KeyExtractor>::Key: Send + Sync + 'static,
+    F: Fn(tower_governor::GovernorError) -> Response + Send + Sync + 'static,
+{
     if per_window == 0 {
         return r;
     }
@@ -79,7 +112,11 @@ where
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .push(Box::new(move || limiter.retain_recent()));
-    r.layer(GovernorLayer::new(cfg).error_handler(error_handler))
+    let layer = GovernorLayer::new(cfg).error_handler(error_handler);
+    match scope {
+        Scope::Router => r.layer(layer),
+        Scope::Routes => r.route_layer(layer),
+    }
 }
 
 /// Plain-text `429` for browser-facing endpoints, with `Retry-After` when the
@@ -207,6 +244,60 @@ where
     )
 }
 
+/// Paired per-minute + per-hour per-client buckets on the routes of `r` only, so an unmatched
+/// request (the router's fallback, or another router's route after a merge) never counts.
+#[cfg(feature = "identity-native")]
+pub(crate) fn route_dual_window<F>(
+    r: Router<AppState>,
+    proxy: &ProxyConfig,
+    per_minute: u32,
+    per_hour: u32,
+    error_handler: F,
+) -> Router<AppState>
+where
+    F: Fn(tower_governor::GovernorError) -> Response + Copy + Send + Sync + 'static,
+{
+    let key = ClientIpKeyExtractor::from_config(proxy);
+    // The layer attached last runs first: a request the minute bucket refuses keeps its hour token.
+    let r = attach(r, key, 3_600_000, per_hour, error_handler, Scope::Routes);
+    attach(r, key, 60_000, per_minute, error_handler, Scope::Routes)
+}
+
+/// [`route_dual_window`] in front of a global pair: a request the per-client buckets refuse never
+/// reaches the global ones, so one client cannot drain the shared budget.
+#[cfg(feature = "identity-native")]
+pub(crate) fn route_dual_window_then_global<F>(
+    r: Router<AppState>,
+    proxy: &ProxyConfig,
+    per_minute: u32,
+    per_hour: u32,
+    global_per_minute: u32,
+    global_per_hour: u32,
+    error_handler: F,
+) -> Router<AppState>
+where
+    F: Fn(tower_governor::GovernorError) -> Response + Copy + Send + Sync + 'static,
+{
+    // The layer attached last runs first.
+    let r = attach(
+        r,
+        GlobalKeyExtractor,
+        3_600_000,
+        global_per_hour,
+        error_handler,
+        Scope::Routes,
+    );
+    let r = attach(
+        r,
+        GlobalKeyExtractor,
+        60_000,
+        global_per_minute,
+        error_handler,
+        Scope::Routes,
+    );
+    route_dual_window(r, proxy, per_minute, per_hour, error_handler)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -290,14 +381,23 @@ mod tests {
 pub(crate) struct KeyedQuota {
     window: std::time::Duration,
     limit: usize,
+    max_keys: usize,
     hits: std::sync::Mutex<std::collections::HashMap<String, Vec<std::time::Instant>>>,
 }
 
 impl KeyedQuota {
     pub(crate) fn new(window: std::time::Duration, limit: usize) -> Self {
+        Self::bounded(window, limit, usize::MAX)
+    }
+
+    /// [`Self::new`] tracking at most `max_keys` keys. A new key beyond that evicts the key under
+    /// its limit whose latest attempt is oldest; a key at its limit is never evicted, and when
+    /// every key is at its limit the new key is refused.
+    pub(crate) fn bounded(window: std::time::Duration, limit: usize, max_keys: usize) -> Self {
         Self {
             window,
             limit,
+            max_keys: max_keys.max(1),
             hits: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
@@ -324,6 +424,20 @@ impl KeyedQuota {
             times.retain(|t| now.duration_since(*t) < self.window);
             !times.is_empty()
         });
+        if map.len() >= self.max_keys && !map.contains_key(key) {
+            // Evicting a key at its limit would reset it, so only keys under the limit make room.
+            let stalest = map
+                .iter()
+                .filter(|(_, times)| times.len() < self.limit)
+                .min_by_key(|(_, times)| times.iter().max().copied())
+                .map(|(k, _)| k.clone());
+            let Some(k) = stalest else {
+                let first_free = map.values().filter_map(|t| t.iter().min()).min();
+                let age = first_free.map_or(std::time::Duration::ZERO, |t| now.duration_since(*t));
+                return Err(self.window.saturating_sub(age));
+            };
+            map.remove(&k);
+        }
         let entry = map.entry(key.to_string()).or_default();
         if entry.len() >= self.limit {
             let oldest = entry.iter().min().copied().unwrap_or(now);
@@ -388,6 +502,37 @@ mod keyed_quota_tests {
         assert_eq!(retry_after_secs(Duration::from_millis(10)), 1);
         assert_eq!(retry_after_secs(Duration::from_secs(2)), 2);
         assert_eq!(retry_after_secs(Duration::from_millis(2001)), 3);
+    }
+
+    #[test]
+    fn a_bounded_quota_evicts_the_stalest_key_under_its_limit() {
+        let q = KeyedQuota::bounded(Duration::from_secs(3600), 2, 3);
+        assert!(q.admit("a"));
+        std::thread::sleep(Duration::from_millis(2));
+        assert!(q.admit("b"));
+        std::thread::sleep(Duration::from_millis(2));
+        assert!(q.admit("victim"));
+        assert!(q.admit("victim"));
+        std::thread::sleep(Duration::from_millis(2));
+        assert!(
+            q.admit("c"),
+            "a new key fits by evicting the stalest key under its limit"
+        );
+        assert_eq!(q.hits.lock().unwrap().len(), 3);
+        assert!(q.hits.lock().unwrap().contains_key("b"));
+        assert!(!q.hits.lock().unwrap().contains_key("a"));
+        assert!(!q.admit("victim"), "the key at its limit kept its count");
+    }
+
+    #[test]
+    fn a_full_bounded_quota_refuses_new_keys_rather_than_reset_one_at_its_limit() {
+        let q = KeyedQuota::bounded(Duration::from_secs(3600), 1, 2);
+        assert!(q.admit("victim"));
+        assert!(q.admit("filler"));
+        let wait = q.try_admit("new").expect_err("nothing is evictable");
+        assert!(wait > Duration::ZERO && wait <= Duration::from_secs(3600));
+        assert!(!q.admit("victim"), "the victim is still at its limit");
+        assert_eq!(q.hits.lock().unwrap().len(), 2);
     }
 
     #[test]

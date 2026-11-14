@@ -38,6 +38,9 @@ async fn mint_recovery_link(identity_id: &str, return_to: Option<&str>) -> Strin
 /// with a usable Kratos browser session (whoami 200).
 #[tokio::test]
 async fn recovery_link_redemption_yields_browser_session() {
+    skip_on_native!(
+        "SAML is out of scope on the native build (spec non-goal); the /sso routes are not mounted"
+    );
     let user = common::register_test_user("samlkeystone").await;
 
     // Mint the link server-side (what the SSO callback will do).
@@ -81,6 +84,9 @@ async fn recovery_link_redemption_yields_browser_session() {
 /// settings UI.
 #[tokio::test]
 async fn recovery_link_redemption_with_return_to() {
+    skip_on_native!(
+        "SAML is out of scope on the native build (spec non-goal); the /sso routes are not mounted"
+    );
     let user = common::register_test_user("samlkeystonert").await;
 
     let link = mint_recovery_link(&user.identity_id, Some(&format!("{}/", common::PORTAL))).await;
@@ -122,6 +128,9 @@ async fn recovery_link_redemption_with_return_to() {
 /// assumes.
 #[tokio::test]
 async fn kratos_jit_assumptions_hold() {
+    skip_on_native!(
+        "SAML is out of scope on the native build (spec non-goal); the /sso routes are not mounted"
+    );
     let api = common::browser_client();
     let email = common::unique_email("samljit");
 
@@ -184,6 +193,9 @@ async fn kratos_jit_assumptions_hold() {
 /// not be usable to probe which orgs exist or have SSO.
 #[tokio::test]
 async fn sso_unknown_slug_is_neutral() {
+    skip_on_native!(
+        "SAML is out of scope on the native build (spec non-goal); the /sso routes are not mounted"
+    );
     let resp = common::browser_client()
         .get(format!("{}/sso/no-such-org-xyzzy", common::PORTAL))
         .send()
@@ -201,6 +213,9 @@ async fn sso_unknown_slug_is_neutral() {
 /// Callback without a valid signed state cookie → 400, never a session.
 #[tokio::test]
 async fn sso_callback_rejects_missing_state() {
+    skip_on_native!(
+        "SAML is out of scope on the native build (spec non-goal); the /sso routes are not mounted"
+    );
     let resp = common::browser_client()
         .get(format!(
             "{}/sso/callback?code=fake&state=fake",
@@ -216,6 +231,9 @@ async fn sso_callback_rejects_missing_state() {
 /// settings-password landing to the dashboard.
 #[tokio::test]
 async fn sso_arrival_lands_on_dashboard() {
+    skip_on_native!(
+        "SAML is out of scope on the native build (spec non-goal); the /sso routes are not mounted"
+    );
     let user = common::register_test_user("samlarrival").await;
 
     // Recreate the post-callback browser state: a session from redeeming
@@ -291,6 +309,9 @@ async fn sso_arrival_lands_on_dashboard() {
 /// gated, and sane — anything else (404, 5xx, off-site redirect) fails.
 #[tokio::test]
 async fn sso_org_without_connection_is_neutral() {
+    skip_on_native!(
+        "SAML is out of scope on the native build (spec non-goal); the /sso routes are not mounted"
+    );
     let (_browser, manual, _jar) = common::paired_clients();
     let resp = manual
         .get(format!("{}/sso/default", common::PORTAL))
@@ -332,6 +353,9 @@ async fn sso_org_without_connection_is_neutral() {
 /// reachable for non-default, i.e. commercial multi-org, tenants.)
 #[tokio::test]
 async fn cross_org_non_member_is_the_block_discriminator() {
+    skip_on_native!(
+        "SAML is out of scope on the native build (spec non-goal); the /sso routes are not mounted"
+    );
     let email = common::unique_email("samlxorg");
     // A verified identity in Kratos, never joined to the org under test.
     let identity_id = common::kratos_admin_create_identity(&email).await;
@@ -397,6 +421,9 @@ async fn cross_org_non_member_is_the_block_discriminator() {
 /// hint that the route means anything.
 #[tokio::test]
 async fn sso_confirm_without_a_pending_link_is_neutral() {
+    skip_on_native!(
+        "SAML is out of scope on the native build (spec non-goal); the /sso routes are not mounted"
+    );
     assert!(common::portal_reachable().await);
     let client = common::browser_client();
     let res = client

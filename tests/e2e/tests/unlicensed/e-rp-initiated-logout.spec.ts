@@ -13,14 +13,13 @@
 import { test, expect } from '@playwright/test';
 import { adminCredsFromEnv, signInAdminAal2 } from '../../helpers/admin';
 import { logout, registerUser } from '../../helpers/register';
-import { markEmailVerified } from '../../helpers/orgs';
+import { markEmailVerified, sessionIsActive } from '../../helpers/identity';
 import { createOAuthClient } from '../../helpers/clients';
 import { generatePkcePair } from '../../helpers/oauth';
 
 const HYDRA_AUTHORIZE = 'http://host.containers.internal:4444/oauth2/auth';
 const HYDRA_TOKEN = 'http://host.containers.internal:4444/oauth2/token';
 const HYDRA_LOGOUT = 'http://host.containers.internal:4444/oauth2/sessions/logout';
-const KRATOS_PUBLIC = 'http://host.containers.internal:4433';
 
 const REDIRECT_URI = 'http://localhost:9876/cb';
 const POST_LOGOUT_URI = 'http://localhost:9876/post-logout';
@@ -124,8 +123,9 @@ test('RP-initiated logout clears the session and redirects to post_logout_redire
   const postLogoutUrl = new URL(postLogoutReq.url());
   expect(postLogoutUrl.searchParams.get('state')).toBe(logoutState);
 
-  // 7. Assert: the Kratos session is actually gone. A `to_session` call
-  //    re-using the browser's cookies must return 401. We pull cookies
+  // 7. Assert: the identity session is actually gone when probed with
+  //    the browser's cookies (Kratos whoami 401, or native /settings
+  //    bouncing to /login). We pull cookies
   //    out of the page's context and pass them through a fresh
   //    `request.get` so the assertion isn't fooled by Playwright's
   //    request-context isolation.
@@ -133,9 +133,5 @@ test('RP-initiated logout clears the session and redirects to post_logout_redire
   const cookieHeader = cookies
     .map((c) => `${c.name}=${c.value}`)
     .join('; ');
-  const whoamiRes = await request.get(`${KRATOS_PUBLIC}/sessions/whoami`, {
-    headers: { cookie: cookieHeader },
-    failOnStatusCode: false,
-  });
-  expect(whoamiRes.status()).toBe(401);
+  expect(await sessionIsActive(request, cookieHeader)).toBe(false);
 });

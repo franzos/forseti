@@ -74,6 +74,37 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// State for router tests: no background workers, an in-memory signing key, no license.
+    #[cfg(all(test, feature = "identity-native"))]
+    pub(crate) fn for_test(
+        cfg: AppConfig,
+        db: DbPool,
+        identity: Arc<IdentityImpl>,
+        cookie_secret: &[u8],
+    ) -> Self {
+        let oauth = crate::backend::build_oauth(&cfg);
+        Self {
+            cfg: Arc::new(cfg),
+            identity,
+            oauth,
+            db,
+            webhook_worker: WorkerHandle::for_test(),
+            signing_key: SigningKey::ephemeral(),
+            license: LicenseHandle::new(
+                crate::commercial::LicenseStatus::Unlicensed,
+                crate::commercial::GRACE_DAYS,
+            ),
+            cookie_secret: cookie_secret.into(),
+            ip_salt: "test-salt".into(),
+            discovery: DiscoveryCache::default(),
+            idp_providers: ProviderCache::default(),
+            logo_cache: Arc::new(Mutex::new(LogoCache::default())),
+            metrics_handle: metrics_exporter_prometheus::PrometheusBuilder::new()
+                .build_recorder()
+                .handle(),
+        }
+    }
+
     /// Return the cached discovery doc + an `ok` flag, refreshing if stale. A cold fetch failure returns an
     /// EMPTY doc (not a `public_url` guess) so the template's `is_empty()` guards hide endpoints rather than
     /// show a wrong issuer.

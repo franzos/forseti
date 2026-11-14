@@ -31,6 +31,18 @@ jobs:
       # `cargo fmt --check` step once a one-time `cargo fmt` pass has landed.
       - run: make check
 
+  check-native:
+    name: check + clippy + unit tests (identity-native)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - run: make check-native
+      - run: cargo test --lib --no-default-features --features identity-native
+
   audit:
     name: cargo-deny advisories
     runs-on: ubuntu-latest

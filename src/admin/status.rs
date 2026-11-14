@@ -11,6 +11,7 @@ use crate::backend::identity::CourierStatus;
 use crate::backend::{IdentityBackend, OAuthBackend};
 use crate::config::{DatabaseBackend, DatabaseConfig};
 use crate::extractors::RequireAdmin;
+#[cfg(feature = "identity-ory")]
 use crate::format::humanise_timestamp;
 use crate::page_chrome::PageChrome;
 use crate::render::render;
@@ -37,26 +38,11 @@ struct StatusTemplate {
     sqlite_prod_warning: bool,
     /// Webhook outbox rows that exhausted retries; >0 drives a banner.
     dead_webhook_count: i64,
-    /// "received N ago" for the most recent Kratos-sourced audit event. `None`
-    /// renders "never", itself a signal that the receiver path may be broken.
-    last_kratos_webhook_pretty: Option<String>,
-    /// Raw RFC3339 of the same timestamp, attached as a `title=` tooltip.
-    last_kratos_webhook_full: Option<String>,
     /// Audit rows that failed to land in the DB since restart; >0 means the
     /// `audit_fallback` stderr lines should be inspected.
     audit_write_failures: u64,
-    /// Kratos-webhook payloads rejected since boot; >0 means a hook/config
-    /// mismatch (check the `kratos audit webhook` warn logs).
-    audit_webhook_rejected: u64,
-    /// Kratos-webhook rows flagged stale/future since boot; usually a slow flow
-    /// or clock skew.
-    audit_webhook_freshness_anomalies: u64,
-    /// `[audit].webhook_token` accept-list size; >1 means a rotation is in
-    /// flight (see `WebhookTokens` in `config.rs`).
-    audit_webhook_accept_list_len: usize,
-    /// Index of the accept-list entry that last authenticated a request;
-    /// `None` renders "none since boot".
-    audit_webhook_last_matched: Option<usize>,
+    /// Kratos audit-webhook receiver state; `None` on the native build, which has no receiver.
+    kratos_webhook: Option<KratosWebhookStatus>,
     /// One-word license state: "Unlicensed" / "Active" / "Grace" / "Expired".
     license_state: &'static str,
     /// Tier + customer label when a license is present; `None` for OSS-tier.
@@ -65,6 +51,25 @@ struct StatusTemplate {
     issuer: String,
     /// Whether the discovery fetch succeeded; gates the teaser line.
     discovery_ok: bool,
+}
+
+struct KratosWebhookStatus {
+    /// "received N ago" for the most recent Kratos-sourced audit event. `None`
+    /// renders "never", itself a signal that the receiver path may be broken.
+    last_pretty: Option<String>,
+    /// Raw RFC3339 of the same timestamp, attached as a `title=` tooltip.
+    last_full: Option<String>,
+    /// Payloads rejected since boot; >0 means a hook/config mismatch (check
+    /// the `kratos audit webhook` warn logs).
+    rejected: u64,
+    /// Rows flagged stale/future since boot; usually a slow flow or clock skew.
+    freshness_anomalies: u64,
+    /// `[audit].webhook_token` accept-list size; >1 means a rotation is in
+    /// flight (see `WebhookTokens` in `config.rs`).
+    accept_list_len: usize,
+    /// Index of the accept-list entry that last authenticated a request;
+    /// `None` renders "none since boot".
+    last_matched: Option<usize>,
 }
 
 /// One row in the services-health table.
@@ -105,9 +110,19 @@ pub async fn show(State(state): State<AppState>, admin: RequireAdmin) -> Respons
         state.openid_configuration(),
     );
 
+    #[cfg(feature = "identity-ory")]
+    let (identity_names, identity_detail) = (
+        ["Kratos (alive)", "Kratos (ready)"],
+        state.cfg.kratos.admin_url.as_str(),
+    );
+    #[cfg(feature = "identity-native")]
+    let (identity_names, identity_detail) = (
+        ["Identity (built in, alive)", "Identity (built in, ready)"],
+        "database",
+    );
     let services = vec![
-        probe("Kratos (alive)", &state.cfg.kratos.admin_url, kratos_alive),
-        probe("Kratos (ready)", &state.cfg.kratos.admin_url, kratos_ready),
+        probe(identity_names[0], identity_detail, kratos_alive),
+        probe(identity_names[1], identity_detail, kratos_ready),
         probe("Hydra (alive)", &state.cfg.hydra.admin_url, hydra_alive),
         probe("Hydra (ready)", &state.cfg.hydra.admin_url, hydra_ready),
     ];
@@ -146,23 +161,11 @@ pub async fn show(State(state): State<AppState>, admin: RequireAdmin) -> Respons
         }
     };
 
-    // Display only; DB timestamps go through crate::db::rfc3339.
-    #[allow(clippy::disallowed_methods)]
-    let last_kratos_webhook_full = crate::audit::last_kratos_webhook_epoch().map(|secs| {
-        chrono::DateTime::<chrono::Utc>::from_timestamp(secs as i64, 0)
-            .map(|ts| ts.to_rfc3339())
-            .unwrap_or_else(|| format!("epoch:{secs}"))
-    });
-    let last_kratos_webhook_pretty = last_kratos_webhook_full
-        .as_deref()
-        .map(|ts| humanise_timestamp(&ctx.locale, ts));
-
     let audit_write_failures = crate::audit::audit_write_failures_total();
-    let audit_webhook_rejected = crate::audit::kratos_webhook_rejected_total();
-    let audit_webhook_freshness_anomalies =
-        crate::audit::kratos_webhook_freshness_anomalies_total();
-    let audit_webhook_accept_list_len = state.cfg.audit.webhook_token.entries().len();
-    let audit_webhook_last_matched = crate::audit::kratos_webhook_last_matched_index();
+    #[cfg(feature = "identity-ory")]
+    let kratos_webhook = Some(kratos_webhook_status(&state, &ctx.locale));
+    #[cfg(feature = "identity-native")]
+    let kratos_webhook = None;
 
     let (license_state, license_detail) = match &*state.license.status() {
         crate::commercial::LicenseStatus::Unlicensed => ("Unlicensed", None),
@@ -190,18 +193,38 @@ pub async fn show(State(state): State<AppState>, admin: RequireAdmin) -> Respons
         database_backend,
         sqlite_prod_warning,
         dead_webhook_count,
-        last_kratos_webhook_pretty,
-        last_kratos_webhook_full,
         audit_write_failures,
-        audit_webhook_rejected,
-        audit_webhook_freshness_anomalies,
-        audit_webhook_accept_list_len,
-        audit_webhook_last_matched,
+        kratos_webhook,
         license_state,
         license_detail,
         issuer: disc.issuer,
         discovery_ok,
     })
+}
+
+#[cfg(feature = "identity-ory")]
+fn kratos_webhook_status(
+    state: &AppState,
+    locale: &crate::locale::LanguageIdentifier,
+) -> KratosWebhookStatus {
+    // Display only; DB timestamps go through crate::db::rfc3339.
+    #[allow(clippy::disallowed_methods)]
+    let last_full = crate::audit::last_kratos_webhook_epoch().map(|secs| {
+        chrono::DateTime::<chrono::Utc>::from_timestamp(secs as i64, 0)
+            .map(|ts| ts.to_rfc3339())
+            .unwrap_or_else(|| format!("epoch:{secs}"))
+    });
+    let last_pretty = last_full
+        .as_deref()
+        .map(|ts| humanise_timestamp(locale, ts));
+    KratosWebhookStatus {
+        last_pretty,
+        last_full,
+        rejected: crate::audit::kratos_webhook_rejected_total(),
+        freshness_anomalies: crate::audit::kratos_webhook_freshness_anomalies_total(),
+        accept_list_len: state.cfg.audit.webhook_token.entries().len(),
+        last_matched: crate::audit::kratos_webhook_last_matched_index(),
+    }
 }
 
 fn probe(name: &'static str, base: &str, result: anyhow::Result<()>) -> ServiceStatus {

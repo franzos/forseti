@@ -37,6 +37,7 @@ pub mod hosts;
 pub mod identities;
 pub mod posix;
 pub mod resources;
+#[cfg(feature = "identity-ory")]
 pub mod saml;
 pub mod sessions;
 pub mod status;
@@ -45,7 +46,7 @@ pub mod webhooks;
 /// Build the admin sub-router. Routes are path-prefixed `/admin/...` directly
 /// (not nested) so `require_admin` sees the full request path for redirects.
 pub fn router() -> Router<AppState> {
-    Router::new()
+    let router = Router::new()
         .route("/admin", get(redirect_to_status))
         .route("/admin/status", get(status::show))
         .route("/admin/configuration", get(configuration::show))
@@ -100,14 +101,6 @@ pub fn router() -> Router<AppState> {
         .route("/admin/webhooks/{id}", get(webhooks::show_one))
         .route("/admin/webhooks/{id}/requeue", post(webhooks::requeue))
         .route("/admin/webhooks/{id}/discard", post(webhooks::discard))
-        // SAML SSO connections (commercial)
-        .route("/admin/saml", get(saml::list))
-        .route("/admin/saml/new", get(saml::new).post(saml::create))
-        .route(
-            "/admin/saml/{org_id}/delete",
-            get(saml::delete_confirm).post(saml::delete),
-        )
-        .route("/admin/saml/{org_id}/toggle", post(saml::toggle))
         // Resource registry (RFC 8707 audiences)
         .route("/admin/resources", get(resources::list))
         .route(
@@ -156,8 +149,28 @@ pub fn router() -> Router<AppState> {
         )
         // License (commercial); handlers self-gate via RequireAdmin like the rest.
         .merge(crate::commercial::settings_page::router())
-        .merge(client_logo_router())
+        .merge(client_logo_router());
+    #[cfg(feature = "identity-ory")]
+    let router = router.merge(saml_router());
+    router
 }
+
+/// SAML SSO connections (commercial). The SAML flow mints Kratos sessions, so
+/// the native build has no SAML admin either.
+#[cfg(feature = "identity-ory")]
+fn saml_router() -> Router<AppState> {
+    Router::new()
+        .route("/admin/saml", get(saml::list))
+        .route("/admin/saml/new", get(saml::new).post(saml::create))
+        .route(
+            "/admin/saml/{org_id}/delete",
+            get(saml::delete_confirm).post(saml::delete),
+        )
+        .route("/admin/saml/{org_id}/toggle", post(saml::toggle))
+}
+
+/// Whether `/admin/saml` is mounted; drives its admin-nav entry.
+pub(crate) const SAML_ADMIN: bool = cfg!(feature = "identity-ory");
 
 /// Body-size cap for the client-logo multipart sub-router: headroom over the
 /// 256 KB validated logo cap for multipart boundary/field overhead.
@@ -472,6 +485,7 @@ pub(crate) enum AdminSection {
     Sessions,
     Audit,
     Webhooks,
+    #[cfg(feature = "identity-ory")]
     Saml,
     License,
 }
@@ -489,6 +503,7 @@ impl AdminSection {
             AdminSection::Sessions => "sessions",
             AdminSection::Audit => "audit",
             AdminSection::Webhooks => "webhooks",
+            #[cfg(feature = "identity-ory")]
             AdminSection::Saml => "saml",
             AdminSection::License => "license",
         }

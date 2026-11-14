@@ -14,6 +14,7 @@ use serde::Deserialize;
 /// Top-level application configuration.
 #[derive(Debug, Clone, Deserialize)]
 pub struct AppConfig {
+    #[cfg(feature = "identity-ory")]
     pub kratos: KratosConfig,
     pub hydra: HydraConfig,
     #[serde(rename = "self")]
@@ -40,7 +41,7 @@ pub struct AppConfig {
     /// Commercial-tier license gate. All fields optional; OSS ships unlicensed with an upsell on gated features.
     #[serde(default)]
     pub license: LicenseConfig,
-    /// Identity-management knobs (today only the `unverified-prune` TTL).
+    /// Identity-management knobs.
     #[serde(default)]
     pub identity: IdentityConfig,
     /// Provider config for Forseti-originated mail (invite + claim-email); Kratos's courier handles its own self-service mail.
@@ -341,6 +342,7 @@ impl PosixConfig {
     }
 }
 
+#[cfg(feature = "identity-ory")]
 #[derive(Debug, Clone, Deserialize)]
 pub struct KratosConfig {
     /// Browser-facing public API, e.g. `http://127.0.0.1:4433`.
@@ -718,12 +720,14 @@ impl DatabaseConfig {
 }
 
 /// Shortest audit webhook token accepted on a production-shaped deployment.
+#[cfg(feature = "identity-ory")]
 pub const WEBHOOK_TOKEN_MIN_LEN: usize = 32;
 
 /// One token (string) or an accept list (array) during rotation. The
 /// receiver in `audit::kratos_webhook` accepts a request when the presented
 /// bearer matches any entry, so an operator can add a new token, roll it
 /// out, then drop the old one with no window where valid tokens 401.
+#[cfg(feature = "identity-ory")]
 #[derive(Clone, Deserialize)]
 #[serde(untagged)]
 pub enum WebhookTokens {
@@ -733,12 +737,14 @@ pub enum WebhookTokens {
 
 /// Manual `Debug` (instead of wrapping the entries in [`Redacted`]) so the
 /// constant-time matcher and boot validation keep working on plain `&[String]`.
+#[cfg(feature = "identity-ory")]
 impl std::fmt::Debug for WebhookTokens {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "[redacted; {} entries]", self.entries().len())
     }
 }
 
+#[cfg(feature = "identity-ory")]
 impl WebhookTokens {
     pub fn entries(&self) -> &[String] {
         match self {
@@ -805,6 +811,7 @@ impl WebhookTokens {
     }
 }
 
+#[cfg(feature = "identity-ory")]
 impl Default for WebhookTokens {
     fn default() -> Self {
         WebhookTokens::One(String::new())
@@ -813,13 +820,14 @@ impl Default for WebhookTokens {
 
 /// Audit log configuration.
 ///
-/// `webhook_token` gates the `/internal/audit/kratos` receiver and must match the Kratos config;
+/// `webhook_token` (Ory build only) gates the `/internal/audit/kratos` receiver and must match the Kratos config;
 /// a single string or an array of strings (accept-list, for zero-loss rotation) — see
 /// [`WebhookTokens`]. Forseti refuses to boot when unset. `ip_salt` is optional (derived from the
 /// operator cookie secret via `audit::ip_salt()` when unset). `audit_retention_days` is the
 /// `audit-prune` default.
 #[derive(Debug, Clone, Deserialize)]
 pub struct AuditConfig {
+    #[cfg(feature = "identity-ory")]
     #[serde(default)]
     pub webhook_token: WebhookTokens,
     #[serde(default)]
@@ -831,6 +839,7 @@ pub struct AuditConfig {
 impl Default for AuditConfig {
     fn default() -> Self {
         Self {
+            #[cfg(feature = "identity-ory")]
             webhook_token: WebhookTokens::default(),
             ip_salt: None,
             audit_retention_days: default_audit_retention_days(),
@@ -972,6 +981,8 @@ pub struct MetricsConfig {
 
 /// SAML SSO bridge (commercial, opt-in). Absent = `/sso/*` unmounted, zero SAML footprint. The bridge
 /// (Jackson / Ory Polis) is operator-deployed; Forseti only orchestrates against it. See `docs/commercial/saml.md`.
+// Parsed on both builds; only the Ory build mounts SAML.
+#[cfg_attr(feature = "identity-native", expect(dead_code))]
 #[derive(Debug, Clone, Deserialize)]
 pub struct SamlConfig {
     /// Browser-facing base URL of the Jackson instance, e.g.
@@ -996,8 +1007,10 @@ pub struct SamlConfig {
 }
 
 /// Jackson's default `samlAudience`: the SP entity id the customer's IdP admin configures when `[saml].sp_entity_id` is unset.
+#[cfg(feature = "identity-ory")]
 pub const DEFAULT_SP_ENTITY_ID: &str = "https://saml.boxyhq.com";
 
+#[cfg(feature = "identity-ory")]
 impl SamlConfig {
     pub fn internal_url(&self) -> &str {
         self.jackson_internal_url
@@ -1023,18 +1036,95 @@ pub struct IdentityConfig {
     /// Default 7 keeps an unverified squatter from blocking the legitimate owner; dial up for slower onboarding.
     #[serde(default = "default_unverified_ttl_days")]
     pub unverified_ttl_days: i64,
+    /// Minutes after sign-in during which settings changes need no re-authentication.
+    /// Must match Kratos's `selfservice.flows.settings.privileged_session_max_age` on the Ory build.
+    #[serde(default = "default_privileged_session_minutes")]
+    pub privileged_session_minutes: u32,
+    /// Absolute lifetime of a sign-in session, in hours.
+    #[cfg(feature = "identity-native")]
+    #[serde(default = "default_session_lifespan_hours")]
+    pub session_lifespan_hours: u32,
+    /// Shortest accepted password, in characters (8 to 256).
+    #[cfg(feature = "identity-native")]
+    #[serde(default = "default_password_min_length")]
+    pub password_min_length: usize,
+    /// Reject passwords found in the HaveIBeenPwned range API. A failed lookup lets the password through.
+    #[cfg(feature = "identity-native")]
+    #[serde(default)]
+    pub password_breach_check: bool,
+    /// Login form submits per client IP per minute; `0` turns the bucket off.
+    #[cfg(feature = "identity-native")]
+    #[serde(default = "default_login_ip_rate_per_minute")]
+    pub login_ip_rate_per_minute: u32,
+    /// Login form submits per client IP per hour; `0` turns the bucket off.
+    #[cfg(feature = "identity-native")]
+    #[serde(default = "default_login_ip_rate_per_hour")]
+    pub login_ip_rate_per_hour: u32,
+    /// Password attempts per email address per 15 minutes, counted whether or not the account
+    /// exists; `0` turns the limit off.
+    #[cfg(feature = "identity-native")]
+    #[serde(default = "default_login_identifier_rate_per_15m")]
+    pub login_identifier_rate_per_15m: u32,
 }
 
 impl Default for IdentityConfig {
     fn default() -> Self {
         Self {
             unverified_ttl_days: default_unverified_ttl_days(),
+            privileged_session_minutes: default_privileged_session_minutes(),
+            #[cfg(feature = "identity-native")]
+            session_lifespan_hours: default_session_lifespan_hours(),
+            #[cfg(feature = "identity-native")]
+            password_min_length: default_password_min_length(),
+            #[cfg(feature = "identity-native")]
+            password_breach_check: false,
+            #[cfg(feature = "identity-native")]
+            login_ip_rate_per_minute: default_login_ip_rate_per_minute(),
+            #[cfg(feature = "identity-native")]
+            login_ip_rate_per_hour: default_login_ip_rate_per_hour(),
+            #[cfg(feature = "identity-native")]
+            login_identifier_rate_per_15m: default_login_identifier_rate_per_15m(),
         }
+    }
+}
+
+impl IdentityConfig {
+    pub fn privileged_window(&self) -> chrono::Duration {
+        chrono::Duration::minutes(i64::from(self.privileged_session_minutes))
     }
 }
 
 fn default_unverified_ttl_days() -> i64 {
     7
+}
+
+fn default_privileged_session_minutes() -> u32 {
+    15
+}
+
+#[cfg(feature = "identity-native")]
+fn default_session_lifespan_hours() -> u32 {
+    24
+}
+
+#[cfg(feature = "identity-native")]
+fn default_password_min_length() -> usize {
+    8
+}
+
+#[cfg(feature = "identity-native")]
+fn default_login_ip_rate_per_minute() -> u32 {
+    20
+}
+
+#[cfg(feature = "identity-native")]
+fn default_login_ip_rate_per_hour() -> u32 {
+    200
+}
+
+#[cfg(feature = "identity-native")]
+fn default_login_identifier_rate_per_15m() -> u32 {
+    10
 }
 
 /// Outbound-webhook signing. One Ed25519 key signs every account-lifecycle SET (`src/webhook.rs`);
@@ -1466,6 +1556,26 @@ impl AppConfig {
         for (field, value, ceiling) in required {
             *value = clamp_rate(field, *value, ceiling);
         }
+        #[cfg(feature = "identity-native")]
+        for (field, value, ceiling) in [
+            (
+                "identity.login_ip_rate_per_minute",
+                &mut self.identity.login_ip_rate_per_minute,
+                RATE_LIMIT_PER_MINUTE_CEILING,
+            ),
+            (
+                "identity.login_ip_rate_per_hour",
+                &mut self.identity.login_ip_rate_per_hour,
+                RATE_LIMIT_PER_HOUR_CEILING,
+            ),
+            (
+                "identity.login_identifier_rate_per_15m",
+                &mut self.identity.login_identifier_rate_per_15m,
+                RATE_LIMIT_PER_MINUTE_CEILING,
+            ),
+        ] {
+            *value = clamp_rate(field, *value, ceiling);
+        }
 
         let optional: [(&str, &mut Option<u32>, u32); 16] = [
             (
@@ -1564,6 +1674,7 @@ impl AppConfig {
     /// fields a given test cares about rather than hand-building the literal.
     pub(crate) fn test_fixture() -> Self {
         Self {
+            #[cfg(feature = "identity-ory")]
             kratos: KratosConfig {
                 public_url: "http://kratos:4433".into(),
                 admin_url: "http://kratos:4434".into(),
@@ -1988,7 +2099,10 @@ mod tests {
         cfg.security.cookie_secret = Some("cookie_s3cret".into());
         cfg.posix.pam_client_secret = Some("pam_s3cret".into());
         cfg.metrics.scrape_token = Some("scrape_s3cret".into());
-        cfg.audit.webhook_token = WebhookTokens::Many(vec!["hook_s3cret".into()]);
+        #[cfg(feature = "identity-ory")]
+        {
+            cfg.audit.webhook_token = WebhookTokens::Many(vec!["hook_s3cret".into()]);
+        }
         let dump = format!("{cfg:?}");
         for secret in [
             "cookie_s3cret",
@@ -2039,6 +2153,7 @@ mod tests {
 
     // --- WebhookTokens -------------------------------------------------
 
+    #[cfg(feature = "identity-ory")]
     #[derive(Deserialize)]
     struct W {
         webhook_token: WebhookTokens,
@@ -2046,6 +2161,7 @@ mod tests {
 
     // Exercises the real load path (figment + toml), not just serde, since
     // `AppConfig::load()` goes through `Figment::new().merge(Toml::file(..))`.
+    #[cfg(feature = "identity-ory")]
     #[test]
     fn webhook_tokens_deserializes_single_string() {
         let w: W = Figment::new()
@@ -2055,6 +2171,7 @@ mod tests {
         assert_eq!(w.webhook_token.entries(), ["a"]);
     }
 
+    #[cfg(feature = "identity-ory")]
     #[test]
     fn webhook_tokens_deserializes_array() {
         let w: W = Figment::new()
@@ -2064,6 +2181,7 @@ mod tests {
         assert_eq!(w.webhook_token.entries(), ["a", "b"]);
     }
 
+    #[cfg(feature = "identity-ory")]
     #[test]
     fn webhook_tokens_default_is_unset() {
         assert!(WebhookTokens::default().is_unset());
@@ -2078,18 +2196,21 @@ mod tests {
     const DEV_URL: &str = "http://localhost:3000";
     const PROD_URL: &str = "https://forseti.example.com";
 
+    #[cfg(feature = "identity-ory")]
     #[test]
     fn webhook_tokens_validate_rejects_empty_entry() {
         let t = WebhookTokens::Many(vec!["a".into(), String::new()]);
         assert!(t.validate(DEV_URL).is_err());
     }
 
+    #[cfg(feature = "identity-ory")]
     #[test]
     fn webhook_tokens_validate_rejects_duplicate_entries() {
         let t = WebhookTokens::Many(vec!["a".into(), "a".into()]);
         assert!(t.validate(DEV_URL).is_err());
     }
 
+    #[cfg(feature = "identity-ory")]
     #[test]
     fn webhook_tokens_validate_accepts_distinct_nonempty_entries() {
         let t = WebhookTokens::Many(vec!["a".into(), "b".into()]);
@@ -2097,6 +2218,7 @@ mod tests {
         assert!(WebhookTokens::One("a".into()).validate(DEV_URL).is_ok());
     }
 
+    #[cfg(feature = "identity-ory")]
     #[test]
     fn webhook_tokens_placeholder_refused_only_on_production_shape() {
         let t = WebhookTokens::One("dev-playground-token-change-me".into());
@@ -2107,12 +2229,14 @@ mod tests {
         assert!(t.validate(PROD_URL).is_err());
     }
 
+    #[cfg(feature = "identity-ory")]
     #[test]
     fn webhook_tokens_real_secret_passes_on_production_shape() {
         let t = WebhookTokens::One("f".repeat(64));
         assert!(t.validate(PROD_URL).is_ok());
     }
 
+    #[cfg(feature = "identity-ory")]
     #[test]
     fn webhook_tokens_short_entry_refused_on_production_shape() {
         let t = WebhookTokens::Many(vec!["hook_s3cret".into(), "g".repeat(32)]);

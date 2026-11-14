@@ -1571,6 +1571,7 @@ pub(crate) const SUPPORTED_SCOPES: [&str; 6] = [
 
 /// Claims Forseti and Hydra put in ID tokens, advertised through Hydra's
 /// `webfinger.oidc_discovery.supported_claims`.
+#[cfg(feature = "identity-ory")]
 pub(crate) const SUPPORTED_CLAIMS: [&str; 26] = [
     "sub",
     "iss",

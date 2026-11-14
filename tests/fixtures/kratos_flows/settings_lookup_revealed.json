@@ -1,0 +1,535 @@
+{
+  "id": "282d707c-c674-49af-933a-ac2d6cd6f66d",
+  "type": "browser",
+  "expires_at": "2026-11-13T18:26:33.661376Z",
+  "issued_at": "2026-11-13T17:26:33.661376Z",
+  "request_url": "http://localhost:4433/self-service/settings/browser",
+  "ui": {
+    "action": "http://localhost:4433/self-service/settings?flow=282d707c-c674-49af-933a-ac2d6cd6f66d",
+    "method": "POST",
+    "nodes": [
+      {
+        "type": "input",
+        "group": "default",
+        "attributes": {
+          "name": "csrf_token",
+          "type": "hidden",
+          "value": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+          "required": true,
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {}
+      },
+      {
+        "type": "input",
+        "group": "profile",
+        "attributes": {
+          "name": "traits.email",
+          "type": "email",
+          "value": "fixture-mfa-79253387@example.com",
+          "required": true,
+          "autocomplete": "email",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1070002,
+            "text": "E-Mail",
+            "type": "info",
+            "context": {
+              "name": "traits.email",
+              "title": "E-Mail"
+            }
+          }
+        }
+      },
+      {
+        "type": "input",
+        "group": "profile",
+        "attributes": {
+          "name": "traits.name.first",
+          "type": "text",
+          "value": "Fixture",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1070002,
+            "text": "First Name",
+            "type": "info",
+            "context": {
+              "name": "traits.name.first",
+              "title": "First Name"
+            }
+          }
+        }
+      },
+      {
+        "type": "input",
+        "group": "profile",
+        "attributes": {
+          "name": "traits.name.last",
+          "type": "text",
+          "value": "User",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1070002,
+            "text": "Last Name",
+            "type": "info",
+            "context": {
+              "name": "traits.name.last",
+              "title": "Last Name"
+            }
+          }
+        }
+      },
+      {
+        "type": "input",
+        "group": "profile",
+        "attributes": {
+          "name": "traits.preferred_language",
+          "type": "text",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1070002,
+            "text": "Preferred language",
+            "type": "info",
+            "context": {
+              "name": "traits.preferred_language",
+              "title": "Preferred language"
+            }
+          }
+        }
+      },
+      {
+        "type": "input",
+        "group": "profile",
+        "attributes": {
+          "name": "method",
+          "type": "submit",
+          "value": "profile",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1070003,
+            "text": "Save",
+            "type": "info"
+          }
+        }
+      },
+      {
+        "type": "input",
+        "group": "password",
+        "attributes": {
+          "name": "password",
+          "type": "password",
+          "required": true,
+          "autocomplete": "new-password",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1070001,
+            "text": "Password",
+            "type": "info"
+          }
+        }
+      },
+      {
+        "type": "input",
+        "group": "password",
+        "attributes": {
+          "name": "method",
+          "type": "submit",
+          "value": "password",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1070003,
+            "text": "Save",
+            "type": "info"
+          }
+        }
+      },
+      {
+        "type": "input",
+        "group": "oidc",
+        "attributes": {
+          "name": "link",
+          "type": "submit",
+          "value": "playground",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1050002,
+            "text": "Link Playground",
+            "type": "info",
+            "context": {
+              "provider": "Playground"
+            }
+          }
+        }
+      },
+      {
+        "type": "input",
+        "group": "webauthn",
+        "attributes": {
+          "name": "webauthn_register_displayname",
+          "type": "text",
+          "value": "",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1050013,
+            "text": "Name of the security key",
+            "type": "info"
+          }
+        }
+      },
+      {
+        "type": "input",
+        "group": "webauthn",
+        "attributes": {
+          "name": "webauthn_register",
+          "type": "hidden",
+          "value": "",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {}
+      },
+      {
+        "type": "input",
+        "group": "webauthn",
+        "attributes": {
+          "name": "webauthn_register_trigger",
+          "type": "button",
+          "value": "{\"publicKey\":{\"rp\":{\"name\":\"forseti\",\"id\":\"localhost\"},\"user\":{\"name\":\"forseti\",\"displayName\":\"forseti\",\"id\":\"W8i__dnRTMKmOoLdVnfQVw\"},\"challenge\":\"0fsj8LHjeJBGsVxWJtZ-oUwt6cUigRjEtntlIIcmjac\",\"pubKeyCredParams\":[{\"type\":\"public-key\",\"alg\":-7},{\"type\":\"public-key\",\"alg\":-35},{\"type\":\"public-key\",\"alg\":-36},{\"type\":\"public-key\",\"alg\":-257},{\"type\":\"public-key\",\"alg\":-258},{\"type\":\"public-key\",\"alg\":-259},{\"type\":\"public-key\",\"alg\":-37},{\"type\":\"public-key\",\"alg\":-38},{\"type\":\"public-key\",\"alg\":-39},{\"type\":\"public-key\",\"alg\":-8}],\"timeout\":120000,\"authenticatorSelection\":{\"userVerification\":\"discouraged\"}}}",
+          "disabled": false,
+          "onclick": "window.oryWebAuthnRegistration({\"publicKey\":{\"rp\":{\"name\":\"forseti\",\"id\":\"localhost\"},\"user\":{\"name\":\"forseti\",\"displayName\":\"forseti\",\"id\":\"W8i__dnRTMKmOoLdVnfQVw\"},\"challenge\":\"0fsj8LHjeJBGsVxWJtZ-oUwt6cUigRjEtntlIIcmjac\",\"pubKeyCredParams\":[{\"type\":\"public-key\",\"alg\":-7},{\"type\":\"public-key\",\"alg\":-35},{\"type\":\"public-key\",\"alg\":-36},{\"type\":\"public-key\",\"alg\":-257},{\"type\":\"public-key\",\"alg\":-258},{\"type\":\"public-key\",\"alg\":-259},{\"type\":\"public-key\",\"alg\":-37},{\"type\":\"public-key\",\"alg\":-38},{\"type\":\"public-key\",\"alg\":-39},{\"type\":\"public-key\",\"alg\":-8}],\"timeout\":120000,\"authenticatorSelection\":{\"userVerification\":\"discouraged\"}}})",
+          "onclickTrigger": "oryWebAuthnRegistration",
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1050012,
+            "text": "Add security key",
+            "type": "info"
+          }
+        }
+      },
+      {
+        "type": "script",
+        "group": "webauthn",
+        "attributes": {
+          "src": "http://localhost:4433/.well-known/ory/webauthn.js",
+          "async": true,
+          "referrerpolicy": "no-referrer",
+          "crossorigin": "anonymous",
+          "integrity": "sha512-Dg0gN3fy+JoKxRp9Zda/4KYn3SlMdaKjs3fK5g6nDVQ/CVakD1dfMQyvRtJeiAtzSMEFviJbBLcVSrsBPGsFBA==",
+          "type": "text/javascript",
+          "id": "webauthn_script",
+          "nonce": "e544bc8b-32c1-43dc-b2fd-7d6b41b8455a",
+          "node_type": "script"
+        },
+        "messages": [],
+        "meta": {}
+      },
+      {
+        "type": "input",
+        "group": "passkey",
+        "attributes": {
+          "name": "passkey_register_trigger",
+          "type": "button",
+          "value": "",
+          "disabled": false,
+          "onclick": "window.oryPasskeySettingsRegistration()",
+          "onclickTrigger": "oryPasskeySettingsRegistration",
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1050019,
+            "text": "Add passkey",
+            "type": "info"
+          }
+        }
+      },
+      {
+        "type": "input",
+        "group": "passkey",
+        "attributes": {
+          "name": "passkey_settings_register",
+          "type": "hidden",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {}
+      },
+      {
+        "type": "input",
+        "group": "passkey",
+        "attributes": {
+          "name": "passkey_create_data",
+          "type": "hidden",
+          "value": "{\"publicKey\":{\"rp\":{\"name\":\"forseti\",\"id\":\"localhost\"},\"user\":{\"name\":\"fixture-mfa-79253387@example.com\",\"displayName\":\"fixture-mfa-79253387@example.com\",\"id\":\"YkFtbzAya1BRUG1tTVliM1FIUHlZTFo5cFpaZ250VGxlbDVzemVxR24xWTY0eXpmc3dWNTdpTXRVQXM5N3RKbQ\"},\"challenge\":\"OpD1ec9qFT24YqJFshhGw8h42UACmNPllZJ8fifT9J4\",\"pubKeyCredParams\":[{\"type\":\"public-key\",\"alg\":-7},{\"type\":\"public-key\",\"alg\":-35},{\"type\":\"public-key\",\"alg\":-36},{\"type\":\"public-key\",\"alg\":-257},{\"type\":\"public-key\",\"alg\":-258},{\"type\":\"public-key\",\"alg\":-259},{\"type\":\"public-key\",\"alg\":-37},{\"type\":\"public-key\",\"alg\":-38},{\"type\":\"public-key\",\"alg\":-39},{\"type\":\"public-key\",\"alg\":-8}],\"timeout\":300000,\"authenticatorSelection\":{\"authenticatorAttachment\":\"platform\",\"requireResidentKey\":true,\"residentKey\":\"required\",\"userVerification\":\"preferred\"}}}",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {}
+      },
+      {
+        "type": "input",
+        "group": "totp",
+        "attributes": {
+          "name": "totp_unlink",
+          "type": "submit",
+          "value": "true",
+          "required": true,
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1050004,
+            "text": "Unlink TOTP Authenticator App",
+            "type": "info"
+          }
+        }
+      },
+      {
+        "type": "text",
+        "group": "lookup_secret",
+        "attributes": {
+          "text": {
+            "id": 1050015,
+            "text": "fake00aa, fake01aa, fake02aa, fake03aa, fake04aa, fake05aa, fake06aa, fake07aa, fake08aa, fake09aa, fake10aa, fake11aa",
+            "type": "info",
+            "context": {
+              "secrets": [
+                {
+                  "id": 1050009,
+                  "text": "fake00aa",
+                  "type": "info",
+                  "context": {
+                    "secret": "fake00aa"
+                  }
+                },
+                {
+                  "id": 1050009,
+                  "text": "fake01aa",
+                  "type": "info",
+                  "context": {
+                    "secret": "fake01aa"
+                  }
+                },
+                {
+                  "id": 1050009,
+                  "text": "fake02aa",
+                  "type": "info",
+                  "context": {
+                    "secret": "fake02aa"
+                  }
+                },
+                {
+                  "id": 1050009,
+                  "text": "fake03aa",
+                  "type": "info",
+                  "context": {
+                    "secret": "fake03aa"
+                  }
+                },
+                {
+                  "id": 1050009,
+                  "text": "fake04aa",
+                  "type": "info",
+                  "context": {
+                    "secret": "fake04aa"
+                  }
+                },
+                {
+                  "id": 1050009,
+                  "text": "fake05aa",
+                  "type": "info",
+                  "context": {
+                    "secret": "fake05aa"
+                  }
+                },
+                {
+                  "id": 1050009,
+                  "text": "fake06aa",
+                  "type": "info",
+                  "context": {
+                    "secret": "fake06aa"
+                  }
+                },
+                {
+                  "id": 1050009,
+                  "text": "fake07aa",
+                  "type": "info",
+                  "context": {
+                    "secret": "fake07aa"
+                  }
+                },
+                {
+                  "id": 1050009,
+                  "text": "fake08aa",
+                  "type": "info",
+                  "context": {
+                    "secret": "fake08aa"
+                  }
+                },
+                {
+                  "id": 1050009,
+                  "text": "fake09aa",
+                  "type": "info",
+                  "context": {
+                    "secret": "fake09aa"
+                  }
+                },
+                {
+                  "id": 1050009,
+                  "text": "fake10aa",
+                  "type": "info",
+                  "context": {
+                    "secret": "fake10aa"
+                  }
+                },
+                {
+                  "id": 1050009,
+                  "text": "fake11aa",
+                  "type": "info",
+                  "context": {
+                    "secret": "fake11aa"
+                  }
+                }
+              ]
+            }
+          },
+          "id": "lookup_secret_codes",
+          "node_type": "text"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1050010,
+            "text": "These are your back up recovery codes. Please keep them in a safe place!",
+            "type": "info"
+          }
+        }
+      },
+      {
+        "type": "input",
+        "group": "lookup_secret",
+        "attributes": {
+          "name": "lookup_secret_disable",
+          "type": "submit",
+          "value": "true",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1050016,
+            "text": "Disable this method",
+            "type": "info"
+          }
+        }
+      },
+      {
+        "type": "input",
+        "group": "lookup_secret",
+        "attributes": {
+          "name": "lookup_secret_regenerate",
+          "type": "submit",
+          "value": "true",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1050008,
+            "text": "Generate new backup recovery codes",
+            "type": "info"
+          }
+        }
+      }
+    ]
+  },
+  "identity": {
+    "id": "5bc8bffd-d9d1-4cc2-a63a-82dd5677d057",
+    "schema_id": "default",
+    "schema_url": "http://localhost:4433/schemas/ZGVmYXVsdA",
+    "state": "active",
+    "state_changed_at": "2026-11-13T17:26:25.935348Z",
+    "traits": {
+      "name": {
+        "last": "User",
+        "first": "Fixture"
+      },
+      "email": "fixture-mfa-79253387@example.com"
+    },
+    "verifiable_addresses": [
+      {
+        "id": "ce20be4d-ce26-4af2-8958-3e94f867a2f1",
+        "value": "fixture-mfa-79253387@example.com",
+        "verified": true,
+        "via": "email",
+        "status": "completed",
+        "verified_at": "2026-11-13T17:26:25.937962Z",
+        "created_at": "2026-11-13T17:26:25.93808Z",
+        "updated_at": "2026-11-13T17:26:25.93808Z"
+      }
+    ],
+    "recovery_addresses": [
+      {
+        "id": "47f80469-1e40-4eca-83a6-f4dd75db90ab",
+        "value": "fixture-mfa-79253387@example.com",
+        "via": "email",
+        "created_at": "2026-11-13T17:26:25.93881Z",
+        "updated_at": "2026-11-13T17:26:25.93881Z"
+      }
+    ],
+    "metadata_public": null,
+    "created_at": "2026-11-13T17:26:25.937362Z",
+    "updated_at": "2026-11-13T17:26:33.611103Z",
+    "organization_id": null
+  },
+  "state": "show_form"
+}

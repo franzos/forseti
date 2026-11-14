@@ -75,13 +75,43 @@ via its API, so the script creates the identity with a password and inserts the
 TOTP credential straight into Kratos's Postgres. CI runs it automatically; the
 seeded `admin@example.com` matches `config.ci.toml`'s allowlist.
 
+### Native identity backend
+
+```
+make e2e-native
+```
+
+Runs the unlicensed bucket against a Forseti built with
+`--no-default-features --features identity-native`. Like `make e2e` it does
+not bring the stack up: run `make stack-up-native`, start the native binary
+with `FORSETI_CONFIG_PATH=config.ci.native.toml`, then `make seed-admin-native`
+(prints the same three admin env vars) and `make seed-posix-client`.
+
+On top of `make e2e` the target sets `FORSETI_IDENTITY_BACKEND=native` and
+mounts the directory holding `forseti.db` at `/forseti`
+(`FORSETI_DB_PATH=/forseti/forseti.db`). `helpers/identity.ts` switches on
+that variable: identity lookups read the sqlite file, `markEmailVerified`
+writes `identities.email_verified_at` (the only write), and session probes ask
+Forseti (`GET /settings` bouncing to `/login`) instead of Kratos whoami. The
+session cookie is `forseti_session`, not `ory_kratos_session`.
+
+The native backend accepts one TOTP code per identity per 30 s step. So
+`global-setup.ts` signs the admin in once and `signInAdminAal2` hands that
+session to every spec; `logout()` on that session only drops the cookie, so
+later specs keep it. The specs that submit a code themselves
+(`c-admin-aal2-stepup`, the second-factor case in `n-oauth-skip-consent-login`)
+get it from `freshTotp()`, which waits for the next step when the current one
+is used.
+
 ## Add a new test
 
 1. Drop a `*.spec.ts` file in `tests/`. Use the existing scenarios as
    templates — each one self-registers a fresh user with `uniqueEmail()`
    so they don't depend on prior state.
 2. Re-use the helpers in `helpers/` (`mailcrab.ts`, `register.ts`,
-   `admin.ts`, `oauth.ts`, `totp.ts`) before adding new ones.
+   `admin.ts`, `oauth.ts`, `totp.ts`) before adding new ones. Reach the
+   identity backend only through `identity.ts`, never Kratos directly, so
+   the spec runs under `make e2e-native` too.
 3. Keep the test count small. If the new scenario would be just as easy
    to assert in Rust (HTTP redirects, DB state, Set-Cookie attributes),
    prefer adding it to `tests/integration/bug_regressions.rs` — that

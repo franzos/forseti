@@ -15,9 +15,10 @@ else
 TAILWIND_RUN  := guix shell glibc gcc-toolchain -- bash -c 'export LD_LIBRARY_PATH=$$LIBRARY_PATH:$$LD_LIBRARY_PATH; $(TAILWIND) $$0 "$$@"' --
 endif
 
-.PHONY: css css-watch dev build check clean run test-integration fuzz \
-	stack-up stack-up-saml stack-wait stack-down stack-reset stack-logs seed-admin \
-	e2e e2e-expired e2e-licensed e2e-trace license-fixtures \
+.PHONY: css css-watch dev build check check-native clean run run-native test-integration \
+	test-integration-native fuzz stack-up stack-up-native stack-up-saml stack-wait stack-down \
+	stack-reset stack-logs seed-admin seed-admin-native \
+	e2e e2e-native e2e-expired e2e-licensed e2e-trace license-fixtures \
 	test-linux-host linux-test-seed linux-test-unseed linux-test-build
 
 # Compose engine. Defaults to podman-compose for local GUIX dev; CI overrides
@@ -57,12 +58,21 @@ check: ## cargo check + clippy
 	cargo check
 	cargo clippy --all-targets -- -D warnings
 
+NATIVE_FEATURES := --no-default-features --features identity-native
+
+check-native: ## cargo check + clippy with the native identity backend
+	cargo check $(NATIVE_FEATURES)
+	cargo clippy --all-targets $(NATIVE_FEATURES) -- -D warnings
+
 clean:
 	cargo clean
 	rm -f $(TAILWIND_OUT)
 
 run: ## Run the portal (debug) against the local playground stack
 	cargo run
+
+run-native: ## Run the portal (debug) with the native identity backend
+	cargo run $(NATIVE_FEATURES)
 
 # cargo-fuzz needs nightly, which Guix doesn't ship; run it in a container.
 # FUZZ_SECS bounds the run; TARGET is any name under fuzz/fuzz_targets.
@@ -76,6 +86,13 @@ fuzz: ## Run one libFuzzer target in a nightly container (TARGET=... FUZZ_SECS=.
 test-integration: ## Rust integration suite (stack + Forseti must already be running)
 	COMPOSE="$(COMPOSE)" cargo test --test integration -- --test-threads=1
 
+# The native config the suite and the admin seed read the cookie secret from.
+NATIVE_CONFIG ?= config.ci.native.toml
+
+test-integration-native: ## Rust integration suite against a native Forseti (stack-up-native + the native binary running)
+	FORSETI_CONFIG_PATH="$${FORSETI_CONFIG_PATH:-$(NATIVE_CONFIG)}" \
+		cargo test $(NATIVE_FEATURES) --test integration -- --test-threads=1
+
 # --- Playground stack lifecycle --------------------------------------------
 #
 # Brings the Ory playground (Kratos, Hydra, Mailcrab, Postgres) up and down.
@@ -87,6 +104,10 @@ test-integration: ## Rust integration suite (stack + Forseti must already be run
 stack-up: ## Bring the playground up and block until Kratos + Hydra are ready
 	$(COMPOSE) $(COMPOSE_PROFILE_FLAGS) -f $(COMPOSE_FILE) up -d
 	@$(MAKE) stack-wait
+
+stack-up-native: ## Bring up Hydra, Mailcrab and the mock OIDC upstream (no Kratos); wait for Hydra
+	$(COMPOSE) -f $(COMPOSE_FILE) up -d postgres hydra-migrate hydra mailslurper mock-oidc
+	@$(MAKE) stack-wait ORY_READY_URLS=http://127.0.0.1:4445/health/ready
 
 # podman-compose 1.5.0 ignores the COMPOSE_PROFILES env var, so pass the
 # profile as a flag — works for both podman-compose and docker compose.
@@ -115,6 +136,12 @@ stack-logs: ## Follow playground container logs
 
 seed-admin: ## Seed a deterministic admin (password + planted TOTP) into the playground Kratos
 	COMPOSE="$(COMPOSE)" COMPOSE_FILE="$(COMPOSE_FILE)" $(SEED_RUN)
+
+# The native build has no Kratos: the example writes the admin straight into
+# forseti.db, which must exist (start the native Forseti once first).
+seed-admin-native: ## Seed the deterministic admin (password + TOTP) into forseti.db for a native Forseti
+	FORSETI_CONFIG_PATH="$${FORSETI_CONFIG_PATH:-$(NATIVE_CONFIG)}" \
+		cargo run --quiet $(NATIVE_FEATURES) --example seed_admin_native
 
 # Provision the forseti-linux-pam device-grant OAuth client in Hydra so the
 # device-auth integration tests run (they skip cleanly if it's absent). Needs a
@@ -171,9 +198,16 @@ define PLAYWRIGHT_RUN
 		-e FORSETI_ADMIN_TEST_EMAIL \
 		-e FORSETI_ADMIN_TEST_PASSWORD \
 		-e FORSETI_ADMIN_TEST_TOTP_SECRET \
+		$(2) \
 		$(PLAYWRIGHT_IMAGE) \
 		bash -c "npm ci --no-audit --no-fund && npx playwright test --project=$(1)"
 endef
+
+# The native helpers read forseti.db and mark addresses verified in it. The
+# whole directory goes in so sqlite sees the WAL (-wal, -shm) files.
+PLAYWRIGHT_NATIVE_FLAGS = -e FORSETI_IDENTITY_BACKEND=native \
+	-v "$(abspath $(dir $(FORSETI_DB))):/forseti" \
+	-e FORSETI_DB_PATH=/forseti/$(notdir $(FORSETI_DB))
 
 define FORSETI_HEALTH_CHECK
 	@if ! curl -fsS http://localhost:3000/healthz >/dev/null 2>&1; then \
@@ -188,6 +222,10 @@ endef
 e2e: ## Run unlicensed-bucket Playwright e2e against the locally running stack
 	$(call FORSETI_HEALTH_CHECK)
 	$(call PLAYWRIGHT_RUN,unlicensed)
+
+e2e-native: ## Run unlicensed-bucket Playwright e2e against a native Forseti (stack-up-native + seed-admin-native)
+	$(call FORSETI_HEALTH_CHECK)
+	$(call PLAYWRIGHT_RUN,unlicensed,$(PLAYWRIGHT_NATIVE_FLAGS))
 
 # License-state pre-checks for the two gated buckets. `forseti_license` is a
 # singleton row written by `/admin/license`; `expires_at` is an RFC 3339

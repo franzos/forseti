@@ -1,0 +1,108 @@
+{
+  "id": "b1c4e58f-5c88-48a9-baa5-8d3019517749",
+  "type": "browser",
+  "expires_at": "2026-11-13T18:26:24.572679Z",
+  "issued_at": "2026-11-13T17:26:24.572679Z",
+  "request_url": "http://localhost:4433/self-service/recovery/browser",
+  "active": "code",
+  "ui": {
+    "action": "http://localhost:4433/self-service/recovery?flow=b1c4e58f-5c88-48a9-baa5-8d3019517749",
+    "method": "POST",
+    "nodes": [
+      {
+        "type": "input",
+        "group": "default",
+        "attributes": {
+          "name": "csrf_token",
+          "type": "hidden",
+          "value": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+          "required": true,
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {}
+      },
+      {
+        "type": "input",
+        "group": "code",
+        "attributes": {
+          "name": "code",
+          "type": "text",
+          "required": true,
+          "pattern": "[0-9]+",
+          "disabled": false,
+          "maxlength": 6,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1070010,
+            "text": "Recovery code",
+            "type": "info"
+          }
+        }
+      },
+      {
+        "type": "input",
+        "group": "code",
+        "attributes": {
+          "name": "method",
+          "type": "hidden",
+          "value": "code",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {}
+      },
+      {
+        "type": "input",
+        "group": "code",
+        "attributes": {
+          "name": "method",
+          "type": "submit",
+          "value": "code",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1070009,
+            "text": "Continue",
+            "type": "info"
+          }
+        }
+      },
+      {
+        "type": "input",
+        "group": "code",
+        "attributes": {
+          "name": "email",
+          "type": "submit",
+          "value": "fixture-recovery-97135401@example.com",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1070008,
+            "text": "Resend code",
+            "type": "info"
+          }
+        }
+      }
+    ],
+    "messages": [
+      {
+        "id": 1060003,
+        "text": "An email containing a recovery code has been sent to the email address you provided. If you have not received an email, check the spelling of the address and make sure to use the address you registered with.",
+        "type": "info"
+      }
+    ]
+  },
+  "state": "sent_email"
+}

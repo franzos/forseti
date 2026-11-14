@@ -1,0 +1,469 @@
+{
+  "id": "34ffaae0-557e-4945-b48d-28714a877a79",
+  "type": "browser",
+  "expires_at": "2026-11-13T18:26:25.778154Z",
+  "issued_at": "2026-11-13T17:26:25.778154Z",
+  "request_url": "http://localhost:4433/self-service/recovery?flow=b1c4e58f-5c88-48a9-baa5-8d3019517749&return_to=http%3A%2F%2Flocalhost%3A3000%2F",
+  "return_to": "http://localhost:3000/",
+  "ui": {
+    "action": "http://localhost:4433/self-service/settings?flow=34ffaae0-557e-4945-b48d-28714a877a79",
+    "method": "POST",
+    "nodes": [
+      {
+        "type": "input",
+        "group": "default",
+        "attributes": {
+          "name": "csrf_token",
+          "type": "hidden",
+          "value": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+          "required": true,
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {}
+      },
+      {
+        "type": "input",
+        "group": "profile",
+        "attributes": {
+          "name": "traits.email",
+          "type": "email",
+          "value": "fixture-recovery-97135401@example.com",
+          "required": true,
+          "autocomplete": "email",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1070002,
+            "text": "E-Mail",
+            "type": "info",
+            "context": {
+              "name": "traits.email",
+              "title": "E-Mail"
+            }
+          }
+        }
+      },
+      {
+        "type": "input",
+        "group": "profile",
+        "attributes": {
+          "name": "traits.name.first",
+          "type": "text",
+          "value": "Fixture",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1070002,
+            "text": "First Name",
+            "type": "info",
+            "context": {
+              "name": "traits.name.first",
+              "title": "First Name"
+            }
+          }
+        }
+      },
+      {
+        "type": "input",
+        "group": "profile",
+        "attributes": {
+          "name": "traits.name.last",
+          "type": "text",
+          "value": "User",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1070002,
+            "text": "Last Name",
+            "type": "info",
+            "context": {
+              "name": "traits.name.last",
+              "title": "Last Name"
+            }
+          }
+        }
+      },
+      {
+        "type": "input",
+        "group": "profile",
+        "attributes": {
+          "name": "traits.preferred_language",
+          "type": "text",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1070002,
+            "text": "Preferred language",
+            "type": "info",
+            "context": {
+              "name": "traits.preferred_language",
+              "title": "Preferred language"
+            }
+          }
+        }
+      },
+      {
+        "type": "input",
+        "group": "profile",
+        "attributes": {
+          "name": "method",
+          "type": "submit",
+          "value": "profile",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1070003,
+            "text": "Save",
+            "type": "info"
+          }
+        }
+      },
+      {
+        "type": "input",
+        "group": "password",
+        "attributes": {
+          "name": "password",
+          "type": "password",
+          "required": true,
+          "autocomplete": "new-password",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1070001,
+            "text": "Password",
+            "type": "info"
+          }
+        }
+      },
+      {
+        "type": "input",
+        "group": "password",
+        "attributes": {
+          "name": "method",
+          "type": "submit",
+          "value": "password",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1070003,
+            "text": "Save",
+            "type": "info"
+          }
+        }
+      },
+      {
+        "type": "input",
+        "group": "oidc",
+        "attributes": {
+          "name": "link",
+          "type": "submit",
+          "value": "playground",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1050002,
+            "text": "Link Playground",
+            "type": "info",
+            "context": {
+              "provider": "Playground"
+            }
+          }
+        }
+      },
+      {
+        "type": "input",
+        "group": "lookup_secret",
+        "attributes": {
+          "name": "lookup_secret_regenerate",
+          "type": "submit",
+          "value": "true",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1050008,
+            "text": "Generate new backup recovery codes",
+            "type": "info"
+          }
+        }
+      },
+      {
+        "type": "input",
+        "group": "webauthn",
+        "attributes": {
+          "name": "webauthn_register_displayname",
+          "type": "text",
+          "value": "",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1050013,
+            "text": "Name of the security key",
+            "type": "info"
+          }
+        }
+      },
+      {
+        "type": "input",
+        "group": "webauthn",
+        "attributes": {
+          "name": "webauthn_register",
+          "type": "hidden",
+          "value": "",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {}
+      },
+      {
+        "type": "input",
+        "group": "webauthn",
+        "attributes": {
+          "name": "webauthn_register_trigger",
+          "type": "button",
+          "value": "{\"publicKey\":{\"rp\":{\"name\":\"forseti\",\"id\":\"localhost\"},\"user\":{\"name\":\"forseti\",\"displayName\":\"forseti\",\"id\":\"ppMNQNlzRXSDF_6Jk40iFA\"},\"challenge\":\"HrMR1plDeYzXjMG_myywfHx75PbEOHHOjc-EJoiBD_A\",\"pubKeyCredParams\":[{\"type\":\"public-key\",\"alg\":-7},{\"type\":\"public-key\",\"alg\":-35},{\"type\":\"public-key\",\"alg\":-36},{\"type\":\"public-key\",\"alg\":-257},{\"type\":\"public-key\",\"alg\":-258},{\"type\":\"public-key\",\"alg\":-259},{\"type\":\"public-key\",\"alg\":-37},{\"type\":\"public-key\",\"alg\":-38},{\"type\":\"public-key\",\"alg\":-39},{\"type\":\"public-key\",\"alg\":-8}],\"timeout\":120000,\"authenticatorSelection\":{\"userVerification\":\"discouraged\"}}}",
+          "disabled": false,
+          "onclick": "window.oryWebAuthnRegistration({\"publicKey\":{\"rp\":{\"name\":\"forseti\",\"id\":\"localhost\"},\"user\":{\"name\":\"forseti\",\"displayName\":\"forseti\",\"id\":\"ppMNQNlzRXSDF_6Jk40iFA\"},\"challenge\":\"HrMR1plDeYzXjMG_myywfHx75PbEOHHOjc-EJoiBD_A\",\"pubKeyCredParams\":[{\"type\":\"public-key\",\"alg\":-7},{\"type\":\"public-key\",\"alg\":-35},{\"type\":\"public-key\",\"alg\":-36},{\"type\":\"public-key\",\"alg\":-257},{\"type\":\"public-key\",\"alg\":-258},{\"type\":\"public-key\",\"alg\":-259},{\"type\":\"public-key\",\"alg\":-37},{\"type\":\"public-key\",\"alg\":-38},{\"type\":\"public-key\",\"alg\":-39},{\"type\":\"public-key\",\"alg\":-8}],\"timeout\":120000,\"authenticatorSelection\":{\"userVerification\":\"discouraged\"}}})",
+          "onclickTrigger": "oryWebAuthnRegistration",
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1050012,
+            "text": "Add security key",
+            "type": "info"
+          }
+        }
+      },
+      {
+        "type": "script",
+        "group": "webauthn",
+        "attributes": {
+          "src": "http://localhost:4433/.well-known/ory/webauthn.js",
+          "async": true,
+          "referrerpolicy": "no-referrer",
+          "crossorigin": "anonymous",
+          "integrity": "sha512-Dg0gN3fy+JoKxRp9Zda/4KYn3SlMdaKjs3fK5g6nDVQ/CVakD1dfMQyvRtJeiAtzSMEFviJbBLcVSrsBPGsFBA==",
+          "type": "text/javascript",
+          "id": "webauthn_script",
+          "nonce": "b3906ed8-0a9c-4567-bff0-c6086dd3f3fb",
+          "node_type": "script"
+        },
+        "messages": [],
+        "meta": {}
+      },
+      {
+        "type": "input",
+        "group": "passkey",
+        "attributes": {
+          "name": "passkey_register_trigger",
+          "type": "button",
+          "value": "",
+          "disabled": false,
+          "onclick": "window.oryPasskeySettingsRegistration()",
+          "onclickTrigger": "oryPasskeySettingsRegistration",
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1050019,
+            "text": "Add passkey",
+            "type": "info"
+          }
+        }
+      },
+      {
+        "type": "input",
+        "group": "passkey",
+        "attributes": {
+          "name": "passkey_settings_register",
+          "type": "hidden",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {}
+      },
+      {
+        "type": "input",
+        "group": "passkey",
+        "attributes": {
+          "name": "passkey_create_data",
+          "type": "hidden",
+          "value": "{\"publicKey\":{\"rp\":{\"name\":\"forseti\",\"id\":\"localhost\"},\"user\":{\"name\":\"fixture-recovery-97135401@example.com\",\"displayName\":\"fixture-recovery-97135401@example.com\",\"id\":\"SENCeHplbXZ6eFBiTzdBMlI2SlpRNjRodkltVWdSYWZxdXFhZ2ljdGZBU3Qxc1ZkTWZtZUZoaFNaaDZQRGh2aA\"},\"challenge\":\"OxRCKvaLFtuNL_WvSJgj94llXjzb7fMEhozNFdx2Cfs\",\"pubKeyCredParams\":[{\"type\":\"public-key\",\"alg\":-7},{\"type\":\"public-key\",\"alg\":-35},{\"type\":\"public-key\",\"alg\":-36},{\"type\":\"public-key\",\"alg\":-257},{\"type\":\"public-key\",\"alg\":-258},{\"type\":\"public-key\",\"alg\":-259},{\"type\":\"public-key\",\"alg\":-37},{\"type\":\"public-key\",\"alg\":-38},{\"type\":\"public-key\",\"alg\":-39},{\"type\":\"public-key\",\"alg\":-8}],\"timeout\":300000,\"authenticatorSelection\":{\"authenticatorAttachment\":\"platform\",\"requireResidentKey\":true,\"residentKey\":\"required\",\"userVerification\":\"preferred\"}}}",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {}
+      },
+      {
+        "type": "img",
+        "group": "totp",
+        "attributes": {
+          "src": "data:image/png;base64,iVBORw0KGgo=",
+          "id": "totp_qr",
+          "width": 256,
+          "height": 256,
+          "node_type": "img"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1050005,
+            "text": "Authenticator app QR code",
+            "type": "info"
+          }
+        }
+      },
+      {
+        "type": "text",
+        "group": "totp",
+        "attributes": {
+          "text": {
+            "id": 1050006,
+            "text": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "type": "info",
+            "context": {
+              "secret": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            }
+          },
+          "id": "totp_secret_key",
+          "node_type": "text"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1050017,
+            "text": "This is your authenticator app secret. Use it if you can not scan the QR code.",
+            "type": "info"
+          }
+        }
+      },
+      {
+        "type": "input",
+        "group": "totp",
+        "attributes": {
+          "name": "totp_code",
+          "type": "text",
+          "required": true,
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1070006,
+            "text": "Verify code",
+            "type": "info"
+          }
+        }
+      },
+      {
+        "type": "input",
+        "group": "totp",
+        "attributes": {
+          "name": "method",
+          "type": "submit",
+          "value": "totp",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1070003,
+            "text": "Save",
+            "type": "info"
+          }
+        }
+      }
+    ],
+    "messages": [
+      {
+        "id": 1060001,
+        "text": "You successfully recovered your account. Please change your password or set up an alternative login method (e.g. social sign in) within the next 15.00 minutes.",
+        "type": "success",
+        "context": {
+          "privilegedSessionExpiresAt": "2026-11-13T17:41:25.798739626Z",
+          "privileged_session_expires_at": "2026-11-13T17:41:25.798739626Z",
+          "privileged_session_expires_at_unix": 1794591685
+        }
+      }
+    ]
+  },
+  "identity": {
+    "id": "a6930d40-d973-4574-8317-fe89938d2214",
+    "schema_id": "default",
+    "schema_url": "http://localhost:4433/schemas/ZGVmYXVsdA",
+    "state": "active",
+    "state_changed_at": "2026-11-13T17:26:24.547223Z",
+    "traits": {
+      "name": {
+        "last": "User",
+        "first": "Fixture"
+      },
+      "email": "fixture-recovery-97135401@example.com"
+    },
+    "verifiable_addresses": [
+      {
+        "id": "92327f1e-1abf-482f-afb2-9ef999307619",
+        "value": "fixture-recovery-97135401@example.com",
+        "verified": true,
+        "via": "email",
+        "status": "completed",
+        "verified_at": "2026-11-13T17:26:25.769504Z",
+        "created_at": "2026-11-13T17:26:24.549894Z",
+        "updated_at": "2026-11-13T17:26:24.549894Z"
+      }
+    ],
+    "recovery_addresses": [
+      {
+        "id": "57829f35-1011-48e6-af73-a57476fc1ec6",
+        "value": "fixture-recovery-97135401@example.com",
+        "via": "email",
+        "created_at": "2026-11-13T17:26:24.550509Z",
+        "updated_at": "2026-11-13T17:26:24.550509Z"
+      }
+    ],
+    "metadata_public": null,
+    "created_at": "2026-11-13T17:26:24.549102Z",
+    "updated_at": "2026-11-13T17:26:24.549102Z",
+    "organization_id": null
+  },
+  "state": "show_form"
+}

@@ -80,7 +80,16 @@ impl SigningKey {
             );
             generate_and_persist(path)?
         };
+        Self::from_key(&key)
+    }
 
+    /// A key that lives only in memory.
+    #[cfg(all(test, feature = "identity-native"))]
+    pub(crate) fn ephemeral() -> Self {
+        Self::from_key(&EdSigningKey::from_bytes(&[7; 32])).expect("fixed test key encodes")
+    }
+
+    fn from_key(key: &EdSigningKey) -> anyhow::Result<Self> {
         // DER (not PEM) so the transient private-key bytes stay in a
         // `SecretDocument`, which zeroizes on drop — jsonwebtoken has no
         // raw-seed constructor, so some intermediate copy is unavoidable.

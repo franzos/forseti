@@ -93,6 +93,7 @@ async fn error_landing_fetches_kratos_self_service_error() {
 /// upgrade renaming any of them (or reshaping the payload) fails loudly.
 #[tokio::test]
 async fn kratos_webhook_all_known_actions_land_audit_rows() {
+    skip_on_native!("the Kratos audit webhook receiver is not mounted on the native build");
     if !portal_reachable().await {
         eprintln!("portal not reachable; skipping");
         return;
@@ -162,6 +163,7 @@ async fn metadata_admin(identity_id: &str) -> Value {
 /// absent key (why the builder emits no op there).
 #[tokio::test]
 async fn kratos_metadata_admin_key_patch_shapes() {
+    skip_on_native!("drives Kratos's admin JSON Patch API, which the native build does not have");
     let email = unique_email("metadata-admin-patch");
     let id = kratos_admin_create_identity(&email).await;
 

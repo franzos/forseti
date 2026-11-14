@@ -88,6 +88,7 @@ kratos-4000005 = Le mot de passe ne peut pas être utilisé car { $reason }.
 kratos-4000006 = Les identifiants fournis sont invalides, vérifiez les fautes de frappe dans votre mot de passe, votre nom d'utilisateur, votre adresse e-mail ou votre numéro de téléphone.
 kratos-4000007 = Un compte avec le même identifiant (e-mail, téléphone, nom d'utilisateur, ...) existe déjà.
 kratos-4000008 = Le code d'authentification fourni est invalide, veuillez réessayer.
+kratos-4000010 = Le compte n'est pas encore actif. Avez-vous oublié de vérifier votre adresse e-mail ?
 kratos-4000032 = Le mot de passe doit comporter au moins { $min_length } caractères, mais il n'en compte que { $actual_length }.
 kratos-4000035 = Ce compte n'existe pas ou n'a pas configuré la connexion par code.
 
@@ -111,3 +112,6 @@ kratos-4060006 = Le code de récupération est invalide ou a déjà été utilis
 kratos-4070001 = Le jeton de vérification est invalide ou a déjà été utilisé. Veuillez recommencer le processus.
 kratos-4070005 = Le processus de vérification a expiré, veuillez réessayer.
 kratos-4070006 = Le code de vérification est invalide ou a déjà été utilisé. Veuillez réessayer.
+
+# --- Limitation des tentatives (9000xxx) ---
+kratos-9000001 = Trop de tentatives de connexion pour le moment. Veuillez réessayer dans quelques minutes.

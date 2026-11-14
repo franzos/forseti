@@ -6,16 +6,23 @@
 //! Kratos has no admin session-creation API.
 
 pub mod db;
+#[cfg(feature = "identity-ory")]
 pub mod flow;
+#[cfg(feature = "identity-ory")]
 pub mod jackson;
 
+#[cfg(feature = "identity-ory")]
 use axum::Router;
+#[cfg(feature = "identity-ory")]
 use axum::routing::get;
 
+#[cfg(feature = "identity-ory")]
 use crate::signed_cookie::SignedCookie;
+#[cfg(feature = "identity-ory")]
 use crate::state::AppState;
 
 /// Mounted by `app::run` only when `[saml]` is configured.
+#[cfg(feature = "identity-ory")]
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/sso/{slug}", get(flow::start))
@@ -25,6 +32,7 @@ pub fn router() -> Router<AppState> {
 
 /// CSRF/replay binding for the authorize round-trip. 10 minutes is
 /// generous for an IdP login including a slow MFA prompt.
+#[cfg(feature = "identity-ory")]
 pub(crate) fn state_cookie(secure: bool) -> SignedCookie<'static> {
     SignedCookie {
         name: "forseti_saml_state",
@@ -43,6 +51,7 @@ pub(crate) fn state_cookie(secure: bool) -> SignedCookie<'static> {
 ///
 /// Path is `/` rather than `/sso`, because the bounce goes out to `/login` and
 /// Kratos, and the cookie has to survive the round trip.
+#[cfg(feature = "identity-ory")]
 pub(crate) fn pending_link_cookie(secure: bool) -> SignedCookie<'static> {
     SignedCookie {
         name: "forseti_saml_pending",

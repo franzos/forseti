@@ -949,3 +949,483 @@ mod tests {
         assert_eq!(srcs, vec!["/webauthn.js", "/passkey.js"]);
     }
 }
+
+/// Flows captured from the playground Kratos by `tests/fixtures/kratos_flows/capture.sh`.
+#[cfg(test)]
+mod kratos_fixtures {
+    use std::collections::BTreeSet;
+
+    use super::*;
+
+    /// (group, name, input type, label id, required) of an input node.
+    type Node = (&'static str, &'static str, &'static str, u64, bool);
+
+    struct Case {
+        file: &'static str,
+        json: &'static str,
+        /// Path segment of `ui.action`; `None` when the action leaves self-service.
+        kind: Option<&'static str>,
+        state: &'static str,
+        messages: &'static [u64],
+        nodes: Vec<Node>,
+    }
+
+    const CSRF: Node = ("default", "csrf_token", "hidden", 0, true);
+    const LOGIN: &[Node] = &[
+        CSRF,
+        ("default", "identifier", "text", 1070002, true),
+        ("password", "password", "password", 1070001, true),
+        ("password", "method", "submit", 1010022, false),
+    ];
+    const REFRESH: &[Node] = &[
+        CSRF,
+        ("default", "identifier", "hidden", 0, false),
+        ("password", "password", "password", 1070001, true),
+        ("password", "method", "submit", 1010001, false),
+    ];
+    const TOTP_STEP_UP: &[Node] = &[
+        CSRF,
+        ("totp", "totp_code", "text", 1010006, true),
+        ("totp", "method", "submit", 1010009, false),
+    ];
+    const LOOKUP_STEP_UP: &[Node] = &[
+        ("lookup_secret", "lookup_secret", "text", 1010007, true),
+        ("lookup_secret", "method", "submit", 1010010, false),
+    ];
+    const CODE_CHOOSE: &[Node] = &[
+        CSRF,
+        ("code", "email", "email", 1070007, true),
+        ("code", "method", "submit", 1070009, false),
+    ];
+    const CODE_SENT: &[Node] = &[
+        CSRF,
+        ("code", "method", "hidden", 0, false),
+        ("code", "method", "submit", 1070009, false),
+        ("code", "email", "submit", 1070008, false),
+    ];
+    const SETTINGS: &[Node] = &[
+        CSRF,
+        ("profile", "traits.email", "email", 1070002, true),
+        ("profile", "traits.name.first", "text", 1070002, false),
+        ("profile", "traits.name.last", "text", 1070002, false),
+        ("profile", "method", "submit", 1070003, false),
+        ("password", "password", "password", 1070001, true),
+        ("password", "method", "submit", 1070003, false),
+    ];
+    const TOTP_ENROL: &[Node] = &[
+        ("totp", "totp_code", "text", 1070006, true),
+        ("totp", "method", "submit", 1070003, false),
+        (
+            "lookup_secret",
+            "lookup_secret_regenerate",
+            "submit",
+            1050008,
+            false,
+        ),
+    ];
+    const TOTP_ENROLLED: &[Node] = &[
+        ("totp", "totp_unlink", "submit", 1050004, true),
+        (
+            "lookup_secret",
+            "lookup_secret_regenerate",
+            "submit",
+            1050008,
+            false,
+        ),
+    ];
+    const LOOKUP_GENERATED: &[Node] = &[
+        ("totp", "totp_unlink", "submit", 1050004, true),
+        (
+            "lookup_secret",
+            "lookup_secret_confirm",
+            "submit",
+            1050011,
+            false,
+        ),
+    ];
+    const LOOKUP_CONFIRMED: &[Node] = &[
+        ("totp", "totp_unlink", "submit", 1050004, true),
+        (
+            "lookup_secret",
+            "lookup_secret_reveal",
+            "submit",
+            1050007,
+            false,
+        ),
+        (
+            "lookup_secret",
+            "lookup_secret_disable",
+            "submit",
+            1050016,
+            false,
+        ),
+    ];
+    const LOOKUP_REVEALED: &[Node] = &[
+        ("totp", "totp_unlink", "submit", 1050004, true),
+        (
+            "lookup_secret",
+            "lookup_secret_disable",
+            "submit",
+            1050016,
+            false,
+        ),
+        (
+            "lookup_secret",
+            "lookup_secret_regenerate",
+            "submit",
+            1050008,
+            false,
+        ),
+    ];
+
+    fn cat(parts: &[&[Node]]) -> Vec<Node> {
+        parts.concat()
+    }
+
+    fn cases() -> Vec<Case> {
+        // `include_str!` takes a literal path, so the file name is spliced in at compile time.
+        macro_rules! case {
+            ($file:literal, $kind:expr, $state:literal, $messages:expr, $nodes:expr) => {
+                Case {
+                    file: $file,
+                    json: include_str!(concat!("../tests/fixtures/kratos_flows/", $file, ".json")),
+                    kind: $kind,
+                    state: $state,
+                    messages: $messages,
+                    nodes: $nodes,
+                }
+            };
+        }
+        let (login, reg, ver, rec, set) = (
+            Some("login"),
+            Some("registration"),
+            Some("verification"),
+            Some("recovery"),
+            Some("settings"),
+        );
+        vec![
+            case!("login", login, "choose_method", &[], cat(&[LOGIN])),
+            case!(
+                "login_invalid_credentials",
+                login,
+                "choose_method",
+                &[4000006],
+                cat(&[LOGIN])
+            ),
+            case!(
+                "login_aal2_no_second_factor",
+                login,
+                "choose_method",
+                &[1010004],
+                cat(&[&[CSRF]])
+            ),
+            case!(
+                "login_aal2_totp",
+                login,
+                "choose_method",
+                &[1010004],
+                cat(&[TOTP_STEP_UP])
+            ),
+            case!(
+                "login_aal2_totp_lookup",
+                login,
+                "choose_method",
+                &[1010004],
+                cat(&[TOTP_STEP_UP, LOOKUP_STEP_UP])
+            ),
+            case!(
+                "login_refresh",
+                login,
+                "choose_method",
+                &[1010003],
+                cat(&[REFRESH])
+            ),
+            case!(
+                "login_refresh_aal2",
+                login,
+                "choose_method",
+                &[1010003],
+                cat(&[REFRESH])
+            ),
+            case!(
+                "registration_profile",
+                reg,
+                "choose_method",
+                &[],
+                cat(&[&[
+                    CSRF,
+                    ("default", "traits.email", "email", 1070002, true),
+                    ("default", "traits.name.first", "text", 1070002, false),
+                    ("default", "traits.name.last", "text", 1070002, false),
+                    ("profile", "method", "submit", 1040001, false),
+                ]])
+            ),
+            case!(
+                "registration_password",
+                reg,
+                "choose_method",
+                &[1040009],
+                cat(&[&[
+                    CSRF,
+                    ("default", "traits.email", "hidden", 1070002, true),
+                    ("default", "traits.name.first", "hidden", 1070002, false),
+                    ("default", "traits.name.last", "hidden", 1070002, false),
+                    ("password", "password", "password", 1070001, true),
+                    ("password", "method", "submit", 1040001, false),
+                    ("profile", "screen", "submit", 1040008, false),
+                ]])
+            ),
+            case!(
+                "verification_choose_method",
+                ver,
+                "choose_method",
+                &[],
+                cat(&[CODE_CHOOSE])
+            ),
+            case!(
+                "verification_sent_email",
+                ver,
+                "sent_email",
+                &[1080003],
+                cat(&[CODE_SENT, &[("code", "code", "text", 1070011, true)]])
+            ),
+            case!(
+                "verification_passed_challenge",
+                None,
+                "passed_challenge",
+                &[1080002],
+                cat(&[&[CSRF]])
+            ),
+            case!(
+                "recovery_choose_method",
+                rec,
+                "choose_method",
+                &[],
+                cat(&[CODE_CHOOSE])
+            ),
+            case!(
+                "recovery_sent_email",
+                rec,
+                "sent_email",
+                &[1060003],
+                cat(&[CODE_SENT, &[("code", "code", "text", 1070010, true)]])
+            ),
+            case!(
+                "recovery_passed_challenge",
+                rec,
+                "passed_challenge",
+                &[],
+                cat(&[CODE_SENT, &[("code", "code", "text", 1070010, true)]])
+            ),
+            case!(
+                "settings_recovery_handoff",
+                set,
+                "show_form",
+                &[1060001],
+                cat(&[SETTINGS, TOTP_ENROL])
+            ),
+            case!(
+                "settings_fresh",
+                set,
+                "show_form",
+                &[],
+                cat(&[SETTINGS, TOTP_ENROL])
+            ),
+            case!(
+                "settings_totp_pending",
+                set,
+                "show_form",
+                &[],
+                cat(&[SETTINGS, TOTP_ENROL])
+            ),
+            case!(
+                "settings_totp_enrolled_submit",
+                set,
+                "success",
+                &[1050001],
+                cat(&[SETTINGS, TOTP_ENROLLED])
+            ),
+            case!(
+                "settings_totp_enrolled",
+                set,
+                "show_form",
+                &[],
+                cat(&[SETTINGS, TOTP_ENROLLED])
+            ),
+            case!(
+                "settings_lookup_generated",
+                set,
+                "show_form",
+                &[],
+                cat(&[SETTINGS, LOOKUP_GENERATED])
+            ),
+            case!(
+                "settings_lookup_confirmed_submit",
+                set,
+                "success",
+                &[1050001],
+                cat(&[SETTINGS, LOOKUP_CONFIRMED])
+            ),
+            case!(
+                "settings_lookup_confirmed",
+                set,
+                "show_form",
+                &[],
+                cat(&[SETTINGS, LOOKUP_CONFIRMED])
+            ),
+            case!(
+                "settings_lookup_revealed",
+                set,
+                "show_form",
+                &[],
+                cat(&[SETTINGS, LOOKUP_REVEALED])
+            ),
+        ]
+    }
+
+    fn case(file: &str) -> Flow {
+        let case = cases()
+            .into_iter()
+            .find(|c| c.file == file)
+            .expect("fixture listed");
+        project(&serde_json::from_str(case.json).expect("fixture is JSON"))
+    }
+
+    #[test]
+    fn every_fixture_projects_with_the_node_contract() {
+        for case in cases() {
+            let file = case.file;
+            let flow = project(&serde_json::from_str(case.json).expect("fixture is JSON"));
+            assert!(!flow.id.is_empty(), "{file}: id");
+            assert_eq!(flow.state, case.state, "{file}: state");
+            if let Some(kind) = case.kind {
+                // A settings flow in `success` keeps its id; its action targets a fresh flow.
+                let action = if flow.state == "success" {
+                    format!("/self-service/{kind}?flow=")
+                } else {
+                    format!("/self-service/{kind}?flow={}", flow.id)
+                };
+                assert!(
+                    flow.form_action.contains(&action),
+                    "{file}: {}",
+                    flow.form_action
+                );
+                if flow.state == "success" {
+                    assert!(!flow.form_action.ends_with(&flow.id), "{file}");
+                }
+            }
+            let messages: Vec<u64> = flow.messages.iter().map(|m| m.id).collect();
+            assert_eq!(messages, case.messages, "{file}: messages");
+            assert!(flow.csrf_token.is_some(), "{file}: csrf token");
+
+            let set: BTreeSet<(&str, &str, &str, u64, bool)> = flow
+                .inputs
+                .iter()
+                .map(|(group, i)| {
+                    let (name, input_type) = (i.name.as_str(), i.input_type.as_str());
+                    (group.as_str(), name, input_type, i.label_id, i.required)
+                })
+                .collect();
+            assert!(!set.is_empty(), "{file}: nodes");
+            for node in &case.nodes {
+                assert!(set.contains(node), "{file}: missing {node:?} in {set:#?}");
+            }
+            // Handlers post `method=<group>`; Kratos names every method submit after its group.
+            for (group, input) in &flow.inputs {
+                if input.name == "method" && input.input_type == "submit" {
+                    assert_eq!(&input.value, group, "{file}: method value");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn login_flags_follow_the_init_parameters() {
+        for case in cases().into_iter().filter(|c| c.kind == Some("login")) {
+            let file = case.file;
+            let flow = project(&serde_json::from_str(case.json).expect("fixture is JSON"));
+            let aal = if file.starts_with("login_aal2") {
+                "aal2"
+            } else {
+                "aal1"
+            };
+            assert_eq!(flow.requested_aal.as_deref(), Some(aal), "{file}");
+            assert_eq!(flow.refresh, file.starts_with("login_refresh"), "{file}");
+        }
+    }
+
+    #[test]
+    fn settings_fixtures_carry_the_two_factor_page_contract() {
+        // (file, totp_unlink, lookup_secret_disable, lookup_secret_reveal, lookup codes, enrolment QR)
+        let expected = [
+            ("settings_fresh", false, false, false, 0, true),
+            ("settings_recovery_handoff", false, false, false, 0, true),
+            ("settings_totp_pending", false, false, false, 0, true),
+            (
+                "settings_totp_enrolled_submit",
+                true,
+                false,
+                false,
+                0,
+                false,
+            ),
+            ("settings_totp_enrolled", true, false, false, 0, false),
+            ("settings_lookup_generated", true, false, false, 12, false),
+            (
+                "settings_lookup_confirmed_submit",
+                true,
+                true,
+                true,
+                0,
+                false,
+            ),
+            ("settings_lookup_confirmed", true, true, true, 0, false),
+            ("settings_lookup_revealed", true, true, false, 12, false),
+        ];
+        for (file, unlink, disable, reveal, codes, qr) in expected {
+            let flow = case(file);
+            assert_eq!(flow.has_node("totp", "totp_unlink"), unlink, "{file}");
+            assert_eq!(
+                flow.has_node("lookup_secret", "lookup_secret_disable"),
+                disable,
+                "{file}"
+            );
+            assert_eq!(
+                flow.has_node("lookup_secret", "lookup_secret_reveal"),
+                reveal,
+                "{file}"
+            );
+            assert_eq!(flow.lookup_codes.len(), codes, "{file}");
+            assert_eq!(
+                flow.has_node("lookup_secret", "lookup_secret_codes"),
+                codes > 0,
+                "{file}"
+            );
+            assert_eq!(flow.totp_qr.is_some(), qr, "{file}");
+            assert_eq!(flow.totp_secret.is_some(), qr, "{file}");
+            assert_eq!(
+                flow.recovery_handoff,
+                file == "settings_recovery_handoff",
+                "{file}"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_totp_code_is_reported_on_its_node() {
+        let flow = case("settings_totp_pending");
+        let code = flow
+            .inputs("totp")
+            .find(|i| i.name == "totp_code")
+            .expect("totp_code");
+        let ids: Vec<u64> = code.messages.iter().map(|m| m.id).collect();
+        assert_eq!(ids, [4000008]);
+    }
+
+    #[test]
+    fn verification_success_offers_the_continue_link() {
+        let flow = case("verification_passed_challenge");
+        assert!(flow.has_node("code", "continue"));
+        assert_eq!(flow.inputs.len(), 1, "only the csrf token is an input");
+    }
+}

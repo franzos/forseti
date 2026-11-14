@@ -1,0 +1,106 @@
+{
+  "id": "21fc4be6-ff76-465c-a45a-f7204a9f19b9",
+  "type": "browser",
+  "expires_at": "2026-11-13T18:26:23.27128Z",
+  "issued_at": "2026-11-13T17:26:23.27128Z",
+  "request_url": "http://localhost:4433/self-service/verification/browser",
+  "active": "code",
+  "ui": {
+    "action": "http://localhost:4433/self-service/verification?flow=21fc4be6-ff76-465c-a45a-f7204a9f19b9",
+    "method": "POST",
+    "nodes": [
+      {
+        "type": "input",
+        "group": "code",
+        "attributes": {
+          "name": "method",
+          "type": "hidden",
+          "value": "code",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {}
+      },
+      {
+        "type": "input",
+        "group": "code",
+        "attributes": {
+          "name": "code",
+          "type": "text",
+          "required": true,
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1070011,
+            "text": "Verification code",
+            "type": "info"
+          }
+        }
+      },
+      {
+        "type": "input",
+        "group": "code",
+        "attributes": {
+          "name": "method",
+          "type": "submit",
+          "value": "code",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1070009,
+            "text": "Continue",
+            "type": "info"
+          }
+        }
+      },
+      {
+        "type": "input",
+        "group": "default",
+        "attributes": {
+          "name": "csrf_token",
+          "type": "hidden",
+          "value": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+          "required": true,
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {}
+      },
+      {
+        "type": "input",
+        "group": "code",
+        "attributes": {
+          "name": "email",
+          "type": "submit",
+          "value": "fixture-reg-01590353@example.com",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1070008,
+            "text": "Resend code",
+            "type": "info"
+          }
+        }
+      }
+    ],
+    "messages": [
+      {
+        "id": 1080003,
+        "text": "An email containing a verification code has been sent to the email address you provided. If you have not received an email, check the spelling of the address and make sure to use the address you registered with.",
+        "type": "info"
+      }
+    ]
+  },
+  "state": "sent_email"
+}

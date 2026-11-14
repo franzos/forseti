@@ -8,15 +8,17 @@ use serde_json::Value;
 use crate::flow_view::Flow;
 
 /// Authenticator assurance level; serialises as `aal0` .. `aal3`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub enum Aal {
     #[serde(rename = "aal0")]
+    #[cfg_attr(all(feature = "identity-native", not(test)), expect(dead_code))]
     Aal0,
     #[serde(rename = "aal1")]
     Aal1,
     #[serde(rename = "aal2")]
     Aal2,
     #[serde(rename = "aal3")]
+    #[cfg_attr(all(feature = "identity-native", not(test)), expect(dead_code))]
     Aal3,
 }
 
@@ -173,7 +175,7 @@ pub struct FlowInit<'a> {
 
 /// Kind of Kratos self-service flow. Used by the generic fetch/init helpers to
 /// build the right URL path segment (`login`, `registration`, …).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FlowKind {
     Login,
     Registration,
@@ -182,18 +184,62 @@ pub enum FlowKind {
     Settings,
 }
 
+impl FlowKind {
+    /// URL path segment of this flow kind.
+    pub(crate) fn path_segment(self) -> &'static str {
+        match self {
+            FlowKind::Login => "login",
+            FlowKind::Registration => "registration",
+            FlowKind::Recovery => "recovery",
+            FlowKind::Verification => "verification",
+            FlowKind::Settings => "settings",
+        }
+    }
+}
+
+/// Build the browser redirect URL that starts a new browser flow under `base`; the backend creates the flow,
+/// sets its continuity cookie, and 303s back to Forseti with `?flow=<id>`. `return_to` lands the user back on
+/// the original page; optional `aal` step-up and `refresh` are forwarded.
+pub(crate) fn browser_init_url(base: &str, kind: FlowKind, init: FlowInit<'_>) -> String {
+    let base = base.trim_end_matches('/');
+    let segment = kind.path_segment();
+    let mut params: Vec<(&str, String)> = Vec::new();
+    if let Some(rt) = init.return_to
+        && !rt.is_empty()
+    {
+        params.push(("return_to", rt.to_string()));
+    }
+    if let Some(a) = init.aal
+        && !a.is_empty()
+    {
+        params.push(("aal", a.to_string()));
+    }
+    if init.refresh {
+        params.push(("refresh", "true".to_string()));
+    }
+    if params.is_empty() {
+        return format!("{base}/self-service/{segment}/browser");
+    }
+    let qs: Vec<String> = params
+        .iter()
+        .map(|(k, v)| format!("{}={}", k, crate::web::urlencode(v)))
+        .collect();
+    format!("{base}/self-service/{segment}/browser?{}", qs.join("&"))
+}
+
 /// Why a privileged-session error was raised on a settings flow, parsed from Kratos's `error.id`.
 /// Both resolve to a `/login` redirect with different params (`aal=aal2` vs `refresh=true`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrivilegedReason {
     /// `session_refresh_required`: session older than `privileged_session_max_age`.
+    #[cfg_attr(feature = "identity-native", expect(dead_code))]
     SessionRefresh,
     /// `session_aal2_required`: settings group needs AAL2 but the session is AAL1.
     Aal2Required,
 }
 
 /// Outcome of fetching a Kratos self-service flow, surfacing 404/410 (missing/expired) and the settings-flow
-/// 403 as plain variants. The flow is projected from raw JSON by `ory::flow_json::project`, not the typed
+/// 403 as plain variants. The flow is projected from raw JSON by `flow_json::project`, not the typed
 /// `LoginFlow`/etc, because the SDK's `UiNodeAttributes` deserializer is broken for the real Kratos wire
 /// shape (see `get_flow`).
 pub enum FlowFetch {

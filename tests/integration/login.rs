@@ -67,11 +67,13 @@ async fn get_login_with_valid_flow_renders_form() {
         res.url()
     );
     let body = res.text().await.expect("body");
-    // The form posts to Kratos public's `/self-service/login` action URL.
-    let kratos_action = format!("action=\"{KRATOS_PUBLIC}/self-service/login");
+    // The form posts to the backend's `/self-service/login` action: Kratos public's on the Ory
+    // build, Forseti's own (relative) on the native one.
+    let base = if is_native() { "" } else { KRATOS_PUBLIC };
+    let kratos_action = format!("action=\"{base}/self-service/login");
     assert!(
         body.contains(&kratos_action),
-        "form should point at Kratos login action ({kratos_action}); body excerpt:\n{}",
+        "form should point at the login action ({kratos_action}); body excerpt:\n{}",
         body.chars().take(400).collect::<String>()
     );
     // And it should have the rendered password input.

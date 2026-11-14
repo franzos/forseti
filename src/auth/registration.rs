@@ -11,6 +11,7 @@ use crate::backend::identity::FlowInit;
 use crate::backend::identity::FlowKind;
 use crate::backend::identity::FlowOutcome;
 use crate::cookies;
+#[cfg(feature = "identity-ory")]
 use crate::csrf;
 use crate::extractors::OptionalSession;
 use crate::flow_view::*;
@@ -103,10 +104,14 @@ pub(crate) async fn registration(
         .await
     {
         FlowOutcome::Init => {
+            #[cfg(feature = "identity-ory")]
             let mut resp = csrf::attach_csrf(
                 Redirect::to(&init_url()).into_response(),
                 Some(csrf::delete_csrf_cookie(secure)),
             );
+            // Native flows are bound to this browser's CSRF token; a new one would orphan them.
+            #[cfg(feature = "identity-native")]
+            let mut resp = Redirect::to(&init_url()).into_response();
             if let Some(hint) = query_hint {
                 crate::web::append_set_cookie(
                     &mut resp,

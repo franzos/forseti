@@ -1,3 +1,8 @@
+#[cfg(all(feature = "identity-ory", feature = "identity-native"))]
+compile_error!("features `identity-ory` and `identity-native` are mutually exclusive");
+#[cfg(not(any(feature = "identity-ory", feature = "identity-native")))]
+compile_error!("enable exactly one identity backend: `identity-ory` or `identity-native`");
+
 mod accounts;
 mod admin;
 mod app;
@@ -18,12 +23,15 @@ mod db;
 mod discovery;
 mod extractors;
 mod flash;
+mod flow_json;
 mod flow_view;
 mod format;
 mod handoff;
 mod hydra_front;
 mod i18n;
 mod identity;
+#[cfg(feature = "identity-native")]
+mod identity_native;
 mod legal;
 mod locale;
 mod logo_cache;
@@ -56,12 +64,16 @@ mod web;
 mod webhook;
 
 pub mod fuzz_api;
+#[cfg(feature = "identity-native")]
+pub mod native_test_support;
 
 pub(crate) use web::{FlowQuery, render_error_boundary, safe_return_to};
 
 use backend::OAuthBackend as _;
 use clap::Parser as _;
-use cli::{Cli, Cmd, ConfigCmd, PruneCmd, RotateCmd};
+use cli::{Cli, Cmd};
+#[cfg(feature = "identity-ory")]
+use cli::{ConfigCmd, PruneCmd, RotateCmd};
 
 /// Process entry point: parse the CLI and run the server or a subcommand.
 pub async fn run_cli() -> anyhow::Result<()> {
@@ -80,16 +92,18 @@ pub async fn run_cli() -> anyhow::Result<()> {
         Some(Cmd::UnverifiedPrune) => {
             let cfg = config::AppConfig::load()?;
             // Deletes go through Kratos's admin API but cascade to the local POSIX tables, so the pool is needed.
-            let (identity_backend, oauth_backend) = backend::build(&cfg);
             let db = bootstrap_db(&cfg).await?;
+            let identity_backend = cli_identity(&cfg, &db);
+            let oauth_backend = backend::build_oauth(&cfg);
             let code =
                 identity::prune_unverified_cli(&cfg, &db, &identity_backend, &oauth_backend).await;
             std::process::exit(code);
         }
         Some(Cmd::DeleteIdentity { id, yes, force }) => {
             let cfg = config::AppConfig::load()?;
-            let (identity_backend, oauth_backend) = backend::build(&cfg);
             let db = bootstrap_db(&cfg).await?;
+            let identity_backend = cli_identity(&cfg, &db);
+            let oauth_backend = backend::build_oauth(&cfg);
             let code = identity::delete_identity_cli(
                 &cfg,
                 &db,
@@ -105,7 +119,7 @@ pub async fn run_cli() -> anyhow::Result<()> {
         Some(Cmd::PosixReconcile) => {
             let cfg = config::AppConfig::load()?;
             let db = bootstrap_db(&cfg).await?;
-            let (identity_backend, _) = backend::build(&cfg);
+            let identity_backend = cli_identity(&cfg, &db);
             match posix::reconcile_orphans(&db, &identity_backend).await {
                 Ok(n) => {
                     println!("posix-reconcile: removed {n} orphaned posix account(s)");
@@ -119,7 +133,7 @@ pub async fn run_cli() -> anyhow::Result<()> {
         }
         Some(Cmd::PosixInitClient) => {
             let cfg = config::AppConfig::load()?;
-            let (_, oauth_backend) = backend::build(&cfg);
+            let oauth_backend = backend::build_oauth(&cfg);
             match oauth::device::ensure_pam_client(&oauth_backend, &cfg.posix).await {
                 Ok(oauth::device::EnsureOutcome::AlreadyExists) => {
                     println!(
@@ -154,7 +168,7 @@ pub async fn run_cli() -> anyhow::Result<()> {
         }
         Some(Cmd::ReconcileClientMetadata) => {
             let cfg = config::AppConfig::load()?;
-            let (_, oauth_backend) = backend::build(&cfg);
+            let oauth_backend = backend::build_oauth(&cfg);
             let db = bootstrap_db(&cfg).await?;
             match reconcile_client_metadata(&db, &oauth_backend).await {
                 Ok((stamped, seen)) => {
@@ -170,8 +184,11 @@ pub async fn run_cli() -> anyhow::Result<()> {
             }
         }
         // Pure file operations: Forseti can't read Kratos's live config via API, so these lint/generate the files.
+        #[cfg(feature = "identity-ory")]
         Some(Cmd::ConfigCheckAlias(args)) => std::process::exit(config_cli::check(&args)),
+        #[cfg(feature = "identity-ory")]
         Some(Cmd::ConfigInitAlias(args)) => std::process::exit(config_cli::init(&args)),
+        #[cfg(feature = "identity-ory")]
         Some(Cmd::Config(args)) => std::process::exit(dispatch_config(args).await),
     }
 }
@@ -191,6 +208,7 @@ fn init_cli_tracing() {
 /// `config` subcommand dispatch. Bare `forseti config` (`cmd: None`) drops
 /// into the interactive menu when stdin is a TTY; otherwise it prints the
 /// same clap help it always did and exits 2.
+#[cfg(feature = "identity-ory")]
 async fn dispatch_config(args: cli::ConfigArgs) -> i32 {
     use clap::CommandFactory;
     use std::io::{IsTerminal as _, Write};
@@ -244,6 +262,18 @@ async fn dispatch_config(args: cli::ConfigArgs) -> i32 {
             2
         }
     }
+}
+
+// Kratos ignores the cookie secret; resolving it here would add the server's boot checks to the CLI.
+#[cfg(feature = "identity-ory")]
+fn cli_identity(cfg: &config::AppConfig, db: &db::DbPool) -> std::sync::Arc<backend::IdentityImpl> {
+    backend::build_identity(cfg, db, &[])
+}
+
+#[cfg(feature = "identity-native")]
+fn cli_identity(cfg: &config::AppConfig, db: &db::DbPool) -> std::sync::Arc<backend::IdentityImpl> {
+    let cookie_secret = app::native_cookie_secret(cfg);
+    backend::build_identity(cfg, db, &cookie_secret)
 }
 
 /// Shared DB prologue for the DB-touching subcommands: pool init + ping, then migrations unless skipped.

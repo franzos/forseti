@@ -1,0 +1,456 @@
+{
+  "id": "dde1c414-8644-419c-857a-ec1062f2f543",
+  "type": "browser",
+  "expires_at": "2026-11-13T18:26:26.053284Z",
+  "issued_at": "2026-11-13T17:26:26.053284Z",
+  "request_url": "http://localhost:4433/self-service/settings/browser",
+  "ui": {
+    "action": "http://localhost:4433/self-service/settings?flow=dde1c414-8644-419c-857a-ec1062f2f543",
+    "method": "POST",
+    "nodes": [
+      {
+        "type": "input",
+        "group": "default",
+        "attributes": {
+          "name": "csrf_token",
+          "type": "hidden",
+          "value": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+          "required": true,
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {}
+      },
+      {
+        "type": "input",
+        "group": "profile",
+        "attributes": {
+          "name": "traits.email",
+          "type": "email",
+          "value": "fixture-mfa-79253387@example.com",
+          "required": true,
+          "autocomplete": "email",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1070002,
+            "text": "E-Mail",
+            "type": "info",
+            "context": {
+              "name": "traits.email",
+              "title": "E-Mail"
+            }
+          }
+        }
+      },
+      {
+        "type": "input",
+        "group": "profile",
+        "attributes": {
+          "name": "traits.name.first",
+          "type": "text",
+          "value": "Fixture",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1070002,
+            "text": "First Name",
+            "type": "info",
+            "context": {
+              "name": "traits.name.first",
+              "title": "First Name"
+            }
+          }
+        }
+      },
+      {
+        "type": "input",
+        "group": "profile",
+        "attributes": {
+          "name": "traits.name.last",
+          "type": "text",
+          "value": "User",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1070002,
+            "text": "Last Name",
+            "type": "info",
+            "context": {
+              "name": "traits.name.last",
+              "title": "Last Name"
+            }
+          }
+        }
+      },
+      {
+        "type": "input",
+        "group": "profile",
+        "attributes": {
+          "name": "traits.preferred_language",
+          "type": "text",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1070002,
+            "text": "Preferred language",
+            "type": "info",
+            "context": {
+              "name": "traits.preferred_language",
+              "title": "Preferred language"
+            }
+          }
+        }
+      },
+      {
+        "type": "input",
+        "group": "profile",
+        "attributes": {
+          "name": "method",
+          "type": "submit",
+          "value": "profile",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1070003,
+            "text": "Save",
+            "type": "info"
+          }
+        }
+      },
+      {
+        "type": "input",
+        "group": "password",
+        "attributes": {
+          "name": "password",
+          "type": "password",
+          "required": true,
+          "autocomplete": "new-password",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1070001,
+            "text": "Password",
+            "type": "info"
+          }
+        }
+      },
+      {
+        "type": "input",
+        "group": "password",
+        "attributes": {
+          "name": "method",
+          "type": "submit",
+          "value": "password",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1070003,
+            "text": "Save",
+            "type": "info"
+          }
+        }
+      },
+      {
+        "type": "input",
+        "group": "oidc",
+        "attributes": {
+          "name": "link",
+          "type": "submit",
+          "value": "playground",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1050002,
+            "text": "Link Playground",
+            "type": "info",
+            "context": {
+              "provider": "Playground"
+            }
+          }
+        }
+      },
+      {
+        "type": "input",
+        "group": "lookup_secret",
+        "attributes": {
+          "name": "lookup_secret_regenerate",
+          "type": "submit",
+          "value": "true",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1050008,
+            "text": "Generate new backup recovery codes",
+            "type": "info"
+          }
+        }
+      },
+      {
+        "type": "input",
+        "group": "webauthn",
+        "attributes": {
+          "name": "webauthn_register_displayname",
+          "type": "text",
+          "value": "",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1050013,
+            "text": "Name of the security key",
+            "type": "info"
+          }
+        }
+      },
+      {
+        "type": "input",
+        "group": "webauthn",
+        "attributes": {
+          "name": "webauthn_register",
+          "type": "hidden",
+          "value": "",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {}
+      },
+      {
+        "type": "input",
+        "group": "webauthn",
+        "attributes": {
+          "name": "webauthn_register_trigger",
+          "type": "button",
+          "value": "{\"publicKey\":{\"rp\":{\"name\":\"forseti\",\"id\":\"localhost\"},\"user\":{\"name\":\"forseti\",\"displayName\":\"forseti\",\"id\":\"W8i__dnRTMKmOoLdVnfQVw\"},\"challenge\":\"9iK7pEYVjVDhDjROohbkcLZly6tclJm1E7eAVENtvKU\",\"pubKeyCredParams\":[{\"type\":\"public-key\",\"alg\":-7},{\"type\":\"public-key\",\"alg\":-35},{\"type\":\"public-key\",\"alg\":-36},{\"type\":\"public-key\",\"alg\":-257},{\"type\":\"public-key\",\"alg\":-258},{\"type\":\"public-key\",\"alg\":-259},{\"type\":\"public-key\",\"alg\":-37},{\"type\":\"public-key\",\"alg\":-38},{\"type\":\"public-key\",\"alg\":-39},{\"type\":\"public-key\",\"alg\":-8}],\"timeout\":120000,\"authenticatorSelection\":{\"userVerification\":\"discouraged\"}}}",
+          "disabled": false,
+          "onclick": "window.oryWebAuthnRegistration({\"publicKey\":{\"rp\":{\"name\":\"forseti\",\"id\":\"localhost\"},\"user\":{\"name\":\"forseti\",\"displayName\":\"forseti\",\"id\":\"W8i__dnRTMKmOoLdVnfQVw\"},\"challenge\":\"9iK7pEYVjVDhDjROohbkcLZly6tclJm1E7eAVENtvKU\",\"pubKeyCredParams\":[{\"type\":\"public-key\",\"alg\":-7},{\"type\":\"public-key\",\"alg\":-35},{\"type\":\"public-key\",\"alg\":-36},{\"type\":\"public-key\",\"alg\":-257},{\"type\":\"public-key\",\"alg\":-258},{\"type\":\"public-key\",\"alg\":-259},{\"type\":\"public-key\",\"alg\":-37},{\"type\":\"public-key\",\"alg\":-38},{\"type\":\"public-key\",\"alg\":-39},{\"type\":\"public-key\",\"alg\":-8}],\"timeout\":120000,\"authenticatorSelection\":{\"userVerification\":\"discouraged\"}}})",
+          "onclickTrigger": "oryWebAuthnRegistration",
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1050012,
+            "text": "Add security key",
+            "type": "info"
+          }
+        }
+      },
+      {
+        "type": "script",
+        "group": "webauthn",
+        "attributes": {
+          "src": "http://localhost:4433/.well-known/ory/webauthn.js",
+          "async": true,
+          "referrerpolicy": "no-referrer",
+          "crossorigin": "anonymous",
+          "integrity": "sha512-Dg0gN3fy+JoKxRp9Zda/4KYn3SlMdaKjs3fK5g6nDVQ/CVakD1dfMQyvRtJeiAtzSMEFviJbBLcVSrsBPGsFBA==",
+          "type": "text/javascript",
+          "id": "webauthn_script",
+          "nonce": "03490376-75fc-47e0-878c-e49073f48aba",
+          "node_type": "script"
+        },
+        "messages": [],
+        "meta": {}
+      },
+      {
+        "type": "input",
+        "group": "passkey",
+        "attributes": {
+          "name": "passkey_register_trigger",
+          "type": "button",
+          "value": "",
+          "disabled": false,
+          "onclick": "window.oryPasskeySettingsRegistration()",
+          "onclickTrigger": "oryPasskeySettingsRegistration",
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1050019,
+            "text": "Add passkey",
+            "type": "info"
+          }
+        }
+      },
+      {
+        "type": "input",
+        "group": "passkey",
+        "attributes": {
+          "name": "passkey_settings_register",
+          "type": "hidden",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {}
+      },
+      {
+        "type": "input",
+        "group": "passkey",
+        "attributes": {
+          "name": "passkey_create_data",
+          "type": "hidden",
+          "value": "{\"publicKey\":{\"rp\":{\"name\":\"forseti\",\"id\":\"localhost\"},\"user\":{\"name\":\"fixture-mfa-79253387@example.com\",\"displayName\":\"fixture-mfa-79253387@example.com\",\"id\":\"MVJ4czdWZUdRSzFFc2JWTFRtcExmWWJUcVpwYjFLNGdQbW5HTjBsQTFWRXdMV3B4SFViMzB6R1k5NFJJQlNneg\"},\"challenge\":\"DG5sGmGKbrbB1ic0LhSjP4F_REt6EJP5XtlFeO_u6LI\",\"pubKeyCredParams\":[{\"type\":\"public-key\",\"alg\":-7},{\"type\":\"public-key\",\"alg\":-35},{\"type\":\"public-key\",\"alg\":-36},{\"type\":\"public-key\",\"alg\":-257},{\"type\":\"public-key\",\"alg\":-258},{\"type\":\"public-key\",\"alg\":-259},{\"type\":\"public-key\",\"alg\":-37},{\"type\":\"public-key\",\"alg\":-38},{\"type\":\"public-key\",\"alg\":-39},{\"type\":\"public-key\",\"alg\":-8}],\"timeout\":300000,\"authenticatorSelection\":{\"authenticatorAttachment\":\"platform\",\"requireResidentKey\":true,\"residentKey\":\"required\",\"userVerification\":\"preferred\"}}}",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {}
+      },
+      {
+        "type": "img",
+        "group": "totp",
+        "attributes": {
+          "src": "data:image/png;base64,iVBORw0KGgo=",
+          "id": "totp_qr",
+          "width": 256,
+          "height": 256,
+          "node_type": "img"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1050005,
+            "text": "Authenticator app QR code",
+            "type": "info"
+          }
+        }
+      },
+      {
+        "type": "text",
+        "group": "totp",
+        "attributes": {
+          "text": {
+            "id": 1050006,
+            "text": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "type": "info",
+            "context": {
+              "secret": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            }
+          },
+          "id": "totp_secret_key",
+          "node_type": "text"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1050017,
+            "text": "This is your authenticator app secret. Use it if you can not scan the QR code.",
+            "type": "info"
+          }
+        }
+      },
+      {
+        "type": "input",
+        "group": "totp",
+        "attributes": {
+          "name": "totp_code",
+          "type": "text",
+          "required": true,
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1070006,
+            "text": "Verify code",
+            "type": "info"
+          }
+        }
+      },
+      {
+        "type": "input",
+        "group": "totp",
+        "attributes": {
+          "name": "method",
+          "type": "submit",
+          "value": "totp",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1070003,
+            "text": "Save",
+            "type": "info"
+          }
+        }
+      }
+    ]
+  },
+  "identity": {
+    "id": "5bc8bffd-d9d1-4cc2-a63a-82dd5677d057",
+    "schema_id": "default",
+    "schema_url": "http://localhost:4433/schemas/ZGVmYXVsdA",
+    "state": "active",
+    "state_changed_at": "2026-11-13T17:26:25.935348Z",
+    "traits": {
+      "name": {
+        "last": "User",
+        "first": "Fixture"
+      },
+      "email": "fixture-mfa-79253387@example.com"
+    },
+    "verifiable_addresses": [
+      {
+        "id": "ce20be4d-ce26-4af2-8958-3e94f867a2f1",
+        "value": "fixture-mfa-79253387@example.com",
+        "verified": true,
+        "via": "email",
+        "status": "completed",
+        "verified_at": "2026-11-13T17:26:25.937962Z",
+        "created_at": "2026-11-13T17:26:25.93808Z",
+        "updated_at": "2026-11-13T17:26:25.93808Z"
+      }
+    ],
+    "recovery_addresses": [
+      {
+        "id": "47f80469-1e40-4eca-83a6-f4dd75db90ab",
+        "value": "fixture-mfa-79253387@example.com",
+        "via": "email",
+        "created_at": "2026-11-13T17:26:25.93881Z",
+        "updated_at": "2026-11-13T17:26:25.93881Z"
+      }
+    ],
+    "metadata_public": null,
+    "created_at": "2026-11-13T17:26:25.937362Z",
+    "updated_at": "2026-11-13T17:26:25.937362Z",
+    "organization_id": null
+  },
+  "state": "show_form"
+}

@@ -385,17 +385,6 @@ fn assert_back_on_page(res: &reqwest::Response) {
     assert!(clears_link_cookie(res), "callback clears the link cookie");
 }
 
-async fn kratos_metadata_admin(identity_id: &str) -> serde_json::Value {
-    let res = browser_client()
-        .get(format!("{KRATOS_ADMIN}/admin/identities/{identity_id}"))
-        .send()
-        .await
-        .expect("GET identity");
-    assert!(res.status().is_success(), "GET identity: {}", res.status());
-    let identity: serde_json::Value = res.json().await.expect("identity body");
-    identity["metadata_admin"].clone()
-}
-
 async fn page_shows(user: &RegisteredUser, text: &str) -> bool {
     get_page(&user.client)
         .await
@@ -427,7 +416,7 @@ async fn resource_claim_link_replace_and_remove() {
     let mut fx = Fixtures::default();
     let (resource, claim, id) = seed_self_service_row(&mut fx, "link", "u:{sub}:{uuid}");
     assert!(
-        kratos_metadata_admin(&user.identity_id).await.is_null(),
+        identity_metadata_admin(&user.identity_id).await.is_null(),
         "fixture starts with null metadata_admin"
     );
 
@@ -446,7 +435,7 @@ async fn resource_claim_link_replace_and_remove() {
     assert_back_on_page(&res);
     assert!(page_shows(&user, "Account linked.").await, "success flash");
     assert_eq!(
-        kratos_metadata_admin(&user.identity_id).await,
+        identity_metadata_admin(&user.identity_id).await,
         serde_json::json!({ claim.as_str(): value }),
     );
     let ev = latest_audit_event("resource.claim.linked", &user.identity_id).expect("linked");
@@ -462,7 +451,7 @@ async fn resource_claim_link_replace_and_remove() {
     let callback = mock_oidc_login(&auth, "43").await;
     assert_back_on_page(&get_callback(&user.manual_client, &callback).await);
     assert_eq!(
-        kratos_metadata_admin(&user.identity_id).await[&claim],
+        identity_metadata_admin(&user.identity_id).await[&claim],
         replaced.as_str(),
         "linking again replaces the value"
     );
@@ -472,7 +461,7 @@ async fn resource_claim_link_replace_and_remove() {
     assert_eq!(location(&res), PAGE);
     assert!(page_shows(&user, "Link removed.").await, "removed flash");
     assert!(
-        kratos_metadata_admin(&user.identity_id)
+        identity_metadata_admin(&user.identity_id)
             .await
             .get(&claim)
             .is_none(),
@@ -507,7 +496,7 @@ async fn resource_claim_link_keeps_sibling_keys() {
     let callback = mock_oidc_login(&auth, "alice-7").await;
     assert_back_on_page(&get_callback(&user.manual_client, &callback).await);
     assert_eq!(
-        kratos_metadata_admin(&user.identity_id).await,
+        identity_metadata_admin(&user.identity_id).await,
         serde_json::json!({"note": {"kept": true}, claim.as_str(): "alice-7"}),
     );
 
@@ -530,7 +519,7 @@ async fn resource_claim_link_refuses_a_value_mismatch() {
         page_shows(&user, "match the value you entered").await,
         "mismatch flash"
     );
-    assert!(kratos_metadata_admin(&user.identity_id).await.is_null());
+    assert!(identity_metadata_admin(&user.identity_id).await.is_null());
     let ev = latest_audit_event("resource.claim.link_failed", &user.identity_id).expect("audited");
     assert_eq!(ev.metadata["reason"], "value_mismatch");
     assert_eq!(ev.metadata["upstream_sub"], "99");
@@ -558,7 +547,7 @@ async fn resource_claim_callback_refuses_a_tampered_state() {
         link_failed_reason(&user.identity_id).as_deref(),
         Some("state_mismatch")
     );
-    assert!(kratos_metadata_admin(&user.identity_id).await.is_null());
+    assert!(identity_metadata_admin(&user.identity_id).await.is_null());
 
     user.cleanup().await;
 }
@@ -597,8 +586,8 @@ async fn resource_claim_callback_refuses_another_identitys_cookie() {
         link_failed_reason(&bob_id).as_deref(),
         Some("identity_mismatch")
     );
-    assert!(kratos_metadata_admin(&bob_id).await.is_null());
-    assert!(kratos_metadata_admin(&alice.identity_id).await.is_null());
+    assert!(identity_metadata_admin(&bob_id).await.is_null());
+    assert!(identity_metadata_admin(&alice.identity_id).await.is_null());
 
     let _ = delete_test_identity(&bob_id).await;
     alice.cleanup().await;
@@ -621,7 +610,7 @@ async fn resource_claim_callback_without_a_session_fails() {
     let ev = latest_audit_event("resource.claim.link_failed", &user.identity_id).expect("audited");
     assert_eq!(ev.metadata["reason"], "no_session");
     assert_eq!(ev.actor_kind, "system", "no signed-in actor");
-    assert!(kratos_metadata_admin(&user.identity_id).await.is_null());
+    assert!(identity_metadata_admin(&user.identity_id).await.is_null());
 
     user.cleanup().await;
 }
@@ -650,7 +639,7 @@ async fn resource_claim_callback_reports_an_upstream_error() {
     let ev = latest_audit_event("resource.claim.link_failed", &user.identity_id).expect("audited");
     assert_eq!(ev.metadata["reason"], "upstream_error");
     assert!(!ev.metadata.to_string().contains("upstream-said-no"));
-    assert!(kratos_metadata_admin(&user.identity_id).await.is_null());
+    assert!(identity_metadata_admin(&user.identity_id).await.is_null());
 
     user.cleanup().await;
 }
@@ -686,7 +675,7 @@ async fn resource_claim_remove_requires_csrf_and_an_available_row() {
         "not available flash"
     );
     assert_eq!(
-        kratos_metadata_admin(&user.identity_id).await[&claim],
+        identity_metadata_admin(&user.identity_id).await[&claim],
         "7",
         "value untouched"
     );
@@ -711,7 +700,7 @@ async fn resource_claim_callback_refuses_a_row_turned_off_meanwhile() {
         link_failed_reason(&user.identity_id).as_deref(),
         Some("not_available")
     );
-    assert!(kratos_metadata_admin(&user.identity_id).await.is_null());
+    assert!(identity_metadata_admin(&user.identity_id).await.is_null());
 
     user.cleanup().await;
 }
@@ -759,7 +748,7 @@ async fn resource_claim_callback_ignores_a_tampered_cookie() {
     assert_back_on_page(&get_callback(&user.manual_client, &callback).await);
     assert!(page_shows(&user, "Please start again.").await, "flash");
     assert_eq!(link_failed_reason(&user.identity_id), None, "no audit row");
-    assert!(kratos_metadata_admin(&user.identity_id).await.is_null());
+    assert!(identity_metadata_admin(&user.identity_id).await.is_null());
 
     user.cleanup().await;
 }
@@ -789,7 +778,7 @@ async fn resource_claim_callback_refuses_a_foreign_iss() {
         link_failed_reason(&user.identity_id).as_deref(),
         Some("issuer_mismatch")
     );
-    assert!(kratos_metadata_admin(&user.identity_id).await.is_null());
+    assert!(identity_metadata_admin(&user.identity_id).await.is_null());
 
     user.cleanup().await;
 }

@@ -391,12 +391,111 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    identities (id) {
+        id -> Text,
+        email -> Text,
+        email_norm -> Text,
+        email_verified_at -> Nullable<Text>,
+        first_name -> Nullable<Text>,
+        last_name -> Nullable<Text>,
+        preferred_language -> Nullable<Text>,
+        state -> Text,
+        state_changed_at -> Text,
+        created_at -> Text,
+        updated_at -> Text,
+        metadata_public -> Nullable<Text>,
+        metadata_admin -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
+    identity_credentials (id) {
+        id -> Text,
+        identity_id -> Text,
+        kind -> Text,
+        config -> Text,
+        version -> Integer,
+        created_at -> Text,
+        updated_at -> Text,
+    }
+}
+
+diesel::table! {
+    identity_sessions (id) {
+        id -> Text,
+        identity_id -> Text,
+        token_hash -> Text,
+        aal -> Text,
+        methods -> Text,
+        issued_at -> Text,
+        authenticated_at -> Text,
+        expires_at -> Text,
+        revoked_at -> Nullable<Text>,
+        ip_address -> Nullable<Text>,
+        user_agent -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
+    identity_flows (id) {
+        id -> Text,
+        kind -> Text,
+        state -> Text,
+        binding -> Nullable<Text>,
+        identity_id -> Nullable<Text>,
+        session_id -> Nullable<Text>,
+        requested_aal -> Nullable<Text>,
+        refresh -> Integer,
+        return_to -> Nullable<Text>,
+        request_url -> Text,
+        context -> Text,
+        version -> Integer,
+        issued_at -> Text,
+        expires_at -> Text,
+    }
+}
+
+diesel::table! {
+    identity_codes (id) {
+        id -> Text,
+        flow_id -> Text,
+        purpose -> Text,
+        identity_id -> Text,
+        address -> Text,
+        code_mac -> Text,
+        attempts -> Integer,
+        expires_at -> Text,
+        used_at -> Nullable<Text>,
+        created_at -> Text,
+    }
+}
+
+diesel::table! {
+    identity_mail_outbox (id) {
+        id -> Text,
+        identity_id -> Text,
+        recipient -> Text,
+        kind -> Text,
+        payload -> Text,
+        state -> Text,
+        attempts -> Integer,
+        next_attempt_at -> Text,
+        last_error -> Nullable<Text>,
+        created_at -> Text,
+        sent_at -> Nullable<Text>,
+    }
+}
+
 diesel::joinable!(organization_members -> organizations (org_id));
 diesel::joinable!(saml_connections -> organizations (org_id));
 diesel::joinable!(org_allowed_domains -> organizations (org_id));
 diesel::allow_tables_to_appear_in_same_query!(organizations, organization_members);
 diesel::allow_tables_to_appear_in_same_query!(organizations, saml_connections);
 diesel::allow_tables_to_appear_in_same_query!(organizations, org_allowed_domains);
+diesel::joinable!(identity_credentials -> identities (identity_id));
+diesel::joinable!(identity_sessions -> identities (identity_id));
+diesel::allow_tables_to_appear_in_same_query!(identities, identity_credentials, identity_sessions);
 diesel::allow_tables_to_appear_in_same_query!(posix_group_members, posix_accounts);
 diesel::allow_tables_to_appear_in_same_query!(
     posix_accounts,

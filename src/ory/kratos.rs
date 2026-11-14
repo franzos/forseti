@@ -2,9 +2,14 @@
 
 use super::*;
 use ory_client::apis::{Error as OryError, courier_api, frontend_api, identity_api, metadata_api};
+use ory_client::models::{
+    CreateIdentityBody, CreateRecoveryCodeForIdentityBody, CreateRecoveryLinkForIdentityBody,
+    UpdateIdentityBody,
+};
 
 use crate::backend::identity::{
-    CourierStatus, FlowOutcome, IdentityState, RecoveryCode, SelfServiceError, WhoamiOutcome,
+    CourierStatus, FlowFetch, FlowKind, FlowOutcome, Identity, IdentityState, PrivilegedReason,
+    RecoveryCode, SelfServiceError, Session, WhoamiOutcome,
 };
 use crate::flow_view::Flow;
 
@@ -20,7 +25,7 @@ fn identities(batch: Vec<ory_client::models::Identity>) -> Vec<Identity> {
 /// forwarded `Cookie` header. See [`WhoamiOutcome`] for the three
 /// outcomes (Kratos 401 is `None`, 403 is `InsufficientAal`); `Err` is
 /// reserved for transport / unexpected upstream failures.
-pub async fn whoami(clients: &OryClients, cookie: Option<&str>) -> Result<WhoamiOutcome> {
+pub async fn whoami(clients: &KratosClients, cookie: Option<&str>) -> Result<WhoamiOutcome> {
     match frontend_api::to_session(&clients.kratos_public, None, cookie, None).await {
         Ok(session) => Ok(WhoamiOutcome::Ok(Box::new(session.into()))),
         Err(OryError::ResponseError(resp)) if resp.status == reqwest::StatusCode::UNAUTHORIZED => {
@@ -41,7 +46,7 @@ pub async fn whoami(clients: &OryClients, cookie: Option<&str>) -> Result<Whoami
 /// "node_type")]` while the inner `UiNodeInputAttributes` also requires `node_type`, so every real response
 /// fails with `missing field 'node_type'`. See <https://github.com/ory/sdk/issues/381>.
 pub async fn get_flow(
-    clients: &OryClients,
+    clients: &KratosClients,
     kind: FlowKind,
     flow_id: &str,
     cookie: &str,
@@ -49,7 +54,7 @@ pub async fn get_flow(
     let url = format!(
         "{}/self-service/{}/flows",
         clients.kratos_public.base_path.trim_end_matches('/'),
-        path_segment(kind),
+        kind.path_segment(),
     );
     let mut req = clients
         .kratos_public
@@ -90,7 +95,7 @@ pub async fn get_flow(
         let body = resp.text().await.unwrap_or_default();
         return Err(anyhow::anyhow!(
             "kratos get_flow ({}) returned {status}: {body}",
-            path_segment(kind)
+            kind.path_segment()
         ));
     }
 
@@ -98,7 +103,7 @@ pub async fn get_flow(
         .json()
         .await
         .map_err(|e| anyhow::anyhow!("kratos get_flow body decode failed: {e}"))?;
-    Ok(FlowFetch::Ok(Box::new(flow_json::project(&value))))
+    Ok(FlowFetch::Ok(Box::new(crate::flow_json::project(&value))))
 }
 
 /// Kratos path whose API flow carries the `oidc` provider nodes; probed
@@ -107,7 +112,7 @@ const OIDC_PROVIDER_PROBE_PATH: &str = "/self-service/login/api";
 
 /// Upstream provider ids Kratos offers, read off a fresh API login flow
 /// (Kratos has no endpoint that lists them). Each call creates one flow.
-pub async fn probe_oidc_provider_ids(clients: &OryClients) -> Result<Vec<String>> {
+pub async fn probe_oidc_provider_ids(clients: &KratosClients) -> Result<Vec<String>> {
     let url = format!(
         "{}{OIDC_PROVIDER_PROBE_PATH}",
         clients.kratos_public.base_path.trim_end_matches('/'),
@@ -127,14 +132,14 @@ pub async fn probe_oidc_provider_ids(clients: &OryClients) -> Result<Vec<String>
         .json()
         .await
         .map_err(|e| anyhow::anyhow!("kratos provider probe body decode failed: {e}"))?;
-    Ok(flow_json::project(&flow).oidc_provider_ids())
+    Ok(crate::flow_json::project(&flow).oidc_provider_ids())
 }
 
 /// Resolve the `?flow=` id into a [`FlowOutcome`]: `None` short-circuits to
 /// [`FlowOutcome::Init`]; otherwise [`get_flow`] runs and its [`FlowFetch`]
 /// (or transport error) is mapped to the matching variant.
 pub async fn resolve_flow(
-    clients: &OryClients,
+    clients: &KratosClients,
     kind: FlowKind,
     flow_id: Option<&str>,
     cookie: &str,
@@ -155,7 +160,7 @@ pub async fn resolve_flow(
 /// token, transport failure, or any non-2xx, so callers can fall through to
 /// rendering the form unchanged.
 pub async fn verify_known_email(
-    clients: &OryClients,
+    clients: &KratosClients,
     flow: &Flow,
     email: &str,
     cookie: &str,
@@ -178,7 +183,7 @@ pub async fn verify_known_email(
 /// POST a self-service flow submission to its `ui.action`, forwarding the
 /// user's cookie. `Err` on transport failure or any non-2xx.
 async fn submit_flow(
-    clients: &OryClients,
+    clients: &KratosClients,
     action: &str,
     body: &serde_json::Value,
     cookie: &str,
@@ -203,45 +208,9 @@ async fn submit_flow(
     Ok(())
 }
 
-/// Build the browser redirect URL that starts a new Kratos browser flow; Kratos creates the flow, sets its
-/// continuity cookie, and 303s back to Forseti with `?flow=<id>`. `return_to` lands the user back on the
-/// original page; optional `aal` step-up and `refresh` are forwarded to Kratos.
-pub fn browser_init_url_with(
-    kind: FlowKind,
-    public_url: &str,
-    return_to: Option<&str>,
-    aal: Option<&str>,
-    refresh: Option<bool>,
-) -> String {
-    let base = public_url.trim_end_matches('/');
-    let segment = path_segment(kind);
-    let mut params: Vec<(&str, String)> = Vec::new();
-    if let Some(rt) = return_to
-        && !rt.is_empty()
-    {
-        params.push(("return_to", rt.to_string()));
-    }
-    if let Some(a) = aal
-        && !a.is_empty()
-    {
-        params.push(("aal", a.to_string()));
-    }
-    if matches!(refresh, Some(true)) {
-        params.push(("refresh", "true".to_string()));
-    }
-    if params.is_empty() {
-        return format!("{base}/self-service/{segment}/browser");
-    }
-    let qs: Vec<String> = params
-        .iter()
-        .map(|(k, v)| format!("{}={}", k, crate::web::urlencode(v)))
-        .collect();
-    format!("{base}/self-service/{segment}/browser?{}", qs.join("&"))
-}
-
 /// Fetch a Kratos self-service error (the `/error?id=...` landing) as raw JSON, avoiding the SDK model.
 pub async fn get_self_service_error(
-    clients: &OryClients,
+    clients: &KratosClients,
     error_id: &str,
 ) -> Result<Option<SelfServiceError>> {
     let url = format!(
@@ -287,12 +256,15 @@ fn self_service_error(body: &serde_json::Value) -> SelfServiceError {
 
 /// Admin lookup by identity ID. Hits the Kratos admin API which returns
 /// the typed `Identity` model (no `ui.nodes` involved, so the SDK deserializer works fine here).
-pub async fn admin_get_identity(clients: &OryClients, id: &str) -> Result<Identity> {
+pub async fn admin_get_identity(clients: &KratosClients, id: &str) -> Result<Identity> {
     sdk_get_identity(clients, id).await.map(Identity::from)
 }
 
 /// SDK-typed lookup for read-modify-write helpers, so nothing is flattened on the way back to Kratos.
-async fn sdk_get_identity(clients: &OryClients, id: &str) -> Result<ory_client::models::Identity> {
+async fn sdk_get_identity(
+    clients: &KratosClients,
+    id: &str,
+) -> Result<ory_client::models::Identity> {
     identity_api::get_identity(&clients.kratos_admin, id, None)
         .await
         .map_err(|e| anyhow::anyhow!("kratos admin get_identity failed: {e}"))
@@ -302,7 +274,7 @@ async fn sdk_get_identity(clients: &OryClients, id: &str) -> Result<ory_client::
 /// of an error. Used by the webhook reconciler so transport failures
 /// can't be mistaken for "identity gone" via stringified-error matching.
 pub async fn admin_get_identity_optional(
-    clients: &OryClients,
+    clients: &KratosClients,
     id: &str,
 ) -> Result<Option<Identity>> {
     match identity_api::get_identity(&clients.kratos_admin, id, None).await {
@@ -330,7 +302,10 @@ pub fn logout_browser_url(public_url: &str) -> String {
 /// the public API with the user's forwarded cookie so Kratos resolves
 /// the caller from their session (no admin credentials required). The
 /// `Session` model has no `ui.nodes`, so the typed SDK call works here.
-pub async fn list_my_sessions(clients: &OryClients, cookie: Option<&str>) -> Result<Vec<Session>> {
+pub async fn list_my_sessions(
+    clients: &KratosClients,
+    cookie: Option<&str>,
+) -> Result<Vec<Session>> {
     frontend_api::list_my_sessions(&clients.kratos_public, None, None, None, None, None, cookie)
         .await
         .map(sessions)
@@ -339,7 +314,7 @@ pub async fn list_my_sessions(clients: &OryClients, cookie: Option<&str>) -> Res
 
 /// Revoke a single session by ID. Kratos refuses to delete the *current*
 /// session via this endpoint (it returns 400), so callers treat the current session row as non-revokable in the UI.
-pub async fn revoke_session(clients: &OryClients, id: &str, cookie: Option<&str>) -> Result<()> {
+pub async fn revoke_session(clients: &KratosClients, id: &str, cookie: Option<&str>) -> Result<()> {
     frontend_api::disable_my_session(&clients.kratos_public, id, None, cookie)
         .await
         .map_err(|e| anyhow::anyhow!("kratos disable_my_session failed: {e}"))
@@ -348,7 +323,7 @@ pub async fn revoke_session(clients: &OryClients, id: &str, cookie: Option<&str>
 /// Revoke every session except the one currently making the request.
 /// Kratos enforces "except current" itself. Returns the deletion count
 /// from Kratos (kept loosely-typed as it's just an informational return).
-pub async fn revoke_other_sessions(clients: &OryClients, cookie: Option<&str>) -> Result<u64> {
+pub async fn revoke_other_sessions(clients: &KratosClients, cookie: Option<&str>) -> Result<u64> {
     let count = frontend_api::disable_my_other_sessions(&clients.kratos_public, None, cookie)
         .await
         .map_err(|e| anyhow::anyhow!("kratos disable_my_other_sessions failed: {e}"))?;
@@ -359,7 +334,7 @@ pub async fn revoke_other_sessions(clients: &OryClients, cookie: Option<&str>) -
 /// dashboard's "Recent Activity" sidebar as a stand-in for a real audit
 /// log (Kratos doesn't expose a queryable event stream in this version).
 pub async fn list_identity_sessions(
-    clients: &OryClients,
+    clients: &KratosClients,
     identity_id: &str,
 ) -> Result<Vec<Session>> {
     identity_api::list_identity_sessions(
@@ -383,7 +358,7 @@ const SESSION_LIST_MAX_PAGES: usize = 50;
 /// exhausted. The SDK helper drops the Link header, so this goes through the
 /// raw client like [`super::hydra::list_consent_sessions_by_subject`].
 pub async fn list_identity_sessions_all(
-    clients: &OryClients,
+    clients: &KratosClients,
     identity_id: &str,
 ) -> Result<Vec<Session>> {
     let cfg = &clients.kratos_admin;
@@ -436,7 +411,7 @@ pub async fn list_identity_sessions_all(
 /// The ids of the identity's active, unexpired sessions. Kratos applies the
 /// expiry in its `active` filter.
 pub async fn active_session_ids(
-    clients: &OryClients,
+    clients: &KratosClients,
     identity_id: &str,
 ) -> Result<std::collections::HashSet<String>> {
     let active = identity_api::list_identity_sessions(
@@ -455,7 +430,7 @@ pub async fn active_session_ids(
 
 /// Whether `kratos_session_id` is one of the identity's active sessions.
 pub async fn is_session_active(
-    clients: &OryClients,
+    clients: &KratosClients,
     identity_id: &str,
     kratos_session_id: &str,
 ) -> Result<bool> {
@@ -465,7 +440,7 @@ pub async fn is_session_active(
 }
 
 /// Admin lookup of one session with its identity expanded.
-pub async fn admin_get_session(clients: &OryClients, id: &str) -> Result<Session> {
+pub async fn admin_get_session(clients: &KratosClients, id: &str) -> Result<Session> {
     identity_api::get_session(
         &clients.kratos_admin,
         id,
@@ -480,7 +455,7 @@ pub async fn admin_get_session(clients: &OryClients, id: &str) -> Result<Session
 
 /// Paginated identity list via the Kratos admin API. `page_token` comes from the previous page's `Link` header.
 pub async fn list_identities(
-    clients: &OryClients,
+    clients: &KratosClients,
     page_size: i64,
     page_token: Option<&str>,
     credentials_identifier: Option<&str>,
@@ -508,14 +483,14 @@ pub async fn list_identities(
 /// in whatever order Kratos chose; callers that need a specific order
 /// should sort after the fact.
 pub async fn admin_list_identities_by_ids(
-    clients: &OryClients,
+    clients: &KratosClients,
     ids: Vec<String>,
 ) -> Result<Vec<Identity>> {
     admin_list_identities_by_ids_inner(clients, ids, None).await
 }
 
 async fn admin_list_identities_by_ids_inner(
-    clients: &OryClients,
+    clients: &KratosClients,
     ids: Vec<String>,
     include_credential: Option<Vec<String>>,
 ) -> Result<Vec<Identity>> {
@@ -543,7 +518,7 @@ async fn admin_list_identities_by_ids_inner(
 
 /// Like [`admin_get_identity`] but asks Kratos to include the identity's
 /// credentials in the response (passwords stay hashed/redacted; this surfaces which methods are configured, not the secrets).
-pub async fn admin_get_identity_full(clients: &OryClients, id: &str) -> Result<Identity> {
+pub async fn admin_get_identity_full(clients: &KratosClients, id: &str) -> Result<Identity> {
     identity_api::get_identity(&clients.kratos_admin, id, Some(full_credential_types()))
         .await
         .map(Identity::from)
@@ -552,7 +527,7 @@ pub async fn admin_get_identity_full(clients: &OryClients, id: &str) -> Result<I
 
 /// [`admin_get_identity_full`] with a typed 404 mapped to `Ok(None)`.
 pub async fn admin_get_identity_full_optional(
-    clients: &OryClients,
+    clients: &KratosClients,
     id: &str,
 ) -> Result<Option<Identity>> {
     match identity_api::get_identity(&clients.kratos_admin, id, Some(full_credential_types())).await
@@ -579,7 +554,7 @@ fn full_credential_types() -> Vec<String> {
 /// [`admin_update_identity_state`]) and defaults to `Active` since a
 /// self-service caller is by definition active.
 pub async fn admin_set_identity_language(
-    clients: &OryClients,
+    clients: &KratosClients,
     id: &str,
     lang: &str,
 ) -> Result<Identity> {
@@ -612,7 +587,7 @@ pub async fn admin_set_identity_language(
 /// we round-trip the existing schema_id + traits to avoid clobbering
 /// other fields.
 pub async fn admin_update_identity_state(
-    clients: &OryClients,
+    clients: &KratosClients,
     id: &str,
     state: IdentityState,
 ) -> Result<Identity> {
@@ -673,7 +648,7 @@ fn metadata_admin_patch(
 }
 
 async fn patch_metadata_admin_key(
-    clients: &OryClients,
+    clients: &KratosClients,
     id: &str,
     key: &str,
     value: Option<&str>,
@@ -694,7 +669,7 @@ async fn patch_metadata_admin_key(
 
 /// Write `metadata_admin.<key>`, creating the object when it is null.
 pub async fn admin_set_metadata_admin_key(
-    clients: &OryClients,
+    clients: &KratosClients,
     id: &str,
     key: &str,
     value: &str,
@@ -706,7 +681,7 @@ pub async fn admin_set_metadata_admin_key(
 
 /// Drop `metadata_admin.<key>`; returns whether it held a non-null value.
 pub async fn admin_remove_metadata_admin_key(
-    clients: &OryClients,
+    clients: &KratosClients,
     id: &str,
     key: &str,
 ) -> Result<bool> {
@@ -715,7 +690,7 @@ pub async fn admin_remove_metadata_admin_key(
 
 /// Permanently delete an identity. Cascades to sessions and verifiable
 /// addresses on the Kratos side.
-pub async fn admin_delete_identity(clients: &OryClients, id: &str) -> Result<()> {
+pub async fn admin_delete_identity(clients: &KratosClients, id: &str) -> Result<()> {
     identity_api::delete_identity(&clients.kratos_admin, id)
         .await
         .map_err(|e| anyhow::anyhow!("kratos admin delete_identity failed: {e}"))
@@ -724,7 +699,7 @@ pub async fn admin_delete_identity(clients: &OryClients, id: &str) -> Result<()>
 /// List the ids of every identity schema registered with Kratos. The admin
 /// configuration page surfaces these so operators can see which schemas
 /// drive registration / profile shape. Paging args are all `None`; Kratos returns the full set in one page.
-pub async fn list_identity_schemas(clients: &OryClients) -> Result<Vec<String>> {
+pub async fn list_identity_schemas(clients: &KratosClients) -> Result<Vec<String>> {
     let schemas =
         identity_api::list_identity_schemas(&clients.kratos_admin, None, None, None, None)
             .await
@@ -736,7 +711,7 @@ pub async fn list_identity_schemas(clients: &OryClients) -> Result<Vec<String>> 
 /// code + a recovery link; admin UI shows both once and the operator hands
 /// the code to the user out-of-band.
 pub async fn admin_create_recovery_code(
-    clients: &OryClients,
+    clients: &KratosClients,
     identity_id: &str,
 ) -> Result<RecoveryCode> {
     let body = CreateRecoveryCodeForIdentityBody::new(identity_id.to_string());
@@ -749,7 +724,7 @@ pub async fn admin_create_recovery_code(
 /// Mint a one-shot magic recovery link: a Kratos public URL a browser GET redeems into a privileged session.
 /// The only OSS path from "server-side authenticated" (e.g. a validated SAML assertion) to a real browser session.
 pub async fn admin_create_recovery_link(
-    clients: &OryClients,
+    clients: &KratosClients,
     identity_id: &str,
     expires_in: &str,
     return_to: Option<&str>,
@@ -770,7 +745,7 @@ pub async fn admin_create_recovery_link(
 /// corporate IdP asserted the address, so re-verification is pointless).
 /// Returns `Ok(None)` on 409 (the email already belongs to another identity) so the SSO callback can render a block page instead of a 500.
 pub async fn admin_create_identity_verified(
-    clients: &OryClients,
+    clients: &KratosClients,
     schema_id: &str,
     email: &str,
     first: &str,
@@ -800,7 +775,7 @@ pub async fn admin_create_identity_verified(
 /// Find an identity whose verifiable addresses include `email`, with that address's verified flag. Uses the
 /// `credentials_identifier` filter; SAML-created identities are found via Forseti's `saml_links` table instead.
 pub async fn admin_find_identity_by_email(
-    clients: &OryClients,
+    clients: &KratosClients,
     email: &str,
 ) -> Result<Option<(Identity, bool)>> {
     let matches = list_identities(clients, 10, None, Some(email)).await?;
@@ -822,7 +797,7 @@ pub async fn admin_find_identity_by_email(
 /// List every session across all identities (admin view). Passes `expand=identity` so each row carries its
 /// owner (otherwise `session.identity = None` and the admin UI can't show who owns each session).
 pub async fn admin_list_all_sessions(
-    clients: &OryClients,
+    clients: &KratosClients,
     page_size: i64,
     page_token: Option<&str>,
     active: Option<bool>,
@@ -842,7 +817,7 @@ pub async fn admin_list_all_sessions(
 /// Revoke a single session by ID via the admin API. Unlike the public
 /// `disable_my_session`, this can revoke anyone's session, including the
 /// admin's own, so callers should warn before that happens.
-pub async fn admin_revoke_session(clients: &OryClients, id: &str) -> Result<()> {
+pub async fn admin_revoke_session(clients: &KratosClients, id: &str) -> Result<()> {
     identity_api::disable_session(&clients.kratos_admin, id)
         .await
         .map_err(|e| anyhow::anyhow!("kratos admin disable_session failed: {e}"))
@@ -851,7 +826,7 @@ pub async fn admin_revoke_session(clients: &OryClients, id: &str) -> Result<()> 
 /// Number of courier messages in `status`, counted over the first page only,
 /// so the result is capped at `page_size`. Admin status page only.
 pub async fn courier_backlog(
-    clients: &OryClients,
+    clients: &KratosClients,
     status: CourierStatus,
     page_size: i64,
 ) -> Result<u64> {
@@ -869,18 +844,18 @@ pub async fn courier_backlog(
 
 /// Hit Kratos's `/health/alive` probe (admin URL). The SDK doesn't expose
 /// a typed wrapper for this, so we hit the raw endpoint and treat any 2xx as healthy. Admin status page only.
-pub async fn health_alive(clients: &OryClients) -> Result<()> {
+pub async fn health_alive(clients: &KratosClients) -> Result<()> {
     probe_health(&clients.kratos_admin, "/health/alive").await
 }
 
 /// Hit Kratos's `/health/ready` probe. Stricter than alive: also checks downstream dependencies (DB).
-pub async fn health_ready(clients: &OryClients) -> Result<()> {
+pub async fn health_ready(clients: &KratosClients) -> Result<()> {
     probe_health(&clients.kratos_admin, "/health/ready").await
 }
 
 /// Fetch the Kratos build version. Surfaced on the admin status page so
 /// operators can sanity-check which release they're talking to.
-pub async fn version(clients: &OryClients) -> Result<String> {
+pub async fn version(clients: &KratosClients) -> Result<String> {
     let v = metadata_api::get_version(&clients.kratos_admin)
         .await
         .map_err(|e| anyhow::anyhow!("kratos get_version failed: {e}"))?;
@@ -890,7 +865,7 @@ pub async fn version(clients: &OryClients) -> Result<String> {
 /// Best-effort Kratos session teardown: fetch the logout URL for the cookie's
 /// session and hit it server-side. No-op when the cookie is empty. Callers that
 /// need a guarantee the session is gone must re-check `whoami` afterwards.
-pub async fn tear_down_session(clients: &OryClients, cookie: &str) {
+pub async fn tear_down_session(clients: &KratosClients, cookie: &str) {
     if cookie.is_empty() {
         return;
     }
@@ -901,7 +876,11 @@ pub async fn tear_down_session(clients: &OryClients, cookie: &str) {
 
 /// Fire the single-use `logout_url` server-side to destroy the session without following the post-logout
 /// redirect (for callers routing the browser elsewhere). Transport errors bubble; non-2xx are fire-and-forget.
-pub async fn hit_logout_url(clients: &OryClients, url: &str, cookie: Option<&str>) -> Result<()> {
+pub async fn hit_logout_url(
+    clients: &KratosClients,
+    url: &str,
+    cookie: Option<&str>,
+) -> Result<()> {
     let mut req = clients.kratos_public.client.get(url);
     if let Some(c) = cookie {
         req = req.header(ory_reqwest::header::COOKIE, c);
@@ -915,7 +894,7 @@ pub async fn hit_logout_url(clients: &OryClients, url: &str, cookie: Option<&str
 /// Fetch the Kratos logout flow's `logout_url` (already containing the
 /// single-use `logout_token`). Caller is expected to redirect the browser
 /// to that URL; Kratos clears the session cookie and bounces to `/login`. `Ok(None)` if no session cookie is present.
-pub async fn fetch_logout_url(clients: &OryClients, cookie: &str) -> Result<Option<String>> {
+pub async fn fetch_logout_url(clients: &KratosClients, cookie: &str) -> Result<Option<String>> {
     if cookie.is_empty() {
         return Ok(None);
     }

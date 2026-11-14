@@ -45,6 +45,15 @@ pub(crate) async fn readyz(State(state): State<AppState>) -> Response {
         return format!("ready (degraded: webhook worker stale, {stale}s since last tick)")
             .into_response();
     }
+    #[cfg(feature = "identity-native")]
+    {
+        let threshold = worker_stale_threshold_secs(crate::identity_native::mail::TICK_SECS);
+        let stale = state.identity.mail_worker().seconds_since_last_tick();
+        if stale > threshold {
+            return format!("ready (degraded: mail worker stale, {stale}s since last tick)")
+                .into_response();
+        }
+    }
     "ready".into_response()
 }
 
@@ -93,16 +102,21 @@ pub(crate) async fn run() -> anyhow::Result<()> {
 
     let cfg = AppConfig::load()?;
 
-    // Unset (empty string or empty list) means the audit webhook endpoint boots silently closed; always a deployment bug.
-    if cfg.audit.webhook_token.is_unset() {
+    #[cfg(feature = "identity-ory")]
+    check_audit_webhook_token(&cfg);
+    #[cfg(feature = "identity-native")]
+    require_native_mail(&cfg);
+    #[cfg(feature = "identity-native")]
+    let cookie_secret = native_cookie_secret(&cfg);
+    if cfg.identity.privileged_session_minutes == 0 {
         eprintln!(
-            "config error: audit.webhook_token must be set; the audit webhook endpoint \
-             requires bearer authentication. Set it in config.toml (or via \
-             FORSETI_AUDIT__WEBHOOK_TOKEN env var) and restart."
+            "config error: [identity].privileged_session_minutes must be at least 1; \
+             0 sends every settings change back to sign-in."
         );
         std::process::exit(1);
     }
-    if let Err(msg) = cfg.audit.webhook_token.validate(&cfg.self_.url) {
+    #[cfg(feature = "identity-native")]
+    if let Err(msg) = check_native_identity(&cfg.identity) {
         eprintln!("config error: {msg}");
         std::process::exit(1);
     }
@@ -110,19 +124,11 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         eprintln!("config error: {msg}");
         std::process::exit(1);
     }
-    let weak = cfg.audit.webhook_token.weak_entries();
-    if weak > 0 {
-        tracing::warn!(
-            count = weak,
-            "audit.webhook_token entries are shorter than 32 bytes; \
-             the endpoint authenticates audit writes and session revocation"
-        );
-    }
 
     // Reject overlapping posix uid/gid bands at boot before a team gid can collide with a user gid on a host.
     cfg.posix.validate_bands()?;
 
-    let (identity, oauth) = crate::backend::build(&cfg);
+    let oauth = crate::backend::build_oauth(&cfg);
 
     // Refuse to serve POSIX device auth against a PAM client Hydra reports as
     // public: Forseti holds the `device_code` on every host's behalf, so a
@@ -153,8 +159,10 @@ pub(crate) async fn run() -> anyhow::Result<()> {
     // One Ctrl+C / SIGTERM fans out to the HTTP listeners and the webhook background tasks.
     let shutdown = CancellationToken::new();
 
+    #[cfg(feature = "identity-ory")]
     let cookie_secret =
         resolve_cookie_secret(cfg.security.cookie_secret.as_deref(), &cfg.self_.url);
+    let identity = crate::backend::build_identity(&cfg, &db, &cookie_secret);
 
     if cfg.audit.ip_salt.as_deref().is_none_or(str::is_empty) {
         tracing::warn!(
@@ -203,6 +211,18 @@ pub(crate) async fn run() -> anyhow::Result<()> {
     // Sweeps stale per-IP entries out of every keyed rate limiter built below.
     background.push(crate::rate_limit::spawn_retention(shutdown.clone()));
 
+    #[cfg(feature = "identity-native")]
+    background.push(crate::identity_native::mail::spawn_worker(
+        identity.clone(),
+        crate::identity_native::mail::Smtp::new(&cfg),
+        shutdown.clone(),
+    ));
+    #[cfg(feature = "identity-native")]
+    background.push(crate::identity_native::maintenance::spawn(
+        db.clone(),
+        shutdown.clone(),
+    ));
+
     let cfg_public_bind = cfg.self_.bind.clone();
     let cfg_internal_bind = cfg.internal.bind.clone();
     let metrics_handle = crate::metrics::install_metrics_recorder();
@@ -244,7 +264,10 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         .merge(oauth::router(&state.cfg.oauth, &state.cfg.proxy))
         .merge(accounts::router())
         .merge(handoff::router(&state.cfg.proxy, &state.cfg.handoff))
-        .merge(admin::router())
+        .merge(admin::router());
+    #[cfg(feature = "identity-native")]
+    let csrf_routes = csrf_routes.merge(crate::identity_native::routes::router(&state.cfg));
+    let csrf_routes = csrf_routes
         // One-shot secret reveals (client secrets, recovery codes, DCR + registration access
         // tokens, POSIX host secrets) render on these routes; none of them may reach a disk
         // cache or an intermediary.
@@ -268,7 +291,7 @@ pub(crate) async fn run() -> anyhow::Result<()> {
             crate::locale::persist_locale_middleware,
         ));
 
-    let mut public_app = Router::new()
+    let public_app = Router::new()
         .merge(csrf_routes)
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
@@ -298,9 +321,13 @@ pub(crate) async fn run() -> anyhow::Result<()> {
             &state.cfg.hydra,
         ));
     // SSO routes mount only when [saml] is configured; outside CSRF (Jackson's callback is a cross-site GET).
-    if state.cfg.saml.is_some() {
-        public_app = public_app.merge(crate::saml::router());
-    }
+    // The SAML flow mints a Kratos session, so the native build never mounts them.
+    #[cfg(feature = "identity-ory")]
+    let public_app = if state.cfg.saml.is_some() {
+        public_app.merge(crate::saml::router())
+    } else {
+        public_app
+    };
     // Browser-facing issuer origin: [hydra].issuer → [posix].hydra_issuer (legacy
     // narrow override) → [hydra].public_url.
     let hydra_issuer = state
@@ -310,9 +337,14 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         .clone()
         .or_else(|| state.cfg.posix.hydra_issuer.clone())
         .unwrap_or_else(|| state.cfg.hydra.public_url.clone());
+    // Native flow forms post to Forseti itself, which `'self'` already covers.
+    #[cfg(feature = "identity-ory")]
+    let identity_public_url = state.cfg.kratos.public_url.as_str();
+    #[cfg(feature = "identity-native")]
+    let identity_public_url = "";
     // With [hydra].issuer set, public_url is server-to-server only (e.g. `http://hydra:4444`).
     let form_action = csp_form_action(
-        &state.cfg.kratos.public_url,
+        identity_public_url,
         state.cfg.hydra.issuer_or_public(),
         &hydra_issuer,
         &state.cfg.security.extra_form_action,
@@ -379,8 +411,10 @@ pub(crate) async fn run() -> anyhow::Result<()> {
 
     // Internal listener: machine-to-machine endpoints only. No CSRF, no readiness probes (those stay on the public listener).
     // `/metrics` is added AFTER the metrics/audit layers so scrapes aren't self-counted and don't generate audit noise.
-    let internal_app = Router::new()
-        .merge(audit::kratos_webhook::router())
+    let internal_app = Router::new();
+    #[cfg(feature = "identity-ory")]
+    let internal_app = internal_app.merge(audit::kratos_webhook::router());
+    let internal_app = internal_app
         .merge(crate::posix::router(state.clone()))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -519,13 +553,90 @@ fn warn_if_sqlite_in_production(db: &DbPool, self_url: &str) {
     );
 }
 
+/// Unset (empty string or empty list) means the audit webhook endpoint boots silently closed; always a deployment bug.
+#[cfg(feature = "identity-ory")]
+fn check_audit_webhook_token(cfg: &AppConfig) {
+    if cfg.audit.webhook_token.is_unset() {
+        eprintln!(
+            "config error: audit.webhook_token must be set; the audit webhook endpoint \
+             requires bearer authentication. Set it in config.toml (or via \
+             FORSETI_AUDIT__WEBHOOK_TOKEN env var) and restart."
+        );
+        std::process::exit(1);
+    }
+    if let Err(msg) = cfg.audit.webhook_token.validate(&cfg.self_.url) {
+        eprintln!("config error: {msg}");
+        std::process::exit(1);
+    }
+    let weak = cfg.audit.webhook_token.weak_entries();
+    if weak > 0 {
+        tracing::warn!(
+            count = weak,
+            "audit.webhook_token entries are shorter than 32 bytes; \
+             the endpoint authenticates audit writes and session revocation"
+        );
+    }
+}
+
+/// Codes only reach users by mail, and a disabled mailer reports every send as delivered.
+#[cfg(feature = "identity-native")]
+fn require_native_mail(cfg: &AppConfig) {
+    if !cfg.email.as_ref().is_some_and(|e| e.enabled) {
+        eprintln!(
+            "config error: the native identity backend sends verification and recovery codes \
+             by mail; configure [email] with enabled = true and restart."
+        );
+        std::process::exit(1);
+    }
+}
+
+/// Longest accepted `[identity].session_lifespan_hours`: one year.
+#[cfg(feature = "identity-native")]
+const MAX_SESSION_LIFESPAN_HOURS: u32 = 8760;
+
+#[cfg(feature = "identity-native")]
+fn check_native_identity(identity: &crate::config::IdentityConfig) -> Result<(), String> {
+    use crate::identity_native::password::{MAX_LENGTH, MIN_LENGTH_FLOOR};
+    if !(1..=MAX_SESSION_LIFESPAN_HOURS).contains(&identity.session_lifespan_hours) {
+        return Err(format!(
+            "[identity].session_lifespan_hours must be between 1 and \
+             {MAX_SESSION_LIFESPAN_HOURS}; 0 ends every session as soon as it starts."
+        ));
+    }
+    if !(MIN_LENGTH_FLOOR..=MAX_LENGTH).contains(&identity.password_min_length) {
+        return Err(format!(
+            "[identity].password_min_length must be between {MIN_LENGTH_FLOOR} and {MAX_LENGTH}."
+        ));
+    }
+    Ok(())
+}
+
+/// The secret seals TOTP secrets and keys code MACs, so an ephemeral fallback is refused.
+#[cfg(feature = "identity-native")]
+pub(crate) fn native_cookie_secret(cfg: &AppConfig) -> Arc<[u8]> {
+    if cfg
+        .security
+        .cookie_secret
+        .as_deref()
+        .is_none_or(|s| s.trim().is_empty())
+    {
+        eprintln!(
+            "config error: [security].cookie_secret must be set; the native identity backend \
+             derives its encryption and MAC keys from it. Generate one with `openssl rand -hex \
+             32` (or via FORSETI_SECURITY__COOKIE_SECRET) and restart."
+        );
+        std::process::exit(1);
+    }
+    resolve_cookie_secret(cfg.security.cookie_secret.as_deref(), &cfg.self_.url)
+}
+
 /// Materialise the master cookie-signing secret. Hex string preferred (`openssl rand -hex 32`);
 /// a 64-char value that isn't valid hex hard-fails boot (typo guard), other lengths fall back
 /// to raw UTF-8 bytes; under 32 bytes hard-fails boot. Missing config falls back to 32
 /// per-process random bytes with a warning (cookies won't survive restart) on dev URLs, but
 /// hard-fails on a production-shaped URL: a per-process key silently rejects peers' cookies
 /// across an HA fleet.
-fn resolve_cookie_secret(configured: Option<&str>, self_url: &str) -> Arc<[u8]> {
+pub(crate) fn resolve_cookie_secret(configured: Option<&str>, self_url: &str) -> Arc<[u8]> {
     if let Some(raw) = configured.map(str::trim).filter(|s| !s.is_empty()) {
         let key: Box<[u8]> = match hex::decode(raw) {
             Ok(bytes) => bytes.into_boxed_slice(),
@@ -769,6 +880,28 @@ mod tests {
         ExtraFormAction, MAX_EXTRA_FORM_ACTION, allow_form_action_to, build_csp, csp_form_action,
         csp_origin_source, resolve_cookie_secret, worker_stale_threshold_secs,
     };
+
+    #[cfg(feature = "identity-native")]
+    #[test]
+    fn native_identity_bounds() {
+        use super::check_native_identity;
+        let ok = crate::config::IdentityConfig::default();
+        assert!(check_native_identity(&ok).is_ok());
+        for (hours, accepted) in [(0, false), (1, true), (8760, true), (8761, false)] {
+            let cfg = crate::config::IdentityConfig {
+                session_lifespan_hours: hours,
+                ..ok.clone()
+            };
+            assert_eq!(check_native_identity(&cfg).is_ok(), accepted, "{hours}");
+        }
+        for (len, accepted) in [(7, false), (8, true), (256, true), (257, false)] {
+            let cfg = crate::config::IdentityConfig {
+                password_min_length: len,
+                ..ok.clone()
+            };
+            assert_eq!(check_native_identity(&cfg).is_ok(), accepted, "{len}");
+        }
+    }
 
     #[test]
     fn worker_stale_threshold_scales_with_tick_and_floors_at_20() {

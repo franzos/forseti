@@ -12,8 +12,9 @@
 // Returns null when env vars are missing — tests should skip rather than
 // fail in that case.
 import type { Page } from '@playwright/test';
-import { computeTotp } from './totp';
+import { freshTotp } from './totp';
 import { signInAal1 } from './register';
+import { adminSessionCookies, isNative } from './identity';
 
 export interface AdminCreds {
   email: string;
@@ -32,15 +33,27 @@ export function adminCredsFromEnv(): AdminCreds | null {
 /**
  * Sign in the admin all the way to AAL2 (password + TOTP). Lands wherever
  * the after-hook redirects (usually `/`). Caller can then navigate to any
- * `/admin/*` URL.
+ * `/admin/*` URL. On native the page gets the shared admin session instead
+ * and stays where it is.
+ */
+export async function signInAdminAal2(page: Page, creds: AdminCreds): Promise<void> {
+  if (isNative) {
+    await page.context().addCookies(adminSessionCookies());
+    return;
+  }
+  await signInAdminWithTotp(page, creds);
+}
+
+/**
+ * The real password + TOTP sign-in behind {@link signInAdminAal2}.
  *
  * After a fresh AAL1 password submit, Kratos may either (a) drop us back
  * on `/login?aal=aal2` because the session needs step-up, or (b) skip
  * straight to a TOTP-only flow. Either way the cookie jar carries an
- * AAL1 `ory_kratos_session`; navigating to `/login?aal=aal2` always
- * surfaces the TOTP form for an enrolled user.
+ * AAL1 session; navigating to `/login?aal=aal2` always surfaces the TOTP
+ * form for an enrolled user.
  */
-export async function signInAdminAal2(page: Page, creds: AdminCreds): Promise<void> {
+export async function signInAdminWithTotp(page: Page, creds: AdminCreds): Promise<void> {
   await signInAal1(page, creds.email, creds.password);
 
   // The password step either landed us off `/login` with an AAL1 session, or
@@ -60,7 +73,7 @@ export async function signInAdminAal2(page: Page, creds: AdminCreds): Promise<vo
   // browser-side validity check only fires on visible required inputs and
   // Kratos templates hide the lookup_secret when the totp screen is showing.
   await totpInput.waitFor({ state: 'visible' });
-  await totpInput.fill(computeTotp(creds.totpSecret));
+  await totpInput.fill(await freshTotp(creds.totpSecret));
   await Promise.all([
     page.waitForURL((u) => !u.pathname.startsWith('/login')),
     page.locator('button[name="method"][value="totp"]').click(),

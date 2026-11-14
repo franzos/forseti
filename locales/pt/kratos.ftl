@@ -88,6 +88,7 @@ kratos-4000005 = A palavra-passe não pode ser utilizada porque { $reason }.
 kratos-4000006 = As credenciais fornecidas são inválidas, verifique se há erros ortográficos na sua palavra-passe ou nome de utilizador, endereço de e-mail ou número de telefone.
 kratos-4000007 = Já existe uma conta com o mesmo identificador (e-mail, telefone, nome de utilizador, ...).
 kratos-4000008 = O código de autenticação fornecido é inválido, tente novamente.
+kratos-4000010 = A conta ainda não está ativa. Esqueceu-se de verificar o seu endereço de e-mail?
 kratos-4000032 = A palavra-passe deve ter pelo menos { $min_length } caracteres, mas tem { $actual_length }.
 kratos-4000035 = Esta conta não existe ou não configurou o início de sessão com código.
 
@@ -111,3 +112,6 @@ kratos-4060006 = O código de recuperação é inválido ou já foi utilizado. T
 kratos-4070001 = O token de verificação é inválido ou já foi utilizado. Repita o fluxo.
 kratos-4070005 = O fluxo de verificação expirou, tente novamente.
 kratos-4070006 = O código de verificação é inválido ou já foi utilizado. Tente novamente.
+
+# --- Limitação de tentativas (9000xxx) ---
+kratos-9000001 = Demasiadas tentativas de início de sessão neste momento. Tente novamente dentro de alguns minutos.

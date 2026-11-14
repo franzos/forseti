@@ -8,11 +8,23 @@ Diagrams are [Mermaid](https://mermaid.js.org/) sequence diagrams. Code referenc
 
 ## Authentication Flows
 
-All user-facing auth flows are server-rendered by Forseti but driven by Kratos. Forseti never holds credentials — it forwards the browser's `Cookie` header to Kratos, fetches the flow JSON, projects it into Askama view-models (`flow_json::project` in `src/ory/flow_json.rs`; `GroupedNodes`, `InputView`, `ScriptView` in `src/flow_view.rs`), and renders a form whose `action` points directly back at Kratos's public API. Submissions go browser → Kratos; Kratos sets/clears the session cookie and 303s back to Forseti's `ui_url` for the next step.
+All user-facing auth flows are server-rendered by Forseti but driven by Kratos. Forseti never holds credentials — it forwards the browser's `Cookie` header to Kratos, fetches the flow JSON, projects it into Askama view-models (`flow_json::project` in `src/flow_json.rs`; `GroupedNodes`, `InputView`, `ScriptView` in `src/flow_view.rs`), and renders a form whose `action` points directly back at Kratos's public API. Submissions go browser → Kratos; Kratos sets/clears the session cookie and 303s back to Forseti's `ui_url` for the next step.
 
-Kratos returns 404/410 when a flow ID is unknown or expired and 403 when a settings flow needs a privileged re-auth. Both are surfaced as `FlowFetch::Gone` / `FlowFetch::PrivilegedRequired` (`src/backend/identity.rs:199`) and trigger a clean restart — handlers redirect the browser back to Kratos's `/self-service/<kind>/browser` init endpoint, preserving `return_to` / `aal` / `refresh`.
+Kratos returns 404/410 when a flow ID is unknown or expired and 403 when a settings flow needs a privileged re-auth. Both are surfaced as `FlowFetch::Gone` / `FlowFetch::PrivilegedRequired` (`src/backend/identity.rs:242`) and trigger a clean restart — handlers redirect the browser back to Kratos's `/self-service/<kind>/browser` init endpoint, preserving `return_to` / `aal` / `refresh`.
 
 Forseti's own CSRF (a double-submit cookie token, `src/csrf.rs`) only protects Forseti-owned POST endpoints (`/logout`, settings revocation, oauth consent submit). Kratos forms carry their own `_csrf` hidden input rendered straight from the flow JSON — Kratos validates it itself.
+
+### Native identity build
+
+With `--features identity-native` the same handlers (`src/auth/*`, `src/settings/*`) render the same templates, but `IdentityImpl` is `NativeBackend` (`src/identity_native/mod.rs`) and the flows live in Forseti's `identity_flows` table. Each flow is stored as a row with a JSON context; `flow_document` (`src/identity_native/flows.rs:884`) builds a Kratos-shaped document from it (`src/identity_native/ui.rs`) and `get_flow` (`src/identity_native/backend.rs:60`) runs it through the same `flow_json::project`, so node names, states and message ids match the Kratos fixtures in `tests/fixtures/kratos_flows/`.
+
+Shared machinery, used by every flow below:
+
+- **Routes** (`router`, `src/identity_native/routes.rs:43`, mounted in the CSRF-protected public router): `GET /self-service/{kind}/browser` (`init`, `src/identity_native/routes.rs:165`) creates a flow and 303s to `/{kind}?flow=<id>`; `POST /self-service/{kind}?flow=<id>` (`submit`, `src/identity_native/routes.rs:273`) handles the form; `GET /self-service/{verification,recovery,logout}` (`link`, `src/identity_native/routes.rs:199`) serves the mail link, the admin recovery link and logout. Every path is literal; there is no `{kind}` parameter. `flow_init_url` returns the relative init URL (`src/identity_native/backend.rs:56`), so the handlers' redirects land on Forseti.
+- **Init** (`init_flow`, `src/identity_native/flows.rs:666`): `return_to` is kept only when `safe_return_to` leaves it unchanged and it fits 2048 bytes. Login, registration, recovery and verification flows are bound to the SHA-256 of the browser's `forseti_csrf` token; settings flows to the session and identity.
+- **Submit** (`submit_flow`, `src/identity_native/flows.rs:1018`): `check` (`src/identity_native/flows.rs:766`) loads the flow and compares kind, expiry and binding; the form's `csrf_token` is checked with `csrf::verify_csrf`; then `dispatch` (`src/identity_native/flows.rs:457`) hands it to the per-kind module. The engine returns a `SubmitOutcome` (show the flow again, or redirect with cookies), the audit rows, and an optional after-effect; the route writes the audit rows with the request's `AuditCtx` and runs the after-effect. A missing or expired flow goes to `/error?id=self_service_flow_expired`, a foreign one to `/error?id=security_csrf_violation` (`src/identity_native/errors.rs`).
+- **Sessions** (`src/identity_native/session.rs`): `create` (`:181`) issues the `forseti_session` cookie (`__Host-` prefixed on https), `step_up` (`:308`) raises the AAL and rotates the token, `refresh` (`:330`) advances `authenticated_at`. `whoami` (`:412`) answers `InsufficientAal` for an AAL1 session of an identity with TOTP, which drives the existing step-up.
+- **Mail**: codes and their outbox rows are written in one transaction (`send_code`, `src/identity_native/codes.rs:79`); `spawn_worker` (`src/identity_native/mail.rs:185`) sends them through `mailer::send_text`.
 
 ### Registration
 
@@ -20,10 +32,10 @@ Forseti's own CSRF (a double-submit cookie token, `src/csrf.rs`) only protects F
 
 If the user already has a session, the handler short-circuits to `safe_return_to(query.return_to, "/")` (`src/web.rs:41`). Otherwise:
 
-- No `?flow=` → 302 to `<kratos_public>/self-service/registration/browser?return_to=...` (`flow_init_url`, `src/ory/backend.rs:117`). Kratos creates the flow, sets the continuity cookie, and 303s back to `/registration?flow=<id>`.
-- `?flow=<id>` present → fetch the flow JSON (`get_flow`, `src/ory/kratos.rs:43`) and render `templates/registration.html` via `render_registration` (`src/auth/registration.rs:76`).
+- No `?flow=` → 302 to `<kratos_public>/self-service/registration/browser?return_to=...` (`flow_init_url`, `src/ory/kratos_backend.rs:79`). Kratos creates the flow, sets the continuity cookie, and 303s back to `/registration?flow=<id>`.
+- `?flow=<id>` present → fetch the flow JSON (`get_flow`, `src/ory/kratos.rs:48`) and render `templates/registration.html` via `render_registration` (`src/auth/registration.rs:76`).
 
-The template renders a single form whose `action` is Kratos's `<kratos_public>/self-service/registration?flow=<id>` (extracted by `flow_json::project` at `src/ory/flow_json.rs:37`). Kratos's `selfservice.flows.registration.after.<method>.hooks: [session]` (`infra/kratos/kratos.yml`) auto-logs the new identity in for every method, so the browser lands on `/` immediately after a successful submit. Each method also ships a `web_hook` that fires Forseti's `/internal/audit/kratos?action=identity.created` receiver (on the internal listener — `[internal].bind`, defaults to `127.0.0.1:8081`) to record the event in the audit log. The Default-org floor is applied lazily on the user's first authenticated request — see "Default floor on first authenticated request" below.
+The template renders a single form whose `action` is Kratos's `<kratos_public>/self-service/registration?flow=<id>` (extracted by `flow_json::project` at `src/flow_json.rs:37`). Kratos's `selfservice.flows.registration.after.<method>.hooks: [session]` (`infra/kratos/kratos.yml`) auto-logs the new identity in for every method, so the browser lands on `/` immediately after a successful submit. Each method also ships a `web_hook` that fires Forseti's `/internal/audit/kratos?action=identity.created` receiver (on the internal listener — `[internal].bind`, defaults to `127.0.0.1:8081`) to record the event in the audit log. The Default-org floor is applied lazily on the user's first authenticated request — see "Default floor on first authenticated request" below.
 
 Kratos's progressive-registration mode means the form shape depends on which step the user is at — the first POST returns the same flow with additional method groups (password, passkey, webauthn). The template handles both shapes via `GroupedNodes::from_flow`.
 
@@ -80,8 +92,27 @@ Edge cases:
 
 - Validation errors (password too short, email taken) come back on the same flow with `messages` on individual nodes; rendered inline beside each input.
 - Expired flow (10m, `infra/kratos/kratos.yml:119`) → `FlowFetch::Gone` → restart redirect.
-- Unverified email after registration: the `session` hook lets the user in regardless, but `Session::needs_verification` (`src/backend/identity.rs:307`) drives a banner on the dashboard pointing at `/verification`.
+- Unverified email after registration: the `session` hook lets the user in regardless, but `Session::needs_verification` (`src/backend/identity.rs:350`) drives a banner on the dashboard pointing at `/verification`.
 - CSRF violation on submit → Kratos redirects to `/error?id=<error_id>` (`flows.error.ui_url`, `infra/kratos/kratos.yml:93-94`), handled by `error_page` (`src/auth/error.rs:36`).
+
+#### Native build
+
+`GET /self-service/registration/browser` and `POST /self-service/registration` sit behind the `[auth].registration_*` limiters. `submit` (`src/identity_native/flows/registration.rs:32`) has two steps, as Kratos's progressive registration: step 1 (`profile`, `:83`) validates and stores the traits on the flow; step 2 (`credential`, `:98`) checks the password policy (length, similarity to the address, optional breach check), hashes it with Argon2id and inserts the identity and its password credential in one transaction (`store::create_with_password`). A taken address gives message 4000007 and returns to step 1. `finish` (`:176`) then issues an AAL1 session, creates a verification flow in `sent_email` with the same `return_to` and queues the code mail. The route sets the session cookie, writes `identity.created` and 303s to `/verification?flow=<id>`.
+
+```mermaid
+sequenceDiagram
+    participant B as Browser
+    participant P as Forseti
+    participant DB as Forseti DB
+
+    B->>P: POST /self-service/registration?flow=abc (traits)
+    P->>DB: save traits on flow
+    P-->>B: 303 /registration?flow=abc (password step)
+    B->>P: POST /self-service/registration?flow=abc (password)
+    P->>DB: identity + credential (one transaction)
+    P->>DB: session, verification flow, code + outbox row
+    P-->>B: 303 /verification?flow=def (Set-Cookie: forseti_session)
+```
 
 ### Login
 
@@ -92,7 +123,7 @@ The handler accepts three meaningful query params: `flow`, `return_to`, `aal`, `
 1. `aal=aal2` requested but the current session is at `aal1` (step-up). This fires for an OAuth client's `acr_values`, **and** for the 2FA enforcement bounce — any enrolled identity whose AAL1 session is 403'd by Kratos's `session.whoami.required_aal: highest_available` gets redirected here by `RequireSession` (see [AAL enforcement model](#aal-enforcement-model) below). Without this carve-out the user would loop between the protected page (or `/oauth/login`) and `/login`.
 2. `refresh=true` (privileged-session re-auth bouncing back from `/settings/password` or similar). Without this the user would livelock at `privileged_session_max_age`.
 
-Both fall through to `flow_init_url` (`src/ory/backend.rs:117`) so Kratos starts a flow that demands the appropriate credential.
+Both fall through to `flow_init_url` (`src/ory/kratos_backend.rs:79`) so Kratos starts a flow that demands the appropriate credential.
 
 Render path matches registration: render `templates/login.html` via `render_login` (`src/auth/login.rs:123`). The flow JSON's `action` URL points at `<kratos_public>/self-service/login?flow=<id>` and the form submits directly.
 
@@ -116,7 +147,7 @@ Same `groups.oidc` rendering as registration. Clicking a provider button POSTs t
 
 #### 2FA / AAL2 step-up
 
-When an OAuth client requests `acr_values=aal2` (handled in `oauth_login`, `src/oauth/login.rs:22` — out of scope for this section), or when something else demands a stronger session, the user lands on `/login?aal=aal2&return_to=...`. The handler forces Kratos to issue a fresh login flow with `aal=aal2` in the init URL (`src/ory/backend.rs:117`). Kratos then renders TOTP / lookup_secret / webauthn nodes in `groups.other` (no dedicated group slot — they fall through `GroupedNodes::from_flow` at `src/flow_view.rs:99`). The template's `groups.other` branch (`templates/login.html:99-117`) renders these generically.
+When an OAuth client requests `acr_values=aal2` (handled in `oauth_login`, `src/oauth/login.rs:22` — out of scope for this section), or when something else demands a stronger session, the user lands on `/login?aal=aal2&return_to=...`. The handler forces Kratos to issue a fresh login flow with `aal=aal2` in the init URL (`src/ory/kratos_backend.rs:79`). Kratos then renders TOTP / lookup_secret / webauthn nodes in `groups.other` (no dedicated group slot — they fall through `GroupedNodes::from_flow` at `src/flow_view.rs:99`). The template's `groups.other` branch (`templates/login.html:99-117`) renders these generically.
 
 #### AAL enforcement model
 
@@ -172,6 +203,31 @@ Edge cases:
 - Wrong password → flow re-renders with `messages` on the password node.
 - Account doesn't exist → Kratos returns a generic "credentials invalid" message on `flow_messages` (no user enumeration).
 
+#### Native build
+
+`POST /self-service/login` is limited per client IP (`[identity].login_ip_rate_per_minute` / `_per_hour`). `init_flow` (`src/identity_native/flows.rs:666`) creates one of three flows, and `submit` (`src/identity_native/flows/login.rs:42`) picks the matching path:
+
+- **Password** (no session): `password_login` (`:162`). The per-address attempt counter is checked before the lookup; unknown address and wrong password both run one Argon2 verify and answer 4000006; an unverified address answers 4000010, only after the password verified. Success marks the flow spent, issues an AAL1 session (`[{password, aal1, now}]`) and audits `auth.login`.
+- **Second factor** (`aal=aal2` on an AAL1 session): `second_factor` (`:270`) takes `totp_code` or `lookup_secret`, counted per identity. A TOTP step at or below the last accepted one is refused (`consume_totp`, `:334`); a backup code is marked used with a compare-and-swap (`consume_lookup`, `:360`). Success calls `session::step_up`, which raises the session to AAL2 and moves it to a new token; no `auth.login` row, as on the Ory build. For an identity without TOTP the flow carries only message 1010004.
+- **Refresh** (`refresh=true` on a session): `refresh` (`:223`) takes the password of the session's identity and advances `authenticated_at` on the same session, keeping its token and AAL, then audits `auth.login`.
+
+The flow's `session_id` ties second-factor and refresh flows to the session that started them; another session's submit is refused as foreign.
+
+```mermaid
+sequenceDiagram
+    participant B as Browser
+    participant P as Forseti
+    participant DB as Forseti DB
+
+    B->>P: POST /self-service/login?flow=abc (identifier, password)
+    P->>DB: Argon2 verify, issue session (aal1)
+    P-->>B: 303 return_to (Set-Cookie: forseti_session)
+    Note over B,P: identity with TOTP: whoami InsufficientAal → /login?aal=aal2
+    B->>P: POST /self-service/login?flow=xyz (totp_code)
+    P->>DB: step_up: aal2, new token
+    P-->>B: 303 return_to (Set-Cookie: forseti_session=new)
+```
+
 ### Recovery (Password Reset)
 
 `GET /recovery` — `recovery` handler at `src/auth/recovery.rs:30`.
@@ -201,7 +257,7 @@ Email recovery alone does **not** bypass 2FA. With `selfservice.flows.settings.r
 
 The full path is: email recovery → AAL1 session → step up with the second factor *or* a `lookup_secret` recovery code (either satisfies AAL2) → back to the focused password page → reset. Forseti keeps the password handoff intact across the step-up by preserving the `?flow=<settings_id>` in the step-up's `return_to`, so the user returns to `settings_password_handoff.html` after clearing AAL2 rather than a generic settings or dashboard view.
 
-This is also why an email inbox is *not* enough to defeat 2FA: whoever controls the inbox gets only an AAL1 session, which can't strip the second factor (settings is AAL2-gated) and can't reset the password without first presenting a real second factor or recovery code. A user who has lost their device, has no recovery codes, and forgot their password is locked out of self-service by design — the escape hatch is an admin-minted recovery link/code (`admin_create_recovery_code`, `src/ory/kratos.rs:738`), see the operator guide's break-glass section.
+This is also why an email inbox is *not* enough to defeat 2FA: whoever controls the inbox gets only an AAL1 session, which can't strip the second factor (settings is AAL2-gated) and can't reset the password without first presenting a real second factor or recovery code. A user who has lost their device, has no recovery codes, and forgot their password is locked out of self-service by design — the escape hatch is an admin-minted recovery link/code (`admin_create_recovery_code`, `src/ory/kratos.rs:713`), see the operator guide's break-glass section.
 
 ```mermaid
 sequenceDiagram
@@ -249,7 +305,34 @@ Edge cases:
 - Expired code → `flow_messages` carries the error; user can request a new code.
 - Privileged window lapses before the user submits the new password → JS replaces the countdown with "Your recovery window expired. Start again" linking to `/recovery` (`templates/settings_password_handoff.html:94-100`).
 - `/recovery` accessed by an already-signed-in user → no short-circuit; Kratos handles re-auth itself.
-- Admin-issued recovery codes: operators can mint a one-shot code via the admin UI (`admin_create_recovery_code`, `src/ory/kratos.rs:738`) and hand it over out-of-band — same `/recovery` flow, code path only.
+- Admin-issued recovery codes: operators can mint a one-shot code via the admin UI (`admin_create_recovery_code`, `src/ory/kratos.rs:713`) and hand it over out-of-band — same `/recovery` flow, code path only.
+
+#### Native build
+
+`POST /self-service/recovery` shares a per-IP limit with verification submits. `submit` (`src/identity_native/flows/recovery.rs:23`) has two inputs:
+
+- **Email**: `request_code` (`src/identity_native/flows/verification.rs:80`) moves the flow to `sent_email` for every address. A code (6 digits, 15 minutes, 5 guesses) and its mail are queued only for an active identity with that address and while the address is under its hourly mail quota; otherwise the flow's earlier code is dropped. The mail carries the code only, no link.
+- **Code**: `check_code` (`:40`) spends one guess. A match marks the address verified (a mailed code proved the mailbox), marks the flow spent, issues an AAL1 session with method `code_recovery`, and `handoff` (`:113`) creates a settings flow with `recovery_handoff` set and a `request_url` containing `/self-service/recovery`, so `settings_section_from_flow` routes it to the password page and the handoff template shows as on the Ory build. The route writes `password.recovered` and 303s to `/settings?flow=<id>`.
+
+An identity with TOTP still needs AAL2 for settings, so the recovery session steps up first, exactly as above.
+
+**Admin recovery code.** `admin_create_recovery_code` (`src/identity_native/backend.rs:247`) calls `admin_code` (`src/identity_native/flows/recovery.rs:131`): it refuses an inactive identity, drops the identity's earlier recovery codes, and creates a recovery flow in `sent_email` with no binding, a code that is returned instead of mailed, and the link `<self>/self-service/recovery?flow=<id>`. `GET /self-service/recovery?flow=` (`link`) only sets the CSRF cookie and sends the browser to `/recovery?flow=<id>`; a GET never binds, and an unbound flow renders for any browser (it shows no identity data). The first CSRF-valid submit binds the flow to that browser's token (`adopt`, `src/identity_native/flows.rs:841`, a compare-and-swap on a NULL binding); later browsers get the expired-flow error. A code from an admin proves no mailbox, so it leaves the address's verified state alone.
+
+```mermaid
+sequenceDiagram
+    participant B as Browser
+    participant P as Forseti
+    participant DB as Forseti DB
+    participant M as Mail worker
+
+    B->>P: POST /self-service/recovery?flow=abc (email)
+    P->>DB: code + outbox row (one transaction)
+    M->>M: send code
+    P-->>B: 303 /recovery?flow=abc (sent_email)
+    B->>P: POST /self-service/recovery?flow=abc (code)
+    P->>DB: use code, session (code_recovery, aal1), settings flow
+    P-->>B: 303 /settings?flow=<settings_id> (Set-Cookie: forseti_session)
+```
 
 ### Email Verification
 
@@ -263,9 +346,9 @@ Three template states (`templates/verification.html:5-15`):
 - `sent_email` — code input.
 - `passed_challenge` — success message. When the flow carries a `return_to` (registration started from an OAuth login or an invite link, and Kratos threads it onto the verification flow), the page offers it as the primary "Continue" (`continue_href`, `src/auth/verification.rs`), so the user resumes the OAuth login or lands back on the invite instead of the dashboard. The target is pinned to Forseti's own origin with `safe_return_to` on top of Kratos's `allowed_return_urls` check; without one, the footer link below is shown as before.
 
-**Logged-in short-circuit.** The handler does an optional `whoami` (`src/auth/verification.rs:43`). When the request carries a valid session and the flow is sitting at `choose_method` with an unverified address on that identity, Forseti POSTs `method=code` + the session email + the flow's CSRF token to Kratos's `ui.action` server-side (`verify_known_email`, `src/ory/kratos.rs:157`), then bounces the browser back to the same flow ID — by then Kratos has transitioned the flow to `sent_email` and the user lands directly on the code-entry screen. Failure (transport, CSRF mismatch, etc.) falls through to the regular template render, so the worst-case UX is the form they'd see today. The footer's back link follows the same signal: `is_logged_in` switches "Back to sign in" → "Back to dashboard".
+**Logged-in short-circuit.** The handler does an optional `whoami` (`src/auth/verification.rs:43`). When the request carries a valid session and the flow is sitting at `choose_method` with an unverified address on that identity, Forseti POSTs `method=code` + the session email + the flow's CSRF token to Kratos's `ui.action` server-side (`verify_known_email`, `src/ory/kratos.rs:162`), then bounces the browser back to the same flow ID — by then Kratos has transitioned the flow to `sent_email` and the user lands directly on the code-entry screen. Failure (transport, CSRF mismatch, etc.) falls through to the regular template render, so the worst-case UX is the form they'd see today. The footer's back link follows the same signal: `is_logged_in` switches "Back to sign in" → "Back to dashboard".
 
-Verification is **not enforced** at sign-in time (`infra/kratos/kratos.yml:122-128`). The playground deliberately uses a soft prompt: `Session::needs_verification` (`src/backend/identity.rs:307`) returns true while any of the identity's `verifiable_addresses` has `verified=false`. The dashboard renders a banner that links to `/verification`, and the profile page (`templates/settings_profile.html`) surfaces a "Not verified · Send verification email →" hint below the email field via the `email_verified` flag on `SettingsProfileTemplate`. Operators who need hard enforcement (banks, healthcare) can add `{ hook: show_verification_ui }` to each registration method.
+Verification is **not enforced** at sign-in time (`infra/kratos/kratos.yml:122-128`). The playground deliberately uses a soft prompt: `Session::needs_verification` (`src/backend/identity.rs:350`) returns true while any of the identity's `verifiable_addresses` has `verified=false`. The dashboard renders a banner that links to `/verification`, and the profile page (`templates/settings_profile.html`) surfaces a "Not verified · Send verification email →" hint below the email field via the `email_verified` flag on `SettingsProfileTemplate`. Operators who need hard enforcement (banks, healthcare) can add `{ hook: show_verification_ui }` to each registration method.
 
 Users who registered through Apple, or through Google with a Gmail or Workspace address, never see either prompt — their address arrives already verified (see [OIDC / social registration](#oidc--social-registration)), so there's nothing for them to confirm. Other Google addresses, GitHub and Microsoft users get the banner like password registrations do.
 
@@ -307,6 +390,28 @@ Edge cases:
 - Expired link → `/error?id=<error_id>`, handled by `error_page`. `extract_error_strings` (`src/auth/error.rs:80`) maps `self_service_flow_expired` → "Link expired".
 - Reused link → same expired-link path (Kratos's flow.error.ui_url).
 
+#### Native build
+
+`submit` (`src/identity_native/flows/verification.rs:20`) takes an email or a code. An email goes through `request_code` (`:80`), as recovery does, but mails only an address that is not verified yet. A code goes to `check_code` (`:108`): a match sets `email_verified_at` for the address the code was mailed to (and only that one), moves the flow to `passed_challenge` (`passed`, `:138`, which retries the save until it lands) and audits `verification.completed`. No session is issued, so the flow is not bound to a browser on submit; the code is the proof.
+
+- **Logged-in short-circuit**: `verify_known_email` (`src/identity_native/backend.rs:88`) calls `request_for_known` (`src/identity_native/flows/verification.rs:155`), which does the email step in-process for the session's address.
+- **Mail link**: the mail carries `<self>/self-service/verification?flow=<id>&code=<code>`. `GET` on it (`link`, `src/identity_native/routes.rs:199`) neither verifies nor spends a guess: `prefill_verification_code` (`src/identity_native/flows.rs:1073`) seals the code into the flow for the browser that followed the link, and the page shows it filled in for the user to submit.
+- **Registration and address changes** create the flow already in `sent_email` with the code queued, and send the browser straight to `/verification?flow=<id>`.
+
+```mermaid
+sequenceDiagram
+    participant B as Browser
+    participant P as Forseti
+    participant DB as Forseti DB
+
+    B->>P: GET /self-service/verification?flow=abc&code=123456 (mail link)
+    P->>DB: seal code into flow (prefill)
+    P-->>B: 303 /verification?flow=abc&code=123456
+    B->>P: POST /self-service/verification?flow=abc (code)
+    P->>DB: use code, set email_verified_at
+    P-->>B: 303 /verification?flow=abc (passed_challenge)
+```
+
 ### Logout
 
 `POST /logout` — `logout` handler at `src/auth/logout.rs:26`. POST-only on purpose so link prefetchers, scanners, and pasted URLs cannot terminate a session.
@@ -314,7 +419,7 @@ Edge cases:
 Steps:
 
 1. Verify Forseti's own double-submit CSRF token (`csrf::verify_csrf`, `src/csrf.rs`). 403 on mismatch.
-2. Forward the cookies to Kratos's `/self-service/logout/browser` (`fetch_logout_url`, `src/ory/kratos.rs:918`). Kratos returns `{ logout_url: "...&logout_token=..." }` — the URL embeds a single-use token.
+2. Forward the cookies to Kratos's `/self-service/logout/browser` (`fetch_logout_url`, `src/ory/kratos.rs:897`). Kratos returns `{ logout_url: "...&logout_token=..." }` — the URL embeds a single-use token.
 3. End the Hydra login sessions this browser signed in to, best-effort (`op_sessions::end_op_sessions_for_browser`, `src/oauth/op_sessions.rs`). `/oauth/login` records each accepted Hydra `sid` against the subject and the Kratos session in `hydra_login_sessions`, because Hydra only sends back-channel logout when a login session is revoked by `sid` and has no API to list a subject's sessions. Each recorded `sid` is revoked at Hydra, which notifies every client with a `backchannel_logout_uri`; the subject's sessions in other browsers and its consent grants stay, so offline refresh tokens survive a plain logout (Back-Channel Logout 1.0 §2.7). Logout then sweeps the subject's `sid`s whose recorded Kratos session is no longer active, such as one the browser rotated away from (`op_sessions::sweep_dead_browser_sessions`); a failed Kratos lookup skips the sweep. The account switcher (both the switcher and the consent-screen "not you?") ends one Kratos session's `sid`s the same way.
 
    A security event ends `sid`s and also revokes their grants (RFC 9700 §4.14.2): single-session revoke and revoke-others on the Sessions page, the admin single-session revoke, and a password change (which spares the current browser). `/oauth/consent` records each accepted consent request against its `sid` in `hydra_consent_grants`, and ending a `sid` this way revokes each recorded grant at Hydra by `consent_request_id`, falling back to Hydra's consent listing by login session when none is recorded. Admin disable, identity delete and account self-deletion end every recorded `sid` of the subject, then revoke the subject's login and consent sessions as a backstop for sessions recorded before the table existed; those subject-wide revokes kill the grants but send no back-channel logout.
@@ -352,6 +457,24 @@ Edge cases:
 - No session cookie on request → `fetch_logout_url` returns `Ok(None)` (handles the 401/403 from Kratos), handler redirects to `/login`.
 - The "Sign out without changing" button in the recovery handoff template POSTs to `/logout` with the same CSRF token — same path.
 
+#### Native build
+
+`POST /logout` runs the same handler and the same OP-session steps. `fetch_logout_url` (`src/identity_native/backend.rs:48`) returns `/self-service/logout?token=<mac>`, where the token is an HMAC of the session id under the logout subkey (`logout_url`, `src/identity_native/session.rs:749`). `GET /self-service/logout` (`link`, `src/identity_native/routes.rs:199`) calls `logout` (`src/identity_native/flows.rs:1099`): a token matching the cookie's session revokes it; the response clears the session cookie and 303s to `/login`. A browser without a session gets the same redirect; a wrong token goes to `/error?id=security_csrf_violation`.
+
+```mermaid
+sequenceDiagram
+    participant B as Browser
+    participant P as Forseti
+    participant H as Hydra
+
+    B->>P: POST /logout (cookie, _csrf)
+    P->>H: revoke this browser's recorded sids
+    P-->>B: 302 /self-service/logout?token=mac
+    B->>P: GET /self-service/logout?token=mac
+    P->>P: revoke session
+    P-->>B: 303 /login (Set-Cookie: forseti_session=; Expires=1970)
+```
+
 ---
 
 ## Settings & Account Management Flows
@@ -380,6 +503,19 @@ behaviours uniformly:
 CSRF cookies are issued via `csrf::ensure_csrf_cookie` on every render and
 verified on every POST handler defined in this app (Kratos handles its own
 CSRF for the flow form itself, since the form action is Kratos's public URL).
+
+### Native build
+
+The pages and `fetch_settings_subpage` are the same; the flow comes from `init_flow` (`src/identity_native/flows.rs:666`) through `create_settings_flow` (`src/identity_native/flows.rs:542`). One flow holds every group (profile, password, TOTP, and backup codes once TOTP is enrolled), is tied to the session and identity that opened it, and carries the page URL as `return_to`. GET and POST refuse an AAL1 session of an identity with TOTP (`PrivilegedRequired(Aal2Required)`, then the step-up), and another session's flow is refused as foreign.
+
+`POST /self-service/settings` is limited per client IP. `submit` (`src/identity_native/flows/settings.rs:39`) dispatches on `method`:
+
+- `profile` (`:201`): a name change saves at once. A new address needs the privileged window (else 303 to `/login?refresh=true&return_to=<page>`), the per-identity change quota and the address's mail quota (9000001 when either is spent); the address, the cleared `email_verified_at`, the retired old codes, and a new verification flow with its code and outbox row are written in one transaction (`store::update_profile`). A taken address gives 4000007 and writes nothing. Audits `profile.updated`.
+- `password` (`:253`): privileged window and change quota, then policy, Argon2id hash and credential replace. Audits `password.changed`; the route then calls `end_op_sessions_for_subject` sparing the current session, so the other browsers' OP sessions and grants end while their identity sessions stay.
+- `totp` (`:294`): a code for the pending secret sealed on the flow stores the credential (the enrolment step counts as used), raises the current session to AAL2 with a new token and audits `mfa.totp.enrolled`; `totp_unlink` deletes TOTP and backup codes and audits `mfa.totp.disabled`.
+- `lookup_secret` (`:348`): regenerate keeps 10 new codes sealed on the flow and shows them; confirm clears them from the flow, then stores their MACs (`mfa.lookup.regenerated`), so one set can be stored only once; disable deletes them (`mfa.lookup.disabled`).
+
+A stored change marks the flow `success` (message 1050001) and redirects to the flow's `return_to`, or back to the flow without one; a concurrent save of the flow is reloaded and retried.
 
 ### Settings overview
 
@@ -412,10 +548,10 @@ flow with a "Your changes have been saved" message and stays on the same UI URL.
 
 Ory calls (via `fetch_settings_subpage`):
 
-- `kratos::whoami` (`src/ory/kratos.rs:23`)
-- `flow_init_url` for `FlowKind::Settings` (`src/ory/backend.rs:117`) when
+- `kratos::whoami` (`src/ory/kratos.rs:28`)
+- `flow_init_url` for `FlowKind::Settings` (`src/ory/kratos_backend.rs:79`) when
   no flow ID is present
-- `kratos::get_flow` (`src/ory/kratos.rs:43`)
+- `kratos::get_flow` (`src/ory/kratos.rs:48`)
 
 ### Password
 
@@ -515,11 +651,11 @@ session from `whoami` and stamps a "Current" badge on it
 Ory calls:
 
 - `kratos::whoami`
-- `kratos::list_my_sessions` (`src/ory/kratos.rs:333`)
+- `kratos::list_my_sessions` (`src/ory/kratos.rs:305`)
 
 `POST /settings/sessions/{id}/revoke` — `settings_sessions_revoke`
 (`src/settings/sessions.rs:152`). Verifies CSRF, re-checks the session, calls
-`kratos::revoke_session` (`src/ory/kratos.rs:342`), ends the Hydra login
+`kratos::revoke_session` (`src/ory/kratos.rs:317`), ends the Hydra login
 sessions that Kratos session signed in to and revokes their grants, since
 revoking a session is a security event (see [Logout](#logout)), and 303s
 back to the list with a flash cookie set ("Session signed out." / "Could not
@@ -527,7 +663,7 @@ sign out that session.").
 
 `POST /settings/sessions/revoke-others` — `settings_sessions_revoke_others`
 (`src/settings/sessions.rs:188`). Calls `kratos::revoke_other_sessions`
-(`src/ory/kratos.rs:351`) which returns the count of revoked sessions, then
+(`src/ory/kratos.rs:326`) which returns the count of revoked sessions, then
 ends every recorded Hydra `sid` of the user except this browser's and revokes
 their grants; flash message reflects the number.
 
@@ -573,13 +709,13 @@ the app re-prompt with the smaller scope set on next sign-in.
 
 Self-service values for registry rows that name an upstream issuer, client id and value template (see the operator guide, "Self-service resource claims"). Forseti-owned, no Kratos settings flow: Forseti is a public OIDC client of the row's issuer, and the verified value goes into `metadata_admin.<claim>` through the Kratos admin API. Handlers in `src/settings/resource_claims.rs`, routes in `src/settings/mod.rs`.
 
-`GET /settings/resource-claims`: `settings_resource_claims` (`src/settings/resource_claims.rs:118`), template `templates/settings_resource_claims.html`. Rows come from `resource_registry::list_self_service` (`src/resource_registry.rs:353`, enabled rows with a self-service claim) filtered by `visible_to` (`src/resource_registry.rs:367`: default-org rows for everyone, named-org rows for members). `kratos::admin_get_identity` plus `Identity::metadata_admin_has_key` (`src/backend/identity.rs:267`) decide Linked / Not linked. A value input shows only when the template has `{uuid}`. The response extends CSP `form-action` with the issuer origins (`app::allow_form_action_to`, `src/app.rs:686`) because the start POST 303s there.
+`GET /settings/resource-claims`: `settings_resource_claims` (`src/settings/resource_claims.rs:118`), template `templates/settings_resource_claims.html`. Rows come from `resource_registry::list_self_service` (`src/resource_registry.rs:353`, enabled rows with a self-service claim) filtered by `visible_to` (`src/resource_registry.rs:367`: default-org rows for everyone, named-org rows for members). `kratos::admin_get_identity` plus `Identity::metadata_admin_has_key` (`src/backend/identity.rs:310`) decide Linked / Not linked. A value input shows only when the template has `{uuid}`. The response extends CSP `form-action` with the issuer origins (`app::allow_form_action_to`, `src/app.rs:686`) because the start POST 303s there.
 
 `POST /settings/resource-claims/{id}/start`: `settings_resource_claims_start` (`src/settings/resource_claims.rs:308`), CSRF-checked, behind a per-IP bucket of 30 per 10 minutes (`resource_claims_router`, `src/settings/mod.rs:130`) and a per-identity `KeyedQuota` of 10 per 10 minutes. `usable_row` (`src/settings/resource_claims.rs:203`) re-checks enabled, configured and visible. The submitted value must match the template (`claim_template::Template::matches`, `src/claim_template.rs:80`). Discovery (`oidc_rp::discovery::discover`, `src/oidc_rp/discovery.rs:152`) requires the document's `issuer` to equal the configured one and every endpoint on the issuer's origin. A fresh `state` goes into the signed `forseti_claim_link` cookie (`{s,i,r,v}`: state, identity, row, value; 10 minutes, `Path=/settings/resource-claims`, `SameSite=Lax`); the PKCE verifier and nonce are HMACs of `state` under `oidc_rp::link_key(cookie_secret)` (`src/oidc_rp/mod.rs:25`), so the cookie carries no secret.
 
-`GET /settings/resource-claims/callback`: `settings_resource_claims_callback` (`src/settings/resource_claims.rs:397`) and `finish_link` (`src/settings/resource_claims.rs:415`), per-IP bucket of 60 per 10 minutes (`src/settings/mod.rs:145`). Every outcome clears the link cookie. A missing or invalid cookie is logged (`link_missing`) and not audited; with a verified cookie, every failure writes `resource.claim.link_failed` with its reason, in check order: `no_session` (no bounce through login, the code would sit in the return URL), `state_mismatch`, `identity_mismatch`, `upstream_error`, `code_missing`, `not_available` / `template_invalid` / `invalid_value` (the row is re-read; nothing about it is taken from the cookie), `discovery_failed`, `issuer_mismatch` (RFC 9207 `iss`), `exchange_failed`, `jwks_failed`, `id_token_invalid` (`oidc_rp::id_token::verify`, `src/oidc_rp/id_token.rs:78`: RS256/ES256, `iss`, `aud`, `azp`, `exp`, `iat`, nonce), `sub_unrenderable`, `value_mismatch`, `write_failed`. Success writes the key with `kratos::admin_set_metadata_admin_key` (`src/ory/kratos.rs:696`) and audits `resource.claim.linked` (critical).
+`GET /settings/resource-claims/callback`: `settings_resource_claims_callback` (`src/settings/resource_claims.rs:397`) and `finish_link` (`src/settings/resource_claims.rs:415`), per-IP bucket of 60 per 10 minutes (`src/settings/mod.rs:145`). Every outcome clears the link cookie. A missing or invalid cookie is logged (`link_missing`) and not audited; with a verified cookie, every failure writes `resource.claim.link_failed` with its reason, in check order: `no_session` (no bounce through login, the code would sit in the return URL), `state_mismatch`, `identity_mismatch`, `upstream_error`, `code_missing`, `not_available` / `template_invalid` / `invalid_value` (the row is re-read; nothing about it is taken from the cookie), `discovery_failed`, `issuer_mismatch` (RFC 9207 `iss`), `exchange_failed`, `jwks_failed`, `id_token_invalid` (`oidc_rp::id_token::verify`, `src/oidc_rp/id_token.rs:78`: RS256/ES256, `iss`, `aud`, `azp`, `exp`, `iat`, nonce), `sub_unrenderable`, `value_mismatch`, `write_failed`. Success writes the key with `kratos::admin_set_metadata_admin_key` (`src/ory/kratos.rs:671`) and audits `resource.claim.linked` (critical).
 
-`POST /settings/resource-claims/{id}/remove`: `settings_resource_claims_remove` (`src/settings/resource_claims.rs:570`), CSRF-checked, not rate-limited, same `usable_row` gate. `kratos::admin_remove_metadata_admin_key` (`src/ory/kratos.rs:708`) patches out the key and reports whether it held a value: if so, `resource.claim.removed` (critical); if not, "nothing to remove" and no audit row. Failures are logged, not audited.
+`POST /settings/resource-claims/{id}/remove`: `settings_resource_claims_remove` (`src/settings/resource_claims.rs:570`), CSRF-checked, not rate-limited, same `usable_row` gate. `kratos::admin_remove_metadata_admin_key` (`src/ory/kratos.rs:683`) patches out the key and reports whether it held a value: if so, `resource.claim.removed` (critical); if not, "nothing to remove" and no audit row. Failures are logged, not audited.
 
 ```mermaid
 sequenceDiagram
@@ -639,7 +775,7 @@ its own card on the page:
   `lookup_secret_regenerate` / `lookup_secret_disable` / `lookup_secret_reveal`
   + a `lookup_secret_confirm` button. The single render-pass right after
   regeneration carries the plaintext codes in `flow.lookup_codes`
-  (`lookup_codes`, `src/ory/flow_json.rs:303`) — `lookup_just_regenerated` distinguishes this
+  (`lookup_codes`, `src/flow_json.rs:303`) — `lookup_just_regenerated` distinguishes this
   render-once state. Subsequent fetches drop the plaintext.
 - **WebAuthn / Passkeys** (`webauthn` + `passkey` groups merged) — Kratos
   emits a `webauthn_register_displayname` text input and a `button`-typed
@@ -1506,7 +1642,7 @@ POST path:
    and nothing is torn down.
 3. Best-effort Kratos session teardown — if the cookie's present, fetch
    the Kratos logout URL via `kratos::fetch_logout_url`
-   (`src/ory/kratos.rs:918`) and hit it server-side. We don't follow Kratos's
+   (`src/ory/kratos.rs:897`) and hit it server-side. We don't follow Kratos's
    post-logout redirect because Hydra's redirect is authoritative for
    this flow.
 4. `hydra::accept_logout_request` → returns the RP-specified
@@ -1625,7 +1761,7 @@ the only entry point (SP-initiated only — no IdP-initiated flow in v1).
 5. Org membership ensured (`member` role; best-effort — a DB blip must
    not abort an otherwise valid login).
 6. Session establishment: `admin_create_recovery_link`
-   (`src/ory/kratos.rs:751`, 15-minute TTL) mints a Kratos recovery
+   (`src/ory/kratos.rs:726`, 15-minute TTL) mints a Kratos recovery
    (magic) link — OSS Kratos has no admin session-creation API, so the
    browser redeems the link and receives a native `ory_kratos_session`
    cookie. **Requires `selfservice.methods.link.enabled: true` in the
@@ -1876,13 +2012,13 @@ organizations.
 
 Ory calls (all `kratos::*`):
 
-- `list_identities(limit=50, page_token, filter_email)` — `src/ory/kratos.rs:482`
-- `admin_get_identity_full(id)` — `src/ory/kratos.rs:546`
-- `list_identity_sessions(id)` — `src/ory/kratos.rs:361` (per-identity, surfaced
+- `list_identities(limit=50, page_token, filter_email)` — `src/ory/kratos.rs:457`
+- `admin_get_identity_full(id)` — `src/ory/kratos.rs:521`
+- `list_identity_sessions(id)` — `src/ory/kratos.rs:336` (per-identity, surfaced
   in the show view)
-- `admin_create_recovery_code(id)` — `src/ory/kratos.rs:738`
-- `admin_update_identity_state(id, Active|Inactive)` — `src/ory/kratos.rs:614`
-- `admin_delete_identity(id)` — `src/ory/kratos.rs:718`, called from
+- `admin_create_recovery_code(id)` — `src/ory/kratos.rs:713`
+- `admin_update_identity_state(id, Active|Inactive)` — `src/ory/kratos.rs:589`
+- `admin_delete_identity(id)` — `src/ory/kratos.rs:693`, called from
   inside `delete_identity`
 
 The show view aggregates: traits (pretty-printed JSON), enrolled
@@ -1944,7 +2080,7 @@ Templates: `sessions_list.html`, `confirm.html`.
 Ory calls:
 
 - `kratos::admin_list_all_sessions(limit=100, page_token, active_only)` —
-  `src/ory/kratos.rs:824`
+  `src/ory/kratos.rs:799`
 - `kratos::admin_get_session(id)` (identity expanded), then
   `kratos::admin_revoke_session(id)` — `src/ory/kratos.rs`
 
@@ -2009,7 +2145,7 @@ submitted identity field to a canonical UUID — accepting **either** a UUID
 - `crate::format::looks_like_uuid` (`src/format.rs:107`) true → treat as a
   UUID, confirm it exists via `admin_get_identity_optional`.
 - otherwise → resolve the typed email via
-  `kratos::admin_find_identity_by_email` (`src/ory/kratos.rs:802`), a unique
+  `kratos::admin_find_identity_by_email` (`src/ory/kratos.rs:777`), a unique
   `credentials_identifier` lookup. **Caveat:** an identity that exists only
   through OIDC/SAML has no password credentials identifier, so a typed email
   may not resolve — the picker (authoritative hidden UUID) is the reliable
@@ -2154,8 +2290,8 @@ debug builds panic, release builds drop the key and `warn!`-log.
 Probes (every one is best-effort — a failure renders that row as "down"
 with the error text in the detail column, without aborting the page):
 
-- `kratos::health_alive` (`src/ory/kratos.rs:872`)
-- `kratos::health_ready` (`src/ory/kratos.rs:877`)
+- `kratos::health_alive` (`src/ory/kratos.rs:847`)
+- `kratos::health_ready` (`src/ory/kratos.rs:852`)
 - `hydra::health_alive` (`src/ory/hydra.rs:842`)
 - `hydra::health_ready` (`src/ory/hydra.rs:846`)
 
@@ -2184,7 +2320,7 @@ Flow:
    "Successful sign-in" row with `ip · user-agent` detail and the
    `authenticated_at` timestamp. Failures here are non-fatal — the
    sidebar renders an empty-state fallback if the API call fails.
-3. `session.needs_verification()` (`src/backend/identity.rs:307`) drives a
+3. `session.needs_verification()` (`src/backend/identity.rs:350`) drives a
    verification banner at the top of the page when any verifiable
    address on the identity is still unverified. Banner links to
    `/verification`.

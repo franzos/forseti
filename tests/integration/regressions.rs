@@ -149,18 +149,7 @@ async fn login_flow_id_short_circuit_renders_form_for_authed_user() {
 
     // 1. Start a fresh login flow via Kratos with refresh=true so the
     //    flow's internal context carries `refresh: true`.
-    let res = user
-        .client
-        .get(format!(
-            "{KRATOS_PUBLIC}/self-service/login/browser?refresh=true"
-        ))
-        .header("Accept", "application/json")
-        .send()
-        .await
-        .expect("kratos login init refresh=true");
-    assert!(res.status().is_success(), "kratos init: {}", res.status());
-    let flow: serde_json::Value = res.json().await.expect("flow json");
-    let flow_id = flow["id"].as_str().expect("flow id").to_string();
+    let flow_id = browser_flow_id(&user.client, "login", "?refresh=true").await;
 
     // 2. With the same client (still signed in), GET /login?flow=<id>. The
     //    portal should render the form (200), NOT 303 to /.

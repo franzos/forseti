@@ -67,6 +67,7 @@ FORSETI_ADMIN_TEST_EMAIL/PASSWORD/TOTP_CODE not set or sign-in failed."
 /// playground's `config.toml`.
 #[tokio::test]
 async fn kratos_webhook_profile_updated_lands_audit_row() {
+    skip_on_native!("the Kratos audit webhook receiver is not mounted on the native build");
     if !portal_reachable().await {
         eprintln!("portal not reachable; skipping");
         return;
@@ -144,6 +145,7 @@ async fn kratos_webhook_profile_updated_lands_audit_row() {
 
 #[tokio::test]
 async fn kratos_webhook_stale_payload_flagged_and_recorded() {
+    skip_on_native!("the Kratos audit webhook receiver is not mounted on the native build");
     if !portal_reachable().await {
         eprintln!("portal not reachable; skipping");
         return;
@@ -207,6 +209,7 @@ async fn kratos_webhook_stale_payload_flagged_and_recorded() {
 
 #[tokio::test]
 async fn kratos_webhook_unknown_action_returns_204_not_400() {
+    skip_on_native!("the Kratos audit webhook receiver is not mounted on the native build");
     if !portal_reachable().await {
         eprintln!("portal not reachable; skipping");
         return;
@@ -1040,7 +1043,7 @@ async fn admin_identity_disable_enable_cycle() {
         "disable status: {}",
         res.status()
     );
-    let state = kratos_identity_state(&identity_id).await;
+    let state = identity_state(&identity_id).await;
     assert_eq!(
         state.as_deref(),
         Some("inactive"),
@@ -1071,7 +1074,7 @@ async fn admin_identity_disable_enable_cycle() {
         "enable status: {}",
         res.status()
     );
-    let state = kratos_identity_state(&identity_id).await;
+    let state = identity_state(&identity_id).await;
     assert_eq!(
         state.as_deref(),
         Some("active"),
@@ -1283,6 +1286,7 @@ async fn csrf_cookie_cleared_on_logout() {
 
 #[tokio::test]
 async fn csrf_cookie_cleared_on_login_page_visit() {
+    skip_on_native!("native flows are bound to the CSRF token, so the page keeps it");
     if !portal_reachable().await {
         eprintln!("portal not reachable; skipping");
         return;
@@ -1308,6 +1312,7 @@ async fn csrf_cookie_cleared_on_login_page_visit() {
 
 #[tokio::test]
 async fn csrf_cookie_cleared_on_registration_page_visit() {
+    skip_on_native!("native flows are bound to the CSRF token, so the page keeps it");
     if !portal_reachable().await {
         eprintln!("portal not reachable; skipping");
         return;
@@ -1516,20 +1521,6 @@ fn read_webhook_state(row_id: &str) -> Option<String> {
 }
 
 /// Fetch the live Kratos identity's `state` field via the admin API.
-async fn kratos_identity_state(identity_id: &str) -> Option<String> {
-    let c = browser_client();
-    let res = c
-        .get(format!("{KRATOS_ADMIN}/admin/identities/{identity_id}"))
-        .send()
-        .await
-        .ok()?;
-    if !res.status().is_success() {
-        return None;
-    }
-    let v: Value = res.json().await.ok()?;
-    v["state"].as_str().map(String::from)
-}
-
 /// Minimal URL-encode that matches what `ory_client::apis::urlencode`
 /// emits for an email's `@` (`%40`) and `.` (verbatim). Sufficient for
 /// asserting that the redirect URL carries the freed email.

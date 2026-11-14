@@ -7,6 +7,7 @@
 // claim the email.
 import type { Page } from '@playwright/test';
 import { expect } from '@playwright/test';
+import { holdsSharedAdminSession, requireIdentityId, SESSION_COOKIE } from './identity';
 
 export interface RegisteredUser {
   email: string;
@@ -14,7 +15,6 @@ export interface RegisteredUser {
 }
 
 const DEFAULT_PASSWORD = 'Sup3rSecret-E2E-Password!';
-const KRATOS_ADMIN = process.env.KRATOS_ADMIN || 'http://host.containers.internal:4434';
 
 /**
  * Build a unique email per test. Combines a prefix, the test info worker
@@ -29,7 +29,7 @@ export function uniqueEmail(prefix: string): string {
 
 /**
  * Register a fresh user via the portal's two-step flow. Lands on the
- * dashboard with `ory_kratos_session` in the cookie jar on success.
+ * dashboard with the session cookie in the cookie jar on success.
  */
 export async function registerUser(page: Page, prefix: string): Promise<RegisteredUser> {
   const email = uniqueEmail(prefix);
@@ -88,12 +88,7 @@ export async function registerUserWithEmail(
  * Set on both hosts the login redirect can use.
  */
 export async function skipUsernameStep(page: Page, email: string): Promise<void> {
-  const res = await page.request.get(
-    `${KRATOS_ADMIN}/admin/identities?credentials_identifier=${encodeURIComponent(email)}`,
-  );
-  const identities = (await res.json()) as Array<{ id: string }>;
-  const id = identities[0]?.id;
-  expect(id, `no identity for ${email}`).toBeTruthy();
+  const id = await requireIdentityId(page.request, email);
   await page.context().addCookies(
     ['localhost', 'host.containers.internal'].map((domain) => ({
       name: 'forseti_username_skipped',
@@ -106,6 +101,12 @@ export async function skipUsernameStep(page: Page, email: string): Promise<void>
 
 /** Drive the portal's logout form on the current page. */
 export async function logout(page: Page): Promise<void> {
+  // Signing out would revoke the native admin session every later spec reuses.
+  if (await holdsSharedAdminSession(page.context())) {
+    await page.context().clearCookies({ name: SESSION_COOKIE });
+    await page.goto('/');
+    return;
+  }
   await page.goto('/');
   // The Sign Out form posts to /logout. Target by action so we don't
   // accidentally submit some other form on the page.

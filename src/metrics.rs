@@ -31,9 +31,12 @@ pub fn scrape_allowed(status: FeatureStatus) -> bool {
     )
 }
 
-pub fn record_bridged_metrics(audit_failures: u64, last_webhook_epoch: u64) {
+/// `last_webhook_epoch` is `None` on the native build, which has no Kratos webhook.
+pub fn record_bridged_metrics(audit_failures: u64, last_webhook_epoch: Option<u64>) {
     metrics::counter!("forseti_audit_write_failures_total").absolute(audit_failures);
-    metrics::gauge!("forseti_last_kratos_webhook_timestamp_seconds").set(last_webhook_epoch as f64);
+    if let Some(epoch) = last_webhook_epoch {
+        metrics::gauge!("forseti_last_kratos_webhook_timestamp_seconds").set(epoch as f64);
+    }
 }
 
 /// Constant-time bearer-token comparison against `Authorization: Bearer <expected>`.
@@ -69,9 +72,13 @@ pub async fn metrics_handler(State(state): State<AppState>, headers: HeaderMap) 
     if !bearer_matches(&headers, expected) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
+    #[cfg(feature = "identity-ory")]
+    let last_webhook_epoch = Some(crate::audit::last_kratos_webhook_epoch().unwrap_or(0));
+    #[cfg(feature = "identity-native")]
+    let last_webhook_epoch = None;
     record_bridged_metrics(
         crate::audit::audit_write_failures_total(),
-        crate::audit::last_kratos_webhook_epoch().unwrap_or(0),
+        last_webhook_epoch,
     );
     let body = state.metrics_handle.render();
     (
@@ -134,7 +141,7 @@ mod tests {
         let recorder = PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
         metrics::with_local_recorder(&recorder, || {
-            record_bridged_metrics(42, 1_700_000_000);
+            record_bridged_metrics(42, Some(1_700_000_000));
         });
         let out = handle.render();
         assert!(

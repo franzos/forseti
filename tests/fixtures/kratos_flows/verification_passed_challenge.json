@@ -1,0 +1,58 @@
+{
+  "id": "21fc4be6-ff76-465c-a45a-f7204a9f19b9",
+  "type": "browser",
+  "expires_at": "2026-11-13T18:26:23.27128Z",
+  "issued_at": "2026-11-13T17:26:23.27128Z",
+  "request_url": "http://localhost:4433/self-service/verification/browser",
+  "active": "code",
+  "ui": {
+    "action": "http://localhost:3000/",
+    "method": "GET",
+    "nodes": [
+      {
+        "type": "input",
+        "group": "default",
+        "attributes": {
+          "name": "csrf_token",
+          "type": "hidden",
+          "value": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+          "required": true,
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {}
+      },
+      {
+        "type": "a",
+        "group": "code",
+        "attributes": {
+          "href": "http://localhost:3000/",
+          "title": {
+            "id": 1070009,
+            "text": "Continue",
+            "type": "info"
+          },
+          "id": "continue",
+          "node_type": "a"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1070009,
+            "text": "Continue",
+            "type": "info"
+          }
+        }
+      }
+    ],
+    "messages": [
+      {
+        "id": 1080002,
+        "text": "You successfully verified your email address.",
+        "type": "success"
+      }
+    ]
+  },
+  "state": "passed_challenge"
+}

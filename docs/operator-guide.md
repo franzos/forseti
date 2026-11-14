@@ -2,7 +2,7 @@
 
 A reference for deploying `forseti` as the self-service UI and OAuth2 login/consent bridge for an Ory Kratos + Ory Hydra installation at, for example, `accounts.example.com`.
 
-This guide assumes self-hosting the full stack: `forseti`, Kratos, Hydra, and Postgres. It does not assume prior familiarity with Kratos's surface area.
+This guide assumes self-hosting the full stack: `forseti`, Kratos, Hydra, and Postgres. It does not assume prior familiarity with Kratos's surface area. Forseti also builds without Kratos: the native identity build keeps identities, sessions and self-service flows in Forseti's own database and needs only Hydra. See [Native identity build](#native-identity-build) for what changes there; the rest of this guide describes the default (Ory) build unless a passage says otherwise.
 
 For app-developer documentation on how downstream applications consume Forseti as an OIDC Provider, see [`integration-guide.md`](./integration-guide.md). For project status and milestones, see [`../README.md`](../README.md) and [`../ROADMAP.md`](../ROADMAP.md).
 
@@ -73,6 +73,8 @@ The authoritative schema is `src/config.rs`. The example file is `config.example
 
 ### `[kratos]`
 
+Ory build only; the native build does not read this section.
+
 | Key          | Type   | Default | Description                                                                                          |
 |--------------|--------|---------|------------------------------------------------------------------------------------------------------|
 | `public_url` | string | —       | Browser-facing Kratos URL. Forseti redirects users here to initialize flows and proxies cookies. |
@@ -97,7 +99,7 @@ The authoritative schema is `src/config.rs`. The example file is `config.example
 
 | Key                | Type   | Default            | Description                                                            |
 |--------------------|--------|--------------------|------------------------------------------------------------------------|
-| `cookie_secret`    | string | ephemeral per-boot | Seeds the HMAC keys for every Forseti-signed cookie. Long random secret. |
+| `cookie_secret`    | string | ephemeral per-boot (Ory build); required (native build) | Seeds the HMAC keys for every Forseti-signed cookie. On the native build also the key material for stored TOTP secrets and one-time codes. Long random secret. |
 | `frame_ancestors`  | string | `"'self'"`         | CSP `frame-ancestors` on every public_app response. `"'none'"` blocks framing entirely. |
 | `x_frame_options`  | bool   | `true`             | Also emit `X-Frame-Options: SAMEORIGIN` for older browsers.            |
 | `extra_form_action` | list of strings | `[]`      | Extra origins for the CSP `form-action` directive. Needed for an upstream OIDC provider added to `kratos.yml` by hand, or a host a provider bounces through. |
@@ -106,7 +108,9 @@ The authoritative schema is `src/config.rs`. The example file is `config.example
 
 Generate one with `openssl rand -hex 32` (a hex string is decoded to bytes; anything that isn't valid hex is taken as raw UTF-8 bytes). The decoded key must be at least 32 bytes or Forseti hard-fails at boot. Override via `FORSETI_SECURITY__COOKIE_SECRET`.
 
-When unset, Forseti generates a 32-byte ephemeral key per process and logs a warning. That means flash, active-org, and app-referrer cookies don't survive a restart, and separate instances can't validate each other's cookies — so **set `cookie_secret` in production** and on any multi-instance deployment. None of these are Forseti's session cookie (that's Kratos), and none are catastrophic on their own (the flash banner is short-lived, the org cookie's selection is re-validated at use, the handoff cookie's `referrer_uri` is re-checked against the Hydra client), but a stable secret avoids the restart churn.
+On the Ory build, when unset, Forseti generates a 32-byte ephemeral key per process and logs a warning. That means flash, active-org, and app-referrer cookies don't survive a restart, and separate instances can't validate each other's cookies, so **set `cookie_secret` in production** and on any multi-instance deployment. On that build none of these are the session cookie (that's Kratos's), and none are catastrophic on their own (the flash banner is short-lived, the org cookie's selection is re-validated at use, the handoff cookie's `referrer_uri` is re-checked against the Hydra client), but a stable secret avoids the restart churn.
+
+The native build refuses to boot without `cookie_secret`, because there the secret is durable key material: changing it makes stored TOTP secrets unreadable and invalidates outstanding codes, backup codes and logout links. See [`cookie_secret` is key material](#cookie_secret-is-key-material).
 
 CSRF protection uses a double-submit token (`src/csrf.rs`) keyed off the same secret; there's nothing extra to configure for it.
 
@@ -174,7 +178,7 @@ The `[posix]` table (uid/gid bases, default shell, home prefix, free-tier seat c
 
 ### `[email]`
 
-Forseti-owned outbound mail (org invites + claim-email). Kratos's courier handles its own self-service mail separately. Optional — omit the section (or set `enabled = false`) and the send sites log + skip so dev still works with the token / code accessible via the DB. Backed by [polymail](https://github.com/franzos/polymail-rs): `provider` selects the transport and the remaining fields are that provider's credentials, flattened in directly under `[email]`.
+Forseti-owned outbound mail (org invites + claim-email). On the Ory build Kratos's courier handles its own self-service mail separately, and this section is optional: omit it (or set `enabled = false`) and the send sites log + skip so dev still works with the token / code accessible via the DB. On the native build it also carries the verification and recovery codes and is required: Forseti refuses to boot unless `enabled = true`. Backed by [polymail](https://github.com/franzos/polymail-rs): `provider` selects the transport and the remaining fields are that provider's credentials, flattened in directly under `[email]`.
 
 Sender identity and switch:
 
@@ -348,7 +352,7 @@ Per-IP + global rate limiting on `GET /registration`. These knobs apply to **eve
 | `registration_global_rate_per_minute`  | u32  | `120`   | Global (all-callers-share-one-bucket) rate limit, requests per minute. Bounds total traffic even when a spoofed `X-Forwarded-For` defeats the per-IP bucket. `0` disables. |
 | `registration_global_rate_per_hour`    | u32  | `1200`  | Global rate limit, requests per hour, in parallel with the per-minute global bucket. `0` disables.             |
 
-These are clamped at load time under the same ceilings as `[oauth]`/`[orgs]`/`[claim_email]`/`[handoff]`. See [External access mode](#external-access-mode-public-self-serve) for what this limiter does and does not cover.
+These are clamped at load time under the same ceilings as `[oauth]`/`[orgs]`/`[claim_email]`/`[handoff]`. See [External access mode](#external-access-mode-public-self-serve) for what this limiter does and does not cover. On the native build the same values also limit `GET /self-service/registration/browser` and the registration form submit (`POST /self-service/registration`), each with its own buckets.
 
 ### `[proxy]` — reverse-proxy trust
 
@@ -377,6 +381,102 @@ FORSETI_BRAND__NAME="Example Accounts"
 ```
 
 Recommended pattern: keep non-secret structural config in `config.toml`, load secrets from env (typically injected by your secrets manager or orchestrator).
+
+## Native identity build
+
+The native build keeps identities, credentials, sessions and the self-service flows (login, registration, verification, recovery, settings, logout) in Forseti's own database. Hydra stays: OAuth2 and OIDC work the same on both builds. The choice is made at compile time with a cargo feature, and a binary carries exactly one identity backend.
+
+### Building and running it
+
+```bash
+cargo build --release --locked --no-default-features --features identity-native
+make check-native    # cargo check + clippy with the native feature
+make run-native      # debug run against config.toml
+```
+
+`--all-features` does not build: the two identity features exclude each other. `static/styles.css` is committed, so `make css` is only needed after a template change.
+
+### What it replaces and what it leaves out
+
+There is no Kratos container, no Kratos config file, no Kratos courier and no audit webhook. Forseti serves `/self-service/*` itself, sends verification and recovery codes through `[email]`, and writes the flow audit rows (`identity.created`, `auth.login`, `password.changed`, `password.recovered`, `verification.completed`, `profile.updated`, `mfa.*`) directly, with the request's IP and user agent. A password change ends the OP sessions and grants of the identity's other browsers in-process, as the `password.changed` webhook does on the Ory build.
+
+Not available on the native build:
+
+- Enterprise SAML SSO: the `/sso/*` and `/admin/saml` routes are not mounted.
+- Upstream OIDC sign-in and linked providers (Google, GitHub and the rest).
+- WebAuthn security keys and passkeys. Second factors are TOTP and backup codes.
+- The `forseti config` verbs, including `config check` and `config init`.
+- Moving existing Kratos identities over. The native build is for fresh installs.
+
+### Configuration
+
+`[kratos]` and `[audit].webhook_token` are not read. Two settings are required, and Forseti refuses to boot without them:
+
+- `[security].cookie_secret`, as key material (below).
+- `[email]` with `enabled = true`. A disabled mailer would mark every code as sent while nothing leaves the host, so new accounts could never verify.
+
+The native settings live under `[identity]`; see [`[identity]` configuration](#identity-configuration) for every key and its default. `privileged_session_minutes` applies to both builds.
+
+### `cookie_secret` is key material
+
+On the native build every identity key is derived from `[security].cookie_secret`: the AES-256-GCM key that encrypts stored TOTP secrets, pending enrolment secrets and queued mail payloads, and the HMAC keys for verification and recovery codes, backup codes and logout links. Changing the secret means:
+
+- every enrolled authenticator stops working (the stored TOTP secrets no longer decrypt), so every TOTP user needs an admin recovery code and a fresh enrolment;
+- outstanding verification and recovery codes, backup codes and logout links stop matching;
+- queued mail no longer decrypts and is abandoned unsent.
+
+Passwords and sessions survive: password hashes are Argon2id PHC strings and session tokens are stored as plain SHA-256 hashes. There is no rotation tooling. Back the secret up with the database, and treat losing it like losing the database.
+
+### Mail and the first admin
+
+Mail is a hard requirement, and it shapes the bootstrap. There is no admin seeding verb on the native build: the first admin registers through `/registration` like anyone else, with an address listed in `[admin].allowed_emails`. Registration signs the new account in and shows the verification screen, but the admin surface requires a verified address and AAL2, and a later password sign-in with an unverified address is refused. So the first admin must receive the verification mail, verify, then enrol TOTP at `/settings/2fa` before `/admin` opens. Check that `[email]` delivers before handing out the URL.
+
+### Sessions
+
+| Property | Value |
+|---|---|
+| Cookie | `forseti_session`, or `__Host-forseti_session` when `[self].url` is https; `HttpOnly`, `SameSite=Lax`, `Path=/`, `Secure` on https, no `Domain` |
+| Lifespan | `[identity].session_lifespan_hours` (default 24), absolute: counted from sign-in, not extended by use |
+| Privileged window | `[identity].privileged_session_minutes` (default 15). Changing the email address, password, TOTP or backup codes after it lapses sends the browser to a password re-authentication first; a name change does not need it |
+| Second factor | An identity with TOTP gets AAL2 only after a TOTP or backup code; until then pages that need a session send it to the step-up. Stepping up moves the session to a new token |
+
+The session token is 32 random bytes; the database keeps its SHA-256 hash. Each session records its AAL, the methods used with their times, and the client IP (resolved through `[proxy]`) and user agent seen at sign-in. Revoking a session at `/settings/sessions` or `/admin/sessions` takes effect on the next request.
+
+### Throttles
+
+Per-IP limits answer with a plain `429` and `Retry-After`; per-address and per-account limits answer on the form with "Too many sign-in attempts right now" (message `9000001`). All counters live in the Forseti process, so several instances each allow their own share.
+
+| What | Limit |
+|---|---|
+| Sign-in submits per client IP | `login_ip_rate_per_minute` / `login_ip_rate_per_hour` (20 / 200) |
+| Password attempts per email address | `login_identifier_rate_per_15m` (10 per 15 minutes), counted before the account is looked up |
+| TOTP and backup-code attempts per account | 10 per 15 minutes |
+| Registration init and submits per client IP, and globally | the `[auth].registration_*` values |
+| Flow starts (`/self-service/{login,recovery,verification,settings}/browser`) per client IP | 60 per minute, 600 per hour |
+| Verification and recovery submits per client IP, shared | 5 per minute, 30 per hour |
+| Codes mailed per address, verification and recovery together | 5 per hour |
+| Guesses per code | 5; a code lives 15 minutes |
+| Settings submits per client IP | 30 per minute, 300 per hour |
+| Email address and password changes per account | 10 per 15 minutes, shared |
+
+The per-address password limit is the lockout trade-off: anyone who knows an address can spend its attempts and keep its owner out of password sign-in for 15 minutes, whether or not they know the password. Raising `login_identifier_rate_per_15m` loosens that and gives a password guesser more room; `0` turns it off and leaves only the per-IP buckets.
+
+### Background workers and `/readyz`
+
+Two workers run next to the webhook worker and stop with it on shutdown:
+
+- **Mail**: drains `identity_mail_outbox` every 5 seconds and right after a code is queued, up to 32 rows per pass. A failed send is retried after 10 seconds, doubling to at most 5 minutes; a row is abandoned after 10 attempts, or unsent once its code (15 minutes) has expired. A sent or abandoned row keeps no payload. `/readyz` reports `ready (degraded: mail worker stale, ...)` when the worker has been silent for more than 20 seconds.
+- **Maintenance**: a minute after boot and then hourly, deletes sessions revoked or expired more than 30 days ago, flows expired more than a day ago (their codes go with them), and sent or abandoned mail rows queued more than 30 days ago.
+
+`/admin/status` shows the backend as "Identity (built in, alive)" and "Identity (built in, ready)" (ready runs a database query), the courier queue counts from the outbox (queued and abandoned rows), and no Kratos webhook cards. The build row labelled "Kratos" shows `native <version>`.
+
+### Tables
+
+The native backend owns six tables in Forseti's database: `identities`, `identity_credentials` (password, TOTP and backup codes per identity), `identity_sessions`, `identity_flows`, `identity_codes` and `identity_mail_outbox`. The migrations create them on both builds, so the schema does not depend on the build; they stay empty on the Ory build. Deleting an identity removes its credentials, sessions, codes, mail rows and the flows tied to it. Back them up with the rest of Forseti's database (see [Backups](#backups)).
+
+### Admin recovery codes
+
+On `/admin/identities/{id}`, an admin can mint a recovery code (`POST /admin/identities/{id}/recovery`). On the native build this creates a recovery flow that no browser holds yet and a 6-digit code for it; nothing is mailed, and the identity's earlier recovery codes stop working. A disabled identity gets no code: enable it first. The admin hands over the link (`<self>/self-service/recovery?flow=<id>`) and the code out of band. Opening the link takes nothing, so a chat preview or mail scanner that fetches it leaves it usable, and the page shows no account data. The first browser to submit on the page takes the flow; any other browser gets the expired-flow page. Entering the code (5 guesses, 15 minutes) signs the user in at AAL1 and opens the password page within the privileged window. An identity with TOTP still steps up before settings open, with TOTP or a backup code, so a recovery code does not get a user past a lost authenticator without backup codes.
 
 ## Appearance
 
@@ -650,7 +750,9 @@ The internal listener does not mount `/readyz` or `/healthz`; those stay on the 
 
 The `POST /internal/audit/kratos` endpoint authenticates inbound Kratos webhooks with a shared bearer token (`Authorization: Bearer <token>`). Forseti reads it from `[audit].webhook_token`; Kratos sends it from the `auth.config.value` field on each `web_hook` in `kratos.yml`.
 
-**The token is mandatory.** Forseti refuses to boot when `webhook_token` is empty (exit code `1`, error on stderr): a misconfigured deployment is supposed to fail loudly at startup rather than silently accept or reject every inbound event.
+This receiver and `[audit].webhook_token` exist on the Ory build only; the native build writes flow audit rows directly and does not read the token.
+
+**The token is mandatory on the Ory build.** Forseti refuses to boot when `webhook_token` is empty (exit code `1`, error on stderr): a misconfigured deployment is supposed to fail loudly at startup rather than silently accept or reject every inbound event.
 
 **Every entry must be at least 32 bytes** (`openssl rand -hex 32`). On a production-shaped `[self].url` (https, not localhost or a private address) Forseti refuses to boot when any accept-list entry is shorter; elsewhere it logs a warning. `forseti config check` reports the same rule as `audit.webhook_token.length`. To replace an existing short token on production, run `forseti config rotate webhook-token --yes` (the interactive form asks for a Forseti restart while the short entry is still staged, and that restart is refused), then `forseti config prune webhook-token` to drop the short entry, then restart Kratos and Forseti. Webhooks carrying the new token return 401 until the Forseti restart.
 
@@ -988,6 +1090,8 @@ This is the subtle part. Get the recovery model wrong and you'll lock users out 
 
 ## Config CLI
 
+Ory build only: the native build has no `forseti config` verbs (including `config-check` and `config-init`), since its identity settings live in `config.toml` under `[identity]`.
+
 Forseti's 2FA enforcement lives entirely in Kratos config, and Kratos won't tell you over the wire whether you got it right. So Forseti ships subcommands that work on the config *files* directly: no DB, no running server, no Ory clients. They're pure file operations. `config-check` and `config-init` (below) started as standalone subcommands and are now also reachable as `forseti config check` / `forseti config init` under the unified `forseti config` surface. Both spellings work; the top-level ones are kept as hidden aliases for backward compatibility. See [Managing configuration with forseti config](#managing-configuration-with-forseti-config) for the rest of that surface: enabling/disabling OIDC providers, rotating secrets, SMTP, backups.
 
 Every subcommand takes `--help` (also `-h`), and `forseti --help` lists them all. Running `forseti` with no subcommand starts the HTTP server.
@@ -1078,6 +1182,8 @@ Why `config-init`'s baked-in recommendations are set the way they are. This used
 **Hydra `strategies.scope: exact`.** Hydra's default `wildcard` strategy lets a `*` entry on a client's scope match every dot-free scope, so one stray `*` on a client turns its ceiling into "anything". RFC 6749 scopes are opaque strings with no wildcard semantics. Forseti drops `*` tokens before they reach a CIMD client, and `forseti config check` warns when `strategies.scope` isn't `exact`.
 
 ## Managing configuration with forseti config
+
+Ory build only, like the rest of the `config` surface.
 
 `config-check` and `config-init` cover linting and first-time generation. Once a deployment is live, day-2 operations (turning on a sign-in provider, rotating a secret, restoring from a backup) go through the rest of the `forseti config` surface. Like `config-check`/`config-init`, every subcommand here is a pure file operation: no DB, no running Forseti process, no live Kratos/Hydra API calls beyond a couple of best-effort read-only probes (counting affected identities/clients before a destructive change, when an admin URL is configured).
 
@@ -2016,6 +2122,7 @@ The following secrets must be unique, long, and protected:
 | `kratos.yml: secrets.cookie`               | Kratos                       | Signs Kratos session cookies.                      |
 | `kratos.yml: secrets.cipher`               | Kratos                       | Encrypts sensitive trait values at rest.           |
 | OIDC client secrets (per upstream)         | `kratos.yml` env substitution | Authenticate to upstream OIDC providers.          |
+| `[security].cookie_secret`                 | Forseti                      | Signs Forseti's cookies. On the native build also encrypts stored TOTP secrets and keys one-time codes, so it must be kept and backed up (see [`cookie_secret` is key material](#cookie_secret-is-key-material)). |
 
 Recommended pattern: load secrets from environment variables injected by your orchestrator or secrets manager (AWS Secrets Manager, HashiCorp Vault, Doppler, 1Password Connect). Do not commit any of the above to a repository.
 
@@ -2025,7 +2132,7 @@ Generate fresh values with `openssl rand -base64 64` (cookie/session secrets) or
 
 - **Kratos's Postgres database** holds every identity, credential hash, and active session. Restoring it restores user accounts.
 - **Hydra's Postgres database** holds OAuth2 client registrations, consent grants, refresh tokens, and the JWKS used to sign id_tokens. Losing the JWKS invalidates every previously-issued id_token's signature.
-- **Forseti's own database** holds organizations, the audit log, the webhook outbox, the resource registry, client trust metadata, and POSIX accounts. On the default sqlite backend that's `forseti.db` next to the binary: copy it while Forseti is stopped, or use `sqlite3 forseti.db ".backup backup.db"` online (a plain file copy of a live WAL-mode database can be inconsistent). On Postgres, include it in the `pg_dump` routine.
+- **Forseti's own database** holds organizations, the audit log, the webhook outbox, the resource registry, client trust metadata, and POSIX accounts; on the native build also every identity, credential and session. Restore a native database with the same `[security].cookie_secret`, or its stored TOTP secrets stay unreadable. On the default sqlite backend that's `forseti.db` next to the binary: copy it while Forseti is stopped, or use `sqlite3 forseti.db ".backup backup.db"` online (a plain file copy of a live WAL-mode database can be inconsistent). On Postgres, include it in the `pg_dump` routine.
 - **Forseti's webhook signing key** (`[webhook].signing_key_path`, default `data/webhook-signing-key.pem`, created `0600`) signs outbound Security Event Tokens. Without a backup, a rebuilt host mints a fresh key and `kid`, and receivers that pinned the old JWKS reject deliveries (see [Rotating the webhook signing key](#rotating-the-webhook-signing-key)).
 - Take daily logical backups (`pg_dump`) at minimum. Streaming replication or PITR is preferable for production.
 - Test restore quarterly. A backup you have never restored is not a backup.
@@ -2043,7 +2150,7 @@ Generate fresh values with `openssl rand -base64 64` (cookie/session secrets) or
 | Endpoint              | Service | Purpose                                                |
 |-----------------------|---------|--------------------------------------------------------|
 | `/healthz`            | Forseti | Liveness. Returns `ok` if the process is up.           |
-| `/readyz`             | Forseti | Readiness. Returns `ready` (200) when Forseti will serve. If the background webhook worker has been silent for more than 4x `[webhook].tick_seconds` (floor 20s), it still returns 200 but the body reads `ready (degraded: webhook worker stale, ...)`; page serving is unaffected, so a stuck worker does not pull the instance out of rotation. Monitor the body (or logs) to catch a stale worker before undelivered webhooks pile up. |
+| `/readyz`             | Forseti | Readiness. Returns `ready` (200) when Forseti will serve. If the background webhook worker has been silent for more than 4x `[webhook].tick_seconds` (floor 20s), it still returns 200 but the body reads `ready (degraded: webhook worker stale, ...)`; page serving is unaffected, so a stuck worker does not pull the instance out of rotation. On the native build the identity mail worker is checked the same way (silent for more than 20s: `ready (degraded: mail worker stale, ...)`). Monitor the body (or logs) to catch a stale worker before undelivered webhooks or codes pile up. |
 | `/health/alive`       | Kratos  | Liveness.                                              |
 | `/health/ready`       | Kratos  | Readiness (checks DB connectivity).                    |
 | `/health/alive`       | Hydra   | Liveness.                                              |
@@ -2254,9 +2361,22 @@ The complement to external mode, for **internal** orgs: an owner registers email
 ```toml
 [identity]
 unverified_ttl_days = 7
+privileged_session_minutes = 15
+session_lifespan_hours = 24
+password_min_length = 8
+password_breach_check = false
+login_ip_rate_per_minute = 20
+login_ip_rate_per_hour = 200
+login_identifier_rate_per_15m = 10
 ```
 
 - `unverified_ttl_days` — TTL applied by the `unverified-prune` CLI. Identities with at least one unverified verifiable address AND `created_at < now - N days` are deleted. Default `7`. GitHub uses `30`; we run more aggressive because a stuck unverified squatter blocks the legitimate owner. Operators with a slower onboarding flow can dial up.
+- `privileged_session_minutes`: how long after sign-in a session may change settings without signing in again. Default `15`. Forseti uses it for the password-page deadline and for the settings pages it gates itself; on the Ory build Kratos enforces its own `selfservice.flows.settings.privileged_session_max_age`, so keep the two equal. On the native build it is the only setting for the window.
+- `session_lifespan_hours`: native build only. A sign-in session and its cookie end this many hours after sign-in, whether or not the session is in use. Default `24`; Forseti refuses to boot with `0` or with more than `8760` (one year).
+- `password_min_length`: native build only. Shortest accepted password, in characters. Default `8`; Forseti refuses to boot with a value below `8` or above `256`, the maximum password length.
+- `password_breach_check`: native build only. When `true`, a new password is checked against the HaveIBeenPwned range API: Forseti sends the first five hex characters of the password's SHA-1 (with the `Add-Padding` header) and rejects the password if the rest of the hash is in the answer. The lookup times out after 2 s and a failed lookup lets the password through. Default `false`.
+- `login_ip_rate_per_minute`, `login_ip_rate_per_hour`: native build only. Sign-in form submits per client IP (resolved through `[proxy]`); past either bucket the answer is a plain `429` with `Retry-After`. Defaults `20` and `200`, clamped to `1000` and `10000`; `0` turns a bucket off.
+- `login_identifier_rate_per_15m`: native build only. Password attempts per email address in 15 minutes, counted before the account is looked up, so unknown and known addresses throttle alike; past the limit the sign-in form says to try again later. Default `10`, clamped to `1000`; `0` turns it off. Someone who knows an address can use up its attempts and block password sign-in for that address for 15 minutes. TOTP and backup-code attempts are capped at 10 per account in 15 minutes. The counters live in each Forseti process, so several instances each allow their own share.
 
 ### Unverified-account reaper
 

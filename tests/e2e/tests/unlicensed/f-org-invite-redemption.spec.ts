@@ -13,53 +13,7 @@ import { test, expect } from '@playwright/test';
 import { adminCredsFromEnv, signInAdminAal2 } from '../../helpers/admin';
 import { uniqueEmail, registerUserWithEmail } from '../../helpers/register';
 import { waitForMail } from '../../helpers/mailcrab';
-
-const KRATOS_ADMIN = 'http://host.containers.internal:4434';
-
-/**
- * Mark an identity's email as verified via Kratos admin API. The invite
- * accept handler refuses to write the membership row for an unverified
- * identity (`src/orgs/invite.rs::invite_accept_post`), and Kratos
- * registration doesn't auto-verify — so for the test to exercise the
- * "happy path" all the way through, we flip the verified flag here.
- *
- * IMPORTANT: PUT /admin/identities/{id} with a `verifiable_addresses`
- * array whose entries carry `verified: true` is silently ignored by
- * Kratos — the `verified` field is treated as server-controlled and
- * only the `code` self-service flow can set it. JSON Patch on
- * `/verifiable_addresses/0/verified` IS honoured, so we use that.
- */
-async function markEmailVerified(
-  request: import('@playwright/test').APIRequestContext,
-  email: string,
-): Promise<void> {
-  const lookup = await request.get(
-    `${KRATOS_ADMIN}/admin/identities?credentials_identifier=${encodeURIComponent(email)}`,
-  );
-  expect(lookup.ok()).toBeTruthy();
-  const ids = (await lookup.json()) as Array<{
-    id: string;
-    verifiable_addresses?: Array<{ id: string; value: string; verified: boolean }>;
-  }>;
-  const identity = ids[0];
-  expect(identity, `no identity for ${email}`).toBeTruthy();
-  const idx = (identity.verifiable_addresses ?? []).findIndex(
-    (a) => a.value.toLowerCase() === email.toLowerCase(),
-  );
-  expect(idx, `no verifiable_address for ${email}`).toBeGreaterThanOrEqual(0);
-
-  const patch = await request.patch(`${KRATOS_ADMIN}/admin/identities/${identity.id}`, {
-    headers: { 'content-type': 'application/json' },
-    data: [
-      { op: 'replace', path: `/verifiable_addresses/${idx}/verified`, value: true },
-      { op: 'replace', path: `/verifiable_addresses/${idx}/status`, value: 'completed' },
-    ],
-  });
-  expect(
-    patch.ok(),
-    `PATCH identity returned ${patch.status()}: ${await patch.text()}`,
-  ).toBeTruthy();
-}
+import { markEmailVerified } from '../../helpers/identity';
 
 test('org invite: admin mints → invitee redeems → member row lands', async ({
   browser,
@@ -141,7 +95,7 @@ test('org invite: admin mints → invitee redeems → member row lands', async (
     //    registration after-hook chain, dropping us on /invite/finalize
     //    which bounces to /invite/accept. The "signed in + email
     //    matches" branch refuses unverified identities, so we mark the
-    //    email verified via the admin API before clicking accept.
+    //    email verified (`markEmailVerified`) before clicking accept.
     await markEmailVerified(request, inviteeEmail);
 
     // 9. Navigate to the accept page (in case the finalize redirect

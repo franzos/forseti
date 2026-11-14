@@ -88,6 +88,7 @@ kratos-4000005 = The password can not be used because { $reason }.
 kratos-4000006 = The provided credentials are invalid, check for spelling mistakes in your password or username, email address, or phone number.
 kratos-4000007 = An account with the same identifier (email, phone, username, ...) exists already.
 kratos-4000008 = The provided authentication code is invalid, please try again.
+kratos-4000010 = Account not active yet. Did you forget to verify your email address?
 kratos-4000032 = The password must be at least { $min_length } characters long, but got { $actual_length }.
 kratos-4000035 = This account does not exist or has not setup sign in with code.
 
@@ -111,3 +112,7 @@ kratos-4060006 = The recovery code is invalid or has already been used. Please t
 kratos-4070001 = The verification token is invalid or has already been used. Please retry the flow.
 kratos-4070005 = The verification flow has expired, please try again.
 kratos-4070006 = The verification code is invalid or has already been used. Please try again.
+
+# --- Throttling (9000xxx) ---
+# 9000001 is Forseti's own id; Kratos has none for throttled attempts.
+kratos-9000001 = Too many sign-in attempts right now. Please try again in a few minutes.
