@@ -273,6 +273,10 @@ fn cli_identity(cfg: &config::AppConfig, db: &db::DbPool) -> std::sync::Arc<back
 #[cfg(feature = "identity-native")]
 fn cli_identity(cfg: &config::AppConfig, db: &db::DbPool) -> std::sync::Arc<backend::IdentityImpl> {
     let cookie_secret = app::native_cookie_secret(cfg);
+    if let Err(msg) = app::check_native_identity(cfg) {
+        eprintln!("config error: {msg}");
+        std::process::exit(1);
+    }
     backend::build_identity(cfg, db, &cookie_secret)
 }
 

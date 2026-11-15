@@ -117,6 +117,10 @@ mod sessions;
 #[path = "integration/settings.rs"]
 mod settings;
 
+#[cfg(feature = "identity-native")]
+#[path = "integration/upstream.rs"]
+mod upstream;
+
 #[path = "integration/verification.rs"]
 mod verification;
 

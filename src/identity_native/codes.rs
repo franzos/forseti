@@ -48,7 +48,8 @@ pub(super) struct CodeRow {
     id: String,
     flow_id: String,
     purpose: String,
-    identity_id: String,
+    /// `None` on a provider sign-up's code, mailed before the identity exists.
+    identity_id: Option<String>,
     /// Normalised address the code was mailed to; a verification code verifies exactly this one.
     address: String,
     code_mac: String,
@@ -68,7 +69,8 @@ pub(super) struct MailedCode {
 /// A code that matched and is now used up.
 #[derive(Debug, PartialEq)]
 pub(super) struct UsedCode {
-    pub(super) identity_id: String,
+    /// `None` for a provider sign-up's code; every other code names its identity.
+    pub(super) identity_id: Option<String>,
     /// Normalised address the code was mailed to.
     pub(super) address: String,
 }
@@ -83,7 +85,16 @@ impl NativeBackend {
         identity_id: &str,
         recipient: &str,
     ) -> Result<()> {
-        self.store_code(flow_id, purpose, identity_id, recipient, true)
+        self.store_code(flow_id, purpose, Some(identity_id), recipient, true)
+            .await?;
+        self.wake_mail();
+        Ok(())
+    }
+
+    /// [`send_code`](Self::send_code) for a provider sign-up: a verification code to `recipient`
+    /// with no identity behind it yet.
+    pub(super) async fn send_signup_code(&self, flow_id: &str, recipient: &str) -> Result<()> {
+        self.store_code(flow_id, Purpose::Verification, None, recipient, true)
             .await?;
         self.wake_mail();
         Ok(())
@@ -98,7 +109,7 @@ impl NativeBackend {
         identity_id: &str,
         address: &str,
     ) -> Result<String> {
-        self.store_code(flow_id, purpose, identity_id, address, false)
+        self.store_code(flow_id, purpose, Some(identity_id), address, false)
             .await
     }
 
@@ -111,9 +122,9 @@ impl NativeBackend {
         identity_id: &str,
         recipient: &str,
     ) -> MailedCode {
-        let (code, row) = self.code_row(flow_id, purpose, identity_id, recipient);
+        let (code, row) = self.code_row(flow_id, purpose, Some(identity_id), recipient);
         MailedCode {
-            mail: self.outbox_row(purpose, identity_id, recipient, flow_id, &code),
+            mail: self.outbox_row(purpose, Some(identity_id), recipient, flow_id, &code),
             code: row,
         }
     }
@@ -126,7 +137,7 @@ impl NativeBackend {
         &self,
         flow_id: &str,
         purpose: Purpose,
-        identity_id: &str,
+        identity_id: Option<&str>,
         recipient: &str,
     ) -> (String, CodeRow) {
         let code = new_numeric_code();
@@ -135,7 +146,7 @@ impl NativeBackend {
             id: uuid::Uuid::new_v4().to_string(),
             flow_id: flow_id.to_string(),
             purpose: purpose.as_str().to_string(),
-            identity_id: identity_id.to_string(),
+            identity_id: identity_id.map(str::to_string),
             address: super::store::email_norm(recipient),
             code_mac: code_mac(&self.keys.code_mac, flow_id, purpose.as_str(), &code),
             attempts: 0,
@@ -150,7 +161,7 @@ impl NativeBackend {
         &self,
         flow_id: &str,
         purpose: Purpose,
-        identity_id: &str,
+        identity_id: Option<&str>,
         recipient: &str,
         mail: bool,
     ) -> Result<String> {

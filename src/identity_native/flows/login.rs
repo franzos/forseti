@@ -14,11 +14,11 @@ use crate::identity_native::ui::Message;
 use crate::identity_native::{NativeBackend, errors};
 
 /// Kratos's message ids and English texts for the outcomes below.
-const INVALID_CREDENTIALS: (u64, &str) = (
+pub(super) const INVALID_CREDENTIALS: (u64, &str) = (
     4_000_006,
     "The provided credentials are invalid, check for spelling mistakes in your password or username, email address, or phone number.",
 );
-const NOT_VERIFIED: (u64, &str) = (
+pub(super) const NOT_VERIFIED: (u64, &str) = (
     4_000_010,
     "Account not active yet. Did you forget to verify your email address?",
 );
@@ -208,7 +208,7 @@ async fn password_login(backend: &NativeBackend, mut s: Submission<'_>) -> Resul
         return Ok(expired());
     }
     let issued = backend
-        .issue_session(&row.id, "password", Aal::Aal1, s.device)
+        .issue_session(&row.id, "password", None, Aal::Aal1, s.device)
         .await?;
     let event = login_event(&s.flow, &row, &issued.id);
     Ok(signed_in(
@@ -255,7 +255,7 @@ async fn refresh(
     }
     let mut flow = s.flow;
     if !flow.finish(&backend.db).await?
-        || !session::refresh(&backend.db, &session.id, "password", Aal::Aal1).await?
+        || !session::refresh(&backend.db, &session.id, "password", None, Aal::Aal1).await?
     {
         return Ok(expired());
     }
@@ -308,7 +308,7 @@ async fn second_factor(
     if !s.flow.finish(&backend.db).await? {
         return Ok(expired());
     }
-    match session::step_up(&backend.db, &session, method, Aal::Aal2).await? {
+    match session::step_up(&backend.db, &session, method, None, Aal::Aal2).await? {
         StepUp::Rotated(token) => Ok(signed_in(
             return_to(&s.flow),
             vec![backend.session_set_cookie(&token)],

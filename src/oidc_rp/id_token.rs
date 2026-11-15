@@ -83,6 +83,64 @@ pub(crate) fn verify(
     nonce: &str,
     now: i64,
 ) -> Result<String, &'static str> {
+    validate(id_token, jwks, issuer, client_id, nonce, now).map(|(claims, _)| claims.sub)
+}
+
+/// Profile claims of a validated ID token (OIDC Core 5.1). Values of an
+/// unexpected JSON type read as absent.
+#[cfg(feature = "identity-native")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct IdClaims {
+    pub sub: String,
+    pub email: Option<String>,
+    /// JSON `true` or the string `"true"`.
+    pub email_verified: bool,
+    pub given_name: Option<String>,
+    pub family_name: Option<String>,
+    /// Unix seconds.
+    pub auth_time: Option<i64>,
+}
+
+/// [`verify`], returning the profile claims beside `sub`.
+#[cfg(feature = "identity-native")]
+pub(crate) fn verify_claims(
+    id_token: &str,
+    jwks: &Jwks,
+    issuer: &str,
+    client_id: &str,
+    nonce: &str,
+    now: i64,
+) -> Result<IdClaims, &'static str> {
+    use serde_json::Value;
+    let (claims, raw) = validate(id_token, jwks, issuer, client_id, nonce, now)?;
+    let text = |name: &str| match raw.get(name) {
+        Some(Value::String(s)) if !s.is_empty() => Some(s.clone()),
+        _ => None,
+    };
+    Ok(IdClaims {
+        sub: claims.sub,
+        email: text("email"),
+        email_verified: match raw.get("email_verified") {
+            Some(Value::Bool(b)) => *b,
+            Some(Value::String(s)) => s == "true",
+            _ => false,
+        },
+        given_name: text("given_name"),
+        family_name: text("family_name"),
+        auth_time: raw.get("auth_time").and_then(Value::as_i64),
+    })
+}
+
+/// Signature, issuer, audience, time and nonce checks; returns the checked
+/// claims and the full payload.
+fn validate(
+    id_token: &str,
+    jwks: &Jwks,
+    issuer: &str,
+    client_id: &str,
+    nonce: &str,
+    now: i64,
+) -> Result<(Claims, serde_json::Value), &'static str> {
     let header = decode_header(id_token).map_err(|_| "ID token header is malformed")?;
     if !matches!(header.alg, Algorithm::RS256 | Algorithm::ES256) {
         return Err("ID token algorithm not accepted");
@@ -95,12 +153,13 @@ pub(crate) fn verify(
     validation.validate_exp = false;
     validation.validate_aud = false;
     validation.required_spec_claims.clear();
-    let claims = decode::<Claims>(id_token, &key, &validation)
+    let raw = decode::<serde_json::Value>(id_token, &key, &validation)
         .map_err(|e| match e.kind() {
             ErrorKind::InvalidSignature => "ID token signature is invalid",
             _ => "ID token is malformed",
         })?
         .claims;
+    let claims = Claims::deserialize(&raw).map_err(|_| "ID token is malformed")?;
 
     if claims.iss != issuer {
         return Err("ID token issuer does not match");
@@ -133,11 +192,11 @@ pub(crate) fn verify(
     if claims.sub.is_empty() || claims.sub.len() > MAX_SUB_OCTETS {
         return Err("ID token sub is empty or too long");
     }
-    Ok(claims.sub)
+    Ok((claims, raw))
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use jsonwebtoken::{EncodingKey, Header, encode};
@@ -148,8 +207,8 @@ mod tests {
     const NONCE: &str = "n-0S6_WzA2Mj";
     const NOW: i64 = 1_800_000_000;
 
-    // Test-only keys; never used outside this module.
-    const RSA_PEM: &str = "-----BEGIN PRIVATE KEY-----
+    // Test-only keys; the upstream provider stubs sign with them too.
+    pub(crate) const RSA_PEM: &str = "-----BEGIN PRIVATE KEY-----
 MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDF+oOCuo8VOVaq
 LO091+JSPajNhG36l7mjsV1qHLK0v2LpbFLJsZJVCueZ43dFJYblIJayZKbORdvx
 JeyYFAnSNfC2QT1gUY1D0sKSU0oZPYKfdt4Xowe3KyivE9i9/RAZmjPkfIPAEXST
@@ -178,17 +237,17 @@ QTamh3BbCGcy8hvejXyyAccRPCjZ2Ege7Bh4QF78xJJQdPMc1SKthIhnnR1zjrkY
 oYPJJ+0gfUPJBVIr/ByVahY=
 -----END PRIVATE KEY-----
 ";
-    const RSA_N: &str = "xfqDgrqPFTlWqiztPdfiUj2ozYRt-pe5o7FdahyytL9i6WxSybGSVQrnmeN3RSWG5SCWsmSmzkXb8SXsmBQJ0jXwtkE9YFGNQ9LCklNKGT2Cn3beF6MHtysorxPYvf0QGZoz5HyDwBF0k06sDTQGESK8WD9qI435bk7Rutvqg6N5f16Z65IlGy8ON2FoZHuHdHH5A_tgmO9yjldZEbqZ_UFVcRdzOWyWzW0l3Zrjgct5X5nKBEV4P-150S-yNIBKK1U-ubyU40eGDrtPQmyFdNXzeFSvoM3LardRRuj2n7Uar2aS-AdT8bEym3j3VE9AxS-AYSoCsxpVNBaEiaIUGw";
-    const RSA_E: &str = "AQAB";
+    pub(crate) const RSA_N: &str = "xfqDgrqPFTlWqiztPdfiUj2ozYRt-pe5o7FdahyytL9i6WxSybGSVQrnmeN3RSWG5SCWsmSmzkXb8SXsmBQJ0jXwtkE9YFGNQ9LCklNKGT2Cn3beF6MHtysorxPYvf0QGZoz5HyDwBF0k06sDTQGESK8WD9qI435bk7Rutvqg6N5f16Z65IlGy8ON2FoZHuHdHH5A_tgmO9yjldZEbqZ_UFVcRdzOWyWzW0l3Zrjgct5X5nKBEV4P-150S-yNIBKK1U-ubyU40eGDrtPQmyFdNXzeFSvoM3LardRRuj2n7Uar2aS-AdT8bEym3j3VE9AxS-AYSoCsxpVNBaEiaIUGw";
+    pub(crate) const RSA_E: &str = "AQAB";
 
-    const EC_PEM: &str = "-----BEGIN PRIVATE KEY-----
+    pub(crate) const EC_PEM: &str = "-----BEGIN PRIVATE KEY-----
 MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgZrQgzo6sWmSLK4zM
 +HjwY2azXU8/WzNhqtTc+1LG6NmhRANCAATuV59boX6AtX9kfHI3ylWErroSm5cq
 RllZIfBDxQA0QAiej2PmjYzxYaJLFFsvDIdaQqr3CcBwMr1yqVlXpwUZ
 -----END PRIVATE KEY-----
 ";
-    const EC_X: &str = "7lefW6F-gLV_ZHxyN8pVhK66EpuXKkZZWSHwQ8UANEA";
-    const EC_Y: &str = "CJ6PY-aNjPFhoksUWy8Mh1pCqvcJwHAyvXKpWVenBRk";
+    pub(crate) const EC_X: &str = "7lefW6F-gLV_ZHxyN8pVhK66EpuXKkZZWSHwQ8UANEA";
+    pub(crate) const EC_Y: &str = "CJ6PY-aNjPFhoksUWy8Mh1pCqvcJwHAyvXKpWVenBRk";
 
     fn jwks(keys: Value) -> Jwks {
         serde_json::from_value(json!({ "keys": keys })).unwrap()
@@ -437,6 +496,73 @@ RllZIfBDxQA0QAiej2PmjYzxYaJLFFsvDIdaQqr3CcBwMr1yqVlXpwUZ
             );
             assert_eq!(check(&token).unwrap_err(), "ID token nonce does not match");
         }
+    }
+
+    #[cfg(feature = "identity-native")]
+    #[test]
+    fn verify_claims_reads_profile() {
+        let claims_of = |c: Value| {
+            let token = mint(Algorithm::RS256, Some("rsa-1"), &with(c));
+            verify_claims(&token, &default_jwks(), ISS, CLIENT, NONCE, NOW)
+        };
+        let c = claims_of(json!({
+            "email": "ada@example.com",
+            "email_verified": true,
+            "given_name": "Ada",
+            "family_name": "Lovelace",
+            "auth_time": NOW - 10,
+        }))
+        .unwrap();
+        assert_eq!(
+            c,
+            IdClaims {
+                sub: "42".into(),
+                email: Some("ada@example.com".into()),
+                email_verified: true,
+                given_name: Some("Ada".into()),
+                family_name: Some("Lovelace".into()),
+                auth_time: Some(NOW - 10),
+            }
+        );
+        for (value, verified) in [
+            (json!("true"), true),
+            (json!(false), false),
+            (json!("false"), false),
+            (json!("TRUE"), false),
+            (json!(1), false),
+            (Value::Null, false),
+        ] {
+            let c = claims_of(json!({"email": "a@b.c", "email_verified": value})).unwrap();
+            assert_eq!(c.email_verified, verified, "{value}");
+        }
+        let c = claims_of(json!({"email": 7, "given_name": "", "auth_time": "soon"})).unwrap();
+        assert_eq!(c.email, None);
+        assert_eq!(c.given_name, None);
+        assert_eq!(c.family_name, None);
+        assert_eq!(c.auth_time, None);
+    }
+
+    #[cfg(feature = "identity-native")]
+    #[test]
+    fn verify_claims_shares_validation() {
+        let token = mint(
+            Algorithm::RS256,
+            Some("rsa-1"),
+            &with(json!({"nonce": "other"})),
+        );
+        assert_eq!(
+            verify_claims(&token, &default_jwks(), ISS, CLIENT, NONCE, NOW).unwrap_err(),
+            "ID token nonce does not match"
+        );
+        let token = mint(
+            Algorithm::RS256,
+            Some("rsa-1"),
+            &with(json!({"aud": "other"})),
+        );
+        assert_eq!(
+            verify_claims(&token, &default_jwks(), ISS, CLIENT, NONCE, NOW).unwrap_err(),
+            "ID token audience does not include the client"
+        );
     }
 
     #[test]

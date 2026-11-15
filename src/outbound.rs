@@ -1,5 +1,6 @@
 //! Shared outbound HTTP for attacker-influenceable targets: CIMD documents,
-//! domain-verification files, protected-resource metadata, webhook delivery.
+//! domain-verification files, protected-resource metadata, webhook delivery,
+//! upstream OIDC and OAuth2 providers.
 //! One `reqwest::Client` per trust policy, built once (a fresh client
 //! reloads the platform root store from disk), plus the capped body read
 //! every caller needs. Redirects are never followed: a 302 to an internal
@@ -10,6 +11,7 @@ use std::sync::LazyLock;
 use std::time::Duration;
 
 use futures_util::StreamExt;
+use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderName, HeaderValue};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -48,6 +50,22 @@ pub(crate) enum FetchError {
     TooLarge,
 }
 
+/// Request headers for [`get_ok_with`] and [`post_form`]. A name given
+/// twice keeps the last value; `Authorization` values are marked sensitive.
+fn header_map(
+    defaults: &[(HeaderName, &str)],
+    headers: &[(HeaderName, &str)],
+) -> Result<HeaderMap, FetchError> {
+    let mut map = HeaderMap::new();
+    for (name, value) in defaults.iter().chain(headers) {
+        let mut value = HeaderValue::from_str(value)
+            .map_err(|_| FetchError::Transport(format!("invalid {name} header value")))?;
+        value.set_sensitive(*name == AUTHORIZATION);
+        map.insert(name.clone(), value);
+    }
+    Ok(map)
+}
+
 /// GET `url` and require a 2xx. Returns the response so the caller can read
 /// headers before draining the body with [`read_capped`].
 pub(crate) async fn get_ok(
@@ -56,11 +74,23 @@ pub(crate) async fn get_ok(
     accept: Option<&str>,
     timeout: Duration,
 ) -> Result<reqwest::Response, FetchError> {
-    let mut req = client.get(url).timeout(timeout);
-    if let Some(a) = accept {
-        req = req.header(reqwest::header::ACCEPT, a);
+    match accept {
+        Some(a) => get_ok_with(client, url, &[(ACCEPT, a)], timeout).await,
+        None => get_ok_with(client, url, &[], timeout).await,
     }
-    let resp = req
+}
+
+/// [`get_ok`] with arbitrary request headers.
+pub(crate) async fn get_ok_with(
+    client: &reqwest::Client,
+    url: &str,
+    headers: &[(HeaderName, &str)],
+    timeout: Duration,
+) -> Result<reqwest::Response, FetchError> {
+    let resp = client
+        .get(url)
+        .timeout(timeout)
+        .headers(header_map(&[], headers)?)
         .send()
         .await
         .map_err(|e| FetchError::Transport(e.to_string()))?;
@@ -122,18 +152,20 @@ pub(crate) fn check_target(url: &url::Url, allow_private: bool) -> Result<(), &'
 }
 
 /// POST `form` as `application/x-www-form-urlencoded` and return the status
-/// with a body of at most `limit` bytes, whatever the status.
+/// with a body of at most `limit` bytes, whatever the status. Sends
+/// `Accept: application/json` unless `headers` sets another.
 pub(crate) async fn post_form(
     client: &reqwest::Client,
     url: &str,
     form: &[(&str, &str)],
+    headers: &[(HeaderName, &str)],
     timeout: Duration,
     limit: usize,
 ) -> Result<(u16, Vec<u8>), FetchError> {
     let resp = client
         .post(url)
         .timeout(timeout)
-        .header(reqwest::header::ACCEPT, "application/json")
+        .headers(header_map(&[(ACCEPT, "application/json")], headers)?)
         .form(form)
         .send()
         .await
@@ -144,7 +176,33 @@ pub(crate) async fn post_form(
 
 #[cfg(test)]
 mod tests {
-    use super::check_target;
+    use super::{ACCEPT, AUTHORIZATION, HeaderName, check_target, header_map};
+
+    #[test]
+    fn header_map_overrides_defaults_and_hides_authorization() {
+        let map = header_map(
+            &[(ACCEPT, "application/json")],
+            &[
+                (ACCEPT, "application/vnd.github+json"),
+                (AUTHORIZATION, "Bearer t"),
+                (
+                    HeaderName::from_static("x-github-api-version"),
+                    "2022-11-28",
+                ),
+            ],
+        )
+        .unwrap();
+        assert_eq!(map.len(), 3);
+        assert_eq!(map[ACCEPT], "application/vnd.github+json");
+        assert!(map[AUTHORIZATION].is_sensitive());
+        assert!(!map[ACCEPT].is_sensitive());
+        assert_eq!(map["x-github-api-version"], "2022-11-28");
+    }
+
+    #[test]
+    fn header_map_refuses_invalid_value() {
+        assert!(header_map(&[], &[(ACCEPT, "a\nb")]).is_err());
+    }
 
     fn check(raw: &str, allow_private: bool) -> Result<(), &'static str> {
         check_target(&url::Url::parse(raw).unwrap(), allow_private)

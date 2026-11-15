@@ -406,6 +406,16 @@ diesel::table! {
         updated_at -> Text,
         metadata_public -> Nullable<Text>,
         metadata_admin -> Nullable<Text>,
+        first_verified_at -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
+    identity_oidc_links (provider, subject) {
+        provider -> Text,
+        subject -> Text,
+        identity_id -> Text,
+        created_at -> Text,
     }
 }
 
@@ -461,7 +471,7 @@ diesel::table! {
         id -> Text,
         flow_id -> Text,
         purpose -> Text,
-        identity_id -> Text,
+        identity_id -> Nullable<Text>,
         address -> Text,
         code_mac -> Text,
         attempts -> Integer,
@@ -474,7 +484,7 @@ diesel::table! {
 diesel::table! {
     identity_mail_outbox (id) {
         id -> Text,
-        identity_id -> Text,
+        identity_id -> Nullable<Text>,
         recipient -> Text,
         kind -> Text,
         payload -> Text,
@@ -495,7 +505,13 @@ diesel::allow_tables_to_appear_in_same_query!(organizations, saml_connections);
 diesel::allow_tables_to_appear_in_same_query!(organizations, org_allowed_domains);
 diesel::joinable!(identity_credentials -> identities (identity_id));
 diesel::joinable!(identity_sessions -> identities (identity_id));
-diesel::allow_tables_to_appear_in_same_query!(identities, identity_credentials, identity_sessions);
+diesel::joinable!(identity_oidc_links -> identities (identity_id));
+diesel::allow_tables_to_appear_in_same_query!(
+    identities,
+    identity_credentials,
+    identity_sessions,
+    identity_oidc_links
+);
 diesel::allow_tables_to_appear_in_same_query!(posix_group_members, posix_accounts);
 diesel::allow_tables_to_appear_in_same_query!(
     posix_accounts,

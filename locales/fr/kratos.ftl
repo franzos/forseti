@@ -115,3 +115,4 @@ kratos-4070006 = Le code de vérification est invalide ou a déjà été utilis�
 
 # --- Limitation des tentatives (9000xxx) ---
 kratos-9000001 = Trop de tentatives de connexion pour le moment. Veuillez réessayer dans quelques minutes.
+kratos-9000002 = La connexion via le fournisseur n'a pas abouti. Veuillez réessayer.

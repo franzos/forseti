@@ -3,6 +3,7 @@
 use anyhow::{Result, anyhow};
 use serde_json::json;
 
+use super::registration::ACCOUNT_EXISTS;
 use super::{FlowRecord, SAVE_ATTEMPTS, Saved, Submission, SubmitOutcome, Submitted};
 use crate::audit::{AuditEvent, action, target_kind};
 use crate::backend::identity::FlowKind;
@@ -12,7 +13,7 @@ use crate::identity_native::store;
 use crate::identity_native::ui::Message;
 
 /// Kratos's message for a wrong, used, expired or exhausted code.
-const INVALID_CODE: (u64, &str) = (
+pub(super) const INVALID_CODE: (u64, &str) = (
     4_070_006,
     "The verification code is invalid or has already been used. Please try again.",
 );
@@ -23,6 +24,12 @@ pub(super) async fn submit(backend: &NativeBackend, mut s: Submission<'_>) -> Re
         return page(backend, s.flow).await;
     }
     let code = s.form.get("code").map(str::trim).unwrap_or_default();
+    if s.flow.ctx.upstream.is_some() {
+        return super::upstream::signup_code_submit(backend, s.flow, code, s.device).await;
+    }
+    if s.flow.ctx.address_change {
+        return address_change_submit(backend, s, code).await;
+    }
     let email = s.form.get("email").map(str::trim).unwrap_or_default();
     if !code.is_empty() {
         return check_code(backend, s.flow, code).await;
@@ -113,8 +120,11 @@ async fn check_code(
     let used = backend
         .use_code(&flow.row.id, Purpose::Verification, code)
         .await?;
-    let verified = match used {
-        Some(used) => store::mark_verified(&backend.db, &used.identity_id, &used.address).await?,
+    // A code without an identity belongs to a provider sign-up and verifies nothing here.
+    let verified = match used.and_then(|u| Some((u.identity_id?, u.address))) {
+        Some((identity_id, address)) => {
+            store::mark_verified(&backend.db, &identity_id, &address).await?
+        }
         None => None,
     };
     let Some(row) = verified else {
@@ -129,6 +139,92 @@ async fn check_code(
         .metadata(crate::audit_metadata!(
             "source" => "native",
             "flow_id" => flow_id,
+        ));
+    Ok(Submitted::new(SubmitOutcome::Page, vec![event]))
+}
+
+/// A settings address change's flow, which the dispatcher only lets a live session of its
+/// identity submit. A code applies the change; anything else mails a fresh code to the pending
+/// address, whatever address the form carries.
+async fn address_change_submit(
+    backend: &NativeBackend,
+    mut s: Submission<'_>,
+    code: &str,
+) -> Result<Submitted> {
+    let session = s.session.take().ok_or_else(|| {
+        anyhow!(
+            "address change flow {} submitted without a session",
+            s.flow.row.id
+        )
+    })?;
+    let mut flow = s.flow;
+    let (Some(identity_id), Some(pending)) = (flow.row.identity_id.clone(), flow.ctx.email.clone())
+    else {
+        return Err(anyhow!(
+            "address change flow {} lacks its identity or address",
+            flow.row.id
+        ));
+    };
+    if code.is_empty() {
+        if backend
+            .limiters
+            .recipient
+            .admit(&store::address_key(&pending))
+        {
+            backend
+                .send_code(&flow.row.id, Purpose::Verification, &identity_id, &pending)
+                .await?;
+        }
+        return page(backend, flow).await;
+    }
+    let used = backend
+        .use_code(&flow.row.id, Purpose::Verification, code)
+        .await?;
+    // The code row and the flow must agree on the identity and the address being applied.
+    let matches = used.is_some_and(|u| {
+        u.identity_id.as_deref() == Some(identity_id.as_str())
+            && u.address == store::email_norm(&pending)
+    });
+    if !matches || session.identity_id != identity_id {
+        flow.add_message(Message::error(INVALID_CODE.0, INVALID_CODE.1));
+        return page(backend, flow).await;
+    }
+    let writer = store::Writer {
+        identity_id: &identity_id,
+        session_id: &session.id,
+        verified_only: false,
+    };
+    let row = match store::apply_address_change(&backend.db, writer, &pending).await? {
+        store::AddressApplied::Applied(row) => row,
+        store::AddressApplied::Taken => {
+            flow.add_message(Message::error(ACCOUNT_EXISTS.0, ACCOUNT_EXISTS.1));
+            return page(backend, flow).await;
+        }
+        store::AddressApplied::Gone => {
+            flow.add_message(Message::error(INVALID_CODE.0, INVALID_CODE.1));
+            return page(backend, flow).await;
+        }
+        store::AddressApplied::SignedOut => {
+            return Ok(SubmitOutcome::Redirect {
+                location: super::sign_in_for(FlowKind::Verification, &flow.row.id),
+                set_cookies: Vec::new(),
+            }
+            .into());
+        }
+    };
+    let flow_id = flow.row.id.clone();
+    if let Err(e) = passed(backend, flow).await {
+        // The address is moved, so the browser and the audit row still get it.
+        tracing::warn!(error = ?e, flow_id = %flow_id, "address change applied; flow state not recorded");
+    }
+    let event = AuditEvent::new(action::VERIFICATION_COMPLETED)
+        .actor_user(&row.id, &row.email)
+        .target(target_kind::IDENTITY, &row.id)
+        .metadata(crate::audit_metadata!(
+            "source" => "native",
+            "flow_id" => flow_id,
+            "kratos_session_id" => session.id,
+            "address_change" => "applied",
         ));
     Ok(Submitted::new(SubmitOutcome::Page, vec![event]))
 }

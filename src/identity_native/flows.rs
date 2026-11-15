@@ -21,12 +21,16 @@ mod login;
 mod recovery;
 mod registration;
 mod settings;
+mod upstream;
 mod verification;
+
+pub(super) use upstream::{CallbackQuery, clear_state_cookie};
 
 /// Seal purposes for secrets kept in a flow's context; each is bound to the flow id.
 const SEAL_PENDING_TOTP: &str = "flow-pending-totp";
 const SEAL_LOOKUP_CODES: &str = "flow-lookup-codes";
 const SEAL_PREFILL_CODE: &str = "flow-prefill-code";
+const SEAL_UPSTREAM: &str = "flow-upstream";
 
 /// Load-change-save rounds before a write that must land on a contended flow gives up.
 const SAVE_ATTEMPTS: usize = 3;
@@ -55,6 +59,15 @@ pub(super) fn kind_from_segment(segment: &str) -> Option<FlowKind> {
     ]
     .into_iter()
     .find(|k| k.path_segment() == segment)
+}
+
+/// The page that shows flow `id`.
+pub(super) fn page_url(kind: FlowKind, id: &str) -> String {
+    format!(
+        "/{}?flow={}",
+        kind.path_segment(),
+        crate::web::urlencode(id)
+    )
 }
 
 /// Lowercase hex SHA-256 of the browser's CSRF token, the form stored in `identity_flows.binding`.
@@ -132,6 +145,23 @@ pub(super) struct Context {
     /// Binding of the browser that followed the mail link; only it sees the prefilled code.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) prefill_binding: Option<String>,
+    /// Registration asking for an address: the provider that signed the user in without a
+    /// verified one. The address typed is echoed from `traits`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) email_needed: Option<String>,
+    /// Sealed provider account (provider, subject, names) of a sign-up waiting for an address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) upstream: Option<String>,
+    /// `state` of the provider hop in progress; one callback consumes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) oidc_state: Option<String>,
+    /// When that hop started (unix seconds, server clock); set and consumed with `oidc_state`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) oidc_started_at: Option<i64>,
+    /// Verification flow of a settings address change: `email` is the pending address and the
+    /// flow row's `identity_id` the identity it is for.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(super) address_change: bool,
 }
 
 /// A flow row with its parsed context. Submit functions change `state` and `ctx`, then [`save`].
@@ -324,6 +354,8 @@ pub(super) enum AfterEffect {
         identity_id: String,
         session_id: String,
     },
+    /// Recovery reset a never-verified identity: end its OP sessions and grants in every browser.
+    AccountReset { identity_id: String },
 }
 
 /// The dispatcher's answer to a submit.
@@ -336,6 +368,36 @@ pub(super) enum Dispatch {
     Forged,
     /// The submit needs a sign-in first; go to this URL.
     SignIn(String),
+    /// Over a rate limit: the plain `429`, with these `Retry-After` seconds.
+    TooManyRequests(Option<u64>),
+}
+
+/// Where a settings submit without a live session is sent.
+pub(super) fn settings_sign_in() -> String {
+    format!("/login?return_to={}", crate::web::urlencode("/settings"))
+}
+
+/// Where a submit on flow `id` of `kind` is sent for the second factor: back to the settings
+/// page, or to the address change's verification page.
+pub(super) fn step_up_for(kind: FlowKind, id: &str) -> String {
+    match kind {
+        FlowKind::Verification => {
+            crate::auth::aal2_step_up_url(&page_url(FlowKind::Verification, id))
+        }
+        _ => crate::auth::aal2_step_up_url("/settings"),
+    }
+}
+
+/// Where a submit on flow `id` of `kind` that needs a live session is sent without one: the
+/// settings page, or the address change's verification page.
+pub(super) fn sign_in_for(kind: FlowKind, id: &str) -> String {
+    match kind {
+        FlowKind::Verification => format!(
+            "/login?return_to={}",
+            crate::web::urlencode(page_url(FlowKind::Verification, id))
+        ),
+        _ => settings_sign_in(),
+    }
 }
 
 /// Start parameters of a browser flow, `return_to` already sanitised.
@@ -389,6 +451,9 @@ struct Person {
     last: String,
     totp: bool,
     lookup: bool,
+    password: bool,
+    /// Providers the identity is linked to, configured or not.
+    links: std::collections::BTreeSet<String>,
 }
 
 impl Person {
@@ -413,6 +478,8 @@ impl Person {
             last: text("/name/last"),
             totp: has("totp"),
             lookup: has("lookup_secret"),
+            password: has("password"),
+            links: crate::settings::linked_providers::linked_provider_ids(identity),
         }
     }
 }
@@ -455,6 +522,13 @@ fn new_flow(
 
 /// Per-kind submit for a flow that passed the checks.
 async fn dispatch(backend: &NativeBackend, kind: FlowKind, s: Submission<'_>) -> Result<Submitted> {
+    let upstream_kind = matches!(
+        kind,
+        FlowKind::Login | FlowKind::Registration | FlowKind::Settings
+    );
+    if upstream_kind && upstream::is_upstream_submit(s.form) {
+        return upstream::start(backend, kind, s).await;
+    }
     match kind {
         FlowKind::Login => login::submit(backend, s).await,
         FlowKind::Registration => registration::submit(backend, s).await,
@@ -617,6 +691,43 @@ impl NativeBackend {
         );
         rec.set_state("sent_email");
         rec
+    }
+
+    /// The verification flow of a settings change of `identity_id`'s address to `email`, not
+    /// stored yet; see [`verification_flow`](Self::verification_flow).
+    pub(super) fn address_change_flow(&self, email: &str, identity_id: &str) -> FlowRecord {
+        let mut rec = self.verification_flow(email, None, None);
+        rec.ctx.address_change = true;
+        rec.row.identity_id = Some(identity_id.to_string());
+        rec.row.context = serde_json::to_string(&rec.ctx).expect("flow context serialises");
+        rec
+    }
+
+    /// Where a mail link to an address change's flow sends the browser first: to sign in when it
+    /// holds no live session, to the second factor when its identity has TOTP and the session is
+    /// at AAL1. `None` for every other flow and browser.
+    pub(super) async fn address_change_detour(
+        &self,
+        id: &str,
+        cookie: &str,
+    ) -> Result<Option<String>> {
+        let Some(rec) = self.load_flow(id).await? else {
+            return Ok(None);
+        };
+        if rec.kind() != Some(FlowKind::Verification) || !rec.ctx.address_change {
+            return Ok(None);
+        }
+        Ok(match self.browser_session(cookie).await? {
+            None => Some(sign_in_for(FlowKind::Verification, id)),
+            Some((session, identity))
+                if rec.row.identity_id.as_deref() == Some(identity.id.as_str())
+                    && Person::of(&identity).totp
+                    && session.aal != "aal2" =>
+            {
+                Some(step_up_for(FlowKind::Verification, id))
+            }
+            Some(_) => None,
+        })
     }
 
     /// Keep freshly generated lookup `codes` on the flow, sealed, until they are confirmed.
@@ -788,6 +899,29 @@ impl NativeBackend {
                 }
                 Ok(Checked::Ok(Box::new((rec, Some(session)))))
             }
+            // The code moves the identity to a new address, so only a browser signed in as that
+            // identity may use it; the owner of the new address alone must not complete it.
+            FlowKind::Verification if rec.ctx.address_change => {
+                let Some((session, identity)) = self.browser_session(cookie).await? else {
+                    return Ok(Checked::NoSession);
+                };
+                if rec.row.identity_id.as_deref() != Some(identity.id.as_str()) {
+                    return Ok(Checked::Foreign);
+                }
+                if Person::of(&identity).totp && session.aal != "aal2" {
+                    return Ok(Checked::Aal2Required);
+                }
+                Ok(Checked::Ok(Box::new((rec, Some(session)))))
+            }
+            // A provider sign-up's code issues a session, so only the browser that started it may
+            // use its flow.
+            FlowKind::Verification if rec.ctx.upstream.is_some() => {
+                if self.binding_matches(&rec, cookie) {
+                    Ok(Checked::Ok(Box::new((rec, None))))
+                } else {
+                    Ok(Checked::Foreign)
+                }
+            }
             // The code is the proof and no session is issued, so any browser may finish it.
             FlowKind::Verification => Ok(Checked::Ok(Box::new((rec, None)))),
             FlowKind::Login | FlowKind::Registration | FlowKind::Recovery => {
@@ -896,7 +1030,19 @@ impl NativeBackend {
             last: String::new(),
             totp: false,
             lookup: false,
+            password: false,
+            links: std::collections::BTreeSet::new(),
         });
+        let configured: Vec<&str> = self.upstream.ids().collect();
+        let refreshable: Vec<&str> = configured
+            .iter()
+            .copied()
+            .filter(|p| person.links.contains(*p) && self.upstream.can_reauthenticate(p))
+            .collect();
+        let link_states: Vec<(&str, bool)> = configured
+            .iter()
+            .map(|p| (*p, person.links.contains(*p)))
+            .collect();
 
         let mut pending: Option<(String, String)> = None;
         if matches!(kind, FlowKind::Settings) && !person.totp {
@@ -948,6 +1094,7 @@ impl NativeBackend {
         let screen = match kind {
             FlowKind::Login if row.refresh != 0 => ui::Screen::Login(ui::Login::Refresh {
                 identifier: &person.email,
+                providers: &refreshable,
             }),
             FlowKind::Login if row.requested_aal.as_deref() == Some("aal2") => {
                 ui::Screen::Login(ui::Login::SecondFactor {
@@ -957,11 +1104,24 @@ impl NativeBackend {
             }
             FlowKind::Login => ui::Screen::Login(ui::Login::Password {
                 identifier: ctx.identifier.as_deref().unwrap_or_default(),
+                providers: &configured,
             }),
-            FlowKind::Registration if ctx.credential_step => {
-                ui::Screen::Registration(ui::Registration::Password(traits))
+            FlowKind::Registration if ctx.email_needed.is_some() => {
+                ui::Screen::Registration(ui::Registration::EmailNeeded {
+                    email: traits.email,
+                    provider: ctx.email_needed.as_deref().unwrap_or_default(),
+                })
             }
-            FlowKind::Registration => ui::Screen::Registration(ui::Registration::Profile(traits)),
+            FlowKind::Registration if ctx.credential_step => {
+                ui::Screen::Registration(ui::Registration::Password {
+                    traits,
+                    providers: &configured,
+                })
+            }
+            FlowKind::Registration => ui::Screen::Registration(ui::Registration::Profile {
+                traits,
+                providers: &configured,
+            }),
             FlowKind::Verification => ui::Screen::Verification(code),
             FlowKind::Recovery => ui::Screen::Recovery(code),
             FlowKind::Settings => {
@@ -993,6 +1153,8 @@ impl NativeBackend {
                     lookup,
                     saved: row.state == "success",
                     handoff,
+                    providers: &link_states,
+                    has_password: person.password,
                 })
             }
         };
@@ -1028,15 +1190,8 @@ impl NativeBackend {
             Checked::Ok(found) => *found,
             Checked::Missing | Checked::Expired => return Ok(Dispatch::Expired),
             Checked::Foreign => return Ok(Dispatch::Forged),
-            Checked::NoSession => {
-                return Ok(Dispatch::SignIn(format!(
-                    "/login?return_to={}",
-                    crate::web::urlencode("/settings")
-                )));
-            }
-            Checked::Aal2Required => {
-                return Ok(Dispatch::SignIn(crate::auth::aal2_step_up_url("/settings")));
-            }
+            Checked::NoSession => return Ok(Dispatch::SignIn(sign_in_for(kind, id))),
+            Checked::Aal2Required => return Ok(Dispatch::SignIn(step_up_for(kind, id))),
         };
         if !csrf_valid {
             return Ok(Dispatch::Forged);

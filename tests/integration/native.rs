@@ -9,16 +9,16 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use reqwest::Client;
 use serde_json::Value;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::common::{
-    PORTAL, RegisteredUser, admin_test_credentials, browser_client, forseti_db_path,
+    PORTAL, RegisteredUser, admin_test_credentials, browser_client, client_cookie, forseti_db_path,
     paired_clients, skip_username_step, unique_email,
 };
 use crate::native_seed;
 
 const PASSWORD: &str = "Sup3rSecret-Test-Password!";
 const SESSION_COOKIE: &str = "forseti_session";
+const CSRF_COOKIE: &str = "forseti_csrf";
 
 fn db() -> rusqlite::Connection {
     native_seed::open(&forseti_db_path())
@@ -183,47 +183,6 @@ fn page_errors(html: &str) -> String {
 }
 
 // --- Cookies -----------------------------------------------------------------
-
-/// The value of cookie `name` that `client` sends to `localhost`: the client calls a one-shot
-/// listener on a loopback port, and cookies are not port-scoped.
-pub async fn client_cookie(client: &Client, name: &str) -> Option<String> {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind cookie probe");
-    let port = listener.local_addr().expect("probe addr").port();
-    let server = tokio::spawn(async move {
-        let (mut sock, _) = listener.accept().await.ok()?;
-        let mut buf = Vec::new();
-        let mut chunk = [0u8; 4096];
-        while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
-            let n = sock.read(&mut chunk).await.ok()?;
-            if n == 0 {
-                break;
-            }
-            buf.extend_from_slice(&chunk[..n]);
-        }
-        let _ = sock
-            .write_all(b"HTTP/1.1 204 No Content\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
-            .await;
-        Some(String::from_utf8_lossy(&buf).into_owned())
-    });
-    let _ = client
-        .get(format!("http://localhost:{port}/"))
-        .timeout(Duration::from_secs(5))
-        .send()
-        .await;
-    let request = server.await.ok().flatten()?;
-    request
-        .lines()
-        .filter_map(|l| {
-            l.split_once(':')
-                .filter(|(k, _)| k.eq_ignore_ascii_case("cookie"))
-        })
-        .flat_map(|(_, v)| v.split(';'))
-        .filter_map(|c| c.trim().split_once('='))
-        .find(|(k, _)| *k == name)
-        .map(|(_, v)| v.to_string())
-}
 
 /// The session row behind `client`'s session cookie.
 async fn client_session(client: &Client) -> Option<native_seed::SessionRow> {
@@ -552,6 +511,206 @@ pub async fn kratos_change_password(client: &Client, new_password: &str) {
         errors.is_empty(),
         "password change refused at {at}: {errors}"
     );
+}
+
+// --- Upstream sign-in --------------------------------------------------------
+
+/// The `mock-oidc` provider's id in `config.ci.native.toml`.
+pub const PLAYGROUND: &str = "playground";
+
+/// Press the `field` button valued `provider` on the page at `url` (`provider` on sign-in,
+/// sign-up and refresh pages, `link` or `unlink` on settings); where Forseti sends the browser.
+/// `client` must not follow redirects.
+pub async fn press_provider(
+    client: &Client,
+    url: &str,
+    field: &str,
+    provider: &str,
+) -> reqwest::Url {
+    let (at, html) = get_page(client, url).await;
+    let form = html_forms(&html, &at)
+        .into_iter()
+        .find(|f| f.inputs.iter().any(|(n, v, _)| n == field && v == provider))
+        .unwrap_or_else(|| {
+            panic!(
+                "no `{field}={provider}` button on {at}: {}",
+                html.chars().take(1500).collect::<String>()
+            )
+        });
+    post_for_location(client, &form.action, &form.fields(&[(field, provider)])).await
+}
+
+/// POST `fields` to `action` and return the redirect target. `client` must not follow redirects.
+async fn post_for_location(
+    client: &Client,
+    action: &str,
+    fields: &[(String, String)],
+) -> reqwest::Url {
+    let res = client
+        .post(action)
+        .form(fields)
+        .send()
+        .await
+        .unwrap_or_else(|e| panic!("POST {action}: {e}"));
+    assert!(
+        res.status().is_redirection(),
+        "POST {action}: expected a redirect, got {}",
+        res.status()
+    );
+    let to = res
+        .headers()
+        .get("location")
+        .and_then(|h| h.to_str().ok())
+        .expect("redirect Location");
+    res.url().join(to).expect("redirect target")
+}
+
+/// One sign-in at the mock through the `field` button on `url`: the mock signs `sub` in with
+/// `claims` merged into its ID token, and `client` follows the callback; the page it lands on.
+pub async fn provider_round_trip(
+    client: &Client,
+    url: &str,
+    field: &str,
+    sub: &str,
+    claims: &Value,
+) -> (reqwest::Url, String) {
+    let upstream = press_provider(client, url, field, PLAYGROUND).await;
+    assert!(
+        upstream
+            .as_str()
+            .starts_with(&format!("{}/authorize", crate::common::MOCK_OIDC_ISSUER)),
+        "the provider button leads to the mock, got {upstream}"
+    );
+    let back =
+        crate::common::mock_oidc_login_with(upstream.as_str(), sub, &claims.to_string()).await;
+    assert!(
+        back.starts_with(&format!(
+            "{PORTAL}/self-service/methods/oidc/callback/{PLAYGROUND}"
+        )),
+        "the mock returns to Forseti's callback, got {back}"
+    );
+    get_page(client, &back).await
+}
+
+/// Submit the flow behind the page at `url` with the browser's CSRF token and `fields` only, as
+/// a browser could whether or not the page offers that submit; the page it lands on.
+pub async fn submit_flow_fields(
+    client: &Client,
+    url: &str,
+    fields: &[(&str, &str)],
+) -> (reqwest::Url, String) {
+    let (at, _) = get_page(client, url).await;
+    let flow = crate::common::extract_flow_id_from_url(at.as_str())
+        .unwrap_or_else(|| panic!("{at} is not a flow page"));
+    let kind = at
+        .path_segments()
+        .and_then(|mut s| s.next())
+        .expect("flow page path")
+        .to_string();
+    let csrf = client_cookie(client, CSRF_COOKIE)
+        .await
+        .expect("browser CSRF cookie");
+    let body: Vec<(String, String)> = std::iter::once(("csrf_token".to_string(), csrf))
+        .chain(fields.iter().map(|(k, v)| (k.to_string(), v.to_string())))
+        .collect();
+    let action = format!("{PORTAL}/self-service/{kind}?flow={flow}");
+    let res = client
+        .post(&action)
+        .form(&body)
+        .send()
+        .await
+        .unwrap_or_else(|e| panic!("POST {action}: {e}"));
+    if res.status().is_redirection() {
+        let to = res
+            .headers()
+            .get("location")
+            .and_then(|h| h.to_str().ok())
+            .expect("redirect Location");
+        let next = res.url().join(to).expect("redirect target");
+        return get_page(client, next.as_str()).await;
+    }
+    let status = res.status();
+    let at = res.url().clone();
+    let body = res.text().await.unwrap_or_default();
+    assert!(status.is_success(), "POST {action}: status {status}");
+    (at, body)
+}
+
+/// The identity's provider links, `(provider, subject)`.
+pub fn provider_links(identity_id: &str) -> Vec<(String, String)> {
+    let conn = db();
+    let mut stmt = conn
+        .prepare("SELECT provider, subject FROM identity_oidc_links WHERE identity_id = ?1")
+        .expect("prepare links");
+    stmt.query_map([identity_id], |r| Ok((r.get(0)?, r.get(1)?)))
+        .expect("query links")
+        .collect::<Result<_, _>>()
+        .expect("read links")
+}
+
+/// The identity that `(provider, subject)` is linked to.
+pub fn provider_link_owner(provider: &str, subject: &str) -> Option<String> {
+    db().query_row(
+        "SELECT identity_id FROM identity_oidc_links WHERE provider = ?1 AND subject = ?2",
+        [provider, subject],
+        |r| r.get(0),
+    )
+    .ok()
+}
+
+/// A provider link written straight into the table, as for an identity that linked earlier.
+pub fn seed_provider_link(identity_id: &str, provider: &str, subject: &str) {
+    db().execute(
+        "INSERT INTO identity_oidc_links (provider, subject, identity_id, created_at) \
+         VALUES (?1, ?2, ?3, ?4)",
+        [
+            provider,
+            subject,
+            identity_id,
+            &chrono::Utc::now().to_rfc3339(),
+        ],
+    )
+    .expect("seed provider link");
+}
+
+/// Kinds of the identity's credentials (`password`, `totp`, `lookup_secret`).
+pub fn credential_kinds(identity_id: &str) -> Vec<String> {
+    let conn = db();
+    let mut stmt = conn
+        .prepare("SELECT kind FROM identity_credentials WHERE identity_id = ?1 ORDER BY kind")
+        .expect("prepare credentials");
+    stmt.query_map([identity_id], |r| r.get(0))
+        .expect("query credentials")
+        .collect::<Result<_, _>>()
+        .expect("read credentials")
+}
+
+/// `methods` (JSON) and `authenticated_at` of the session behind `client`'s cookie.
+pub async fn session_auth(client: &Client) -> Option<(Value, String)> {
+    let token = client_cookie(client, SESSION_COOKIE).await?;
+    let hash = forseti::native_test_support::token_hash(&token);
+    db().query_row(
+        "SELECT methods, authenticated_at FROM identity_sessions WHERE token_hash = ?1",
+        [hash],
+        |r| {
+            let methods: String = r.get(0)?;
+            Ok((
+                serde_json::from_str(&methods).unwrap_or(Value::Null),
+                r.get(1)?,
+            ))
+        },
+    )
+    .ok()
+}
+
+/// Whether the identity's first proven address is on record.
+pub fn first_verified(identity_id: &str) -> bool {
+    db().query_row(
+        "SELECT first_verified_at IS NOT NULL FROM identities WHERE id = ?1",
+        [identity_id],
+        |r| r.get(0),
+    )
+    .unwrap_or(false)
 }
 
 // --- Admin -----------------------------------------------------------------

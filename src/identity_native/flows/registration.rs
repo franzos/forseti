@@ -11,12 +11,10 @@ use crate::identity_native::NativeBackend;
 use crate::identity_native::codes::Purpose;
 use crate::identity_native::password::{self, HashError, PasswordConfig, PolicyError};
 use crate::identity_native::session::Issued;
-use crate::identity_native::store::{self, IdentityRow};
+use crate::identity_native::store::{self, IdentityRow, NAME_MAX_CHARS};
 use crate::identity_native::ui::Message;
 
-const NAME_MAX_CHARS: usize = 256;
-
-const ACCOUNT_EXISTS: (u64, &str) = (
+pub(super) const ACCOUNT_EXISTS: (u64, &str) = (
     4_000_007,
     "An account with the same identifier (email, phone, username, ...) exists already.",
 );
@@ -175,7 +173,7 @@ async fn credential(backend: &NativeBackend, mut s: Submission<'_>) -> Result<Su
 /// Each step that fails is logged and left out; resend on the verification page mails a new code.
 async fn finish(backend: &NativeBackend, s: &Submission<'_>, row: &IdentityRow) -> Created {
     let session = backend
-        .issue_session(&row.id, "password", Aal::Aal1, s.device)
+        .issue_session(&row.id, "password", None, Aal::Aal1, s.device)
         .await
         .inspect_err(|e| tracing::error!(error = ?e, identity_id = %row.id, "session for a new account not issued"))
         .ok();

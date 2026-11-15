@@ -127,6 +127,48 @@ pub fn paired_clients() -> (Client, Client, std::sync::Arc<reqwest::cookie::Jar>
     (auto, manual, jar)
 }
 
+/// The value of cookie `name` that `client` sends to `localhost`: the client calls a one-shot
+/// listener on a loopback port, and cookies are not port-scoped.
+pub async fn client_cookie(client: &Client, name: &str) -> Option<String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind cookie probe");
+    let port = listener.local_addr().expect("probe addr").port();
+    let server = tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.ok()?;
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 4096];
+        while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+            let n = sock.read(&mut chunk).await.ok()?;
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&chunk[..n]);
+        }
+        let _ = sock
+            .write_all(b"HTTP/1.1 204 No Content\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+            .await;
+        Some(String::from_utf8_lossy(&buf).into_owned())
+    });
+    let _ = client
+        .get(format!("http://localhost:{port}/"))
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await;
+    let request = server.await.ok().flatten()?;
+    request
+        .lines()
+        .filter_map(|l| {
+            l.split_once(':')
+                .filter(|(k, _)| k.eq_ignore_ascii_case("cookie"))
+        })
+        .flat_map(|(_, v)| v.split(';'))
+        .filter_map(|c| c.trim().split_once('='))
+        .find(|(k, _)| *k == name)
+        .map(|(_, v)| v.to_string())
+}
+
 // --- Email / identity factories -------------------------------------------
 
 /// Generate a unique test email. `prefix` lets the caller embed a per-test
@@ -2515,6 +2557,11 @@ pub async fn kratos_set_metadata_admin(identity_id: &str, metadata: Value) {
 /// Forseti redirected to) and return the mock's redirect back to Forseti's
 /// callback, unfollowed.
 pub async fn mock_oidc_login(authorize_url: &str, sub: &str) -> String {
+    mock_oidc_login_with(authorize_url, sub, "").await
+}
+
+/// [`mock_oidc_login`] with `claims`, a JSON object the mock merges into the ID token.
+pub async fn mock_oidc_login_with(authorize_url: &str, sub: &str, claims: &str) -> String {
     let client = manual_redirect_client();
     let res = client
         .get(authorize_url)
@@ -2528,7 +2575,7 @@ pub async fn mock_oidc_login(authorize_url: &str, sub: &str) -> String {
     );
     let res = client
         .post(authorize_url)
-        .form(&[("username", sub), ("claims", "")])
+        .form(&[("username", sub), ("claims", claims)])
         .send()
         .await
         .expect("POST mock login");

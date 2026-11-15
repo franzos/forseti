@@ -1036,7 +1036,7 @@ pub(crate) fn oidc_enable(ctx: &mut ModifyCtx, input: OidcEnableInput) -> anyhow
                 ctx.out,
                 "warning: no audit web_hook template found in this kratos.yml, so OIDC \
                  login/registration events will NOT reach Forseti's audit log; see \
-                 docs/operator-guide.md."
+                 docs/operator-guide-kratos.md."
             )?;
         }
 
@@ -3646,7 +3646,7 @@ mod tests {
             out.contains("no audit web_hook template"),
             "warning missing from output: {out}"
         );
-        assert!(out.contains("docs/operator-guide.md"), "out: {out}");
+        assert!(out.contains("docs/operator-guide-kratos.md"), "out: {out}");
 
         let written = std::fs::read_to_string(&kratos_path).unwrap();
         let root: Value = crate::config_cli::yamlutil::parse_yaml(&written).unwrap();

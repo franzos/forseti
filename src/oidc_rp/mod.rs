@@ -1,5 +1,6 @@
 //! Relying-party side of an upstream OIDC authorization code flow with a
-//! public client: PKCE (S256), nonce, discovery, code exchange.
+//! public or confidential client: PKCE (S256), nonce, discovery, code
+//! exchange.
 //!
 //! The PKCE verifier and nonce are derived from `state` under a server-side
 //! key, so the browser-held state cookie carries no secret.
@@ -61,8 +62,23 @@ pub(crate) fn random_urlsafe(bytes: usize) -> String {
     URL_SAFE_NO_PAD.encode(buf)
 }
 
-/// Authorization request URL (OIDC Core 3.1.2.1). Query parameters already on
-/// `endpoint` are kept unless they collide with one set here.
+/// One authorization request (OIDC Core 3.1.2.1, RFC 6749 4.1.1).
+pub(crate) struct AuthorizeRequest<'a> {
+    pub client_id: &'a str,
+    pub redirect_uri: &'a str,
+    pub state: &'a str,
+    /// `None` for OAuth2 providers without ID tokens.
+    pub nonce: Option<&'a str>,
+    pub code_challenge: &'a str,
+    /// Space-separated scopes.
+    pub scope: &'a str,
+    /// Further parameters such as `max_age`; one that names a parameter set
+    /// from the fields above is dropped.
+    pub extra: &'a [(&'a str, &'a str)],
+}
+
+/// Authorization request URL with scope `openid`. Query parameters already
+/// on `endpoint` are kept unless they collide with one set here.
 pub(crate) fn authorize_url(
     endpoint: &Url,
     client_id: &str,
@@ -71,16 +87,40 @@ pub(crate) fn authorize_url(
     nonce: &str,
     code_challenge: &str,
 ) -> Url {
-    let params = [
+    authorize_url_for(
+        endpoint,
+        &AuthorizeRequest {
+            client_id,
+            redirect_uri,
+            state,
+            nonce: Some(nonce),
+            code_challenge,
+            scope: "openid",
+            extra: &[],
+        },
+    )
+}
+
+/// Authorization request URL for `req`. Query parameters already on
+/// `endpoint` are kept unless they collide with one set here.
+pub(crate) fn authorize_url_for(endpoint: &Url, req: &AuthorizeRequest<'_>) -> Url {
+    let mut params = vec![
         ("response_type", "code"),
-        ("scope", "openid"),
-        ("client_id", client_id),
-        ("redirect_uri", redirect_uri),
-        ("state", state),
-        ("nonce", nonce),
-        ("code_challenge", code_challenge),
-        ("code_challenge_method", "S256"),
+        ("scope", req.scope),
+        ("client_id", req.client_id),
+        ("redirect_uri", req.redirect_uri),
+        ("state", req.state),
     ];
+    if let Some(nonce) = req.nonce {
+        params.push(("nonce", nonce));
+    }
+    params.push(("code_challenge", req.code_challenge));
+    params.push(("code_challenge_method", "S256"));
+    for &(k, v) in req.extra {
+        if !params.iter().any(|(p, _)| *p == k) {
+            params.push((k, v));
+        }
+    }
     let kept: Vec<(String, String)> = endpoint
         .query_pairs()
         .filter(|(k, _)| !params.iter().any(|(p, _)| p == k))
@@ -182,6 +222,40 @@ mod tests {
         );
         assert_eq!(get("nonce"), ["nn"]);
         assert_eq!(get("code_challenge"), ["ch"]);
+        assert_eq!(get("code_challenge_method"), ["S256"]);
+    }
+
+    #[test]
+    fn authorize_url_for_scope_extra_and_no_nonce() {
+        let endpoint = Url::parse("https://id.example.com/auth?max_age=60&hd=x").unwrap();
+        let url = authorize_url_for(
+            &endpoint,
+            &AuthorizeRequest {
+                client_id: "c",
+                redirect_uri: "https://r.example/cb",
+                state: "s",
+                nonce: None,
+                code_challenge: "x",
+                scope: "openid email profile",
+                extra: &[("max_age", "0"), ("state", "forged")],
+            },
+        );
+        let pairs: Vec<(String, String)> = url
+            .query_pairs()
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        let get = |name: &str| -> Vec<&str> {
+            pairs
+                .iter()
+                .filter(|(k, _)| k == name)
+                .map(|(_, v)| v.as_str())
+                .collect()
+        };
+        assert_eq!(get("scope"), ["openid email profile"]);
+        assert_eq!(get("max_age"), ["0"]);
+        assert_eq!(get("state"), ["s"]);
+        assert_eq!(get("hd"), ["x"]);
+        assert!(get("nonce").is_empty());
         assert_eq!(get("code_challenge_method"), ["S256"]);
     }
 

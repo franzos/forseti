@@ -2,7 +2,7 @@
 #
 # For a build with `--no-default-features --features identity-native` against
 # `make stack-up-native` (Hydra, Mailcrab and the mock OIDC upstream, no
-# Kratos). Point at it with FORSETI_CONFIG_PATH=config.ci.native.toml. NOT
+# Kratos) or `make stack-up-native-saml`. Point at it with FORSETI_CONFIG_PATH=config.ci.native.toml. NOT
 # production values.
 
 [hydra]
@@ -53,6 +53,15 @@ login_ip_rate_per_minute      = 1000
 login_ip_rate_per_hour        = 10000
 login_identifier_rate_per_15m = 1000
 
+# The `mock-oidc` upstream, with the client Kratos's `playground` provider uses
+# (infra/kratos/kratos.idp-test.yml). The mock accepts any client id and secret.
+[[identity.oidc_providers]]
+id = "playground"
+kind = "oidc"
+issuer = "http://host.containers.internal:8092/default"
+client_id = "forseti-playground"
+client_secret = "playground-secret"
+
 # `make seed-admin-native` plants this identity (password + TOTP). Keep in sync
 # with SEED_ADMIN_EMAIL.
 [admin]
@@ -88,6 +97,13 @@ rate_limit_per_hour = 1000
 # Public /users/{id} view + members-roster links.
 [profiles]
 enabled = true
+
+# Mounts /sso/{slug} and /sso/callback. The integration tests need no bridge;
+# `make stack-up-native-saml` adds Jackson and mock-saml for the e2e spec.
+[saml]
+jackson_url = "http://127.0.0.1:5225"
+jackson_api_key = "dev-jackson-api-key"
+client_secret_verifier = "dev-client-secret-verifier"
 
 # POSIX/Linux-auth device grant; `make seed-posix-client` provisions the client.
 [posix]

@@ -93,6 +93,11 @@ pub mod action {
     pub const PASSWORD_CHANGED: &str = "password.changed";
     pub const PASSWORD_RECOVERED: &str = "password.recovered";
     pub const VERIFICATION_COMPLETED: &str = "verification.completed";
+    /// Kratos fires no hook when a provider is linked or unlinked, so only the native build writes them.
+    #[cfg(feature = "identity-native")]
+    pub const IDENTITY_OIDC_LINKED: &str = "identity.oidc.linked";
+    #[cfg(feature = "identity-native")]
+    pub const IDENTITY_OIDC_UNLINKED: &str = "identity.oidc.unlinked";
     // mfa (flow-driven)
     pub const MFA_TOTP_ENROLLED: &str = "mfa.totp.enrolled";
     pub const MFA_TOTP_DISABLED: &str = "mfa.totp.disabled";
@@ -228,28 +233,18 @@ pub mod action {
     pub const APP_REFERRER_ENTERED: &str = "app.referrer.entered";
     pub const APP_REFERRER_RETURNED: &str = "app.referrer.returned";
     // saml (commercial SSO bridge — `src/saml/`)
-    #[cfg(feature = "identity-ory")]
     pub const SAML_LOGIN_SUCCEEDED: &str = "saml.login.succeeded";
-    #[cfg(feature = "identity-ory")]
     pub const SAML_LOGIN_FAILED: &str = "saml.login.failed";
-    #[cfg(feature = "identity-ory")]
     pub const SAML_LOGIN_BLOCKED_UNVERIFIED: &str = "saml.login.blocked_unverified";
-    #[cfg(feature = "identity-ory")]
     pub const SAML_IDENTITY_JIT_CREATED: &str = "saml.identity.jit_created";
-    #[cfg(feature = "identity-ory")]
     pub const SAML_IDENTITY_LINKED: &str = "saml.identity.linked";
     /// An assertion matched a pre-existing identity, so the user was sent to
     /// prove they hold it before anything was linked (RFC 9700 §4.16).
-    #[cfg(feature = "identity-ory")]
     pub const SAML_LINK_CONFIRM_REQUIRED: &str = "saml.link.confirm_required";
     /// The user came back from that bounce holding the matched identity.
-    #[cfg(feature = "identity-ory")]
     pub const SAML_LINK_CONFIRMED: &str = "saml.link.confirmed";
-    #[cfg(feature = "identity-ory")]
     pub const ADMIN_SAML_CONNECTION_CREATED: &str = "admin.saml.connection_created";
-    #[cfg(feature = "identity-ory")]
     pub const ADMIN_SAML_CONNECTION_DELETED: &str = "admin.saml.connection_deleted";
-    #[cfg(feature = "identity-ory")]
     pub const ADMIN_SAML_CONNECTION_TOGGLED: &str = "admin.saml.connection_toggled";
 }
 
@@ -283,7 +278,6 @@ pub mod target_kind {
     pub const LICENSE: &str = "license";
     pub const ORG: &str = "org";
     pub const TEAM: &str = "team";
-    #[cfg(feature = "identity-ory")]
     pub const SAML_CONNECTION: &str = "saml_connection";
 }
 

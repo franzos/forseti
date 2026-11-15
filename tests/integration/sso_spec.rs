@@ -1148,11 +1148,12 @@ fn extract_attr(html: &str, attr: &str) -> Option<String> {
     Some(rest[..rest.find('"')?].to_string())
 }
 
-/// POST the hand-off form like the page's script would; returns the 303's target.
-async fn submit_handoff(manual: &reqwest::Client, body: &str) -> reqwest::Url {
+/// POST the hand-off form on the page at `page` like its script would; returns the 303's target.
+async fn submit_handoff(manual: &reqwest::Client, page: &reqwest::Url, body: &str) -> reqwest::Url {
     let (action, fields) = handoff_form(body);
+    let action = page.join(&action).expect("hand-off action");
     let resp = manual
-        .post(&action)
+        .post(action)
         .form(&fields)
         .send()
         .await
@@ -1167,9 +1168,6 @@ async fn submit_handoff(manual: &reqwest::Client, body: &str) -> reqwest::Url {
 
 #[tokio::test]
 async fn discovery_lists_idp_hints_supported() {
-    skip_on_native!(
-        "upstream OIDC sign-in is out of scope on the native build (spec non-goal), so there are no idp_hint providers"
-    );
     assert!(portal_reachable().await);
     let doc: serde_json::Value = browser_client()
         .get("http://host.containers.internal:3000/hydra/.well-known/openid-configuration")
@@ -1219,9 +1217,6 @@ async fn discovery_lists_idp_hints_supported() {
 
 #[tokio::test]
 async fn idp_hint_full_round_trip() {
-    skip_on_native!(
-        "upstream OIDC sign-in is out of scope on the native build (spec non-goal), so there are no idp_hint providers"
-    );
     assert!(portal_reachable().await);
     let (id, secret, redirect) = hydra_create_test_client(&["openid"]).await;
     let manual = manual_redirect_client();
@@ -1252,7 +1247,7 @@ async fn idp_hint_full_round_trip() {
         .expect("form-action directive");
     assert!(form_action.contains(MOCK_IDP_ORIGIN), "{form_action}");
 
-    let upstream = submit_handoff(&manual, &body).await;
+    let upstream = submit_handoff(&manual, last, &body).await;
     assert!(
         upstream
             .as_str()
@@ -1260,25 +1255,34 @@ async fn idp_hint_full_round_trip() {
         "{upstream}"
     );
 
-    // Sign in at the mock as a fresh subject; Kratos registers the identity.
-    let username = unique_email("idp-hint").replace('@', "-at-");
+    // Sign in at the mock as a fresh subject; the identity is registered on the way back.
+    let email = unique_email("idp-hint");
+    let username = email.replace('@', "-at-");
+    // Native takes an upstream address only when the provider asserts it verified.
+    let (claims, callback) = if is_native() {
+        (
+            serde_json::json!({ "email": email, "email_verified": true }).to_string(),
+            format!("{PORTAL}/self-service/methods/oidc/callback/playground"),
+        )
+    } else {
+        (
+            "{}".to_string(),
+            format!("{KRATOS_PUBLIC}/self-service/methods/oidc/callback/playground"),
+        )
+    };
     let resp = manual
         .post(upstream.clone())
-        .form(&[("username", username.as_str()), ("claims", "{}")])
+        .form(&[("username", username.as_str()), ("claims", claims.as_str())])
         .send()
         .await
         .expect("mock sign-in");
-    let back = next_hop(resp).await.expect("mock redirects back to Kratos");
-    assert!(
-        back.as_str()
-            .starts_with("http://localhost:4433/self-service/methods/oidc/callback/playground"),
-        "{back}"
-    );
+    let back = next_hop(resp).await.expect("mock redirects back");
+    assert!(back.as_str().starts_with(&callback), "{back}");
 
     let (visited, body) = chase_all(&manual, back.as_str()).await;
     assert!(
         visited.iter().any(|u| u.path() == "/oauth/login"),
-        "Kratos returns to Forseti's /oauth/login: {visited:?}"
+        "the callback returns to Forseti's /oauth/login: {visited:?}"
     );
     let last = visited.last().unwrap().clone();
     let code = if last.path() == "/oauth/consent" {
@@ -1306,9 +1310,6 @@ async fn idp_hint_full_round_trip() {
 
 #[tokio::test]
 async fn idp_hint_with_prompt_create_hands_off_from_registration() {
-    skip_on_native!(
-        "upstream OIDC sign-in is out of scope on the native build (spec non-goal), so there are no idp_hint providers"
-    );
     assert!(portal_reachable().await);
     let (id, _secret, redirect) = hydra_create_test_client(&["openid"]).await;
     let manual = manual_redirect_client();
@@ -1327,7 +1328,7 @@ async fn idp_hint_with_prompt_create_hands_off_from_registration() {
         body.contains("id=\"idp-handoff\""),
         "no hand-off page:\n{body}"
     );
-    let upstream = submit_handoff(&manual, &body).await;
+    let upstream = submit_handoff(&manual, visited.last().unwrap(), &body).await;
     assert!(
         upstream
             .as_str()
@@ -1340,9 +1341,6 @@ async fn idp_hint_with_prompt_create_hands_off_from_registration() {
 
 #[tokio::test]
 async fn unknown_idp_hint_shows_normal_login() {
-    skip_on_native!(
-        "upstream OIDC sign-in is out of scope on the native build (spec non-goal), so there are no idp_hint providers"
-    );
     assert!(portal_reachable().await);
     let (id, _secret, redirect) = hydra_create_test_client(&["openid"]).await;
 
@@ -1376,9 +1374,6 @@ async fn unknown_idp_hint_shows_normal_login() {
 
 #[tokio::test]
 async fn idp_hint_ignored_with_session() {
-    skip_on_native!(
-        "upstream OIDC sign-in is out of scope on the native build (spec non-goal), so there are no idp_hint providers"
-    );
     assert!(portal_reachable().await);
     let user = register_test_user("idp-hint-session").await;
     mark_identity_verified(&user.identity_id).await;

@@ -300,12 +300,21 @@ pub(crate) async fn end_sid(
     Ok(())
 }
 
-async fn revoke_sids(db: &DbPool, oauth: &OAuthImpl, sids: Vec<String>, grants: GrantRevocation) {
+/// `false` when any `sid` could not be revoked.
+async fn revoke_sids(
+    db: &DbPool,
+    oauth: &OAuthImpl,
+    sids: Vec<String>,
+    grants: GrantRevocation,
+) -> bool {
+    let mut all = true;
     for sid in sids {
         if let Err(e) = end_sid(db, oauth, &sid, grants).await {
             tracing::warn!(error = %e, "hydra login-session revoke by sid failed");
+            all = false;
         }
     }
+    all
 }
 
 /// End the app sessions one browser's Kratos session signed in to. The
@@ -319,7 +328,9 @@ pub(crate) async fn end_op_sessions_for_browser(
     grants: GrantRevocation,
 ) {
     match sids_for_browser(db, subject, kratos_session_id).await {
-        Ok(sids) => revoke_sids(db, oauth, sids, grants).await,
+        Ok(sids) => {
+            revoke_sids(db, oauth, sids, grants).await;
+        }
         Err(e) => tracing::warn!(error = %e, "hydra login session lookup failed"),
     }
 }
@@ -359,27 +370,33 @@ pub(crate) async fn sweep_dead_browser_sessions(
 /// End every app session of a subject, optionally sparing one browser's
 /// Kratos session. Subject-wide login and consent revokes follow as the
 /// backstop for sessions recorded before this table existed; those fire no
-/// back-channel logout but kill the grants.
+/// back-channel logout but kill the grants. `false` when any lookup or revoke failed.
 pub(crate) async fn end_op_sessions_for_subject(
     db: &DbPool,
     oauth: &OAuthImpl,
     subject: &str,
     except_kratos_session: Option<&str>,
     grants: GrantRevocation,
-) {
-    match sids_for_subject(db, subject, except_kratos_session).await {
+) -> bool {
+    let mut all = match sids_for_subject(db, subject, except_kratos_session).await {
         Ok(sids) => revoke_sids(db, oauth, sids, grants).await,
-        Err(e) => tracing::warn!(error = %e, "hydra login session lookup failed"),
-    }
+        Err(e) => {
+            tracing::warn!(error = %e, "hydra login session lookup failed");
+            false
+        }
+    };
     if except_kratos_session.is_some() {
-        return;
+        return all;
     }
     if let Err(e) = oauth.revoke_login_sessions_for_subject(subject).await {
         tracing::warn!(error = %e, "hydra login-session revoke failed");
+        all = false;
     }
     if let Err(e) = oauth.revoke_consent_sessions_for_subject(subject).await {
         tracing::warn!(error = %e, "hydra consent-session revoke failed");
+        all = false;
     }
+    all
 }
 
 /// A recorded Hydra login session of a subject.

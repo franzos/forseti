@@ -40,20 +40,42 @@ pub(crate) fn auth_origin(provider_id: &str) -> Option<&'static str> {
 /// Every known provider origin reachable from this flow's OIDC buttons.
 /// Covers sign-in/sign-up (`provider` nodes) and linking an account (`link`),
 /// whose values are raw provider ids. `unlink` is excluded: it resolves at
-/// Kratos and never bounces to the provider.
-pub(crate) fn flow_auth_origins(flow: &crate::flow_view::Flow) -> Vec<String> {
+/// the identity backend and never bounces to the provider. A provider in
+/// `[[identity.oidc_providers]]` maps to its issuer origin (GitHub: its own).
+pub(crate) fn flow_auth_origins(
+    flow: &crate::flow_view::Flow,
+    identity: &crate::config::IdentityConfig,
+) -> Vec<String> {
     let mut origins: Vec<String> = Vec::new();
     for node in flow.inputs("oidc") {
         if !matches!(node.name.as_str(), "provider" | "link") {
             continue;
         }
-        if let Some(origin) = auth_origin(&node.value)
-            && !origins.iter().any(|o| o == origin)
+        if let Some(origin) = configured_origin(identity, &node.value)
+            .or_else(|| auth_origin(&node.value).map(str::to_string))
+            && !origins.contains(&origin)
         {
-            origins.push(origin.to_string());
+            origins.push(origin);
         }
     }
     origins
+}
+
+#[cfg(feature = "identity-native")]
+fn configured_origin(identity: &crate::config::IdentityConfig, id: &str) -> Option<String> {
+    use crate::config::OidcProviderKind;
+    let provider = identity.oidc_providers.iter().find(|p| p.id == id)?;
+    match provider.kind {
+        OidcProviderKind::Github => auth_origin("github").map(str::to_string),
+        OidcProviderKind::Oidc => url::Url::parse(provider.issuer.as_deref()?)
+            .ok()
+            .map(|u| u.origin().ascii_serialization()),
+    }
+}
+
+#[cfg(not(feature = "identity-native"))]
+fn configured_origin(_: &crate::config::IdentityConfig, _: &str) -> Option<String> {
+    None
 }
 
 fn capitalize_first(s: &str) -> String {
@@ -104,7 +126,7 @@ mod tests {
             {"group": "oidc", "type": "input", "attributes": {"name": "provider", "type": "submit", "value": "google"}},
             {"group": "oidc", "type": "input", "attributes": {"name": "provider", "type": "submit", "value": "github"}},
         ]}}));
-        let origins = flow_auth_origins(&flow);
+        let origins = flow_auth_origins(&flow, &crate::config::IdentityConfig::default());
         assert!(origins.iter().any(|o| o == "https://accounts.google.com"));
         assert!(origins.iter().any(|o| o == "https://github.com"));
         assert_eq!(origins.len(), 2);
@@ -118,7 +140,57 @@ mod tests {
             {"group": "oidc", "type": "input", "attributes": {"name": "link", "type": "submit", "value": "apple"}},
             {"group": "oidc", "type": "input", "attributes": {"name": "unlink", "type": "submit", "value": "okta"}},
         ]}}));
-        assert_eq!(flow_auth_origins(&flow), vec!["https://appleid.apple.com"]);
+        assert_eq!(
+            flow_auth_origins(&flow, &crate::config::IdentityConfig::default()),
+            vec!["https://appleid.apple.com"]
+        );
+    }
+
+    /// Configured providers resolve to their issuer origin, which wins over the
+    /// pinned table, and to github.com for `kind = "github"`.
+    #[cfg(feature = "identity-native")]
+    #[test]
+    fn flow_auth_origins_maps_configured_providers() {
+        use crate::config::{IdentityConfig, OidcProviderConfig, OidcProviderKind};
+        let provider = |id: &str, kind, issuer: Option<&str>| OidcProviderConfig {
+            id: id.into(),
+            kind,
+            issuer: issuer.map(str::to_string),
+            client_id: "c".into(),
+            client_secret: Some("s".into()),
+            client_secret_env: None,
+            scopes: None,
+        };
+        let identity = IdentityConfig {
+            oidc_providers: vec![
+                provider(
+                    "playground",
+                    OidcProviderKind::Oidc,
+                    Some("https://idp.example.com:8443/realms/x"),
+                ),
+                provider(
+                    "google",
+                    OidcProviderKind::Oidc,
+                    Some("https://google.example"),
+                ),
+                provider("gh", OidcProviderKind::Github, None),
+            ],
+            ..IdentityConfig::default()
+        };
+        let flow = crate::flow_json::project(&serde_json::json!({"ui": {"nodes": [
+            {"group": "oidc", "type": "input", "attributes": {"name": "provider", "type": "submit", "value": "playground"}},
+            {"group": "oidc", "type": "input", "attributes": {"name": "link", "type": "submit", "value": "google"}},
+            {"group": "oidc", "type": "input", "attributes": {"name": "provider", "type": "submit", "value": "gh"}},
+            {"group": "oidc", "type": "input", "attributes": {"name": "unlink", "type": "submit", "value": "other"}},
+        ]}}));
+        assert_eq!(
+            flow_auth_origins(&flow, &identity),
+            [
+                "https://idp.example.com:8443",
+                "https://google.example",
+                "https://github.com"
+            ]
+        );
     }
 
     #[test]

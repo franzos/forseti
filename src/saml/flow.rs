@@ -2,18 +2,20 @@
 //!
 //! Start redirects to Jackson's authorize endpoint with a signed state
 //! cookie binding the round-trip; the callback exchanges the code,
-//! resolves the asserted email to a Kratos identity (link → verified
-//! match → JIT create), then establishes a native Kratos session via an
-//! admin-minted recovery link.
+//! resolves the asserted email to an identity (link → verified
+//! match → JIT create), then hands the browser a session through the
+//! identity backend.
 //!
 //! Every can't-start cause renders ONE uniform neutral page so the URL
 //! can't be used to probe which orgs have SSO configured.
 
+use std::net::SocketAddr;
 use std::sync::OnceLock;
 use std::time::Duration;
 
 use askama::Template;
-use axum::extract::{Path, Query, State};
+use axum::Extension;
+use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use serde::Deserialize;
@@ -21,7 +23,7 @@ use serde::Deserialize;
 use crate::audit::{self, AuditCtx, AuditEvent, action, target_kind};
 use crate::audit_metadata;
 use crate::backend::IdentityBackend;
-use crate::backend::identity::Identity;
+use crate::backend::identity::{Identity, SessionOrigin};
 use crate::commercial::license::{Feature, FeatureStatus};
 use crate::config::SamlConfig;
 use crate::orgs;
@@ -201,6 +203,7 @@ pub async fn callback(
     State(state): State<AppState>,
     Query(q): Query<CallbackQuery>,
     headers: HeaderMap,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     actx: AuditCtx,
 ) -> Response {
     let codec = state_cookie(state.cfg.self_.is_https());
@@ -373,18 +376,25 @@ pub async fn callback(
         }
     }
 
-    // The link is a bearer credential that lands in the browser's URL bar and
-    // history, and redeeming it opens Kratos' password-change window. One
-    // minute is the shortest Kratos honours exactly; it's consumed on the next
-    // hop, so there's nothing to gain from a longer window.
-    let link = match state
+    let origin = SessionOrigin {
+        method: "saml",
+        ip: crate::client_ip::client_ip(
+            &headers,
+            &state.cfg.proxy,
+            peer.map(|Extension(ConnectInfo(addr))| addr.ip()),
+        ),
+        user_agent: headers
+            .get(axum::http::header::USER_AGENT)
+            .and_then(|v| v.to_str().ok()),
+    };
+    let browser = match state
         .identity
-        .admin_create_recovery_link(&identity_id, "1m", Some("/"))
+        .establish_browser_session(&identity_id, "/", origin)
         .await
     {
-        Ok(l) => l,
+        Ok(b) => b,
         Err(e) => {
-            tracing::error!(error = ?e, "saml callback: recovery link mint failed");
+            tracing::error!(error = ?e, "saml callback: browser session failed");
             return fail_upstream(&state, &actx, &org_id, "recovery_link", clear).await;
         }
     };
@@ -397,21 +407,11 @@ pub async fn callback(
             .metadata(audit_metadata!("org_id" => org_id.as_str())),
     )
     .await;
-    let mut resp = Redirect::to(&link).into_response();
+    let mut resp = Redirect::to(&browser.location).into_response();
     append_set_cookie(&mut resp, Some(clear));
-    // The recovery redemption dumps SSO arrivals on the settings-password
-    // page; this breadcrumb lets that handler bounce them home.
-    let secure = if state.cfg.self_.is_https() {
-        "; Secure"
-    } else {
-        ""
-    };
-    append_set_cookie(
-        &mut resp,
-        Some(format!(
-            "forseti_sso_arrival=1; Path=/settings; Max-Age=60; HttpOnly; SameSite=Lax{secure}"
-        )),
-    );
+    for cookie in browser.set_cookies {
+        append_set_cookie(&mut resp, Some(cookie));
+    }
     resp
 }
 
@@ -1188,5 +1188,193 @@ mod link_decision_tests {
                 assert_ne!(saml_link_decision(facts), LinkDecision::JitCreate);
             }
         }
+    }
+}
+
+#[cfg(all(test, feature = "identity-native"))]
+mod native_callback_tests {
+    use std::sync::Arc;
+
+    use axum::body::Body;
+    use axum::http::{Request, header};
+    use axum::routing::{get, post};
+    use axum::{Json, Router};
+    use tower::ServiceExt as _;
+
+    use super::*;
+    use crate::backend::identity::{Aal, WhoamiOutcome};
+    use crate::config::{AppConfig, Redacted};
+    use crate::identity_native::NativeBackend;
+
+    const SECRET: &[u8] = &[0x42; 32];
+    const EMAIL: &str = "sso@acme.test";
+    const SUBJECT: &str = "idp-subject-1";
+
+    async fn jackson_stub() -> String {
+        let app = Router::new()
+            .route(
+                "/api/oauth/token",
+                post(|| async { Json(serde_json::json!({ "access_token": "at" })) }),
+            )
+            .route(
+                "/api/oauth/userinfo",
+                get(|headers: HeaderMap| async move {
+                    let bearer = headers
+                        .get(header::AUTHORIZATION)
+                        .and_then(|v| v.to_str().ok());
+                    if bearer != Some("Bearer at") {
+                        return StatusCode::UNAUTHORIZED.into_response();
+                    }
+                    Json(serde_json::json!({
+                        "id": SUBJECT,
+                        "email": EMAIL,
+                        "firstName": "Sam",
+                        "lastName": "So",
+                    }))
+                    .into_response()
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://{addr}")
+    }
+
+    /// The native callback for an identity linked to org `o1`, verified or never verified: the
+    /// response, the backend, the database and the identity id.
+    async fn callback_for_linked(
+        verified: bool,
+    ) -> (Response, Arc<NativeBackend>, crate::db::DbPool, String) {
+        let mut cfg = AppConfig::test_fixture();
+        cfg.saml = Some(SamlConfig {
+            jackson_url: jackson_stub().await,
+            jackson_internal_url: None,
+            jackson_api_key: Redacted("api-key".to_string()),
+            client_secret_verifier: Redacted("verifier".to_string()),
+            identity_schema_id: "default".to_string(),
+            sp_entity_id: None,
+        });
+        let db = crate::db::test_pool().await;
+        let backend = NativeBackend::new(&cfg, &db, SECRET);
+        let identity = backend
+            .admin_create_identity_verified("default", EMAIL, "Sam", "So")
+            .await
+            .unwrap()
+            .unwrap();
+        if !verified {
+            use crate::schema::identities;
+            use diesel::prelude::*;
+            let id = identity.id.clone();
+            let unverify = async {
+                Ok::<_, anyhow::Error>(crate::db_interact!(db, |c| {
+                    diesel::update(identities::table.find(&id))
+                        .set((
+                            identities::email_verified_at.eq(None::<String>),
+                            identities::first_verified_at.eq(None::<String>),
+                        ))
+                        .execute(c)
+                })?)
+            };
+            unverify.await.unwrap();
+        }
+        orgs::db::create_org(&db, "o1", "acme", "Acme", None)
+            .await
+            .unwrap();
+        orgs::db::add_member_race_safe(&db, &identity.id, "o1", orgs::Role::Member)
+            .await
+            .unwrap();
+        db::upsert_link(&db, "o1", EMAIL, Some(SUBJECT), &identity.id)
+            .await
+            .unwrap();
+        let state = AppState::for_test(cfg, db.clone(), backend.clone(), SECRET);
+        let router = crate::saml::router().with_state(state);
+
+        let payload = serde_json::to_vec(&StatePayload {
+            s: "nonce-1".to_string(),
+            o: "o1".to_string(),
+        })
+        .unwrap();
+        let state_value =
+            crate::saml::state_cookie(false).encode(SECRET, &payload, unix_seconds_now());
+        let req = Request::get("/sso/callback?code=c0de&state=nonce-1")
+            .header(header::COOKIE, format!("forseti_saml_state={state_value}"))
+            .header(header::USER_AGENT, "Mozilla/5.0 sso")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        (resp, backend, db, identity.id)
+    }
+
+    fn set_cookies(resp: &Response) -> Vec<&str> {
+        resp.headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .map(|v| v.to_str().unwrap())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn the_callback_signs_the_browser_in_with_a_saml_session() {
+        let (resp, backend, _, identity) = callback_for_linked(true).await;
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+        assert_eq!(resp.headers()[header::LOCATION], "/");
+        let cookies = set_cookies(&resp);
+        assert!(
+            cookies
+                .iter()
+                .any(|c| c.starts_with("forseti_saml_state=;"))
+        );
+        assert!(
+            !cookies
+                .iter()
+                .any(|c| c.starts_with("forseti_sso_arrival="))
+        );
+        let session = cookies
+            .iter()
+            .find(|c| c.starts_with("forseti_session="))
+            .expect("a session cookie");
+        let pair = session.split(';').next().unwrap();
+        let WhoamiOutcome::Ok(s) = backend.whoami(Some(pair)).await.unwrap() else {
+            panic!("whoami accepts the cookie");
+        };
+        assert_eq!(
+            s.identity.as_ref().map(|i| i.id.as_str()),
+            Some(identity.as_str())
+        );
+        assert_eq!(s.authenticator_assurance_level, Some(Aal::Aal1));
+        let methods: Vec<_> = s
+            .authentication_methods
+            .iter()
+            .flatten()
+            .map(|m| m.method.as_deref().unwrap())
+            .collect();
+        assert_eq!(methods, ["saml"]);
+    }
+
+    #[tokio::test]
+    async fn a_never_verified_linked_identity_gets_no_session_and_a_failure_row() {
+        let (resp, _, db, _) = callback_for_linked(false).await;
+        assert!(
+            !set_cookies(&resp)
+                .iter()
+                .any(|c| c.starts_with("forseti_session=")),
+            "no session"
+        );
+        let (rows, _) = audit::query(&db, audit::AuditFilter::default())
+            .await
+            .unwrap();
+        let actions: Vec<&str> = rows.iter().map(|r| r.action.as_str()).collect();
+        assert!(
+            !actions.contains(&action::SAML_LOGIN_SUCCEEDED),
+            "{actions:?}"
+        );
+        let failed = rows
+            .iter()
+            .find(|r| r.action == action::SAML_LOGIN_FAILED)
+            .expect("a saml.login.failed row");
+        assert!(!failed.succeeded());
+        let meta: serde_json::Value = serde_json::from_str(&failed.metadata).unwrap();
+        assert_eq!(meta["org_id"], "o1");
+        assert_eq!(meta["reason"], "recovery_link");
     }
 }

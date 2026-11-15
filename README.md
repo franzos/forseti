@@ -41,6 +41,29 @@ Because it's backed by software the giants scale with — OpenAI self-hosts Ory 
 | 🌗 **Light & dark** | A built-in theme toggle (light / dark / follow-system) across every page. |
 | 🛡️ **Production-minded** | CSRF on every form, signed cookies, rate-limited public endpoints, and an account-deletion webhook saga with retries. |
 
+## Identity backend: Kratos or native
+
+Forseti builds with one of two identity backends. The default talks to Kratos, and that's what most of this page describes. The other one is native: identities, credentials, sessions and the self-service flows live in Forseti's own database, and Kratos isn't part of the deployment. Hydra stays on both, so OAuth2 and OIDC work the same either way.
+
+The choice is made at compile time with a cargo feature; a binary carries exactly one backend.
+
+| | Kratos backend | Native backend |
+| --- | --- | --- |
+| **Services to run** | Forseti, Kratos, Hydra | Forseti, Hydra |
+| **Self-service flows** | Login, registration, verification, recovery, settings, logout | The same |
+| **Second factors** | TOTP, backup codes, WebAuthn security keys | TOTP, backup codes |
+| **Passwordless sign-in** | Passkeys, email codes | None |
+| **Upstream sign-in** | Every provider Kratos supports | OpenID Connect providers and GitHub (no Apple) |
+| **Enterprise SAML SSO** *(licensed)* | Yes | Yes |
+| **Mail** | Kratos courier for flow mail, Forseti for invites | Forseti for everything |
+| **Config tooling** | `forseti config` lints and edits the Ory config files | Nothing to lint: it's all in `config.toml` |
+| **Existing Kratos identities** | Stay where they are | No import; fresh installs only |
+| **How you get it** | Release tarballs, packages, container image | Build from source: `--no-default-features --features identity-native` |
+
+The native backend is new in the 0.2 series, and it's my code, not Ory's. The argument under [Why Forseti](#why-forseti) (your auth load sits on Ory's engines) only covers the OAuth side there. What you get in return is one service less to run, configure and back up.
+
+If you need passkeys or security keys, Apple sign-in or another provider that's neither OpenID Connect nor GitHub, or you already have identities in Kratos, stay on Kratos. Setup for each: [Kratos](docs/operator-guide-kratos.md), [native](docs/operator-guide-native.md).
+
 ## Authorizing MCP servers
 
 The MCP 2025-06-18 spec is OAuth 2.1 + OIDC, so Hydra fits. What it's missing is CIMD ([ory/hydra#4061](https://github.com/ory/hydra/issues/4061)) and RFC 8707 `resource=`, which it ignores entirely. Forseti fills both gaps:
@@ -95,7 +118,7 @@ Legend: **✓** built-in · **◐** partial / via add-on / consumes-not-serves �
 | **SAML 2.0** | ✓ † | ✗ | ✗ | ✓ | ◐ via Keycloak |
 | **TOTP + passkeys/WebAuthn** | ✓ (AAL2-enforced) | ◐ passkey-first | ✓ (passkey attestation) | ✓ | ✓ (+ smartcard) |
 | **Multi-org / tenancy** | ✓ † | ✗ | ✗ | ✓ realms + orgs | ✗ |
-| **Upstream IdP brokering / social login** | ✓ (Kratos) | ✓ | ✗ by design | ✓ | ◐ device-grant |
+| **Upstream IdP brokering / social login** | ✓ (Kratos, or native OIDC + GitHub) | ✓ | ✗ by design | ✓ | ◐ device-grant |
 | **LDAP / RADIUS / Unix (POSIX) hosts** | ◐ POSIX/PAM ² | ◐ PAM/NSS | ✓ | ◐ federation | ✓ (core) |
 | **Admin console (web)** | ✓ | ✓ | ◐ CLI-first | ✓ | ✓ |
 | **End-user self-service UI** | ✓ (the whole point) | ✓ | ✓ | ✓ | ◐ limited |
@@ -104,7 +127,7 @@ Legend: **✓** built-in · **◐** partial / via add-on / consumes-not-serves �
 | **License** | AGPL-3.0 + commercial gate | Apache-2.0 | MPL-2.0 | Apache-2.0 | GPLv3 |
 | **Maturity** | Young; built on mature Ory | Pre-1.0, audited | Stable 1.x | Very mature (CNCF/Red Hat) | Very mature (Red Hat) |
 
-¹ Forseti's own data. Kratos and Hydra each bring their own Postgres, so a full deployment runs several services — more moving parts than a single-binary Rauthy or Kanidm. † Organizations, SAML SSO, and the Prometheus `/metrics` endpoint are commercial features; the AGPL core runs as a fully working single tenant. SCIM, SIEM streaming and bulk-admin are on the roadmap, not shipped. ² Linux host auth (POSIX accounts, NSS, SSH-key distribution, PAM device-auth + offline login) ships as a **preview** — it backs POSIX hosts, but it's not an LDAP/RADIUS/Kerberos directory.
+¹ Forseti's own data. Kratos and Hydra each bring their own Postgres, so a full deployment runs several services — more moving parts than a single-binary Rauthy or Kanidm. The [native backend](#identity-backend-kratos-or-native) drops Kratos; Hydra stays. † Organizations, SAML SSO, and the Prometheus `/metrics` endpoint are commercial features; the AGPL core runs as a fully working single tenant. SCIM, SIEM streaming and bulk-admin are on the roadmap, not shipped. ² Linux host auth (POSIX accounts, NSS, SSH-key distribution, PAM device-auth + offline login) ships as a **preview** — it backs POSIX hosts, but it's not an LDAP/RADIUS/Kerberos directory.
 
 **Where Forseti wins.** If you've already bet on Ory — or you want a certified OAuth2/OIDC engine rather than a bespoke one — nothing else gives Kratos and Hydra real screens *and* an admin console *and* first-class multi-tenant organizations (members, invites, per-org branding, `org`/`orgs` OIDC claims). Rauthy, Kanidm and FreeIPA have no organizations model at all; only Keycloak does, and it costs you a JVM and a couple of gigs of RAM. You also get governance the others don't bundle: an append-only audit log, CIMD client onboarding for MCP with a default-deny audience registry, and an account-deletion webhook saga that emits signed RISC events.
 
@@ -142,7 +165,7 @@ podman run --rm -p 3000:3000 \
   ghcr.io/franzos/forseti:latest
 ```
 
-All of them need a reachable Kratos and Hydra — see the [operator guide](docs/operator-guide.md). The binary reads `./config.toml` (override with `FORSETI_CONFIG_PATH`); web assets, translations and database migrations are compiled into it, so there is nothing else to deploy alongside.
+All of them are the Kratos build and need a reachable Kratos and Hydra — see the [operator guide](docs/operator-guide.md). The native build needs Hydra only and is built from source — see [Identity: native](docs/operator-guide-native.md). The binary reads `./config.toml` (override with `FORSETI_CONFIG_PATH`); web assets, translations and database migrations are compiled into it, so there is nothing else to deploy alongside.
 
 > **Runtime note:** the binary links dynamically against `libpq` (the Postgres client). On a bare host install `libpq5` (Debian/Ubuntu) or `libpq` (most other distros); the container image already includes it. SQLite is bundled, so it needs nothing extra.
 
@@ -211,12 +234,16 @@ For the full OAuth2 dance — register a Hydra client, run an auth-code flow, ex
          +--------------+
 ```
 
+The diagram shows the Kratos build. On the native build the Kratos boxes go away and Forseti serves the identity flows from its own database.
+
 ## Documentation
 
 Full documentation is published at **<https://franzos.github.io/forseti/>**.
 
 - [User guide](docs/user-guide.md) — for people using an account: signing in, registration, recovery, MFA, account settings
-- [Operator guide](docs/operator-guide.md) — deployment topology, Kratos/Hydra config, secrets, backups
+- [Operator guide](docs/operator-guide.md) — deployment topology, shared config, Hydra, secrets, backups
+- [Operator guide — identity: Kratos](docs/operator-guide-kratos.md) — Kratos config, 2FA enforcement, the `forseti config` verbs
+- [Operator guide — identity: native](docs/operator-guide-native.md) — building the native backend, upstream providers, sessions, mail
 - [Operator guide — reverse proxy](docs/operator-guide-proxy.md) — proxy topology, cookies, CSRF, CORS
 - [Integration guide](docs/integration-guide.md) — consuming Forseti as an OIDC provider
 - [Protecting an MCP server](docs/integration-guide.md#protecting-an-mcp-server) — CIMD onboarding, the resource registry, token validation, and what your MCP server has to implement

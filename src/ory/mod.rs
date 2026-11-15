@@ -99,6 +99,7 @@ pub(crate) fn test_backends(
                 kratos_public: mk(kratos_public),
                 kratos_admin: mk(kratos_admin),
             }),
+            https: false,
         }),
         Arc::new(HydraBackend {
             clients: Arc::new(OryClients {

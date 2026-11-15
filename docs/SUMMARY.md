@@ -9,6 +9,8 @@
 # Operating
 
 - [Operator guide](./operator-guide.md)
+- [Identity: Kratos](./operator-guide-kratos.md)
+- [Identity: native](./operator-guide-native.md)
 - [Reverse proxy](./operator-guide-proxy.md)
 
 # Integrating

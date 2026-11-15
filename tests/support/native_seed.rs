@@ -74,9 +74,9 @@ pub fn create_identity(
     let id = uuid::Uuid::new_v4().to_string();
     let now = now();
     conn.execute(
-        "INSERT INTO identities (id, email, email_norm, email_verified_at, first_name, last_name, \
-         state, state_changed_at, created_at, updated_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', ?7, ?7, ?7)",
+        "INSERT INTO identities (id, email, email_norm, email_verified_at, first_verified_at, \
+         first_name, last_name, state, state_changed_at, created_at, updated_at) \
+         VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6, 'active', ?7, ?7, ?7)",
         params![
             id,
             email,
@@ -123,7 +123,8 @@ pub fn plant_totp(conn: &Connection, cookie_secret: &[u8], identity_id: &str, se
 
 pub fn mark_verified(conn: &Connection, identity_id: &str) {
     conn.execute(
-        "UPDATE identities SET email_verified_at = COALESCE(email_verified_at, ?2) WHERE id = ?1",
+        "UPDATE identities SET email_verified_at = COALESCE(email_verified_at, ?2), \
+         first_verified_at = COALESCE(first_verified_at, ?2) WHERE id = ?1",
         params![identity_id, now()],
     )
     .expect("mark verified");

@@ -5,7 +5,7 @@
 use anyhow::{Result, anyhow};
 
 use super::verification::{address_problem, page, request_code};
-use super::{Context, FlowRecord, Saved, Submission, SubmitOutcome, Submitted};
+use super::{AfterEffect, Context, FlowRecord, Saved, Submission, SubmitOutcome, Submitted};
 use crate::audit::{AuditEvent, action, target_kind};
 use crate::backend::identity::{Aal, FlowInit, FlowKind, RecoveryCode, browser_init_url};
 use crate::identity_native::codes::{Purpose, UsedCode};
@@ -50,20 +50,33 @@ async fn check_code(
         Some(used) => recovered_identity(backend, &flow, &used).await?,
         None => None,
     };
-    let Some(row) = recovered else {
+    let Some((row, reset)) = recovered else {
         flow.add_message(Message::error(INVALID_CODE.0, INVALID_CODE.1));
         return page(backend, flow).await;
     };
-    if !flow.finish(&backend.db).await? {
-        return Ok(SubmitOutcome::Redirect {
-            location: errors::url(errors::FLOW_EXPIRED),
-            set_cookies: Vec::new(),
+    let after = reset.map(|_| AfterEffect::AccountReset {
+        identity_id: row.id.clone(),
+    });
+    let issued = match finish_and_issue(backend, &mut flow, &row, device).await {
+        Ok(issued) => issued,
+        // The reset is stored, so its audit row and OAuth after-effect must still go out.
+        Err(e) if reset.is_some() => {
+            tracing::error!(error = ?e, flow_id = %flow.row.id, "recovery session not issued after reset");
+            None
         }
-        .into());
-    }
-    let issued = backend
-        .issue_session(&row.id, "code_recovery", Aal::Aal1, device)
-        .await?;
+        Err(e) => return Err(e),
+    };
+    let event = recovered_event(&row, &flow.row.id, issued.as_ref(), reset);
+    let Some(issued) = issued else {
+        return Ok(Submitted {
+            outcome: SubmitOutcome::Redirect {
+                location: errors::url(errors::FLOW_EXPIRED),
+                set_cookies: Vec::new(),
+            },
+            audit: reset.map(|_| event).into_iter().collect(),
+            after,
+        });
+    };
     let location = match handoff(backend, &issued, &flow.row.id).await {
         Ok(settings) => format!("/settings?flow={}", crate::web::urlencode(&settings)),
         Err(e) => {
@@ -72,41 +85,86 @@ async fn check_code(
             "/settings/password".to_string()
         }
     };
-    let event = AuditEvent::new(action::PASSWORD_RECOVERED)
-        .actor_user(&row.id, &row.email)
-        .target(target_kind::IDENTITY, &row.id)
-        .metadata(crate::audit_metadata!(
-            "source" => "native",
-            "flow_id" => flow.row.id,
-            "kratos_session_id" => issued.id,
-        ));
-    Ok(Submitted::new(
-        SubmitOutcome::Redirect {
+    Ok(Submitted {
+        outcome: SubmitOutcome::Redirect {
             location,
             set_cookies: vec![backend.session_set_cookie(&issued.token)],
         },
-        vec![event],
-    ))
+        audit: vec![event],
+        after,
+    })
 }
 
-/// The active identity a used code recovers, still holding the address the code was bound to.
-/// A mailed code proved that mailbox, so the address is marked verified, as Kratos does for
-/// self-service recovery codes; an admin-minted one proved nothing and leaves it as it is.
+/// Spend the flow and sign the identity in; `None` when the flow changed underneath.
+async fn finish_and_issue(
+    backend: &NativeBackend,
+    flow: &mut FlowRecord,
+    row: &IdentityRow,
+    device: Device<'_>,
+) -> Result<Option<Issued>> {
+    if !flow.finish(&backend.db).await? {
+        return Ok(None);
+    }
+    let issued = backend
+        .issue_session(&row.id, "code_recovery", None, Aal::Aal1, device)
+        .await?;
+    Ok(Some(issued))
+}
+
+/// The `password.recovered` row; a reset adds what it removed.
+fn recovered_event(
+    row: &IdentityRow,
+    flow_id: &str,
+    issued: Option<&Issued>,
+    reset: Option<store::Reset>,
+) -> AuditEvent {
+    let mut pairs = vec![
+        ("source", serde_json::json!("native")),
+        ("flow_id", serde_json::json!(flow_id)),
+    ];
+    if let Some(issued) = issued {
+        pairs.push(("kratos_session_id", serde_json::json!(issued.id)));
+    }
+    if let Some(reset) = reset {
+        pairs.extend([
+            ("unverified_reset", serde_json::json!(true)),
+            ("sessions_revoked", serde_json::json!(reset.sessions)),
+            ("methods_removed", serde_json::json!(reset.credentials)),
+            ("links_removed", serde_json::json!(reset.links)),
+            (
+                "offline_access_removed",
+                serde_json::json!(reset.offline_secrets),
+            ),
+        ]);
+    }
+    AuditEvent::new(action::PASSWORD_RECOVERED)
+        .actor_user(&row.id, &row.email)
+        .target(target_kind::IDENTITY, &row.id)
+        .metadata(crate::audit::SafeMetadata::from_pairs(&pairs))
+}
+
+/// The active identity a used code recovers, still holding the address the code was bound to,
+/// and the reset done to it. A mailed code proved that mailbox, so the address is marked
+/// verified, as Kratos does for self-service recovery codes, and a never-verified identity loses
+/// whatever was set up on it before; an admin-minted code proved nothing and changes nothing.
 async fn recovered_identity(
     backend: &NativeBackend,
     flow: &FlowRecord,
     used: &UsedCode,
-) -> Result<Option<IdentityRow>> {
-    let Some(row) = store::row_by_id(&backend.db, &used.identity_id).await? else {
+) -> Result<Option<(IdentityRow, Option<store::Reset>)>> {
+    let Some(identity_id) = used.identity_id.as_deref() else {
+        return Ok(None);
+    };
+    let Some(row) = store::row_by_id(&backend.db, identity_id).await? else {
         return Ok(None);
     };
     if !store::is_active(&row) || row.email_norm != used.address {
         return Ok(None);
     }
     if flow.ctx.admin_code {
-        return Ok(Some(row));
+        return Ok(Some((row, None)));
     }
-    store::mark_verified(&backend.db, &row.id, &row.email).await
+    store::verify_recovered(&backend.db, &row.id, &row.email).await
 }
 
 /// The settings flow a completed recovery hands over to, on the password page; its id.
@@ -189,8 +247,8 @@ mod tests {
     use crate::identity_native::codes::CODE_ATTEMPTS;
     use crate::identity_native::session::StepUp;
     use crate::identity_native::test_support::{
-        Browser, DEVICE, PASSWORD, audit_lines, identity_with_password, messages, plant_totp,
-        session_cookie, sql, start, submit,
+        Browser, DEVICE, PASSWORD, audit_lines, identity_with_password, messages,
+        plant_lookup_codes, plant_totp, session_cookie, sql, start, submit,
     };
     use crate::schema::{identity_codes, identity_mail_outbox};
 
@@ -608,7 +666,7 @@ mod tests {
         let (db, backend) = setup().await;
         let identity = identity_with_password(&db, "reset@x.test", true).await;
         let other_session = backend
-            .issue_session(&identity, "password", Aal::Aal1, DEVICE)
+            .issue_session(&identity, "password", None, Aal::Aal1, DEVICE)
             .await
             .unwrap();
         let (browser, _, done) = recover(&backend, "reset@x.test").await;
@@ -690,7 +748,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let StepUp::Rotated(token) = session::step_up(&db, &held, "totp", Aal::Aal2)
+        let StepUp::Rotated(token) = session::step_up(&db, &held, "totp", None, Aal::Aal2)
             .await
             .unwrap()
         else {
@@ -848,6 +906,285 @@ mod tests {
         })
         .await;
         assert_eq!(flows, 0, "no flow or code is left behind");
+    }
+
+    /// What a squatter can have set up on an account: a password, TOTP, lookup codes, a provider
+    /// link with its first-seen row, an offline passphrase and a signed-in browser. That browser.
+    async fn squatted(backend: &NativeBackend, identity: &str) -> Browser {
+        let id = identity.to_string();
+        sql(&backend.db, move |c| {
+            diesel::insert_into(crate::schema::offline_secrets::table)
+                .values((
+                    crate::schema::offline_secrets::identity_id.eq(&id),
+                    crate::schema::offline_secrets::verifier.eq("v"),
+                    crate::schema::offline_secrets::algo_version.eq(1),
+                    crate::schema::offline_secrets::created_at.eq("2026-01-01T00:00:00Z"),
+                    crate::schema::offline_secrets::updated_at.eq("2026-01-01T00:00:00Z"),
+                ))
+                .execute(c)
+        })
+        .await;
+        plant_totp(backend, identity).await;
+        plant_lookup_codes(backend, identity).await;
+        assert_eq!(
+            store::insert_link(&backend.db, identity, "github", identity)
+                .await
+                .unwrap(),
+            store::LinkInserted::Linked
+        );
+        crate::settings::oidc_links_db::upsert_seen(&backend.db, identity, "github")
+            .await
+            .unwrap();
+        let issued = backend
+            .issue_session(identity, "password", None, Aal::Aal2, DEVICE)
+            .await
+            .unwrap();
+        let browser = Browser {
+            session: Some(issued.token),
+            ..Browser::new()
+        };
+        assert!(signed_in_now(backend, &browser).await);
+        browser
+    }
+
+    async fn signed_in_now(backend: &NativeBackend, browser: &Browser) -> bool {
+        matches!(
+            backend.whoami(Some(&browser.cookie())).await.unwrap(),
+            WhoamiOutcome::Ok(_)
+        )
+    }
+
+    /// Which of password, TOTP, lookup codes, a link, a first-seen row and an offline passphrase
+    /// the identity still has.
+    async fn left(backend: &NativeBackend, identity: &str) -> [bool; 6] {
+        let db = &backend.db;
+        let has = async |kind| {
+            store::credential(db, identity, kind)
+                .await
+                .unwrap()
+                .is_some()
+        };
+        [
+            has("password").await,
+            has("totp").await,
+            has("lookup_secret").await,
+            !store::links_of(db, identity).await.unwrap().is_empty(),
+            !crate::settings::oidc_links_db::list_for_identity(db, identity)
+                .await
+                .unwrap()
+                .is_empty(),
+            {
+                let id = identity.to_string();
+                sql(db, move |c| {
+                    crate::schema::offline_secrets::table
+                        .find(&id)
+                        .count()
+                        .get_result::<i64>(c)
+                })
+                .await
+                    == 1
+            },
+        ]
+    }
+
+    #[tokio::test]
+    async fn a_mailed_code_resets_a_never_verified_account_before_signing_in() {
+        let (db, backend) = setup().await;
+        let identity = identity_with_password(&db, "squat@x.test", false).await;
+        let squatter = squatted(&backend, &identity).await;
+        let minted = backend.admin_create_recovery_code(&identity).await.unwrap();
+
+        let (browser, id, done) = recover(&backend, "squat@x.test").await;
+        assert!(
+            !signed_in_now(&backend, &squatter).await,
+            "the earlier session ended"
+        );
+        assert_eq!(left(&backend, &identity).await, [false; 6]);
+        let row = store::row_by_id(&db, &identity).await.unwrap().unwrap();
+        assert!(row.email_verified_at.is_some() && row.first_verified_at.is_some());
+        assert_eq!(
+            done.after,
+            Some(AfterEffect::AccountReset {
+                identity_id: identity.clone()
+            })
+        );
+        let audit = audit_lines(&done);
+        assert_eq!(audit.len(), 1);
+        for part in [
+            "password.recovered",
+            "\"unverified_reset\": Bool(true)",
+            "\"sessions_revoked\": Number(1)",
+            "\"methods_removed\": Number(3)",
+            "\"links_removed\": Number(1)",
+            "\"offline_access_removed\": Number(1)",
+            id.as_str(),
+        ] {
+            assert!(audit[0].contains(part), "{part}: {}", audit[0]);
+        }
+
+        let recovered = signed_in(&browser, &done);
+        let WhoamiOutcome::Ok(session) = backend.whoami(Some(&recovered.cookie())).await.unwrap()
+        else {
+            panic!("the recovery session is live at AAL1, no second factor is left");
+        };
+        assert_eq!(session.identity.unwrap().id, identity);
+        let live: i64 = {
+            let identity = identity.clone();
+            sql(&db, move |c| {
+                crate::schema::identity_sessions::table
+                    .filter(crate::schema::identity_sessions::identity_id.eq(&identity))
+                    .filter(crate::schema::identity_sessions::revoked_at.is_null())
+                    .count()
+                    .get_result(c)
+            })
+            .await
+        };
+        assert_eq!(live, 1, "the recovery session is the only one");
+
+        let admin_flow = minted.recovery_link.rsplit("flow=").next().unwrap();
+        let stale = enter(&backend, &Browser::new(), admin_flow, &minted.recovery_code).await;
+        assert!(
+            session_cookie(&stale).is_none(),
+            "the earlier admin code is gone"
+        );
+        assert_eq!(messages(&backend, admin_flow).await.0, [4_060_006]);
+
+        let settings = handoff_id(&done);
+        let FlowFetch::Ok(handoff) = settings_page(&backend, &recovered, &settings).await else {
+            panic!("the handoff flow is readable");
+        };
+        assert!(handoff.has_node("password", "password"));
+        let changed = submit(
+            &backend,
+            &recovered,
+            FlowKind::Settings,
+            &settings,
+            &[("method", "password"), ("password", NEW_PASSWORD)],
+        )
+        .await;
+        assert!(audit_lines(&changed)[0].contains("password.changed"));
+        assert_eq!(
+            login(&backend, "squat@x.test", PASSWORD).await.1,
+            [4_000_006]
+        );
+        assert!(login(&backend, "squat@x.test", NEW_PASSWORD).await.0);
+
+        let (_, _, again) = recover(&backend, "squat@x.test").await;
+        assert_eq!(again.after, None, "a verified account is reset once");
+        assert!(!audit_lines(&again)[0].contains("unverified_reset"));
+        assert!(left(&backend, &identity).await[0], "the new password stays");
+    }
+
+    #[tokio::test]
+    async fn a_reset_drops_a_pending_address_change() {
+        let (db, backend) = setup().await;
+        let identity = identity_with_password(&db, "owner@x.test", false).await;
+        let squatter = backend
+            .issue_session(&identity, "password", None, Aal::Aal1, DEVICE)
+            .await
+            .unwrap();
+        let change = backend.address_change_flow("squatter@x.test", &identity);
+        let code = backend.mailed_code(
+            &change.row.id,
+            Purpose::Verification,
+            &identity,
+            "squatter@x.test",
+        );
+        let writer = store::Writer {
+            identity_id: &identity,
+            session_id: &squatter.id,
+            verified_only: false,
+        };
+        let pending = store::AddressChange {
+            email: "squatter@x.test".to_string(),
+            verification: change.row.clone(),
+            code,
+        };
+        assert_eq!(
+            store::update_profile(&db, writer, None, None, Some(pending))
+                .await
+                .unwrap(),
+            store::ProfileSaved::Saved
+        );
+        let mailed_code = backend.mailed("squatter@x.test").await[0].code.clone();
+
+        let (browser, _, done) = recover(&backend, "owner@x.test").await;
+        assert!(done.after.is_some(), "the reset ran");
+        assert!(backend.load_flow(&change.row.id).await.unwrap().is_none());
+        let owner = signed_in(&browser, &done);
+        for fields in [
+            vec![("method", "code"), ("email", "squatter@x.test")],
+            vec![("method", "code"), ("code", mailed_code.as_str())],
+        ] {
+            let answer = dispatch(
+                &backend,
+                &owner,
+                FlowKind::Verification,
+                &change.row.id,
+                &fields,
+            )
+            .await;
+            assert!(matches!(answer, Dispatch::Expired), "{answer:?}");
+        }
+        assert_eq!(
+            backend.mailed("squatter@x.test").await.len(),
+            1,
+            "no resend"
+        );
+        let row = store::row_by_id(&db, &identity).await.unwrap().unwrap();
+        assert_eq!(row.email, "owner@x.test");
+        assert!(row.email_verified_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn an_admin_code_resets_nothing() {
+        let (db, backend) = setup().await;
+        let identity = identity_with_password(&db, "admin-squat@x.test", false).await;
+        let squatter = squatted(&backend, &identity).await;
+        let minted = backend.admin_create_recovery_code(&identity).await.unwrap();
+        let id = minted.recovery_link.rsplit("flow=").next().unwrap();
+        let done = enter(&backend, &Browser::new(), id, &minted.recovery_code).await;
+        handoff_id(&done);
+        assert_eq!(done.after, None);
+        assert!(!audit_lines(&done)[0].contains("unverified_reset"));
+        assert!(signed_in_now(&backend, &squatter).await);
+        assert_eq!(left(&backend, &identity).await, [true; 6]);
+        let row = store::row_by_id(&db, &identity).await.unwrap().unwrap();
+        assert!(row.email_verified_at.is_none() && row.first_verified_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_verified_account_resets_nothing_even_mid_email_change() {
+        let (db, backend) = setup().await;
+        let verified = identity_with_password(&db, "kept@x.test", true).await;
+        let changing = identity_with_password(&db, "moved@x.test", true).await;
+        {
+            let changing = changing.clone();
+            sql(&db, move |c| {
+                diesel::update(crate::schema::identities::table.find(&changing))
+                    .set(crate::schema::identities::email_verified_at.eq(None::<String>))
+                    .execute(c)
+            })
+            .await;
+        }
+        for (identity, email) in [(verified, "kept@x.test"), (changing, "moved@x.test")] {
+            let first = store::row_by_id(&db, &identity)
+                .await
+                .unwrap()
+                .unwrap()
+                .first_verified_at;
+            assert!(first.is_some());
+            let squatter = squatted(&backend, &identity).await;
+            let (_, _, done) = recover(&backend, email).await;
+            handoff_id(&done);
+            assert_eq!(done.after, None, "{email}");
+            assert!(!audit_lines(&done)[0].contains("unverified_reset"));
+            assert!(signed_in_now(&backend, &squatter).await, "{email}");
+            assert_eq!(left(&backend, &identity).await, [true; 6], "{email}");
+            let row = store::row_by_id(&db, &identity).await.unwrap().unwrap();
+            assert!(row.email_verified_at.is_some(), "{email}");
+            assert_eq!(row.first_verified_at, first, "{email}");
+        }
     }
 
     #[tokio::test]

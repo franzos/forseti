@@ -54,7 +54,7 @@ struct Payload {
 #[diesel(table_name = identity_mail_outbox)]
 pub(super) struct OutboxRow {
     pub(super) id: String,
-    pub(super) identity_id: String,
+    pub(super) identity_id: Option<String>,
     pub(super) recipient: String,
     pub(super) kind: String,
     pub(super) payload: String,
@@ -87,7 +87,7 @@ impl NativeBackend {
     pub(super) fn outbox_row(
         &self,
         purpose: Purpose,
-        identity_id: &str,
+        identity_id: Option<&str>,
         recipient: &str,
         flow_id: &str,
         code: &str,
@@ -109,7 +109,7 @@ impl NativeBackend {
         OutboxRow {
             payload: self.keys.seal.seal(SEAL_PAYLOAD, &id, &plain),
             id,
-            identity_id: identity_id.to_string(),
+            identity_id: identity_id.map(str::to_string),
             recipient: recipient.to_string(),
             kind: purpose.as_str().to_string(),
             state: state::QUEUED.to_string(),
@@ -522,7 +522,13 @@ mod tests {
     #[tokio::test]
     async fn verification_and_recovery_mail_have_the_agreed_shape() {
         let (_, backend, _) = setup().await;
-        let row = backend.outbox_row(Purpose::Verification, "i-1", "a@x.test", "flow 1", "012345");
+        let row = backend.outbox_row(
+            Purpose::Verification,
+            Some("i-1"),
+            "a@x.test",
+            "flow 1",
+            "012345",
+        );
         assert!(!row.payload.contains("012345"), "the payload is sealed");
         assert_eq!((row.state.as_str(), row.attempts), ("queued", 0));
         let payload = backend.open_payload(&row).unwrap();
@@ -538,7 +544,13 @@ mod tests {
         assert_eq!(text.lines().next(), Some("012345"));
         assert_eq!(first_six_digits(&text), Some("012345"));
 
-        let row = backend.outbox_row(Purpose::Recovery, "i-1", "a@x.test", "flow-2", "987654");
+        let row = backend.outbox_row(
+            Purpose::Recovery,
+            Some("i-1"),
+            "a@x.test",
+            "flow-2",
+            "987654",
+        );
         let payload = backend.open_payload(&row).unwrap();
         assert_eq!(
             subject(Purpose::Recovery, &payload.code),

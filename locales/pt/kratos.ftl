@@ -115,3 +115,4 @@ kratos-4070006 = O código de verificação é inválido ou já foi utilizado. T
 
 # --- Limitação de tentativas (9000xxx) ---
 kratos-9000001 = Demasiadas tentativas de início de sessão neste momento. Tente novamente dentro de alguns minutos.
+kratos-9000002 = Não foi possível iniciar sessão através do fornecedor. Tente novamente.

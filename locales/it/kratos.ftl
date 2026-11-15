@@ -115,3 +115,4 @@ kratos-4070006 = Il codice di verifica non è valido o è già stato utilizzato.
 
 # --- Limitazione dei tentativi (9000xxx) ---
 kratos-9000001 = Troppi tentativi di accesso in questo momento. Riprova tra qualche minuto.
+kratos-9000002 = L'accesso tramite il provider non è riuscito. Riprova.

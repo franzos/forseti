@@ -4,6 +4,7 @@
 
 use anyhow::{Result, anyhow};
 
+use super::login::NOT_VERIFIED;
 use super::registration::{check_traits, traits_of};
 use super::{
     AfterEffect, Context, FlowRecord, Form, SAVE_ATTEMPTS, Saved, Submission, SubmitOutcome,
@@ -14,7 +15,7 @@ use crate::backend::identity::Aal;
 use crate::identity_native::codes::Purpose;
 use crate::identity_native::password::{self, HashError, PasswordConfig, PolicyError};
 use crate::identity_native::session::{self, SessionRow, StepUp};
-use crate::identity_native::store::{self, IdentityRow, ProfileSaved};
+use crate::identity_native::store::{self, IdentityRow, ProfileSaved, Refused, Writer};
 use crate::identity_native::totp::{self, TotpConfig};
 use crate::identity_native::ui::Message;
 use crate::identity_native::{NativeBackend, errors, lookup};
@@ -27,7 +28,7 @@ const INVALID_TOTP: (u64, &str) = (
     4_000_008,
     "The provided authentication code is invalid, please try again.",
 );
-const NO_STRATEGY: (u64, &str) = (
+pub(super) const NO_STRATEGY: (u64, &str) = (
     4_000_001,
     "Could not find a strategy to update your settings. Did you fill out the form correctly?",
 );
@@ -73,6 +74,15 @@ fn expired() -> Submitted {
     .into()
 }
 
+/// The session ended between the flow check and the write; nothing was written.
+pub(super) fn signed_out() -> Submitted {
+    SubmitOutcome::Redirect {
+        location: super::settings_sign_in(),
+        set_cookies: Vec::new(),
+    }
+    .into()
+}
+
 /// One settings submit: the flow, the form, the signed-in session and its identity.
 struct Change<'a> {
     backend: &'a NativeBackend,
@@ -82,39 +92,87 @@ struct Change<'a> {
     row: IdentityRow,
 }
 
-impl Change<'_> {
-    /// Whether the session signed in within the privileged window.
-    fn privileged(&self) -> bool {
-        chrono::DateTime::parse_from_rfc3339(&self.session.authenticated_at).is_ok_and(|at| {
-            chrono::Utc::now() - at.with_timezone(&chrono::Utc)
-                <= self.backend.settings.privileged_window()
-        })
-    }
+/// Whether `session` signed in within the privileged window.
+pub(super) fn privileged(backend: &NativeBackend, session: &SessionRow) -> bool {
+    chrono::DateTime::parse_from_rfc3339(&session.authenticated_at).is_ok_and(|at| {
+        chrono::Utc::now() - at.with_timezone(&chrono::Utc) <= backend.settings.privileged_window()
+    })
+}
 
-    /// Send the browser to a password re-authentication that comes back to this page; nothing
-    /// is applied or saved.
-    fn refresh_required(&self) -> Submitted {
-        let back = self
-            .flow
-            .row
-            .return_to
-            .clone()
-            .unwrap_or_else(|| self.flow_page());
-        SubmitOutcome::Redirect {
-            location: format!(
-                "/login?refresh=true&return_to={}",
-                crate::web::urlencode(&back)
-            ),
-            set_cookies: Vec::new(),
+/// Send the browser to a re-authentication that comes back to the settings flow's page; nothing
+/// is applied or saved.
+pub(super) fn refresh_required(flow: &FlowRecord) -> Submitted {
+    let back = flow
+        .row
+        .return_to
+        .clone()
+        .unwrap_or_else(|| flow_page(flow));
+    SubmitOutcome::Redirect {
+        location: format!(
+            "/login?refresh=true&return_to={}",
+            crate::web::urlencode(&back)
+        ),
+        set_cookies: Vec::new(),
+    }
+    .into()
+}
+
+fn flow_page(flow: &FlowRecord) -> String {
+    format!("/settings?flow={}", crate::web::urlencode(&flow.row.id))
+}
+
+/// A settings change is stored: apply `clear` to the flow context, mark the flow `success` and
+/// send the browser where Kratos does, the flow's `return_to` or else the flow itself. A
+/// concurrent save of the flow is reloaded and `clear` applied again.
+pub(super) async fn saved(
+    backend: &NativeBackend,
+    mut flow: FlowRecord,
+    clear: fn(&mut Context),
+    audit: AuditEvent,
+    set_cookies: Vec<String>,
+    after: Option<AfterEffect>,
+) -> Result<Submitted> {
+    let db = &backend.db;
+    let mut landed = false;
+    for _ in 0..SAVE_ATTEMPTS {
+        clear(&mut flow.ctx);
+        flow.set_state("success");
+        if flow.save(db).await? == Saved::Done {
+            landed = true;
+            break;
         }
-        .into()
+        let Some(mut current) = backend.load_flow(&flow.row.id).await? else {
+            break;
+        };
+        current.clear_messages();
+        flow = current;
+    }
+    if !landed {
+        // The change itself is stored, so the browser and the audit row still get it.
+        tracing::warn!(flow_id = %flow.row.id, "settings flow kept changing; success not recorded on it");
+    }
+    let location = flow
+        .row
+        .return_to
+        .clone()
+        .unwrap_or_else(|| flow_page(&flow));
+    Ok(Submitted {
+        outcome: SubmitOutcome::Redirect {
+            location,
+            set_cookies,
+        },
+        audit: vec![audit],
+        after,
+    })
+}
+
+impl Change<'_> {
+    fn privileged(&self) -> bool {
+        privileged(self.backend, &self.session)
     }
 
-    fn flow_page(&self) -> String {
-        format!(
-            "/settings?flow={}",
-            crate::web::urlencode(&self.flow.row.id)
-        )
+    fn refresh_required(&self) -> Submitted {
+        refresh_required(&self.flow)
     }
 
     /// Save the flow with its messages and show it again.
@@ -133,49 +191,14 @@ impl Change<'_> {
         self.backend.limiters.settings_changes.admit(&self.row.id)
     }
 
-    /// The change is stored: apply `clear` to the flow context, mark the flow `success` and send
-    /// the browser where Kratos does, the flow's `return_to` or else the flow itself. A
-    /// concurrent save of the flow is reloaded and `clear` applied again.
     async fn saved(
-        mut self,
+        self,
         clear: fn(&mut Context),
         audit: AuditEvent,
         set_cookies: Vec<String>,
         after: Option<AfterEffect>,
     ) -> Result<Submitted> {
-        let db = &self.backend.db;
-        let mut landed = false;
-        for _ in 0..SAVE_ATTEMPTS {
-            clear(&mut self.flow.ctx);
-            self.flow.set_state("success");
-            if self.flow.save(db).await? == Saved::Done {
-                landed = true;
-                break;
-            }
-            let Some(mut current) = self.backend.load_flow(&self.flow.row.id).await? else {
-                break;
-            };
-            current.clear_messages();
-            self.flow = current;
-        }
-        if !landed {
-            // The change itself is stored, so the browser and the audit row still get it.
-            tracing::warn!(flow_id = %self.flow.row.id, "settings flow kept changing; success not recorded on it");
-        }
-        let location = self
-            .flow
-            .row
-            .return_to
-            .clone()
-            .unwrap_or_else(|| self.flow_page());
-        Ok(Submitted {
-            outcome: SubmitOutcome::Redirect {
-                location,
-                set_cookies,
-            },
-            audit: vec![audit],
-            after,
-        })
+        saved(self.backend, self.flow, clear, audit, set_cookies, after).await
     }
 
     /// An audit row in the shape the Kratos webhook writes, with the address it holds now.
@@ -193,11 +216,19 @@ impl Change<'_> {
     fn flag(&self, name: &str) -> bool {
         self.form.get(name).is_some_and(|v| !v.is_empty())
     }
+
+    fn writer(&self, verified_only: bool) -> Writer<'_> {
+        Writer {
+            identity_id: &self.row.id,
+            session_id: &self.session.id,
+            verified_only,
+        }
+    }
 }
 
-/// Names, and the address when it changed. A new address needs the privileged window and mail
-/// quota for it, loses its verified mark and is stored together with its verification code and
-/// mail; the old one stops signing in at once.
+/// Names, and a request for a new address when it changed. A new address needs the privileged
+/// window and mail quota for it; the identity keeps its current address, verified mark and sign-in
+/// until the code mailed to the new one is entered from a browser signed in as this identity.
 async fn profile(mut c: Change<'_>) -> Result<Submitted> {
     let traits = traits_of(c.form);
     if !check_traits(&mut c.flow, &traits) {
@@ -219,7 +250,7 @@ async fn profile(mut c: Change<'_>) -> Result<Submitted> {
         {
             return c.reject(BUSY).await;
         }
-        let verification = backend.verification_flow(&traits.email, None, None);
+        let verification = backend.address_change_flow(&traits.email, &c.row.id);
         let code = backend.mailed_code(
             &verification.row.id,
             Purpose::Verification,
@@ -233,18 +264,22 @@ async fn profile(mut c: Change<'_>) -> Result<Submitted> {
         });
     }
     let new_address = change.is_some();
-    match store::update_profile(&backend.db, &c.row.id, first, last, change).await? {
+    match store::update_profile(&backend.db, c.writer(false), first, last, change).await? {
         ProfileSaved::Saved => {}
         ProfileSaved::Taken => return c.reject(ACCOUNT_EXISTS).await,
         ProfileSaved::Gone => return Ok(expired()),
+        ProfileSaved::SignedOut => return Ok(signed_out()),
     }
-    let email = if new_address {
+    let mut event = c.event(action::PROFILE_UPDATED, &c.row.email);
+    if new_address {
         backend.wake_mail();
-        traits.email.clone()
-    } else {
-        c.row.email.clone()
-    };
-    let event = c.event(action::PROFILE_UPDATED, &email);
+        event = event.metadata(crate::audit_metadata!(
+            "source" => "native",
+            "flow_id" => c.flow.row.id,
+            "kratos_session_id" => c.session.id,
+            "address_change" => "requested",
+        ));
+    }
     c.saved(|_| {}, event, Vec::new(), None).await
 }
 
@@ -280,7 +315,11 @@ async fn change_password(mut c: Change<'_>) -> Result<Submitted> {
     let config = serde_json::to_string(&PasswordConfig {
         hashed_password: phc,
     })?;
-    store::put_credential(&c.backend.db, &c.row.id, "password", &config).await?;
+    let written =
+        store::write_credential(&c.backend.db, c.writer(false), "password", &config, true);
+    if written.await?.is_err() {
+        return Ok(signed_out());
+    }
     let event = c.event(action::PASSWORD_CHANGED, &c.row.email);
     let after = AfterEffect::PasswordChanged {
         identity_id: c.row.id.clone(),
@@ -313,6 +352,9 @@ async fn totp_method(mut c: Change<'_>) -> Result<Submitted> {
     if enrolled {
         return c.reject(NO_STRATEGY).await;
     }
+    if c.row.first_verified_at.is_none() {
+        return c.reject(NOT_VERIFIED).await;
+    }
     let secret = c.backend.pending_totp_secret(&mut c.flow).await?;
     let code = c.form.get("totp_code").unwrap_or_default();
     let Some(step) = totp::verify(&secret, code, totp::unix_now()) else {
@@ -324,11 +366,14 @@ async fn totp_method(mut c: Change<'_>) -> Result<Submitted> {
     // The enrolment code is spent: login refuses this step and every earlier one.
     config.last_used_step = Some(step);
     let config = serde_json::to_string(&config)?;
-    if !store::insert_credential(db, &c.row.id, "totp", &config).await? {
-        return c.reject(NO_STRATEGY).await;
+    match store::write_credential(db, c.writer(true), "totp", &config, false).await? {
+        Ok(true) => {}
+        Ok(false) => return c.reject(NO_STRATEGY).await,
+        Err(Refused::NotVerified) => return c.reject(NOT_VERIFIED).await,
+        Err(Refused::SignedOut) => return Ok(signed_out()),
     }
     let event = c.event(action::MFA_TOTP_ENROLLED, &c.row.email);
-    let set_cookies = match session::step_up(db, &c.session, "totp", Aal::Aal2).await? {
+    let set_cookies = match session::step_up(db, &c.session, "totp", None, Aal::Aal2).await? {
         StepUp::Rotated(token) => vec![c.backend.session_set_cookie(&token)],
         // A concurrent step-up already moved this browser to a new token.
         StepUp::Superseded => Vec::new(),
@@ -354,6 +399,10 @@ async fn lookup_method(mut c: Change<'_>) -> Result<Submitted> {
     if store::credential(db, &c.row.id, "totp").await?.is_none() {
         return c.reject(NO_STRATEGY).await;
     }
+    let generating = c.flag("lookup_secret_regenerate") || c.flag("lookup_secret_confirm");
+    if generating && c.row.first_verified_at.is_none() {
+        return c.reject(NOT_VERIFIED).await;
+    }
     if c.flag("lookup_secret_regenerate") {
         let codes = lookup::generate();
         c.backend.hold_generated_codes(&mut c.flow, &codes);
@@ -372,7 +421,11 @@ async fn lookup_method(mut c: Change<'_>) -> Result<Submitted> {
         }
         let config = lookup::config_for(&c.backend.keys.lookup_mac, &c.row.id, &codes);
         let config = serde_json::to_string(&config)?;
-        store::put_credential(db, &c.row.id, "lookup_secret", &config).await?;
+        match store::write_credential(db, c.writer(true), "lookup_secret", &config, true).await? {
+            Ok(_) => {}
+            Err(Refused::NotVerified) => return c.reject(NOT_VERIFIED).await,
+            Err(Refused::SignedOut) => return Ok(signed_out()),
+        }
         let event = c.event(action::MFA_LOOKUP_REGENERATED, &c.row.email);
         return c.saved(clear, event, Vec::new(), None).await;
     }
@@ -416,7 +469,7 @@ mod tests {
     /// A browser with a fresh AAL1 password session for `identity`.
     async fn signed_in(backend: &NativeBackend, identity: &str) -> Browser {
         let issued = backend
-            .issue_session(identity, "password", Aal::Aal1, DEVICE)
+            .issue_session(identity, "password", None, Aal::Aal1, DEVICE)
             .await
             .unwrap();
         Browser {
@@ -435,7 +488,7 @@ mod tests {
     /// Raise the browser's session to AAL2, as a TOTP step-up at login does.
     async fn stepped_up(backend: &NativeBackend, mut browser: Browser) -> Browser {
         let row = held(backend, &browser).await;
-        let StepUp::Rotated(token) = session::step_up(&backend.db, &row, "totp", Aal::Aal2)
+        let StepUp::Rotated(token) = session::step_up(&backend.db, &row, "totp", None, Aal::Aal2)
             .await
             .unwrap()
         else {
@@ -617,7 +670,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_email_change_needs_a_recent_sign_in_and_restarts_verification() {
+    async fn an_email_change_needs_a_recent_sign_in_and_waits_for_its_code() {
         let (db, backend) = setup().await;
         let identity = identity_with_password(&db, "old@x.test", true).await;
         identity_with_password(&db, "taken@x.test", true).await;
@@ -649,7 +702,7 @@ mod tests {
         let row = store::row_by_id(&db, &identity).await.unwrap().unwrap();
         assert_eq!(row.email, "old@x.test");
 
-        // An outstanding code for the old address does not survive the change.
+        // The old address is still the identity's, so its outstanding code stays usable.
         let earlier = backend
             .create_verification_flow("old@x.test", None, None)
             .await
@@ -669,10 +722,11 @@ mod tests {
         let row = store::row_by_id(&db, &identity).await.unwrap().unwrap();
         assert_eq!(
             (row.email.as_str(), row.email_norm.as_str()),
-            ("New@x.test", "new@x.test")
+            ("old@x.test", "old@x.test"),
+            "the address waits for its code"
         );
-        assert!(row.email_verified_at.is_none());
-        let addresses: Vec<String> = {
+        assert!(row.email_verified_at.is_some());
+        let mut addresses: Vec<String> = {
             let identity = identity.clone();
             let run = async {
                 Ok::<Vec<String>, anyhow::Error>(crate::db_interact!(db, |c| {
@@ -684,17 +738,14 @@ mod tests {
             };
             run.await.unwrap()
         };
-        assert_eq!(addresses, ["new@x.test"], "only the new address has a code");
+        addresses.sort();
+        assert_eq!(addresses, ["new@x.test", "old@x.test"]);
         let mail = backend.mailed("New@x.test").await;
         assert_eq!(mail.len(), 1);
         assert!(mail[0].subject.contains("verify"));
 
-        assert_eq!(login(&backend, "old@x.test", PASSWORD).await.1, [4_000_006]);
-        assert_eq!(
-            login(&backend, "new@x.test", PASSWORD).await.1,
-            [4_000_010],
-            "the new address signs in once verified"
-        );
+        assert!(login(&backend, "old@x.test", PASSWORD).await.0.is_some());
+        assert_eq!(login(&backend, "new@x.test", PASSWORD).await.1, [4_000_006]);
         assert!(matches!(
             whoami(&backend, &elsewhere).await,
             WhoamiOutcome::Ok(_)
@@ -702,8 +753,8 @@ mod tests {
 
         let audit = audit_lines(&done);
         assert_eq!(audit.len(), 1);
-        assert!(audit[0].contains("profile.updated"));
-        assert!(audit[0].contains("New@x.test"));
+        assert!(audit[0].contains("profile.updated") && audit[0].contains("requested"));
+        assert!(audit[0].contains("old@x.test") && !audit[0].contains("New@x.test"));
         assert!(!audit[0].contains(&mail[0].code));
     }
 
@@ -966,6 +1017,653 @@ mod tests {
             messages(&backend, &step).await.1,
             [("totp_code".to_string(), 4_000_008)]
         );
+    }
+
+    /// Every settings write for `session_id`; the refusal each gives, or `None` when it stored.
+    async fn try_writes(
+        backend: &NativeBackend,
+        identity: &str,
+        session_id: &str,
+    ) -> [Option<Refused>; 5] {
+        let db = &backend.db;
+        let writer = |verified_only| Writer {
+            identity_id: identity,
+            session_id,
+            verified_only,
+        };
+        let credential = async |kind, verified_only, replace| {
+            store::write_credential(db, writer(verified_only), kind, "{}", replace)
+                .await
+                .unwrap()
+                .err()
+        };
+        let moved = format!("moved-{identity}@x.test");
+        let verification = backend.verification_flow(&moved, None, None);
+        let code = backend.mailed_code(
+            &verification.row.id,
+            Purpose::Verification,
+            identity,
+            &moved,
+        );
+        let change = store::AddressChange {
+            email: moved,
+            verification: verification.row,
+            code,
+        };
+        let profile = match store::update_profile(db, writer(false), None, None, Some(change))
+            .await
+            .unwrap()
+        {
+            ProfileSaved::Saved => None,
+            ProfileSaved::SignedOut => Some(Refused::SignedOut),
+            other => panic!("{other:?}"),
+        };
+        let link = store::link_for(db, writer(true), "github", identity)
+            .await
+            .unwrap()
+            .err();
+        [
+            credential("password", false, true).await,
+            profile,
+            credential("totp", true, false).await,
+            credential("lookup_secret", true, true).await,
+            link,
+        ]
+    }
+
+    /// Password config, address, TOTP, lookup codes and links as stored now.
+    async fn stored(
+        backend: &NativeBackend,
+        identity: &str,
+    ) -> (String, String, bool, bool, usize) {
+        let row = store::row_by_id(&backend.db, identity)
+            .await
+            .unwrap()
+            .unwrap();
+        let password = store::credential(&backend.db, identity, "password")
+            .await
+            .unwrap()
+            .map(|c| c.config)
+            .unwrap_or_default();
+        (
+            password,
+            row.email,
+            has(backend, identity, "totp").await,
+            has(backend, identity, "lookup_secret").await,
+            store::links_of(&backend.db, identity).await.unwrap().len(),
+        )
+    }
+
+    #[tokio::test]
+    async fn settings_writes_need_a_session_live_at_write_time() {
+        let (db, backend) = setup().await;
+        let revoked = identity_with_password(&db, "revoked@x.test", true).await;
+        let session = held(&backend, &signed_in(&backend, &revoked).await)
+            .await
+            .id;
+        let before = stored(&backend, &revoked).await;
+        session::revoke_all(&db, &revoked, None).await.unwrap();
+        assert_eq!(
+            try_writes(&backend, &revoked, &session).await,
+            [const { Some(Refused::SignedOut) }; 5]
+        );
+        assert_eq!(stored(&backend, &revoked).await, before);
+
+        let expired = identity_with_password(&db, "expired@x.test", true).await;
+        let session = held(&backend, &signed_in(&backend, &expired).await)
+            .await
+            .id;
+        let before = stored(&backend, &expired).await;
+        let id = session.clone();
+        crate::identity_native::test_support::sql(&db, move |c| {
+            diesel::update(identity_sessions::table.find(&id))
+                .set(identity_sessions::expires_at.eq("2020-01-01T00:00:00.000000+00:00"))
+                .execute(c)
+        })
+        .await;
+        assert_eq!(
+            try_writes(&backend, &expired, &session).await,
+            [const { Some(Refused::SignedOut) }; 5]
+        );
+        assert_eq!(stored(&backend, &expired).await, before);
+
+        // A recovery reset between the flow check and the write.
+        let squatted = identity_with_password(&db, "reset@x.test", false).await;
+        let session = held(&backend, &signed_in(&backend, &squatted).await)
+            .await
+            .id;
+        let (_, reset) = store::verify_recovered(&db, &squatted, "reset@x.test")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(reset.is_some());
+        let after_reset = stored(&backend, &squatted).await;
+        assert_eq!(
+            try_writes(&backend, &squatted, &session).await,
+            [const { Some(Refused::SignedOut) }; 5]
+        );
+        assert_eq!(stored(&backend, &squatted).await, after_reset);
+        assert!(after_reset.0.is_empty(), "no password");
+    }
+
+    #[tokio::test]
+    async fn gated_settings_writes_need_a_verified_identity_at_write_time() {
+        let (db, backend) = setup().await;
+        let identity = identity_with_password(&db, "gate@x.test", false).await;
+        let session = held(&backend, &signed_in(&backend, &identity).await)
+            .await
+            .id;
+        assert_eq!(
+            try_writes(&backend, &identity, &session).await,
+            [
+                None,
+                None,
+                Some(Refused::NotVerified),
+                Some(Refused::NotVerified),
+                Some(Refused::NotVerified),
+            ]
+        );
+        let (_, _, totp, lookup, links) = stored(&backend, &identity).await;
+        assert_eq!((totp, lookup, links), (false, false, 0));
+
+        let verified = identity_with_password(&db, "ok@x.test", true).await;
+        let session = held(&backend, &signed_in(&backend, &verified).await)
+            .await
+            .id;
+        assert_eq!(
+            try_writes(&backend, &verified, &session).await,
+            [const { None }; 5]
+        );
+        let (_, email, totp, lookup, links) = stored(&backend, &verified).await;
+        assert_eq!(email, "ok@x.test", "an address change only starts");
+        assert_eq!((totp, lookup, links), (true, true, 1));
+    }
+
+    #[tokio::test]
+    async fn a_password_change_whose_session_ends_during_the_breach_check_stores_nothing() {
+        let db = crate::db::test_pool().await;
+        let mut built =
+            NativeBackend::build(&crate::config::AppConfig::test_fixture(), &db, &[0x42; 32]);
+        let identity = identity_with_password(&db, "race@x.test", true).await;
+        let (stub_db, stub_identity) = (db.clone(), identity.clone());
+        let range = axum::Router::new().route(
+            "/range/{prefix}",
+            axum::routing::get(move || {
+                let (db, identity) = (stub_db.clone(), stub_identity.clone());
+                async move {
+                    session::revoke_all(&db, &identity, None).await.unwrap();
+                    String::new()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, range).await.unwrap() });
+        built.breach_check = Some(crate::identity_native::password::BreachCheck::at(format!(
+            "http://{addr}"
+        )));
+        let backend = Arc::new(built);
+
+        let browser = signed_in(&backend, &identity).await;
+        let id = open(&backend, &browser, PASSWORD_PAGE).await;
+        let before = stored(&backend, &identity).await;
+        let done = change(
+            &backend,
+            &browser,
+            &id,
+            &[("method", "password"), ("password", STRONG)],
+        )
+        .await;
+        assert_eq!(location(&done), super::super::settings_sign_in());
+        assert!(done.audit.is_empty() && done.after.is_none());
+        assert_eq!(stored(&backend, &identity).await, before);
+        assert!(login(&backend, "race@x.test", PASSWORD).await.0.is_some());
+        assert!(login(&backend, "race@x.test", STRONG).await.0.is_none());
+    }
+
+    /// Ask for `to` on the profile page in `browser`; the change's verification flow and code.
+    async fn request_address(
+        backend: &NativeBackend,
+        browser: &Browser,
+        to: &str,
+    ) -> (String, String) {
+        let id = open(backend, browser, PROFILE).await;
+        let done = change(
+            backend,
+            browser,
+            &id,
+            &[
+                ("method", "profile"),
+                ("traits.email", to),
+                ("traits.name.first", "Bea"),
+                ("traits.name.last", "Cole"),
+            ],
+        )
+        .await;
+        assert_eq!(location(&done), PROFILE);
+        let mail = backend.mailed(to).await;
+        let last = mail.last().expect("a code for the new address");
+        let flow = last
+            .body
+            .split("flow=")
+            .nth(1)
+            .and_then(|rest| rest.split('&').next())
+            .expect("the mail links the flow")
+            .to_string();
+        (flow, last.code.clone())
+    }
+
+    async fn verify(
+        backend: &NativeBackend,
+        browser: &Browser,
+        id: &str,
+        fields: &[(&str, &str)],
+    ) -> Dispatch {
+        let form = Form(
+            fields
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .collect(),
+        );
+        backend
+            .submit_flow(
+                FlowKind::Verification,
+                id,
+                &form,
+                &browser.cookie(),
+                true,
+                DEVICE,
+            )
+            .await
+            .unwrap()
+    }
+
+    async fn enter_code(
+        backend: &NativeBackend,
+        browser: &Browser,
+        id: &str,
+        code: &str,
+    ) -> Dispatch {
+        verify(backend, browser, id, &[("method", "code"), ("code", code)]).await
+    }
+
+    async fn address(backend: &NativeBackend, identity: &str) -> (String, bool) {
+        let row = store::row_by_id(&backend.db, identity)
+            .await
+            .unwrap()
+            .unwrap();
+        (row.email, row.email_verified_at.is_some())
+    }
+
+    fn wrong(code: &str) -> String {
+        let n: u32 = code.parse().unwrap();
+        format!("{:06}", (n + 1) % 1_000_000)
+    }
+
+    #[tokio::test]
+    async fn an_address_change_waits_for_the_code_from_a_signed_in_browser() {
+        let (db, backend) = setup().await;
+        let identity = identity_with_password(&db, "old@x.test", true).await;
+        let first = store::row_by_id(&db, &identity)
+            .await
+            .unwrap()
+            .unwrap()
+            .first_verified_at;
+        let browser = signed_in(&backend, &identity).await;
+        let (flow, code) = request_address(&backend, &browser, "New@x.test").await;
+
+        let row = store::row_by_id(&db, &identity).await.unwrap().unwrap();
+        assert_eq!(
+            address(&backend, &identity).await,
+            ("old@x.test".to_string(), true)
+        );
+        assert_eq!(row.first_name.as_deref(), Some("Bea"), "names save at once");
+        let settings = open(&backend, &browser, PROFILE).await;
+        let shown = page(&backend, &browser, &settings).await;
+        let email = shown
+            .inputs("profile")
+            .find(|i| i.name == "traits.email")
+            .unwrap();
+        assert_eq!(email.value, "old@x.test", "the current address is shown");
+        assert!(login(&backend, "old@x.test", PASSWORD).await.0.is_some());
+        assert_eq!(login(&backend, "new@x.test", PASSWORD).await.1, [4_000_006]);
+
+        let anonymous = Browser::new();
+        let Dispatch::SignIn(to) = enter_code(&backend, &anonymous, &flow, &code).await else {
+            panic!("the code needs a signed-in browser");
+        };
+        assert_eq!(
+            to,
+            format!(
+                "/login?return_to={}",
+                crate::web::urlencode(format!("/verification?flow={flow}"))
+            )
+        );
+        let other = identity_with_password(&db, "other@x.test", true).await;
+        let stranger = signed_in(&backend, &other).await;
+        assert!(matches!(
+            enter_code(&backend, &stranger, &flow, &code).await,
+            Dispatch::Forged
+        ));
+        assert_eq!(
+            address(&backend, &identity).await,
+            ("old@x.test".to_string(), true)
+        );
+
+        let Dispatch::Done(done) = enter_code(&backend, &browser, &flow, &code).await else {
+            panic!("the signed-in browser applies the change");
+        };
+        assert_eq!(done.outcome, SubmitOutcome::Page);
+        assert_eq!(
+            backend.load_flow(&flow).await.unwrap().unwrap().row.state,
+            "passed_challenge"
+        );
+        let row = store::row_by_id(&db, &identity).await.unwrap().unwrap();
+        assert_eq!(
+            (row.email.as_str(), row.email_norm.as_str()),
+            ("New@x.test", "new@x.test")
+        );
+        assert!(row.email_verified_at.is_some());
+        assert_eq!(row.first_verified_at, first, "the first proof stays");
+        let audit = audit_lines(&done);
+        assert_eq!(audit.len(), 1);
+        assert!(audit[0].contains("verification.completed") && audit[0].contains("applied"));
+        assert!(!audit[0].contains(&code));
+        assert_eq!(login(&backend, "old@x.test", PASSWORD).await.1, [4_000_006]);
+        assert!(login(&backend, "new@x.test", PASSWORD).await.0.is_some());
+
+        let recovery = Browser::new();
+        let rid = start(
+            &backend,
+            &recovery,
+            FlowKind::Recovery,
+            InitParams::default(),
+        )
+        .await;
+        submit(
+            &backend,
+            &recovery,
+            FlowKind::Recovery,
+            &rid,
+            &[("method", "code"), ("email", "old@x.test")],
+        )
+        .await;
+        assert!(
+            backend.mailed("old@x.test").await.is_empty(),
+            "recovery for the old address finds no account"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_squatter_cannot_move_to_an_address_it_does_not_control() {
+        let (db, backend) = setup().await;
+        let squatter = identity_with_password(&db, "squatter@x.test", true).await;
+        plant_totp(&backend, &squatter).await;
+        let browser = stepped_up(&backend, signed_in(&backend, &squatter).await).await;
+        let (flow, code) = request_address(&backend, &browser, "victim@x.test").await;
+
+        // The owner of the address follows the mail, signed out or signed in as themselves.
+        assert!(matches!(
+            enter_code(&backend, &Browser::new(), &flow, &code).await,
+            Dispatch::SignIn(_)
+        ));
+        let bystander = identity_with_password(&db, "bystander@x.test", true).await;
+        assert!(matches!(
+            enter_code(
+                &backend,
+                &signed_in(&backend, &bystander).await,
+                &flow,
+                &code
+            )
+            .await,
+            Dispatch::Forged
+        ));
+        assert_eq!(
+            address(&backend, &squatter).await,
+            ("squatter@x.test".to_string(), true)
+        );
+        assert!(
+            store::row_by_email(&db, "victim@x.test")
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let victim = identity_with_password(&db, "victim@x.test", false).await;
+        let recovery = Browser::new();
+        let rid = start(
+            &backend,
+            &recovery,
+            FlowKind::Recovery,
+            InitParams::default(),
+        )
+        .await;
+        submit(
+            &backend,
+            &recovery,
+            FlowKind::Recovery,
+            &rid,
+            &[("method", "code"), ("email", "victim@x.test")],
+        )
+        .await;
+        let recovery_mail = backend.mailed("victim@x.test").await;
+        assert!(
+            recovery_mail.iter().any(|m| m.subject.contains("recover")),
+            "the address recovers on its own"
+        );
+
+        let Dispatch::Done(_) = enter_code(&backend, &browser, &flow, &code).await else {
+            panic!("handled");
+        };
+        assert_eq!(
+            messages(&backend, &flow).await.0,
+            [4_000_007],
+            "taken at apply time"
+        );
+        assert_eq!(
+            address(&backend, &squatter).await,
+            ("squatter@x.test".to_string(), true)
+        );
+        assert_eq!(
+            address(&backend, &victim).await,
+            ("victim@x.test".to_string(), false)
+        );
+    }
+
+    #[tokio::test]
+    async fn two_identities_racing_to_one_address_leave_one_moved_and_one_untouched() {
+        let (db, backend) = setup().await;
+        let a = identity_with_password(&db, "a@x.test", true).await;
+        let b = identity_with_password(&db, "b@x.test", true).await;
+        let (browser_a, browser_b) = (signed_in(&backend, &a).await, signed_in(&backend, &b).await);
+        let (flow_a, code_a) = request_address(&backend, &browser_a, "same@x.test").await;
+        let (flow_b, code_b) = request_address(&backend, &browser_b, "same@x.test").await;
+        assert!(matches!(
+            enter_code(&backend, &browser_a, &flow_a, &code_a).await,
+            Dispatch::Done(_)
+        ));
+        assert!(matches!(
+            enter_code(&backend, &browser_b, &flow_b, &code_b).await,
+            Dispatch::Done(_)
+        ));
+        assert_eq!(messages(&backend, &flow_b).await.0, [4_000_007]);
+        assert_eq!(
+            address(&backend, &a).await,
+            ("same@x.test".to_string(), true)
+        );
+        assert_eq!(address(&backend, &b).await, ("b@x.test".to_string(), true));
+    }
+
+    #[tokio::test]
+    async fn a_second_change_supersedes_the_first_and_a_resend_goes_to_the_pending_address() {
+        let (db, backend) = setup().await;
+        let identity = identity_with_password(&db, "me@x.test", true).await;
+        let browser = signed_in(&backend, &identity).await;
+        let (first, first_code) = request_address(&backend, &browser, "one@x.test").await;
+        let (second, _) = request_address(&backend, &browser, "two@x.test").await;
+        assert!(matches!(
+            enter_code(&backend, &browser, &first, &first_code).await,
+            Dispatch::Expired
+        ));
+
+        let resent = verify(
+            &backend,
+            &browser,
+            &second,
+            &[("method", "code"), ("email", "elsewhere@x.test")],
+        )
+        .await;
+        assert!(matches!(resent, Dispatch::Done(_)));
+        assert!(backend.mailed("elsewhere@x.test").await.is_empty());
+        let mail = backend.mailed("two@x.test").await;
+        assert_eq!(mail.len(), 2, "the resend goes to the pending address");
+        let (old, new) = (mail[0].code.clone(), mail[1].code.clone());
+        if old != new {
+            enter_code(&backend, &browser, &second, &old).await;
+            assert_eq!(messages(&backend, &second).await.0, [4_070_006]);
+        }
+        assert!(matches!(
+            enter_code(&backend, &browser, &second, &new).await,
+            Dispatch::Done(_)
+        ));
+        assert_eq!(
+            address(&backend, &identity).await,
+            ("two@x.test".to_string(), true)
+        );
+    }
+
+    #[tokio::test]
+    async fn wrong_codes_run_out_and_change_nothing() {
+        let (db, backend) = setup().await;
+        let identity = identity_with_password(&db, "guess@x.test", true).await;
+        let browser = signed_in(&backend, &identity).await;
+        let (flow, code) = request_address(&backend, &browser, "target@x.test").await;
+        for _ in 0..crate::identity_native::codes::CODE_ATTEMPTS {
+            enter_code(&backend, &browser, &flow, &wrong(&code)).await;
+        }
+        enter_code(&backend, &browser, &flow, &code).await;
+        assert_eq!(messages(&backend, &flow).await.0, [4_070_006]);
+        assert_eq!(
+            address(&backend, &identity).await,
+            ("guess@x.test".to_string(), true)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_deactivated_or_deleted_identity_is_not_moved() {
+        let (db, backend) = setup().await;
+        let off = identity_with_password(&db, "off@x.test", true).await;
+        let browser = signed_in(&backend, &off).await;
+        let (flow, code) = request_address(&backend, &browser, "off-new@x.test").await;
+        store::set_state(&db, &off, crate::backend::identity::IdentityState::Inactive)
+            .await
+            .unwrap();
+        assert!(matches!(
+            enter_code(&backend, &browser, &flow, &code).await,
+            Dispatch::SignIn(_)
+        ));
+        assert_eq!(address(&backend, &off).await.0, "off@x.test");
+
+        let gone = identity_with_password(&db, "gone@x.test", true).await;
+        let browser = signed_in(&backend, &gone).await;
+        let (flow, code) = request_address(&backend, &browser, "gone-new@x.test").await;
+        assert!(store::delete(&db, &gone).await.unwrap());
+        assert!(matches!(
+            enter_code(&backend, &browser, &flow, &code).await,
+            Dispatch::Expired | Dispatch::SignIn(_)
+        ));
+        assert!(
+            store::row_by_email(&db, "gone-new@x.test")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_never_verified_identity_cannot_enrol_totp() {
+        let (db, backend) = setup().await;
+        let identity = identity_with_password(&db, "nv@x.test", false).await;
+        let browser = signed_in(&backend, &identity).await;
+        let id = open(&backend, &browser, TWO_FA).await;
+        let secret = secret_of(&page(&backend, &browser, &id).await);
+        let code = totp_code(&secret, totp::unix_now());
+        let done = change(
+            &backend,
+            &browser,
+            &id,
+            &[("method", "totp"), ("totp_code", &code)],
+        )
+        .await;
+        assert_eq!(done.outcome, SubmitOutcome::Page);
+        assert!(done.audit.is_empty() && session_cookie(&done).is_none());
+        assert_eq!(messages(&backend, &id).await.0, [4_000_010]);
+        assert!(!has(&backend, &identity, "totp").await);
+        assert_eq!(held(&backend, &browser).await.aal, "aal1");
+    }
+
+    #[tokio::test]
+    async fn a_never_verified_identity_cannot_generate_lookup_codes_but_can_remove_factors() {
+        let (db, backend) = setup().await;
+        let identity = identity_with_password(&db, "nv-lookup@x.test", false).await;
+        plant_totp(&backend, &identity).await;
+        let browser = stepped_up(&backend, signed_in(&backend, &identity).await).await;
+        let id = open(&backend, &browser, TWO_FA).await;
+
+        let done = change(
+            &backend,
+            &browser,
+            &id,
+            &[
+                ("method", "lookup_secret"),
+                ("lookup_secret_regenerate", "true"),
+            ],
+        )
+        .await;
+        assert_eq!(done.outcome, SubmitOutcome::Page);
+        assert_eq!(messages(&backend, &id).await.0, [4_000_010]);
+        assert!(page(&backend, &browser, &id).await.lookup_codes.is_empty());
+
+        let mut rec = backend.load_flow(&id).await.unwrap().unwrap();
+        backend.hold_generated_codes(&mut rec, &lookup::generate());
+        assert_eq!(rec.save(&db).await.unwrap(), Saved::Done);
+        let done = change(
+            &backend,
+            &browser,
+            &id,
+            &[
+                ("method", "lookup_secret"),
+                ("lookup_secret_confirm", "true"),
+            ],
+        )
+        .await;
+        assert_eq!(done.outcome, SubmitOutcome::Page);
+        assert!(done.audit.is_empty());
+        assert_eq!(messages(&backend, &id).await.0, [4_000_010]);
+        assert!(!has(&backend, &identity, "lookup_secret").await);
+
+        plant_lookup_codes(&backend, &identity).await;
+        let done = change(
+            &backend,
+            &browser,
+            &id,
+            &[
+                ("method", "lookup_secret"),
+                ("lookup_secret_disable", "true"),
+            ],
+        )
+        .await;
+        assert_eq!(location(&done), TWO_FA);
+        assert!(!has(&backend, &identity, "lookup_secret").await);
+        let done = change(
+            &backend,
+            &browser,
+            &id,
+            &[("method", "totp"), ("totp_unlink", "true")],
+        )
+        .await;
+        assert_eq!(location(&done), TWO_FA);
+        assert!(!has(&backend, &identity, "totp").await);
     }
 
     #[tokio::test]
@@ -1308,7 +2006,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_totp_credential_stored_for_a_session_revoked_meanwhile_is_audited() {
+    async fn a_totp_enrolment_for_a_session_revoked_meanwhile_stores_nothing() {
         let (db, backend) = setup().await;
         let identity = identity_with_password(&db, "race@x.test", true).await;
         let browser = signed_in(&backend, &identity).await;
@@ -1321,12 +2019,10 @@ mod tests {
         session::revoke(&db, &c.session.id, None).await.unwrap();
 
         let done = totp_method(c).await.unwrap();
-        assert_eq!(location(&done), errors::url(errors::FLOW_EXPIRED));
+        assert_eq!(location(&done), super::super::settings_sign_in());
         assert!(session_cookie(&done).is_none());
-        assert!(has(&backend, &identity, "totp").await);
-        let audit = audit_lines(&done);
-        assert_eq!(audit.len(), 1);
-        assert!(audit[0].contains("mfa.totp.enrolled"), "{}", audit[0]);
+        assert!(!has(&backend, &identity, "totp").await);
+        assert!(done.audit.is_empty());
     }
 
     #[tokio::test]

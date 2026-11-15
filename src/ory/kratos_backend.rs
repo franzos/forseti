@@ -9,8 +9,9 @@ use axum_extra::extract::cookie::{Cookie, SameSite};
 use super::{KratosClients, Result, kratos};
 use crate::backend::IdentityBackend;
 use crate::backend::identity::{
-    CourierStatus, FlowFetch, FlowInit, FlowKind, FlowOutcome, Identity, IdentityState,
-    RecoveryCode, SelfServiceError, Session, WhoamiOutcome, browser_init_url,
+    BrowserSession, CourierStatus, FlowFetch, FlowInit, FlowKind, FlowOutcome, Identity,
+    IdentityState, RecoveryCode, SelfServiceError, Session, SessionOrigin, WhoamiOutcome,
+    browser_init_url,
 };
 use crate::config::AppConfig;
 use crate::flow_view::Flow;
@@ -19,12 +20,15 @@ const SESSION_COOKIE: &str = "ory_kratos_session";
 
 pub struct KratosBackend {
     pub(super) clients: Arc<KratosClients>,
+    /// `[self].url` is https: Forseti's own cookies are `Secure`.
+    pub(super) https: bool,
 }
 
 impl KratosBackend {
     pub(crate) fn from_config(cfg: &AppConfig) -> Arc<KratosBackend> {
         Arc::new(KratosBackend {
             clients: KratosClients::from_config(cfg),
+            https: cfg.self_.is_https(),
         })
     }
 }
@@ -221,13 +225,26 @@ impl IdentityBackend for KratosBackend {
         kratos::admin_create_recovery_code(&self.clients, identity_id).await
     }
 
-    async fn admin_create_recovery_link(
+    // OSS Kratos has no admin session API, so the browser redeems a recovery link instead. The
+    // link is a bearer credential that lands in the URL bar and history; one minute is the
+    // shortest Kratos honours exactly, and it is consumed on the next hop.
+    async fn establish_browser_session(
         &self,
         identity_id: &str,
-        expires_in: &str,
-        return_to: Option<&str>,
-    ) -> Result<String> {
-        kratos::admin_create_recovery_link(&self.clients, identity_id, expires_in, return_to).await
+        return_to: &str,
+        _origin: SessionOrigin<'_>,
+    ) -> Result<BrowserSession> {
+        let location =
+            kratos::admin_create_recovery_link(&self.clients, identity_id, "1m", Some(return_to))
+                .await?;
+        let secure = if self.https { "; Secure" } else { "" };
+        Ok(BrowserSession {
+            location,
+            // Redemption lands on the settings-password page; this lets that handler bounce home.
+            set_cookies: vec![format!(
+                "forseti_sso_arrival=1; Path=/settings; Max-Age=60; HttpOnly; SameSite=Lax{secure}"
+            )],
+        })
     }
 
     async fn list_identity_schemas(&self) -> Result<Vec<String>> {
@@ -363,6 +380,75 @@ mod tests {
                 "{lines:?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_browser_session_is_a_one_minute_recovery_link_with_the_arrival_breadcrumb() {
+        use std::sync::{Arc, Mutex};
+
+        use axum::extract::{RawQuery, State};
+        use axum::routing::post;
+
+        type Seen = Arc<Mutex<Vec<(Option<String>, serde_json::Value)>>>;
+        let seen: Seen = Arc::default();
+        let app = axum::Router::new()
+            .route(
+                "/admin/recovery/link",
+                post(
+                    |State(seen): State<Seen>,
+                     RawQuery(query): RawQuery,
+                     axum::Json(body): axum::Json<serde_json::Value>| async move {
+                        seen.lock().unwrap().push((query, body));
+                        axum::Json(serde_json::json!({
+                            "recovery_link": "http://kratos:4433/self-service/recovery?token=t"
+                        }))
+                    },
+                ),
+            )
+            .with_state(seen.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let admin = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        for https in [false, true] {
+            let backend = KratosBackend {
+                https,
+                ..Arc::into_inner(
+                    crate::ory::test_backends(
+                        KRATOS,
+                        &admin,
+                        "http://hydra:4444",
+                        "http://hydra:4445",
+                    )
+                    .0,
+                )
+                .unwrap()
+            };
+            let origin = SessionOrigin {
+                method: "saml",
+                ip: None,
+                user_agent: None,
+            };
+            let session = backend
+                .establish_browser_session("id-1", "/", origin)
+                .await
+                .unwrap();
+            let secure = if https { "; Secure" } else { "" };
+            assert_eq!(
+                session,
+                BrowserSession {
+                    location: "http://kratos:4433/self-service/recovery?token=t".to_string(),
+                    set_cookies: vec![format!(
+                        "forseti_sso_arrival=1; Path=/settings; Max-Age=60; HttpOnly; SameSite=Lax{secure}"
+                    )],
+                }
+            );
+        }
+        let seen = seen.lock().unwrap();
+        let (query, body) = &seen[0];
+        assert_eq!(query.as_deref(), Some("return_to=%2F"));
+        assert_eq!(body["identity_id"], "id-1");
+        assert_eq!(body["expires_in"], "1m");
     }
 
     #[test]

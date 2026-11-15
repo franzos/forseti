@@ -121,12 +121,14 @@ export async function requireIdentityId(request: APIRequestContext, email: strin
  */
 export async function markEmailVerified(request: APIRequestContext, email: string): Promise<void> {
   if (isNative) {
+    // Without `first_verified_at` the account counts as never verified (no TOTP, no links).
+    const now = new Date().toISOString();
     const changes = await withDb(false, (db) =>
       db
         .prepare(
-          'UPDATE identities SET email_verified_at = COALESCE(email_verified_at, ?) WHERE email_norm = ?',
+          'UPDATE identities SET email_verified_at = COALESCE(email_verified_at, ?), first_verified_at = COALESCE(first_verified_at, ?) WHERE email_norm = ?',
         )
-        .run(new Date().toISOString(), email.toLowerCase()).changes,
+        .run(now, now, email.toLowerCase()).changes,
     );
     expect(Number(changes), `no identity for ${email}`).toBe(1);
     return;

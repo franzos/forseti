@@ -650,6 +650,8 @@ fn amr_values(kratos_method: &str) -> Vec<String> {
         // RFC 8176 has no "federated" value, and the upstream's own methods
         // aren't known here, so a provider login contributes nothing.
         "oidc" => &[],
+        // Same for an assertion relayed from a SAML IdP.
+        "saml" => &[],
         "totp" | "totp_v2" => &["otp", "mfa"],
         "lookup_secret" => &["otp", "mfa"],
         "webauthn" | "webauthn_v2" => &["hwk", "user", "mfa"],
@@ -838,6 +840,9 @@ mod tests {
         use super::amr_for;
         let m = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         assert!(amr_for(&m(&["oidc"])).is_empty());
+        assert!(amr_for(&m(&["saml"])).is_empty());
+        assert!(amr_for(&m(&["saml", "oidc"])).is_empty());
+        assert_eq!(amr_for(&m(&["saml", "totp"])), vec!["otp", "mfa"]);
         assert_eq!(
             amr_for(&m(&["password", "totp", "password"])),
             vec!["pwd", "otp", "mfa"]

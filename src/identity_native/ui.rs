@@ -101,19 +101,36 @@ pub(super) enum Screen<'a> {
 }
 
 pub(super) enum Login<'a> {
-    /// Sign-in with identifier and password; `identifier` echoes a failed attempt.
-    Password { identifier: &'a str },
-    /// Re-authentication of the signed-in identity.
-    Refresh { identifier: &'a str },
+    /// Sign-in with identifier and password; `identifier` echoes a failed attempt. `providers` are
+    /// the configured upstream providers.
+    Password {
+        identifier: &'a str,
+        providers: &'a [&'a str],
+    },
+    /// Re-authentication of the signed-in identity; `providers` are the configured `oidc` ones it
+    /// is linked to.
+    Refresh {
+        identifier: &'a str,
+        providers: &'a [&'a str],
+    },
     /// Second factor; with neither factor enrolled only the CSRF token and message 1010004 remain.
     SecondFactor { totp: bool, lookup: bool },
 }
 
 pub(super) enum Registration<'a> {
     /// Step 1: the traits, echoed after a failed attempt.
-    Profile(Traits<'a>),
+    Profile {
+        traits: Traits<'a>,
+        providers: &'a [&'a str],
+    },
     /// Step 2: the traits ride along hidden while a password is chosen.
-    Password(Traits<'a>),
+    Password {
+        traits: Traits<'a>,
+        providers: &'a [&'a str],
+    },
+    /// A provider sign-up without a verified address: the address to use and the provider
+    /// whose submit continues the sign-up.
+    EmailNeeded { email: &'a str, provider: &'a str },
 }
 
 pub(super) enum Code<'a> {
@@ -138,6 +155,10 @@ pub(super) struct Settings<'a> {
     pub(super) saved: bool,
     /// Settings flow handed over by a completed recovery.
     pub(super) handoff: Option<Handoff>,
+    /// Configured upstream providers, each with whether the identity is linked to it.
+    pub(super) providers: &'a [(&'a str, bool)],
+    /// With a password any link may be removed; without one, all but the last.
+    pub(super) has_password: bool,
 }
 
 pub(super) enum Totp<'a> {
@@ -197,14 +218,8 @@ pub(super) fn document(meta: &Meta<'_>, screen: &Screen<'_>, notes: Notes<'_>) -
         .value(meta.csrf_token)
         .required();
     match screen {
-        Screen::Login(login) => {
-            nodes.push(csrf);
-            login_nodes(login, &mut nodes, &mut messages);
-        }
-        Screen::Registration(reg) => {
-            nodes.push(csrf);
-            registration_nodes(reg, &mut nodes, &mut messages);
-        }
+        Screen::Login(login) => login_nodes(login, csrf, &mut nodes, &mut messages),
+        Screen::Registration(reg) => registration_nodes(reg, csrf, &mut nodes, &mut messages),
         Screen::Verification(code) => {
             if let Code::PassedChallenge { continue_to, .. } = code {
                 action = (*continue_to).to_string();
@@ -253,9 +268,15 @@ pub(super) fn document(meta: &Meta<'_>, screen: &Screen<'_>, notes: Notes<'_>) -
     })
 }
 
-fn login_nodes(login: &Login<'_>, nodes: &mut Vec<Node>, messages: &mut Vec<Value>) {
+fn login_nodes(login: &Login<'_>, csrf: Node, nodes: &mut Vec<Node>, messages: &mut Vec<Value>) {
+    let providers = match login {
+        Login::Password { providers, .. } | Login::Refresh { providers, .. } => providers,
+        Login::SecondFactor { .. } => &[][..],
+    };
+    nodes.extend(providers.iter().map(|id| sign_in(id)));
+    nodes.push(csrf);
     match login {
-        Login::Password { identifier } => {
+        Login::Password { identifier, .. } => {
             nodes.push(
                 input("default", "identifier", "text")
                     .value(identifier)
@@ -266,7 +287,7 @@ fn login_nodes(login: &Login<'_>, nodes: &mut Vec<Node>, messages: &mut Vec<Valu
             nodes.push(password("current-password"));
             nodes.push(method("password", 1_010_022, "Sign in with password"));
         }
-        Login::Refresh { identifier } => {
+        Login::Refresh { identifier, .. } => {
             messages.push(
                 Message::info(
                     1_010_003,
@@ -310,13 +331,32 @@ fn login_nodes(login: &Login<'_>, nodes: &mut Vec<Node>, messages: &mut Vec<Valu
     }
 }
 
-fn registration_nodes(reg: &Registration<'_>, nodes: &mut Vec<Node>, messages: &mut Vec<Value>) {
+fn registration_nodes(
+    reg: &Registration<'_>,
+    csrf: Node,
+    nodes: &mut Vec<Node>,
+    messages: &mut Vec<Value>,
+) {
     match reg {
-        Registration::Profile(traits) => {
+        Registration::Profile { providers, .. } | Registration::Password { providers, .. } => {
+            nodes.extend(providers.iter().map(|id| sign_up(id)));
+        }
+        Registration::EmailNeeded { provider, .. } => nodes.push(sign_up(provider)),
+    }
+    nodes.push(csrf);
+    match reg {
+        Registration::Profile { traits, .. } => {
             trait_nodes("default", traits, false, nodes);
             nodes.push(method("profile", 1_040_001, "Sign up"));
         }
-        Registration::Password(traits) => {
+        Registration::EmailNeeded { email, .. } => nodes.push(
+            input("default", "traits.email", "email")
+                .value(email)
+                .required()
+                .attr("autocomplete", "email")
+                .label(email_label()),
+        ),
+        Registration::Password { traits, .. } => {
             messages.push(
                 Message::info(
                     1_040_009,
@@ -450,6 +490,16 @@ fn settings_nodes(settings: &Settings<'_>, nodes: &mut Vec<Node>, messages: &mut
     nodes.push(method("profile", 1_070_003, "Save"));
     nodes.push(password("new-password"));
     nodes.push(method("password", 1_070_003, "Save"));
+    for &(id, linked) in settings.providers {
+        let another_link = || settings.providers.iter().any(|&(o, l)| l && o != id);
+        if !linked {
+            let text = format!("Link {}", display(id));
+            nodes.push(provider_submit("link", id, 1_050_002, &text, false));
+        } else if settings.has_password || another_link() {
+            let text = format!("Unlink {}", display(id));
+            nodes.push(provider_submit("unlink", id, 1_050_003, &text, false));
+        }
+    }
 
     match settings.totp {
         Totp::Pending { qr, secret } => {
@@ -603,6 +653,32 @@ fn password(autocomplete: &str) -> Node {
         .label(label(1_070_001, "Password"))
 }
 
+fn display(id: &str) -> String {
+    crate::oidc_providers::display_name(id)
+}
+
+fn sign_in(id: &str) -> Node {
+    let text = format!("Sign in with {}", display(id));
+    provider_submit("provider", id, 1_010_002, &text, true)
+}
+
+fn sign_up(id: &str) -> Node {
+    let text = format!("Sign up with {}", display(id));
+    provider_submit("provider", id, 1_040_002, &text, true)
+}
+
+/// An `oidc` submit named `name` with the provider id as its value; sign-in and sign-up labels
+/// also carry `provider_id` in their context.
+fn provider_submit(name: &str, id: &str, label_id: u64, text: &str, with_id: bool) -> Node {
+    let mut context = json!({ "provider": display(id) });
+    if with_id {
+        context["provider_id"] = json!(id);
+    }
+    input("oidc", name, "submit")
+        .value(id)
+        .label(json!({ "id": label_id, "text": text, "type": "info", "context": context }))
+}
+
 /// The `method=<group>` submit Kratos names after its group.
 fn method(group: &str, label_id: u64, text: &str) -> Node {
     input(group, "method", "submit")
@@ -701,8 +777,11 @@ mod tests {
     /// (group, node type, name or id, input type, label id, required)
     type Tuple = (String, String, String, String, u64, bool);
 
-    /// Groups the native backend does not offer: upstream OIDC, WebAuthn and passkeys.
-    const OUT_OF_SCOPE: &[&str] = &["oidc", "webauthn", "passkey"];
+    /// Groups the native backend does not offer: WebAuthn and passkeys.
+    const OUT_OF_SCOPE: &[&str] = &["webauthn", "passkey"];
+
+    /// The upstream provider configured on the stack the fixtures were captured from.
+    const PROVIDERS: &[&str] = &["playground"];
 
     fn tuples(doc: &Value, without_lookup: bool) -> BTreeSet<Tuple> {
         doc.pointer("/ui/nodes")
@@ -738,6 +817,27 @@ mod tests {
                         n.pointer("/attributes/required").and_then(Value::as_bool) == Some(true),
                     )
                 })
+            })
+            .collect()
+    }
+
+    /// Attributes and label of each `oidc` node, in document order.
+    fn oidc_nodes(doc: &Value) -> Vec<(Value, Value)> {
+        doc.pointer("/ui/nodes")
+            .and_then(Value::as_array)
+            .unwrap()
+            .iter()
+            .filter(|n| n["group"] == "oidc")
+            .map(|n| (n["attributes"].clone(), n["meta"]["label"].clone()))
+            .collect()
+    }
+
+    fn oidc_names(doc: &Value) -> Vec<(String, String)> {
+        oidc_nodes(doc)
+            .into_iter()
+            .map(|(a, _)| {
+                let s = |k: &str| a[k].as_str().unwrap_or_default().to_string();
+                (s("name"), s("value"))
             })
             .collect()
     }
@@ -855,6 +955,8 @@ mod tests {
                 lookup,
                 saved,
                 handoff,
+                providers: &[("playground", false)],
+                has_password: true,
             })
         };
         let aal2 = |file| Case {
@@ -869,7 +971,10 @@ mod tests {
         vec![
             (
                 case("login", FlowKind::Login),
-                Screen::Login(Login::Password { identifier: "" }),
+                Screen::Login(Login::Password {
+                    identifier: "",
+                    providers: PROVIDERS,
+                }),
             ),
             (
                 Case {
@@ -881,6 +986,7 @@ mod tests {
                 },
                 Screen::Login(Login::Password {
                     identifier: "ann@example.com",
+                    providers: PROVIDERS,
                 }),
             ),
             (
@@ -908,21 +1014,29 @@ mod tests {
                 refresh("login_refresh"),
                 Screen::Login(Login::Refresh {
                     identifier: "ann@example.com",
+                    providers: &[],
                 }),
             ),
             (
                 refresh("login_refresh_aal2"),
                 Screen::Login(Login::Refresh {
                     identifier: "ann@example.com",
+                    providers: &[],
                 }),
             ),
             (
                 case("registration_profile", FlowKind::Registration),
-                Screen::Registration(super::Registration::Profile(Traits::default())),
+                Screen::Registration(super::Registration::Profile {
+                    traits: Traits::default(),
+                    providers: PROVIDERS,
+                }),
             ),
             (
                 case("registration_password", FlowKind::Registration),
-                Screen::Registration(super::Registration::Password(TRAITS)),
+                Screen::Registration(super::Registration::Password {
+                    traits: TRAITS,
+                    providers: PROVIDERS,
+                }),
             ),
             (
                 case("verification_choose_method", FlowKind::Verification),
@@ -1064,6 +1178,7 @@ mod tests {
                 expected_tuples(&kratos, without_lookup(screen)),
                 "{file}: nodes"
             );
+            assert_eq!(oidc_nodes(&ours), oidc_nodes(&kratos), "{file}: oidc nodes");
             assert_eq!(message_ids(&ours), message_ids(&kratos), "{file}: messages");
             assert_eq!(
                 node_message_ids(&ours),
@@ -1159,6 +1274,8 @@ mod tests {
                 lookup: Lookup::Offer,
                 saved: false,
                 handoff: Some(handoff()),
+                providers: &[],
+                has_password: true,
             }),
         );
         let msg = &project(&doc).messages[0];
@@ -1209,5 +1326,105 @@ mod tests {
             );
             assert_eq!(ours, page_flags(&project(&fixture(file))), "{file}: Kratos");
         }
+    }
+
+    fn pair(name: &str, value: &str) -> (String, String) {
+        (name.to_string(), value.to_string())
+    }
+
+    #[test]
+    fn refresh_offers_linked_providers_and_the_second_factor_none() {
+        let refresh = Case {
+            requested_aal: Some("aal1"),
+            refresh: true,
+            ..case("login_refresh", FlowKind::Login)
+        };
+        let doc = native(
+            &refresh,
+            &Screen::Login(Login::Refresh {
+                identifier: "ann@example.com",
+                providers: &["github"],
+            }),
+        );
+        assert_eq!(oidc_names(&doc), [pair("provider", "github")]);
+        assert_eq!(oidc_nodes(&doc)[0].1["id"], 1_010_002);
+        assert_eq!(oidc_nodes(&doc)[0].1["text"], "Sign in with GitHub");
+        assert!(project(&doc).has_node("password", "password"));
+
+        let aal2 = Case {
+            requested_aal: Some("aal2"),
+            ..case("login_aal2_totp", FlowKind::Login)
+        };
+        let doc = native(
+            &aal2,
+            &Screen::Login(Login::SecondFactor {
+                totp: true,
+                lookup: false,
+            }),
+        );
+        assert!(oidc_nodes(&doc).is_empty());
+    }
+
+    #[test]
+    fn email_needed_asks_for_the_address_and_continues_with_the_provider() {
+        let case = case("registration_profile", FlowKind::Registration);
+        let doc = native(
+            &case,
+            &Screen::Registration(super::Registration::EmailNeeded {
+                email: "typed@example.com",
+                provider: "playground",
+            }),
+        );
+        assert_eq!(oidc_names(&doc), [pair("provider", "playground")]);
+        assert_eq!(oidc_nodes(&doc)[0].1["id"], 1_040_002);
+        let flow = project(&doc);
+        assert!(flow.inputs("profile").next().is_none());
+        assert!(flow.inputs("password").next().is_none());
+        let email = flow
+            .inputs("default")
+            .find(|i| i.name == "traits.email")
+            .unwrap();
+        assert_eq!(
+            (email.input_type.as_str(), email.value.as_str()),
+            ("email", "typed@example.com")
+        );
+        assert_eq!(flow.csrf_token.as_deref(), Some("csrf-token"));
+        assert_eq!(flow.state, "choose_method");
+    }
+
+    #[test]
+    fn settings_unlink_needs_a_password_or_another_link() {
+        let settings = |providers, has_password| {
+            native(
+                &case("settings_fresh", FlowKind::Settings),
+                &Screen::Settings(super::Settings {
+                    traits: TRAITS,
+                    totp: Totp::Enrolled,
+                    lookup: Lookup::Offer,
+                    saved: false,
+                    handoff: None,
+                    providers,
+                    has_password,
+                }),
+            )
+        };
+        let one = &[("github", true), ("playground", false)][..];
+        assert_eq!(
+            oidc_names(&settings(one, true)),
+            [pair("unlink", "github"), pair("link", "playground")]
+        );
+        assert_eq!(
+            oidc_names(&settings(one, false)),
+            [pair("link", "playground")],
+            "the last way in is not offered for removal"
+        );
+        let two = &[("github", true), ("playground", true)][..];
+        let doc = settings(two, false);
+        assert_eq!(
+            oidc_names(&doc),
+            [pair("unlink", "github"), pair("unlink", "playground")]
+        );
+        assert_eq!(oidc_nodes(&doc)[0].1["id"], 1_050_003);
+        assert_eq!(oidc_nodes(&doc)[0].1["text"], "Unlink GitHub");
     }
 }

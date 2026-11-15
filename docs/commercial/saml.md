@@ -6,9 +6,11 @@ Per-org SAML login at `/sso/{org-slug}`. Forseti doesn't speak SAML itself — i
 
 ## Prerequisites
 
+SAML works on both identity backends: the default build, which fronts Ory Kratos, and the native build, which keeps identities in Forseti's own database (see [Native identity backend](../operator-guide-native.md)).
+
 - A commercial license that includes the `saml` feature (activate at `/admin/license`).
 - A deployed Jackson / Ory Polis instance reachable by both browsers and the Forseti server.
-- Kratos with the recovery `link` method enabled — Forseti establishes the post-SSO session via an admin-minted recovery (magic) link, and Kratos refuses to mint one without:
+- On the Kratos build only: the recovery `link` method enabled. There Forseti establishes the post-SSO session via an admin-minted recovery (magic) link, and Kratos refuses to mint one without:
 
 ```yaml
 selfservice:
@@ -17,7 +19,7 @@ selfservice:
       enabled: true
 ```
 
-Without this, every SSO login fails at the final step. The playground's `infra/kratos/kratos.yml` already has it.
+Without this, every SSO login on the Kratos build fails at the final step. The playground's `infra/kratos/kratos.yml` already has it. The native build issues the session itself and needs nothing here.
 
 ## `[saml]` configuration
 
@@ -27,7 +29,7 @@ jackson_url = "https://sso.example.com"
 jackson_internal_url = "http://jackson:5225"  # optional server-to-server override
 jackson_api_key = "change-me"                 # one of Jackson's JACKSON_API_KEYS
 client_secret_verifier = "change-me"          # Jackson's CLIENT_SECRET_VERIFIER
-identity_schema_id = "default"                # Kratos schema for JIT identities
+identity_schema_id = "default"                # Kratos schema for JIT identities (Kratos build only)
 sp_entity_id = "https://saml.boxyhq.com"      # SP entity id; must match Jackson's samlAudience
 ```
 
@@ -35,14 +37,14 @@ sp_entity_id = "https://saml.boxyhq.com"      # SP entity id; must match Jackson
 - `jackson_internal_url` — optional container-network address for server-to-server calls (token, userinfo, connection CRUD). Defaults to `jackson_url`.
 - `jackson_api_key` — must match an entry in Jackson's `JACKSON_API_KEYS`; authorises connection create/delete against Jackson's admin API.
 - `client_secret_verifier` — must match Jackson's `CLIENT_SECRET_VERIFIER`; it's the OAuth2 client secret paired with the dynamic per-org client id.
-- `identity_schema_id` — the Kratos identity schema used for JIT-provisioned identities. Default `"default"`.
+- `identity_schema_id` — the Kratos identity schema used for JIT-provisioned identities. Default `"default"`. The native build does not read it.
 - `sp_entity_id` — optional; the SP entity id shown on `/admin/saml` and handed to the customer's IdP admin. Defaults to `https://saml.boxyhq.com`. Override it to match Jackson's `samlAudience` if you've changed that — otherwise the page shows a stale value and assertion-audience checks fail.
 
 The table is strictly opt-in: leave it out and the `/sso/*` routes aren't even mounted.
 
 ## Deploying Jackson
 
-The playground service in `infra/docker-compose.yml` (profile `saml`, brought up via `make stack-up-saml`) is the reference for the minimum env:
+The playground service in `infra/docker-compose.yml` (profile `saml`, brought up via `make stack-up-saml`, or `make stack-up-native-saml` for the native build) is the reference for the minimum env:
 
 ```yaml
 environment:
@@ -81,18 +83,18 @@ The **enable/disable toggle** on `/admin/saml` is an instant kill switch: disabl
 
 ## JIT provisioning and linking
 
-Forseti resolves the assertion to a Kratos identity, in order:
+Forseti resolves the assertion to an identity, in order:
 
 0. **Durable subject link** — a prior SSO login recorded a link keyed on the stable SAML subject (NameID) for this org; reuse that identity. This is the primary key, so logins survive an email change at the IdP. Stale links (identity since deleted) are pruned automatically.
 1. **Existing email link** — a legacy or bootstrap link for this (org, email) pair; reuse that identity and backfill its subject so step 0 carries it next time.
-2. **Verified-email match** — an existing identity whose verified address matches is linked on first SSO login and used from then on.
-3. **JIT create** — no match: a new identity is created via the Kratos admin API with the email pre-verified, under `[saml].identity_schema_id`.
+2. **Verified-email match** — an existing identity whose verified address matches is linked once the user confirms it by signing in to that identity with its own credential (the password, or an upstream provider linked to it), and used from then on.
+3. **JIT create** — no match, and the address's domain is a verified domain of the org: a new identity is created with the email pre-verified (on the Kratos build through the Kratos admin API, under `[saml].identity_schema_id`).
 
 Every link records the SAML subject alongside the email, so the (org, subject) pair becomes the durable key once a user has logged in at least once.
 
 Three cases fail closed to a blocked page (no session is established):
 
-- **Cross-org non-member** — a verified identity matches the asserted email but isn't yet a member of this org. Because Kratos identities and sessions are global, auto-linking would let one org's IdP assert another org's user's email and obtain a session as them. So a pre-existing verified identity is only linked when it's **already a member of this org**. To let an existing user sign in via a new org's SSO, pre-add them as a member first (invite or `/admin`); net-new users (no Kratos identity yet) are JIT-created and joined automatically.
+- **Cross-org non-member** — a verified identity matches the asserted email but isn't yet a member of this org. Because identities and sessions are global, auto-linking would let one org's IdP assert another org's user's email and obtain a session as them. So a pre-existing verified identity is only linked when it's **already a member of this org**. To let an existing user sign in via a new org's SSO, pre-add them as a member first (invite or `/admin`); net-new users (no identity yet) are JIT-created and joined automatically.
 - **Unverified match** — an existing identity holds the email but hasn't verified it. Linking would let an IdP assertion capture a squatted-but-unproven account. The user must verify the address (or you reap it via `unverified-prune`) before SSO works.
 - **Email conflict** — the JIT create hits a 409 because an identity holds the address in a way the verified-lookup didn't surface (e.g. imported or passwordless identities). Resolve manually via `/admin/identities`.
 
@@ -102,10 +104,10 @@ Audit trail: `saml.login.succeeded` / `saml.login.failed` / `saml.login.blocked_
 
 ## Session semantics
 
-SSO sessions are established by redeeming a short-lived (15-minute) Kratos recovery link, so the browser ends up with a native `ory_kratos_session` cookie — no parallel session machinery. Two consequences:
+SSO logins get an ordinary session from the identity backend, with no parallel session machinery. On the Kratos build the browser redeems a short-lived (1-minute) Kratos recovery link and ends up with an `ory_kratos_session` cookie; on the native build Forseti issues its own session cookie directly, with no recovery link. Two consequences:
 
-- **Sessions are AAL1.** MFA happens at the corporate IdP; Forseti doesn't see it and doesn't step the session up. AAL2-gated surfaces (the admin UI) still require a second factor enrolled in Kratos.
-- Users land on the dashboard, not the password-change page Kratos normally shows after recovery — Forseti intercepts that landing and bounces them home.
+- **Sessions are AAL1.** MFA happens at the corporate IdP; Forseti doesn't see it and doesn't step the session up. AAL2-gated surfaces (the admin UI) still require a second factor enrolled in Forseti.
+- Users land on the dashboard. On the Kratos build that means skipping the password-change page Kratos shows after recovery: Forseti intercepts that landing and bounces them home.
 
 ## Grace period
 
@@ -114,7 +116,7 @@ When the license is past expiry but inside the fixed 30-day grace window, SSO lo
 ## Not in v1
 
 - IdP-initiated logins (SP-initiated only).
-- SAML Single Logout — Forseti logout ends the Kratos session; the IdP session survives.
+- SAML Single Logout — Forseti logout ends the Forseti session; the IdP session survives.
 - More than one connection per org.
 - Self-serve connection management for org owners — connections are operator-managed; org owners get a read-only status line.
 - **Per-connection subject override.** Linking keys on the stable SAML subject (NameID) once a user has logged in once, so email changes at the IdP are handled transparently — the durable link survives. The caveat: IdPs configured to send a transient or email-format NameID give an unstable or email-derived subject, and those connections fall back to email keying (so an email change orphans the link, as before). Pinning linking to a per-connection immutable attribute (e.g. an IdP `objectGUID`) regardless of NameID format is a future enhancement, not in v1.

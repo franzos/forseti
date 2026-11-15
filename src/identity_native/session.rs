@@ -14,7 +14,7 @@ use super::store::{self, CredentialSummary, IdentityRow, MAX_PAGE_SIZE};
 use crate::backend::identity::{Aal, AuthMethod, Session, SessionDevice, WhoamiOutcome};
 use crate::db::DbPool;
 use crate::db_interact;
-use crate::schema::{identities, identity_credentials, identity_sessions};
+use crate::schema::{identities, identity_sessions};
 
 const COOKIE_NAME: &str = "forseti_session";
 /// On https; `__Host-` pins Secure, Path=/ and no Domain in the browser.
@@ -49,6 +49,9 @@ pub(super) struct SessionRow {
 #[derive(Serialize, Deserialize)]
 struct StoredMethod {
     method: String,
+    /// Upstream provider id of an `oidc` method; absent on rows written without one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provider: Option<String>,
     aal: String,
     completed_at: String,
 }
@@ -143,6 +146,7 @@ fn to_session(
                 aal: Some(parse_aal(&m.aal)?),
                 completed_at: Some(m.completed_at),
                 method: Some(m.method),
+                provider: m.provider,
                 ..AuthMethod::default()
             })
         })
@@ -168,20 +172,12 @@ fn to_session(
     })
 }
 
-/// Group credential summaries by identity id.
-fn by_identity(creds: Vec<CredentialSummary>) -> HashMap<String, Vec<CredentialSummary>> {
-    let mut map: HashMap<String, Vec<CredentialSummary>> = HashMap::new();
-    for c in creds {
-        map.entry(c.identity_id.clone()).or_default().push(c);
-    }
-    map
-}
-
-/// Insert a session for `identity_id` completed by `method` at `aal`.
+/// Insert a session for `identity_id` completed by `method` (through `provider`) at `aal`.
 pub(super) async fn create(
     db: &DbPool,
     identity_id: &str,
     method: &str,
+    provider: Option<&str>,
     aal: Aal,
     lifespan: chrono::Duration,
     device: Device<'_>,
@@ -200,6 +196,7 @@ pub(super) async fn create(
         aal: aal.as_str().to_string(),
         methods: methods_json(&[StoredMethod {
             method: method.to_string(),
+            provider: provider.map(str::to_string),
             aal: aal.as_str().to_string(),
             completed_at: now.clone(),
         }]),
@@ -234,18 +231,20 @@ struct Rotation {
     to: String,
 }
 
-/// Record `method` on a live session, advance `authenticated_at` and raise the AAL to `aal` if it
+/// Record `method` (through `provider`) on a live session, advance `authenticated_at` and raise the AAL to `aal` if it
 /// is higher; the AAL never drops. The method list keeps the newest entry per method name, oldest
 /// first. With `rotation` the session moves to a new token.
 async fn record_method(
     db: &DbPool,
     id: &str,
     method: &str,
+    provider: Option<&str>,
     aal: Aal,
     rotation: Option<Rotation>,
 ) -> Result<Recorded> {
     let aal = storable(aal)?;
     let (id, method) = (id.to_string(), method.to_string());
+    let provider = provider.map(str::to_string);
     db_interact!(db, |c| {
         for _ in 0..APPEND_ATTEMPTS {
             let now = crate::db::now_rfc3339();
@@ -264,6 +263,7 @@ async fn record_method(
             methods.retain(|m| m.method != method);
             methods.push(StoredMethod {
                 method: method.clone(),
+                provider: provider.clone(),
                 aal: aal.as_str().to_string(),
                 completed_at: now.clone(),
             });
@@ -309,6 +309,7 @@ pub(super) async fn step_up(
     db: &DbPool,
     session: &SessionRow,
     method: &str,
+    provider: Option<&str>,
     aal: Aal,
 ) -> Result<StepUp> {
     let token = codes::new_session_token();
@@ -317,7 +318,7 @@ pub(super) async fn step_up(
         to: codes::session_token_hash(&token),
     };
     Ok(
-        match record_method(db, &session.id, method, aal, Some(rotation)).await? {
+        match record_method(db, &session.id, method, provider, aal, Some(rotation)).await? {
             Recorded::Done => StepUp::Rotated(token),
             Recorded::Superseded => StepUp::Superseded,
             Recorded::NotLive => StepUp::NotLive,
@@ -327,8 +328,14 @@ pub(super) async fn step_up(
 
 /// Re-authentication on a live session: records `method` and advances `authenticated_at`, keeping
 /// the token and an AAL already reached. `false` when the session is not live.
-pub(super) async fn refresh(db: &DbPool, id: &str, method: &str, aal: Aal) -> Result<bool> {
-    Ok(record_method(db, id, method, aal, None).await? == Recorded::Done)
+pub(super) async fn refresh(
+    db: &DbPool,
+    id: &str,
+    method: &str,
+    provider: Option<&str>,
+    aal: Aal,
+) -> Result<bool> {
+    Ok(record_method(db, id, method, provider, aal, None).await? == Recorded::Done)
 }
 
 /// The live session with this id.
@@ -376,7 +383,10 @@ pub(super) async fn find_live_by_token(db: &DbPool, token: &str) -> Result<Optio
 }
 
 /// Sessions with their identities, and those identities' credential summaries.
-type SessionPage = (Vec<(SessionRow, IdentityRow)>, Vec<CredentialSummary>);
+type SessionPage = (
+    Vec<(SessionRow, IdentityRow)>,
+    HashMap<String, Vec<CredentialSummary>>,
+);
 
 enum By {
     TokenHash(String),
@@ -400,10 +410,9 @@ async fn load_with_identity(
         let Some((session, identity)) = query.first(c).optional()? else {
             return QueryResult::Ok(None);
         };
-        let creds = identity_credentials::table
-            .filter(identity_credentials::identity_id.eq(&identity.id))
-            .select(CredentialSummary::as_select())
-            .load(c)?;
+        let creds = store::credential_summaries(c, std::slice::from_ref(&identity.id))?
+            .remove(&identity.id)
+            .unwrap_or_default();
         Ok(Some((session, identity, creds)))
     })?)
 }
@@ -589,17 +598,13 @@ pub(super) async fn list_all(
             None => {}
         }
         let rows: Vec<(SessionRow, IdentityRow)> = query.load(c)?;
-        let ids: Vec<&String> = rows.iter().map(|(_, i)| &i.id).collect();
-        let creds = identity_credentials::table
-            .filter(identity_credentials::identity_id.eq_any(ids))
-            .select(CredentialSummary::as_select())
-            .load(c)?;
+        let ids: Vec<String> = rows.iter().map(|(_, i)| i.id.clone()).collect();
+        let creds = store::credential_summaries(c, &ids)?;
         Ok(Some((rows, creds)))
     })?;
     let Some((rows, creds)) = loaded else {
         return Ok(Vec::new());
     };
-    let creds = by_identity(creds);
     Ok(readable(rows.into_iter().map(|(session, identity)| {
         let own = creds.get(&identity.id).cloned().unwrap_or_default();
         (
@@ -726,6 +731,7 @@ impl NativeBackend {
         &self,
         identity_id: &str,
         method: &str,
+        provider: Option<&str>,
         aal: Aal,
         device: Device<'_>,
     ) -> Result<Issued> {
@@ -733,6 +739,7 @@ impl NativeBackend {
             &self.db,
             identity_id,
             method,
+            provider,
             aal,
             self.session_lifespan(),
             device,
@@ -778,6 +785,7 @@ mod tests {
     use crate::backend::IdentityBackend;
     use crate::backend::identity::IdentityState;
     use crate::db::test_pool;
+    use crate::schema::identity_credentials;
     use diesel::sqlite::SqliteConnection;
 
     async fn sql<T: Send + 'static>(
@@ -830,7 +838,7 @@ mod tests {
 
     async fn sign_in(backend: &NativeBackend, identity_id: &str) -> Issued {
         backend
-            .issue_session(identity_id, "password", Aal::Aal1, DEVICE)
+            .issue_session(identity_id, "password", None, Aal::Aal1, DEVICE)
             .await
             .unwrap()
     }
@@ -1028,7 +1036,8 @@ mod tests {
         ));
 
         let row = find_live(&db, &issued.id).await.unwrap().unwrap();
-        let StepUp::Rotated(rotated) = step_up(&db, &row, "totp", Aal::Aal2).await.unwrap() else {
+        let StepUp::Rotated(rotated) = step_up(&db, &row, "totp", None, Aal::Aal2).await.unwrap()
+        else {
             panic!("live session rotates");
         };
         assert_ne!(rotated, issued.token);
@@ -1055,7 +1064,7 @@ mod tests {
             ..row
         };
         assert_eq!(
-            step_up(&db, &row, "totp", Aal::Aal2).await.unwrap(),
+            step_up(&db, &row, "totp", None, Aal::Aal2).await.unwrap(),
             StepUp::NotLive
         );
     }
@@ -1068,12 +1077,13 @@ mod tests {
         let issued = sign_in(&backend, &id).await;
         let held = find_live(&db, &issued.id).await.unwrap().unwrap();
 
-        let StepUp::Rotated(first) = step_up(&db, &held, "totp", Aal::Aal2).await.unwrap() else {
+        let StepUp::Rotated(first) = step_up(&db, &held, "totp", None, Aal::Aal2).await.unwrap()
+        else {
             panic!("first step-up rotates");
         };
         let before = find_live(&db, &issued.id).await.unwrap().unwrap();
         assert_eq!(
-            step_up(&db, &held, "lookup_secret", Aal::Aal2)
+            step_up(&db, &held, "lookup_secret", None, Aal::Aal2)
                 .await
                 .unwrap(),
             StepUp::Superseded
@@ -1095,6 +1105,7 @@ mod tests {
                     &db,
                     &id,
                     "password",
+                    None,
                     bad,
                     chrono::Duration::hours(1),
                     DEVICE
@@ -1105,7 +1116,7 @@ mod tests {
         }
         let issued = sign_in(&backend, &id).await;
         assert!(
-            refresh(&db, &issued.id, "password", Aal::Aal3)
+            refresh(&db, &issued.id, "password", None, Aal::Aal3)
                 .await
                 .is_err()
         );
@@ -1163,14 +1174,15 @@ mod tests {
         add_credential(&db, &id, "totp").await;
         let issued = sign_in(&backend, &id).await;
         let row = find_live(&db, &issued.id).await.unwrap().unwrap();
-        let StepUp::Rotated(token) = step_up(&db, &row, "totp", Aal::Aal2).await.unwrap() else {
+        let StepUp::Rotated(token) = step_up(&db, &row, "totp", None, Aal::Aal2).await.unwrap()
+        else {
             panic!("live session rotates");
         };
         let old = "2026-01-01T00:00:00.000000+00:00";
         set_column(&db, &issued.id, "authenticated_at", old).await;
 
         assert!(
-            refresh(&db, &issued.id, "password", Aal::Aal1)
+            refresh(&db, &issued.id, "password", None, Aal::Aal1)
                 .await
                 .unwrap()
         );
@@ -1192,7 +1204,7 @@ mod tests {
 
         for _ in 0..20 {
             assert!(
-                refresh(&db, &issued.id, "password", Aal::Aal1)
+                refresh(&db, &issued.id, "password", None, Aal::Aal1)
                     .await
                     .unwrap()
             );
@@ -1213,10 +1225,73 @@ mod tests {
         )
         .await;
         assert!(
-            !refresh(&db, &issued.id, "password", Aal::Aal1)
+            !refresh(&db, &issued.id, "password", None, Aal::Aal1)
                 .await
                 .unwrap()
         );
+    }
+
+    fn methods_with_provider(s: &Session) -> Vec<(String, Option<String>)> {
+        s.authentication_methods
+            .iter()
+            .flatten()
+            .map(|m| (m.method.clone().unwrap(), m.provider.clone()))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn the_provider_is_recorded_per_method() {
+        let (db, backend) = setup().await;
+        let id = identity(&db, "p@x.test").await;
+        let issued = backend
+            .issue_session(&id, "oidc", Some("acme"), Aal::Aal1, DEVICE)
+            .await
+            .unwrap();
+        assert!(
+            refresh(&db, &issued.id, "password", None, Aal::Aal1)
+                .await
+                .unwrap()
+        );
+        let s = session_of(whoami(&backend, &issued.token).await);
+        assert_eq!(
+            methods_with_provider(&s),
+            [
+                ("oidc".to_string(), Some("acme".to_string())),
+                ("password".to_string(), None)
+            ]
+        );
+        let row = find_live(&db, &issued.id).await.unwrap().unwrap();
+        assert!(!row.methods.contains(r#""provider":null"#));
+        let StepUp::Rotated(token) = step_up(&db, &row, "oidc", Some("other"), Aal::Aal1)
+            .await
+            .unwrap()
+        else {
+            panic!("step-up rotates");
+        };
+        let s = session_of(whoami(&backend, &token).await);
+        assert_eq!(
+            methods_with_provider(&s),
+            [
+                ("password".to_string(), None),
+                ("oidc".to_string(), Some("other".to_string()))
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_method_stored_without_a_provider_still_reads() {
+        let (db, backend) = setup().await;
+        let id = identity(&db, "legacy@x.test").await;
+        let issued = sign_in(&backend, &id).await;
+        set_column(
+            &db,
+            &issued.id,
+            "methods",
+            r#"[{"method":"password","aal":"aal1","completed_at":"2026-01-01T00:00:00.000000+00:00"}]"#,
+        )
+        .await;
+        let s = session_of(whoami(&backend, &issued.token).await);
+        assert_eq!(methods_with_provider(&s), [("password".to_string(), None)]);
     }
 
     #[tokio::test]
@@ -1539,6 +1614,7 @@ mod tests {
             .issue_session(
                 &id,
                 "password",
+                None,
                 Aal::Aal1,
                 Device {
                     ip: None,

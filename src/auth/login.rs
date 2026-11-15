@@ -172,7 +172,7 @@ pub(crate) async fn login(
             }
             crate::app::allow_form_action_to(
                 &mut resp,
-                &crate::oidc_providers::flow_auth_origins(&flow),
+                &crate::oidc_providers::flow_auth_origins(&flow, &state.cfg.identity),
             );
             resp
         }

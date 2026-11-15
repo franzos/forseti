@@ -2,7 +2,7 @@
 # their paths; files not listed in SUMMARY.md (e.g. dev/) are never published.
 [book]
 title = "Forseti"
-description = "Self-service UI and OAuth2 login/consent bridge for Ory Kratos + Ory Hydra."
+description = "Self-service UI and OAuth2 login/consent bridge for Ory Hydra, with Ory Kratos or a native identity backend."
 authors = ["Franz Geffke"]
 language = "en"
 src = "."

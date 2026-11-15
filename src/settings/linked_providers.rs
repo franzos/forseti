@@ -81,8 +81,8 @@ pub(crate) async fn settings_linked_providers(
     .await
     {
         Ok((session, flow)) => {
-            // Linking POSTs to Kratos, which 303s on to the provider.
-            let auth_origins = crate::oidc_providers::flow_auth_origins(&flow);
+            // Linking POSTs to the identity backend, which 303s on to the provider.
+            let auth_origins = crate::oidc_providers::flow_auth_origins(&flow, &state.cfg.identity);
             let memberships = crate::orgs::list_memberships(&state.db, &sess.identity_id)
                 .await
                 .unwrap_or_default();
@@ -303,9 +303,13 @@ fn credential_enrolled(method: &str, cred: &crate::backend::identity::Credential
     }
 }
 
-/// True when OIDC is the identity's only real sign-in method: at least one OIDC
-/// provider is linked and no other credential is actually enrolled.
+/// True when OIDC is the identity's only real sign-in method: the backend's
+/// answer when it gives one, else at least one OIDC provider is linked and no
+/// other credential is actually enrolled.
 pub(crate) fn sole_credential(identity: &Identity) -> bool {
+    if let Some(sole) = identity.sole_sign_in_is_oidc {
+        return sole;
+    }
     if linked_provider_ids(identity).is_empty() {
         return false;
     }
@@ -392,5 +396,15 @@ mod tests {
     #[test]
     fn sole_credential_false_with_real_password() {
         assert!(!sole_credential(&oidc_plus_password()));
+    }
+
+    #[test]
+    fn sole_credential_takes_the_backend_fact_over_credential_configs() {
+        let stated = |identity: Identity, sole| Identity {
+            sole_sign_in_is_oidc: Some(sole),
+            ..identity
+        };
+        assert!(!sole_credential(&stated(oidc_only(), false)));
+        assert!(sole_credential(&stated(oidc_plus_password(), true)));
     }
 }

@@ -1,11 +1,11 @@
-//! `/self-service/*`: flow init, form submits, the verification mail link, the admin recovery
-//! link and logout.
+//! `/self-service/*`: flow init, form submits, the provider callback, the verification mail link,
+//! the admin recovery link and logout.
 
 use std::net::SocketAddr;
 
 use axum::Extension;
 use axum::Router;
-use axum::extract::{ConnectInfo, Query, State};
+use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
@@ -13,7 +13,8 @@ use serde::Deserialize;
 
 use super::errors;
 use super::flows::{
-    AfterEffect, Dispatch, Form, InitOutcome, InitParams, Logout, SubmitOutcome, kind_from_segment,
+    AfterEffect, CallbackQuery, Dispatch, Form, InitOutcome, InitParams, Logout, SubmitOutcome,
+    clear_state_cookie, kind_from_segment, page_url,
 };
 use super::session::{self, Device};
 use crate::audit::AuditCtx;
@@ -62,6 +63,10 @@ pub(crate) fn router(cfg: &AppConfig) -> Router<AppState> {
             rate_limit::plain_text_error("registration"),
         )
     };
+    // A provider sign-up creates an identity from the callback, so it spends the registration
+    // submit buckets.
+    let (registration_submit, creation) =
+        registration(Router::new().route("/self-service/registration", post(submit)));
     // Literal paths only: routing matches the raw path, so a `{kind}` route would also take a
     // percent-encoded kind and skip that kind's buckets. Anything else is a 404.
     Router::new()
@@ -82,12 +87,19 @@ pub(crate) fn router(cfg: &AppConfig) -> Router<AppState> {
             INIT_IP_RATE_PER_HOUR,
             "flow init",
         ))
-        .merge(registration(
-            Router::new().route("/self-service/registration/browser", get(init)),
+        .merge(per_ip(
+            Router::new()
+                .route(
+                    "/self-service/methods/oidc/callback/{provider}",
+                    get(callback),
+                )
+                .route_layer(Extension(creation)),
+            INIT_IP_RATE_PER_MINUTE,
+            INIT_IP_RATE_PER_HOUR,
+            "provider callback",
         ))
-        .merge(registration(
-            Router::new().route("/self-service/registration", post(submit)),
-        ))
+        .merge(registration(Router::new().route("/self-service/registration/browser", get(init))).0)
+        .merge(registration_submit)
         .merge(per_ip(
             Router::new().route("/self-service/login", post(submit)),
             cfg.identity.login_ip_rate_per_minute,
@@ -133,14 +145,6 @@ struct LinkQuery {
 #[derive(Deserialize)]
 struct SubmitQuery {
     flow: Option<String>,
-}
-
-fn page_url(kind: FlowKind, id: &str) -> String {
-    format!(
-        "/{}?flow={}",
-        kind.path_segment(),
-        crate::web::urlencode(id)
-    )
 }
 
 fn failure(
@@ -218,6 +222,13 @@ async fn link(
             {
                 return failure(&state, &locale, &e);
             }
+            // The prefilled code is sealed on the flow for this browser, so it survives the
+            // sign-in or second factor without riding on the return URL.
+            match state.identity.address_change_detour(flow, &cookie).await {
+                Ok(Some(detour)) => return Redirect::to(&detour).into_response(),
+                Ok(None) => {}
+                Err(e) => return failure(&state, &locale, &e),
+            }
             let mut to = page_url(FlowKind::Verification, flow);
             if !code.is_empty() {
                 to.push_str(&format!("&code={}", crate::web::urlencode(code)));
@@ -268,6 +279,78 @@ fn respond(kind: FlowKind, id: &str, outcome: SubmitOutcome) -> Response {
     }
 }
 
+/// The device a request comes from, as sessions record it.
+fn device_of<'a>(
+    state: &AppState,
+    headers: &'a HeaderMap,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
+) -> Device<'a> {
+    let peer = peer.map(|Extension(ConnectInfo(addr))| addr.ip());
+    Device {
+        ip: crate::client_ip::client_ip(headers, &state.cfg.proxy, peer),
+        user_agent: headers
+            .get(header::USER_AGENT)
+            .and_then(|v| v.to_str().ok()),
+    }
+}
+
+/// `GET /self-service/methods/oidc/callback/{provider}`: the provider's redirect back. An answer
+/// clears the state cookie once the cookie and `state` verified (RFC 9700 4.2.4); a request that
+/// fails before that leaves it for the genuine callback.
+#[allow(clippy::too_many_arguments)]
+async fn callback(
+    State(state): State<AppState>,
+    Path(provider): Path<String>,
+    query: Result<Query<CallbackQuery>, axum::extract::rejection::QueryRejection>,
+    headers: HeaderMap,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
+    Extension(creation): Extension<rate_limit::SharedBuckets>,
+    ReqLocale(locale): ReqLocale,
+    audit: AuditCtx,
+) -> Response {
+    let query = query.map(|Query(q)| q).unwrap_or_default();
+    let device = device_of(&state, &headers, peer);
+    let answer = state
+        .identity
+        .upstream_callback(&provider, &query, &headers, device, &creation)
+        .await;
+    let Some(answer) = answer.transpose() else {
+        return Redirect::to(&errors::url(errors::CSRF_VIOLATION)).into_response();
+    };
+    let mut resp = match answer {
+        Ok(Dispatch::Done(done)) => {
+            for event in done.audit {
+                let _ = crate::audit::log(&state.db, event.with_ctx(&audit)).await;
+            }
+            match done.outcome {
+                SubmitOutcome::Redirect {
+                    location,
+                    set_cookies,
+                } => {
+                    let mut resp = Redirect::to(&location).into_response();
+                    for c in set_cookies {
+                        crate::web::append_set_cookie(&mut resp, Some(c));
+                    }
+                    resp
+                }
+                SubmitOutcome::Page => {
+                    Redirect::to(&errors::url(errors::FLOW_EXPIRED)).into_response()
+                }
+            }
+        }
+        Ok(Dispatch::Expired) => Redirect::to(&errors::url(errors::FLOW_EXPIRED)).into_response(),
+        Ok(Dispatch::Forged) => Redirect::to(&errors::url(errors::CSRF_VIOLATION)).into_response(),
+        Ok(Dispatch::SignIn(to)) => Redirect::to(&to).into_response(),
+        Ok(Dispatch::TooManyRequests(retry_after)) => rate_limit::too_many_requests(retry_after),
+        Err(e) => failure(&state, &locale, &e),
+    };
+    crate::web::append_set_cookie(
+        &mut resp,
+        Some(clear_state_cookie(state.cfg.self_.is_https())),
+    );
+    resp
+}
+
 /// `POST /self-service/{kind}?flow=<id>`.
 #[allow(clippy::too_many_arguments)]
 async fn submit(
@@ -289,14 +372,7 @@ async fn submit(
     let form = Form(fields);
     let csrf_valid = crate::csrf::verify_csrf(&headers, form.get("csrf_token").unwrap_or_default());
     let cookie = crate::cookies::cookie_header(&headers);
-    let user_agent = headers
-        .get(header::USER_AGENT)
-        .and_then(|v| v.to_str().ok());
-    let peer = peer.map(|Extension(ConnectInfo(addr))| addr.ip());
-    let device = Device {
-        ip: crate::client_ip::client_ip(&headers, &state.cfg.proxy, peer),
-        user_agent,
-    };
+    let device = device_of(&state, &headers, peer);
     match state
         .identity
         .submit_flow(kind, &id, &form, &cookie, csrf_valid, device)
@@ -306,25 +382,34 @@ async fn submit(
             for event in done.audit {
                 let _ = crate::audit::log(&state.db, event.with_ctx(&audit)).await;
             }
-            if let Some(AfterEffect::PasswordChanged {
-                identity_id,
-                session_id,
-            }) = &done.after
-            {
-                crate::oauth::op_sessions::end_op_sessions_for_subject(
+            let ended = match &done.after {
+                Some(AfterEffect::PasswordChanged {
+                    identity_id,
+                    session_id,
+                }) => Some((identity_id, Some(session_id.as_str()))),
+                Some(AfterEffect::AccountReset { identity_id }) => Some((identity_id, None)),
+                None => None,
+            };
+            if let Some((identity_id, kept)) = ended {
+                let all = crate::oauth::op_sessions::end_op_sessions_for_subject(
                     &state.db,
                     &state.oauth,
                     identity_id,
-                    Some(session_id),
+                    kept,
                     crate::oauth::op_sessions::GrantRevocation::Revoke,
                 )
                 .await;
+                // A later recovery is no reset, so nothing retries this.
+                if !all && kept.is_none() {
+                    tracing::error!(identity_id = %identity_id, "OAuth sessions and grants of a reset identity not fully ended");
+                }
             }
             respond(kind, &id, done.outcome)
         }
         Ok(Dispatch::Expired) => Redirect::to(&errors::url(errors::FLOW_EXPIRED)).into_response(),
         Ok(Dispatch::Forged) => Redirect::to(&errors::url(errors::CSRF_VIOLATION)).into_response(),
         Ok(Dispatch::SignIn(to)) => Redirect::to(&to).into_response(),
+        Ok(Dispatch::TooManyRequests(retry_after)) => rate_limit::too_many_requests(retry_after),
         Err(e) => failure(&state, &locale, &e),
     }
 }
@@ -361,9 +446,26 @@ mod tests {
     }
 
     async fn app_with(cfg: AppConfig) -> App {
+        app_with_github(cfg, None).await
+    }
+
+    /// An app whose GitHub providers talk to `github`.
+    async fn app_with_github(
+        cfg: AppConfig,
+        github: Option<&crate::identity_native::test_support::GithubStub>,
+    ) -> App {
         let db = test_pool().await;
-        let backend = NativeBackend::new(&cfg, &db, SECRET);
-        let router = super::router(&cfg).merge(crate::auth::router(&cfg.proxy, &cfg.auth));
+        let backend = match github {
+            Some(stub) => NativeBackend::with_github(&cfg, &db, SECRET, stub.urls()),
+            None => NativeBackend::new(&cfg, &db, SECRET),
+        };
+        let router = super::router(&cfg)
+            .merge(crate::auth::router(&cfg.proxy, &cfg.auth))
+            .merge(crate::settings::router(&cfg));
+        let csp = crate::app::CspSources {
+            frame_ancestors: cfg.security.frame_ancestors.clone(),
+            form_action: "'self'".to_string(),
+        };
         let state = AppState::for_test(cfg, db.clone(), backend.clone(), SECRET);
         let router = router
             .route_layer(axum::middleware::from_fn_with_state(
@@ -373,6 +475,10 @@ mod tests {
             .layer(axum::middleware::from_fn_with_state(
                 state.clone(),
                 crate::audit::middleware,
+            ))
+            .layer(axum::middleware::from_fn_with_state(
+                csp,
+                crate::app::strict_frame_for_sensitive,
             ))
             .with_state(state);
         App {
@@ -458,9 +564,19 @@ mod tests {
 
         /// A signed-in browser: (session id, cookie header with session and CSRF cookies, CSRF token).
         async fn signed_in(&self, identity_id: &str) -> (String, String, String) {
+            self.signed_in_by(identity_id, "password", None).await
+        }
+
+        /// [`signed_in`](Self::signed_in) with a session completed by `method` through `provider`.
+        async fn signed_in_by(
+            &self,
+            identity_id: &str,
+            method: &str,
+            provider: Option<&str>,
+        ) -> (String, String, String) {
             let issued = self
                 .backend
-                .issue_session(identity_id, "password", Aal::Aal1, Device::default())
+                .issue_session(identity_id, method, provider, Aal::Aal1, Device::default())
                 .await
                 .unwrap();
             let resp = self.get("/self-service/logout", "").await;
@@ -849,9 +965,10 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let session::StepUp::Rotated(session) = session::step_up(&app.db, &held, "totp", Aal::Aal2)
-            .await
-            .unwrap()
+        let session::StepUp::Rotated(session) =
+            session::step_up(&app.db, &held, "totp", None, Aal::Aal2)
+                .await
+                .unwrap()
         else {
             panic!("live session rotates");
         };
@@ -947,6 +1064,209 @@ mod tests {
         match outcome {
             WhoamiOutcome::Ok(session) => *session,
             _ => panic!("the browser is signed in"),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_address_change_mail_link_sends_a_signed_out_browser_to_sign_in_first() {
+        use crate::identity_native::codes::Purpose;
+        let app = app().await;
+        let identity = app.user("before@x.test").await;
+        let (session, signed_in_cookie, _) = app.signed_in(&identity).await;
+        let flow = app.backend.address_change_flow("after@x.test", &identity);
+        let code = app.backend.mailed_code(
+            &flow.row.id,
+            Purpose::Verification,
+            &identity,
+            "after@x.test",
+        );
+        let writer = store::Writer {
+            identity_id: &identity,
+            session_id: &session,
+            verified_only: false,
+        };
+        let change = store::AddressChange {
+            email: "after@x.test".to_string(),
+            verification: flow.row.clone(),
+            code,
+        };
+        assert_eq!(
+            store::update_profile(&app.db, writer, None, None, Some(change))
+                .await
+                .unwrap(),
+            store::ProfileSaved::Saved
+        );
+        let mail = app.backend.mailed("after@x.test").await;
+        let body = &mail[0].body;
+        let at = body
+            .find("/self-service/verification?flow=")
+            .expect("a link");
+        let link: String = body[at..]
+            .chars()
+            .take_while(|c| !c.is_whitespace())
+            .collect();
+
+        let resp = app.get(&link, "").await;
+        let page = format!("/verification?flow={}", flow.row.id);
+        assert_eq!(
+            location(&resp),
+            format!("/login?return_to={}", crate::web::urlencode(&page))
+        );
+        assert!(
+            !location(&resp).contains(&mail[0].code),
+            "the code stays off the URL"
+        );
+        let rec = app.backend.load_flow(&flow.row.id).await.unwrap().unwrap();
+        assert!(
+            rec.ctx.prefill_code.is_some(),
+            "the code waits on the flow for this browser"
+        );
+
+        let resp = app.get(&link, &signed_in_cookie).await;
+        assert!(location(&resp).starts_with(&page), "{}", location(&resp));
+        assert_eq!(
+            store::row_by_id(&app.db, &identity)
+                .await
+                .unwrap()
+                .unwrap()
+                .email,
+            "before@x.test",
+            "following the link changes nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_address_change_of_a_totp_identity_steps_up_back_to_its_flow() {
+        use crate::identity_native::codes::Purpose;
+        let app = app().await;
+        let identity = app.user("totp-before@x.test").await;
+        app.add_totp(&identity).await;
+        let (session, aal1_cookie, token) = app.signed_in(&identity).await;
+        let flow = app
+            .backend
+            .address_change_flow("totp-after@x.test", &identity);
+        let code = app.backend.mailed_code(
+            &flow.row.id,
+            Purpose::Verification,
+            &identity,
+            "totp-after@x.test",
+        );
+        let writer = store::Writer {
+            identity_id: &identity,
+            session_id: &session,
+            verified_only: false,
+        };
+        let change = store::AddressChange {
+            email: "totp-after@x.test".to_string(),
+            verification: flow.row.clone(),
+            code,
+        };
+        assert_eq!(
+            store::update_profile(&app.db, writer, None, None, Some(change))
+                .await
+                .unwrap(),
+            store::ProfileSaved::Saved
+        );
+        let mail = app.backend.mailed("totp-after@x.test").await;
+        let body = &mail[0].body;
+        let at = body
+            .find("/self-service/verification?flow=")
+            .expect("a link");
+        let link: String = body[at..]
+            .chars()
+            .take_while(|c| !c.is_whitespace())
+            .collect();
+        let step_up = crate::auth::aal2_step_up_url(&format!("/verification?flow={}", flow.row.id));
+
+        let resp = app.get(&link, &aal1_cookie).await;
+        assert_eq!(location(&resp), step_up);
+        let submit_uri = format!("/self-service/verification?flow={}", flow.row.id);
+        let body = format!("csrf_token={token}&method=code&code={}", mail[0].code);
+        let resp = app.post(&submit_uri, &aal1_cookie, &body).await;
+        assert_eq!(location(&resp), step_up);
+        assert_eq!(
+            store::row_by_id(&app.db, &identity)
+                .await
+                .unwrap()
+                .unwrap()
+                .email,
+            "totp-before@x.test"
+        );
+
+        let held = session::find_live(&app.db, &session)
+            .await
+            .unwrap()
+            .unwrap();
+        let session::StepUp::Rotated(aal2) =
+            session::step_up(&app.db, &held, "totp", None, Aal::Aal2)
+                .await
+                .unwrap()
+        else {
+            panic!("a live session rotates");
+        };
+        let aal2_cookie = format!("forseti_session={aal2}; forseti_csrf={token}");
+        let rec = app.backend.load_flow(&flow.row.id).await.unwrap().unwrap();
+        assert!(
+            rec.ctx.prefill_code.is_some(),
+            "the code waited on the flow"
+        );
+        let resp = app.post(&submit_uri, &aal2_cookie, &body).await;
+        assert_eq!(
+            location(&resp),
+            format!("/verification?flow={}", flow.row.id)
+        );
+        let row = store::row_by_id(&app.db, &identity).await.unwrap().unwrap();
+        assert_eq!(row.email, "totp-after@x.test");
+        assert!(row.email_verified_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_recovery_reset_over_http_ends_every_op_session_and_grant() {
+        use crate::identity_native::test_support::identity_with_password;
+        use crate::oauth::op_sessions;
+        let (hydra, seen) = fake_hydra_admin().await;
+        let mut cfg = AppConfig::test_fixture();
+        cfg.hydra.admin_url = hydra;
+        let app = app_with(cfg).await;
+        let identity = identity_with_password(&app.db, "squat@x.test", false).await;
+        let (squatter, _, _) = app.signed_in(&identity).await;
+        op_sessions::record(&app.db, "sid-squatter", &identity, &squatter, 86400)
+            .await
+            .unwrap();
+        let (id, cookie, token) = app.start("recovery", "").await;
+        let uri = format!("/self-service/recovery?flow={id}");
+        let body = format!("csrf_token={token}&method=code&email=squat%40x.test");
+        app.post(&uri, &cookie, &body).await;
+        let code = app.backend.mailed("squat@x.test").await[0].code.clone();
+        let body = format!("csrf_token={token}&method=code&code={code}");
+        let resp = app.post(&uri, &cookie, &body).await;
+        assert!(
+            location(&resp).starts_with("/settings?flow="),
+            "{}",
+            location(&resp)
+        );
+        let rows = audit_rows(&app.db).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].action, "password.recovered");
+
+        let left = op_sessions::rows_for_subject(&app.db, &identity)
+            .await
+            .unwrap()
+            .login_sessions;
+        assert!(left.is_empty(), "{left:?}");
+        let seen = seen.lock().unwrap().clone();
+        let revokes: Vec<&String> = seen.iter().filter(|r| r.starts_with("DELETE")).collect();
+        assert!(
+            revokes.iter().any(|r| r.contains("sid=sid-squatter")),
+            "{seen:?}"
+        );
+        for kind in ["login", "consent"] {
+            assert!(
+                revokes
+                    .iter()
+                    .any(|r| r.contains(kind) && r.contains(&format!("subject={identity}"))),
+                "{kind}: {seen:?}"
+            );
         }
     }
 
@@ -1311,9 +1631,10 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let session::StepUp::Rotated(token) = session::step_up(&app.db, &held, "totp", Aal::Aal2)
-            .await
-            .unwrap()
+        let session::StepUp::Rotated(token) =
+            session::step_up(&app.db, &held, "totp", None, Aal::Aal2)
+                .await
+                .unwrap()
         else {
             panic!("live session rotates");
         };
@@ -2046,5 +2367,2295 @@ mod tests {
             location(&app.get("/self-service/recovery", "").await),
             "/recovery"
         );
+    }
+
+    const ISSUER: &str = "https://idp.example.com/realms/x";
+
+    /// An app with an `oidc` provider `playground` at [`ISSUER`] and a GitHub provider `gh`.
+    async fn app_with_providers() -> App {
+        use crate::config::{OidcProviderConfig, OidcProviderKind};
+        let provider = |id: &str, kind, issuer: Option<&str>| OidcProviderConfig {
+            id: id.into(),
+            kind,
+            issuer: issuer.map(str::to_string),
+            client_id: "forseti".into(),
+            client_secret: Some("secret".into()),
+            client_secret_env: None,
+            scopes: None,
+        };
+        let mut cfg = AppConfig::test_fixture();
+        cfg.identity.oidc_providers = vec![
+            provider("playground", OidcProviderKind::Oidc, Some(ISSUER)),
+            provider("gh", OidcProviderKind::Github, None),
+        ];
+        app_with(cfg).await
+    }
+
+    async fn body(resp: Response) -> String {
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    fn oidc_inputs(flow: &Flow) -> Vec<(String, String)> {
+        flow.inputs("oidc")
+            .map(|i| (i.name.clone(), i.value.clone()))
+            .collect()
+    }
+
+    fn named(name: &str, value: &str) -> (String, String) {
+        (name.to_string(), value.to_string())
+    }
+
+    #[tokio::test]
+    async fn sign_in_and_sign_up_offer_the_configured_providers_and_csp_allows_them() {
+        let app = app_with_providers().await;
+        assert_eq!(
+            app.backend.probe_oidc_provider_ids().await.unwrap(),
+            ["playground", "gh"]
+        );
+        for kind in ["login", "registration"] {
+            let (id, cookie, _) = app.start(kind, "").await;
+            let resp = app.get(&format!("/{kind}?flow={id}"), &cookie).await;
+            assert_eq!(resp.status(), StatusCode::OK, "{kind}");
+            let csp = resp.headers()[header::CONTENT_SECURITY_POLICY]
+                .to_str()
+                .unwrap()
+                .to_string();
+            assert!(
+                csp.ends_with("form-action 'self' https://idp.example.com https://github.com"),
+                "{kind}: {csp}"
+            );
+            let html = body(resp).await;
+            assert!(html.contains(r#"name="provider""#), "{kind}");
+            assert!(html.contains(r#"value="playground""#), "{kind}");
+            assert!(html.contains(r#"value="gh""#), "{kind}");
+        }
+        let (id, cookie, _) = app.start("login", "").await;
+        assert_eq!(
+            oidc_inputs(&app.flow(FlowKind::Login, &id, &cookie).await),
+            [named("provider", "playground"), named("provider", "gh")]
+        );
+    }
+
+    #[tokio::test]
+    async fn without_providers_the_csp_gains_nothing() {
+        let app = app().await;
+        let (id, cookie, _) = app.start("login", "").await;
+        let resp = app.get(&format!("/login?flow={id}"), &cookie).await;
+        assert!(
+            resp.headers()
+                .get(header::CONTENT_SECURITY_POLICY)
+                .is_none()
+        );
+        assert!(
+            app.backend
+                .probe_oidc_provider_ids()
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refresh_login_offers_only_the_configured_oidc_providers_the_identity_is_linked_to() {
+        let app = app_with_providers().await;
+        let identity = app.user("refresh@x.test").await;
+        for (provider, subject) in [("playground", "0"), ("gh", "1"), ("gone", "2")] {
+            store::insert_link(&app.db, &identity, provider, subject)
+                .await
+                .unwrap();
+        }
+        let (_, cookie, _) = app.signed_in(&identity).await;
+        let resp = app
+            .get("/self-service/login/browser?refresh=true", &cookie)
+            .await;
+        let id = location(&resp)
+            .strip_prefix("/login?flow=")
+            .expect("a refresh login flow")
+            .to_string();
+        assert_eq!(app.row(&id).await.refresh, 1);
+        assert_eq!(
+            oidc_inputs(&app.flow(FlowKind::Login, &id, &cookie).await),
+            [named("provider", "playground")]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_email_needed_screen_asks_for_an_address_and_continues_with_the_provider() {
+        let app = app_with_providers().await;
+        let (id, cookie, _) = app.start("registration", "").await;
+        let mut rec = app.backend.load_flow(&id).await.unwrap().unwrap();
+        rec.ctx.email_needed = Some("playground".into());
+        rec.ctx.traits = Some(super::super::flows::PendingTraits {
+            email: "typed@x.test".into(),
+            first: String::new(),
+            last: String::new(),
+        });
+        assert_eq!(
+            rec.save(&app.db).await.unwrap(),
+            super::super::flows::Saved::Done
+        );
+        let flow = app.flow(FlowKind::Registration, &id, &cookie).await;
+        assert_eq!(oidc_inputs(&flow), [named("provider", "playground")]);
+
+        let html = body(app.get(&format!("/registration?flow={id}"), &cookie).await).await;
+        assert!(html.contains("share a verified email address"), "{html}");
+        assert!(html.contains(r#"name="traits.email""#));
+        assert!(html.contains(r#"value="typed@x.test""#));
+        assert!(!html.contains(r#"name="password""#));
+    }
+
+    /// The linked-providers page for `identity`, rendered from a fresh settings flow.
+    async fn linked_providers_page(app: &App, identity: &str) -> String {
+        let (_, cookie, _) = app.signed_in(identity).await;
+        let id = settings_flow(app, &cookie, "/settings/linked-providers").await;
+        let resp = app
+            .get(&format!("/settings/linked-providers?flow={id}"), &cookie)
+            .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let csp = resp
+            .headers()
+            .get(header::CONTENT_SECURITY_POLICY)
+            .map(|v| v.to_str().unwrap().to_string())
+            .unwrap_or_default();
+        let html = body(resp).await;
+        for (provider, origin) in [
+            ("playground", "https://idp.example.com"),
+            ("gh", "https://github.com"),
+        ] {
+            assert_eq!(
+                csp.contains(origin),
+                action(&html, "link", provider),
+                "only a link hop leaves for the provider: {csp}"
+            );
+        }
+        html
+    }
+
+    fn action(html: &str, name: &str, provider: &str) -> bool {
+        let html = html.split_whitespace().collect::<Vec<_>>().join(" ");
+        html.contains(&format!(r#"name="{name}" value="{provider}""#))
+    }
+
+    const BLOCKED: &str = "This is your only sign-in method.";
+
+    #[tokio::test]
+    async fn linked_providers_page_offers_link_unlink_or_the_blocked_note() {
+        use crate::identity_native::test_support::{identity_with_password, plant_password};
+        let app = app_with_providers().await;
+
+        let fresh = identity_with_password(&app.db, "fresh@x.test", true).await;
+        let html = linked_providers_page(&app, &fresh).await;
+        assert!(action(&html, "link", "playground"));
+        assert!(action(&html, "link", "gh"));
+        assert!(!html.contains(BLOCKED));
+
+        let sole = app.user("sole@x.test").await;
+        store::insert_link(&app.db, &sole, "playground", "s1")
+            .await
+            .unwrap();
+        let html = linked_providers_page(&app, &sole).await;
+        assert!(!action(&html, "unlink", "playground"));
+        assert!(html.contains(BLOCKED), "{html}");
+        assert!(action(&html, "link", "gh"));
+
+        plant_password(&app.db, &sole).await;
+        let html = linked_providers_page(&app, &sole).await;
+        assert!(action(&html, "unlink", "playground"));
+        assert!(!html.contains(BLOCKED));
+
+        let two = app.user("two@x.test").await;
+        for (provider, subject) in [("playground", "t1"), ("gh", "t2")] {
+            store::insert_link(&app.db, &two, provider, subject)
+                .await
+                .unwrap();
+        }
+        let html = linked_providers_page(&app, &two).await;
+        assert!(action(&html, "unlink", "playground"));
+        assert!(action(&html, "unlink", "gh"));
+        assert!(!html.contains(BLOCKED));
+    }
+
+    #[tokio::test]
+    async fn the_sole_sign_in_fact_counts_only_configured_links_and_a_password() {
+        use crate::identity_native::test_support::plant_password;
+        let app = app_with_providers().await;
+        let fact = |links: &'static [&'static str], password: bool| {
+            let app = &app;
+            async move {
+                let id = app
+                    .user(&format!("u{}@x.test", uuid::Uuid::new_v4().simple()))
+                    .await;
+                for provider in links {
+                    let inserted = store::insert_link(&app.db, &id, provider, &id)
+                        .await
+                        .unwrap();
+                    assert_eq!(inserted, store::LinkInserted::Linked);
+                }
+                if password {
+                    plant_password(&app.db, &id).await;
+                }
+                app.backend
+                    .admin_get_identity_full(&id)
+                    .await
+                    .unwrap()
+                    .sole_sign_in_is_oidc
+            }
+        };
+        assert_eq!(fact(&[], false).await, Some(false));
+        assert_eq!(fact(&["gh"], false).await, Some(true));
+        assert_eq!(fact(&["gone"], false).await, Some(true));
+        assert_eq!(fact(&["gh", "gone"], false).await, Some(true));
+        assert_eq!(fact(&["gh", "playground"], false).await, Some(false));
+        assert_eq!(fact(&["gh"], true).await, Some(false));
+    }
+
+    use crate::identity_native::test_support::OidcStub;
+
+    const STATE_COOKIE: &str = "forseti_upstream_state";
+
+    /// An app whose providers are `stub` (and `other`, when `two`) at the OIDC stub.
+    async fn stub_app(stub: &OidcStub, two: bool) -> App {
+        let mut cfg = AppConfig::test_fixture();
+        cfg.oauth.cimd.allow_private_targets = true;
+        cfg.identity.oidc_providers = vec![stub.provider_config("stub")];
+        if two {
+            cfg.identity
+                .oidc_providers
+                .push(stub.provider_config("other"));
+        }
+        app_with(cfg).await
+    }
+
+    /// A provider hop started from a fresh flow.
+    struct Hop {
+        flow: String,
+        provider: String,
+        /// The browser's cookie header, the state cookie included.
+        cookie: String,
+        authorize: url::Url,
+        /// The `Set-Cookie` line of the state cookie.
+        set_cookie: String,
+    }
+
+    impl Hop {
+        fn state(&self) -> String {
+            self.authorize
+                .query_pairs()
+                .find(|(k, _)| k == "state")
+                .map(|(_, v)| v.into_owned())
+                .unwrap()
+        }
+
+        /// The callback URI for `provider` with `query` appended to `state`.
+        fn callback_at(&self, provider: &str, query: &str) -> String {
+            format!(
+                "/self-service/methods/oidc/callback/{provider}?state={}{query}",
+                crate::web::urlencode(self.state())
+            )
+        }
+
+        fn callback(&self, query: &str) -> String {
+            self.callback_at(&self.provider, query)
+        }
+    }
+
+    /// Start a `kind` flow (`query` on its init) and press the `provider` button.
+    async fn start_hop(app: &App, kind: &str, query: &str, provider: &str) -> Hop {
+        let (flow, cookie, token) = app.start(kind, query).await;
+        let body = format!("csrf_token={token}&provider={provider}");
+        press(app, kind, &flow, &cookie, &body, provider).await
+    }
+
+    /// Post `body` on the `kind` flow in the browser holding `cookie`: the provider hop it answers.
+    async fn press(
+        app: &App,
+        kind: &str,
+        flow: &str,
+        cookie: &str,
+        body: &str,
+        provider: &str,
+    ) -> Hop {
+        let resp = app
+            .post(&format!("/self-service/{kind}?flow={flow}"), cookie, body)
+            .await;
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+        let flow = flow.to_string();
+        let authorize = url::Url::parse(&location(&resp)).expect("a redirect to the provider");
+        let set_cookie = set_cookies(&resp)
+            .into_iter()
+            .find(|c| c.starts_with(&format!("{STATE_COOKIE}=")))
+            .expect("the state cookie");
+        let value = set_cookie.split(';').next().unwrap().to_string();
+        Hop {
+            flow,
+            provider: provider.to_string(),
+            cookie: format!("{cookie}; {value}"),
+            authorize,
+            set_cookie,
+        }
+    }
+
+    /// The callback for a code the stub issues for `claims`.
+    async fn stub_callback(
+        app: &App,
+        stub: &OidcStub,
+        hop: &Hop,
+        claims: serde_json::Value,
+    ) -> Response {
+        let code = stub.issue(&hop.authorize, claims);
+        app.get(&hop.callback(&format!("&code={code}")), &hop.cookie)
+            .await
+    }
+
+    fn clears_state_cookie(resp: &Response) -> bool {
+        set_cookies(resp).iter().any(|c| {
+            c.starts_with(&format!("{STATE_COOKIE}=;"))
+                && c.contains("Path=/self-service/methods/oidc/callback")
+                && c.contains("Expires=Thu, 01 Jan 1970")
+        })
+    }
+
+    async fn flow_messages(app: &App, id: &str) -> Vec<u64> {
+        let rec = app.backend.load_flow(id).await.unwrap().unwrap();
+        rec.ctx.messages.iter().map(|m| m.id).collect()
+    }
+
+    /// A verified identity linked to the stub's default subject at `stub`.
+    async fn linked_user(app: &App, email: &str, verified: bool) -> String {
+        let id = store::create(&app.db, email, Some("Ann"), Some("Lee"), verified)
+            .await
+            .unwrap()
+            .unwrap()
+            .id;
+        store::insert_link(&app.db, &id, "stub", "stub-subject")
+            .await
+            .unwrap();
+        id
+    }
+
+    #[tokio::test]
+    async fn a_linked_provider_account_signs_in_through_the_callback() {
+        let stub = OidcStub::start().await;
+        let app = stub_app(&stub, false).await;
+        let identity = linked_user(&app, "linked@x.test", true).await;
+        let hop = start_hop(&app, "login", "?return_to=%2Fsettings", "stub").await;
+        assert!(
+            hop.authorize
+                .as_str()
+                .starts_with(&format!("{}/authorize?", stub.issuer))
+        );
+        for attr in [
+            "Path=/self-service/methods/oidc/callback",
+            "HttpOnly",
+            "SameSite=Lax",
+            "Max-Age=600",
+        ] {
+            assert!(hop.set_cookie.contains(attr), "{attr}: {}", hop.set_cookie);
+        }
+        assert!(!hop.set_cookie.contains("Secure"), "http self URL");
+        let stored = app.backend.load_flow(&hop.flow).await.unwrap().unwrap();
+        assert_eq!(stored.ctx.oidc_state.as_deref(), Some(hop.state().as_str()));
+
+        let resp = stub_callback(&app, &stub, &hop, serde_json::json!({})).await;
+        assert_eq!(location(&resp), "/settings");
+        assert!(clears_state_cookie(&resp));
+        let token = session_cookie(&resp).expect("a session cookie");
+        let WhoamiOutcome::Ok(session) = app
+            .backend
+            .whoami(Some(&format!("forseti_session={token}")))
+            .await
+            .unwrap()
+        else {
+            panic!("the session is live");
+        };
+        assert_eq!(session.identity.unwrap().id, identity);
+        assert_eq!(session.authenticator_assurance_level, Some(Aal::Aal1));
+        let methods = session.authentication_methods.unwrap();
+        assert_eq!(methods[0].method.as_deref(), Some("oidc"));
+        assert_eq!(methods[0].provider.as_deref(), Some("stub"));
+        let row = app.row(&hop.flow).await;
+        assert_eq!(row.state, "passed_challenge", "the flow is spent");
+
+        let rows = audit_rows(&app.db).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].action, "auth.login");
+        assert_eq!(rows[0].actor_id.as_deref(), Some(identity.as_str()));
+        let meta: serde_json::Value = serde_json::from_str(&rows[0].metadata).unwrap();
+        assert_eq!(meta["method"], "oidc");
+        assert_eq!(meta["provider"], "stub");
+        let whole = format!("{:?}", rows[0]);
+        assert!(!whole.contains("stub-subject") && !whole.contains(&hop.state()));
+        assert!(!whole.contains(&token));
+
+        let hop = start_hop(&app, "registration", "", "stub").await;
+        let resp = stub_callback(&app, &stub, &hop, serde_json::json!({})).await;
+        assert_eq!(
+            location(&resp),
+            "/",
+            "a registration flow signs the linked account in"
+        );
+        assert!(session_cookie(&resp).is_some());
+
+        app.add_totp(&identity).await;
+        let hop = start_hop(&app, "login", "", "stub").await;
+        let resp = stub_callback(&app, &stub, &hop, serde_json::json!({})).await;
+        let token = session_cookie(&resp).unwrap();
+        assert!(
+            matches!(
+                app.backend
+                    .whoami(Some(&format!("forseti_session={token}")))
+                    .await
+                    .unwrap(),
+                WhoamiOutcome::InsufficientAal
+            ),
+            "TOTP still demands the second factor"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_tampered_or_missing_state_cookie_is_a_csrf_violation() {
+        let stub = OidcStub::start().await;
+        let app = stub_app(&stub, false).await;
+        linked_user(&app, "tamper@x.test", true).await;
+        let hop = start_hop(&app, "login", "", "stub").await;
+        let code = stub.issue(&hop.authorize, serde_json::json!({}));
+        let uri = hop.callback(&format!("&code={code}"));
+        let mut tampered = hop.cookie.clone().into_bytes();
+        let last = tampered.len() - 1;
+        tampered[last] = if tampered[last] == b'0' { b'1' } else { b'0' };
+        let tampered = String::from_utf8(tampered).unwrap();
+        let without = hop
+            .cookie
+            .split("; forseti_upstream")
+            .next()
+            .unwrap()
+            .to_string();
+        for cookie in [&tampered, &without] {
+            let resp = app.get(&uri, cookie).await;
+            assert_eq!(location(&resp), "/error?id=security_csrf_violation");
+            assert!(
+                no_state_cookie(&resp),
+                "an unverified request leaves the cookie"
+            );
+            assert!(session_cookie(&resp).is_none());
+        }
+        assert!(
+            stub.client_auth().is_empty(),
+            "no exchange reached the provider"
+        );
+        let resp = app.get(&uri, &hop.cookie).await;
+        assert_eq!(location(&resp), "/", "the genuine callback still works");
+        assert!(clears_state_cookie(&resp));
+
+        let hop = start_hop(&app, "login", "", "stub").await;
+        app.expire(&hop.flow).await;
+        let resp = stub_callback(&app, &stub, &hop, serde_json::json!({})).await;
+        assert_eq!(location(&resp), "/error?id=self_service_flow_expired");
+        assert!(clears_state_cookie(&resp));
+    }
+
+    #[tokio::test]
+    async fn a_callback_for_another_provider_or_state_is_refused() {
+        let stub = OidcStub::start().await;
+        let app = stub_app(&stub, true).await;
+        linked_user(&app, "paths@x.test", true).await;
+        let hop = start_hop(&app, "login", "", "stub").await;
+        let code = stub.issue(&hop.authorize, serde_json::json!({}));
+        let code_q = format!("&code={code}");
+        for uri in [
+            hop.callback_at("other", &code_q),
+            hop.callback_at("nope", &code_q),
+            format!("/self-service/methods/oidc/callback/stub?state=other{code_q}"),
+            format!("/self-service/methods/oidc/callback/stub?code={code}"),
+        ] {
+            let resp = app.get(&uri, &hop.cookie).await;
+            assert_eq!(
+                location(&resp),
+                "/error?id=security_csrf_violation",
+                "{uri}"
+            );
+            assert!(no_state_cookie(&resp), "{uri}");
+        }
+        assert!(stub.client_auth().is_empty());
+        let resp = app.get(&hop.callback(&code_q), &hop.cookie).await;
+        assert_eq!(location(&resp), "/");
+        assert!(clears_state_cookie(&resp));
+
+        let (_, foreign, _) = app.start("login", "").await;
+        let hop = start_hop(&app, "login", "", "stub").await;
+        let state_cookie = hop.cookie.split("; ").last().unwrap();
+        let resp = app
+            .get(
+                &hop.callback("&code=x"),
+                &format!("{foreign}; {state_cookie}"),
+            )
+            .await;
+        assert_eq!(
+            location(&resp),
+            "/error?id=security_csrf_violation",
+            "another browser's flow"
+        );
+        assert!(
+            clears_state_cookie(&resp),
+            "the cookie and state verified before the flow check"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_replayed_callback_never_reaches_the_provider() {
+        let stub = OidcStub::start().await;
+        let app = stub_app(&stub, false).await;
+        let hop = start_hop(&app, "login", "", "stub").await;
+        let resp = stub_callback(
+            &app,
+            &stub,
+            &hop,
+            serde_json::json!({"aud": "someone-else"}),
+        )
+        .await;
+        assert_eq!(
+            location(&resp),
+            format!("/login?flow={}", hop.flow),
+            "the flow stays usable"
+        );
+        assert_eq!(stub.client_auth().len(), 1);
+        let resp = stub_callback(&app, &stub, &hop, serde_json::json!({})).await;
+        assert_eq!(location(&resp), "/error?id=security_csrf_violation");
+        assert!(clears_state_cookie(&resp));
+        assert_eq!(stub.client_auth().len(), 1, "the replay was not exchanged");
+
+        linked_user(&app, "replay@x.test", true).await;
+        let hop = start_hop(&app, "login", "", "stub").await;
+        let code = stub.issue(&hop.authorize, serde_json::json!({}));
+        let uri = hop.callback(&format!("&code={code}"));
+        let resp = app.get(&uri, &hop.cookie).await;
+        assert!(session_cookie(&resp).is_some());
+        let again = app.get(&uri, &hop.cookie).await;
+        assert_eq!(location(&again), "/error?id=self_service_flow_expired");
+        assert!(session_cookie(&again).is_none());
+        assert_eq!(stub.client_auth().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn the_iss_parameter_must_name_the_configured_issuer() {
+        let stub = OidcStub::start().await;
+        stub.set_iss_parameter(true);
+        let app = stub_app(&stub, false).await;
+        linked_user(&app, "iss@x.test", true).await;
+        let iss = format!("&iss={}", crate::web::urlencode(&stub.issuer));
+        for (extra, signed_in) in [
+            (String::new(), false),
+            ("&iss=https%3A%2F%2Fevil.example".to_string(), false),
+            (iss, true),
+        ] {
+            let hop = start_hop(&app, "login", "", "stub").await;
+            let before = stub.client_auth().len();
+            let code = stub.issue(&hop.authorize, serde_json::json!({}));
+            let resp = app
+                .get(&hop.callback(&format!("&code={code}{extra}")), &hop.cookie)
+                .await;
+            assert!(clears_state_cookie(&resp));
+            assert_eq!(session_cookie(&resp).is_some(), signed_in, "{extra}");
+            if !signed_in {
+                assert_eq!(location(&resp), format!("/login?flow={}", hop.flow));
+                assert_eq!(flow_messages(&app, &hop.flow).await, [9_000_002], "{extra}");
+                assert_eq!(stub.client_auth().len(), before, "no exchange: {extra}");
+            }
+        }
+
+        let plain = OidcStub::start().await;
+        let app = stub_app(&plain, false).await;
+        linked_user(&app, "iss2@x.test", true).await;
+        let hop = start_hop(&app, "login", "", "stub").await;
+        let code = plain.issue(&hop.authorize, serde_json::json!({}));
+        let resp = app
+            .get(
+                &hop.callback(&format!("&code={code}&iss=https%3A%2F%2Fevil.example")),
+                &hop.cookie,
+            )
+            .await;
+        assert_eq!(
+            flow_messages(&app, &hop.flow).await,
+            [9_000_002],
+            "a present iss is checked"
+        );
+        assert!(session_cookie(&resp).is_none());
+    }
+
+    #[tokio::test]
+    async fn a_provider_error_is_shown_on_the_flow_and_audited() {
+        let stub = OidcStub::start().await;
+        let app = stub_app(&stub, false).await;
+        let hop = start_hop(&app, "login", "", "stub").await;
+        let resp = app
+            .get(
+                &hop.callback("&error=access_denied&error_description=%3Cb%3Eno%3C%2Fb%3E"),
+                &hop.cookie,
+            )
+            .await;
+        assert_eq!(location(&resp), format!("/login?flow={}", hop.flow));
+        assert!(clears_state_cookie(&resp));
+        assert!(stub.client_auth().is_empty());
+        let flow = app.flow(FlowKind::Login, &hop.flow, &hop.cookie).await;
+        assert_eq!(flow.messages.len(), 1);
+        assert_eq!(flow.messages[0].id, 9_000_002);
+        assert!(
+            !flow.messages[0].text.contains("<b>"),
+            "the provider's text is not shown"
+        );
+        let rows = audit_rows(&app.db).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].action, "auth.login_failed");
+        assert!(!rows[0].succeeded());
+        let meta: serde_json::Value = serde_json::from_str(&rows[0].metadata).unwrap();
+        assert_eq!(
+            (meta["method"].as_str(), meta["provider"].as_str()),
+            (Some("oidc"), Some("stub"))
+        );
+
+        let hop = start_hop(&app, "login", "", "stub").await;
+        let resp = app
+            .get(&hop.callback("&code=not-issued"), &hop.cookie)
+            .await;
+        assert_eq!(location(&resp), format!("/login?flow={}", hop.flow));
+        assert_eq!(
+            flow_messages(&app, &hop.flow).await,
+            [9_000_002],
+            "a failed exchange"
+        );
+        let hop = start_hop(&app, "login", "", "stub").await;
+        let resp = stub_callback(
+            &app,
+            &stub,
+            &hop,
+            serde_json::json!({"aud": "someone-else"}),
+        )
+        .await;
+        assert_eq!(location(&resp), format!("/login?flow={}", hop.flow));
+        assert_eq!(
+            flow_messages(&app, &hop.flow).await,
+            [9_000_002],
+            "an invalid ID token"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_never_verified_or_inactive_identity_is_not_signed_in() {
+        let stub = OidcStub::start().await;
+        let app = stub_app(&stub, false).await;
+        let identity = linked_user(&app, "pending@x.test", false).await;
+        let hop = start_hop(&app, "login", "", "stub").await;
+        let resp = stub_callback(&app, &stub, &hop, serde_json::json!({})).await;
+        assert_eq!(location(&resp), format!("/login?flow={}", hop.flow));
+        assert!(session_cookie(&resp).is_none());
+        assert_eq!(flow_messages(&app, &hop.flow).await, [4_000_010]);
+        let rows = audit_rows(&app.db).await.unwrap();
+        assert_eq!(rows[0].action, "auth.login_failed");
+        assert_eq!(rows[0].actor_id.as_deref(), Some(identity.as_str()));
+
+        store::mark_verified(&app.db, &identity, "pending@x.test")
+            .await
+            .unwrap();
+        store::set_state(
+            &app.db,
+            &identity,
+            crate::backend::identity::IdentityState::Inactive,
+        )
+        .await
+        .unwrap();
+        let hop = start_hop(&app, "login", "", "stub").await;
+        let resp = stub_callback(&app, &stub, &hop, serde_json::json!({})).await;
+        assert!(session_cookie(&resp).is_none());
+        assert_eq!(flow_messages(&app, &hop.flow).await, [4_000_006]);
+        assert_eq!(
+            app.row(&hop.flow).await.state,
+            "choose_method",
+            "the flow is not spent"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_start_for_an_unknown_provider_sets_no_cookie() {
+        let stub = OidcStub::start().await;
+        let app = stub_app(&stub, false).await;
+        let (id, cookie, token) = app.start("login", "").await;
+        let resp = app
+            .post(
+                &format!("/self-service/login?flow={id}"),
+                &cookie,
+                &format!("csrf_token={token}&provider=nope"),
+            )
+            .await;
+        assert_eq!(location(&resp), format!("/login?flow={id}"));
+        assert!(
+            set_cookies(&resp)
+                .iter()
+                .all(|c| !c.starts_with(STATE_COOKIE))
+        );
+        assert_eq!(flow_messages(&app, &id).await, [9_000_002]);
+        assert_eq!(stub.discovery_fetches(), 0);
+        assert!(
+            app.backend
+                .load_flow(&id)
+                .await
+                .unwrap()
+                .unwrap()
+                .ctx
+                .oidc_state
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_callbacks_are_limited_per_ip() {
+        let app = app().await;
+        let uri = "/self-service/methods/oidc/callback/stub?state=x";
+        for _ in 0..INIT_IP_RATE_PER_MINUTE {
+            let resp = app.get(uri, "").await;
+            assert_eq!(location(&resp), "/error?id=security_csrf_violation");
+        }
+        let limited = app.get(uri, "").await;
+        assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+        let elsewhere = app.get_from("198.51.100.4", uri, "").await;
+        assert_eq!(elsewhere.status(), StatusCode::SEE_OTHER);
+    }
+
+    /// Identities and provider links stored.
+    async fn identity_and_link_counts(db: &DbPool) -> (i64, i64) {
+        use crate::schema::{identities, identity_oidc_links};
+        let run = async {
+            Ok::<_, anyhow::Error>(crate::db_interact!(db, |c| {
+                Ok::<_, diesel::result::Error>((
+                    identities::table.count().get_result::<i64>(c)?,
+                    identity_oidc_links::table.count().get_result::<i64>(c)?,
+                ))
+            })?)
+        };
+        run.await.unwrap()
+    }
+
+    fn verified(email: &str) -> serde_json::Value {
+        serde_json::json!({"email": email, "email_verified": true})
+    }
+
+    /// The registration flow a callback sent the browser to.
+    fn registration_flow(resp: &Response) -> String {
+        location(resp)
+            .strip_prefix("/registration?flow=")
+            .expect("a new registration flow")
+            .to_string()
+    }
+
+    async fn whoami_of(app: &App, token: &str) -> crate::backend::identity::Session {
+        match app
+            .backend
+            .whoami(Some(&format!("forseti_session={token}")))
+            .await
+            .unwrap()
+        {
+            WhoamiOutcome::Ok(session) => *session,
+            _ => panic!("the session is live"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_verified_provider_address_signs_up_a_linked_verified_identity() {
+        let stub = OidcStub::start().await;
+        let app = stub_app(&stub, false).await;
+        let hop = start_hop(&app, "login", "?return_to=%2Fsettings", "stub").await;
+        let long = "L".repeat(store::NAME_MAX_CHARS + 40);
+        let claims = serde_json::json!({
+            "email": "New@X.test",
+            "email_verified": true,
+            "given_name": " <b>Ada</b> ",
+            "family_name": long,
+        });
+        let resp = stub_callback(&app, &stub, &hop, claims).await;
+        assert_eq!(location(&resp), "/settings");
+        assert!(clears_state_cookie(&resp));
+        let token = session_cookie(&resp).expect("signed in");
+        let session = whoami_of(&app, &token).await;
+        assert_eq!(session.authenticator_assurance_level, Some(Aal::Aal1));
+        let methods = session.authentication_methods.unwrap();
+        assert_eq!(methods[0].method.as_deref(), Some("oidc"));
+        assert_eq!(methods[0].provider.as_deref(), Some("stub"));
+        let identity = session.identity.unwrap();
+        let traits = identity.traits.as_ref().unwrap();
+        assert_eq!(traits["email"], "New@X.test");
+        assert_eq!(traits["name"]["first"], "<b>Ada</b>");
+        assert_eq!(
+            traits["name"]["last"].as_str().unwrap().chars().count(),
+            store::NAME_MAX_CHARS,
+            "a long name is cut, not refused"
+        );
+        assert!(identity.verifiable_addresses.as_ref().unwrap()[0].verified);
+        let row = store::row_by_id(&app.db, &identity.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(row.first_verified_at.is_some() && row.email_verified_at.is_some());
+        assert_eq!(
+            store::link_owner(&app.db, "stub", "stub-subject")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(identity.id.as_str())
+        );
+        assert_eq!(app.row(&hop.flow).await.state, "passed_challenge");
+        assert!(
+            app.backend.mailed("New@X.test").await.is_empty(),
+            "no verification mail"
+        );
+
+        let rows = audit_rows(&app.db).await.unwrap();
+        let actions: Vec<&str> = rows.iter().map(|r| r.action.as_str()).collect();
+        assert_eq!(actions, ["identity.created", "auth.login"]);
+        for row in &rows {
+            assert_eq!(row.actor_id.as_deref(), Some(identity.id.as_str()));
+            let meta: serde_json::Value = serde_json::from_str(&row.metadata).unwrap();
+            assert_eq!(
+                (meta["method"].as_str(), meta["provider"].as_str()),
+                (Some("oidc"), Some("stub"))
+            );
+            let whole = format!("{row:?}");
+            assert!(!whole.contains("stub-subject") && !whole.contains(&hop.state()));
+            assert!(!whole.contains(&token));
+        }
+
+        let hop = start_hop(&app, "login", "", "stub").await;
+        let resp = stub_callback(&app, &stub, &hop, verified("other@x.test")).await;
+        assert_eq!(
+            location(&resp),
+            "/",
+            "the next callback signs the linked identity in"
+        );
+        let again = whoami_of(&app, &session_cookie(&resp).unwrap()).await;
+        assert_eq!(again.identity.unwrap().id, identity.id);
+        assert_eq!(identity_and_link_counts(&app.db).await, (1, 1));
+    }
+
+    #[tokio::test]
+    async fn a_taken_provider_address_is_refused_on_a_new_registration_flow() {
+        use crate::identity_native::test_support::identity_with_password;
+        let stub = OidcStub::start().await;
+        let app = stub_app(&stub, false).await;
+        let existing = identity_with_password(&app.db, "taken@x.test", true).await;
+        let before = store::row_by_id(&app.db, &existing).await.unwrap().unwrap();
+        for kind in ["login", "registration"] {
+            let hop = start_hop(&app, kind, "?return_to=%2Fsettings", "stub").await;
+            let resp = stub_callback(&app, &stub, &hop, verified("TAKEN@x.test")).await;
+            assert!(session_cookie(&resp).is_none(), "{kind}");
+            assert!(clears_state_cookie(&resp));
+            let next = registration_flow(&resp);
+            assert_ne!(next, hop.flow);
+            assert_eq!(flow_messages(&app, &next).await, [4_000_007], "{kind}");
+            let (old, new) = (app.row(&hop.flow).await, app.row(&next).await);
+            assert_eq!(old.state, "passed_challenge", "the original flow is spent");
+            assert_eq!(new.binding, old.binding);
+            assert_eq!(new.return_to.as_deref(), Some("/settings"));
+            assert_eq!(new.identity_id, None);
+            let ctx = app.backend.load_flow(&next).await.unwrap().unwrap().ctx;
+            assert_eq!(
+                (ctx.email_needed, ctx.upstream, ctx.traits),
+                (None, None, None)
+            );
+            let flow = app.flow(FlowKind::Registration, &next, &hop.cookie).await;
+            assert_eq!(flow.messages[0].id, 4_000_007);
+        }
+        assert_eq!(identity_and_link_counts(&app.db).await, (1, 0));
+        assert!(
+            store::links_of(&app.db, &existing)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let after = store::row_by_id(&app.db, &existing).await.unwrap().unwrap();
+        assert_eq!(
+            (after.email, after.first_name, after.updated_at),
+            (before.email, before.first_name, before.updated_at)
+        );
+        let rows = audit_rows(&app.db).await.unwrap();
+        assert!(
+            rows.iter()
+                .all(|r| r.action == "auth.login_failed" && r.actor_id.is_none())
+        );
+    }
+
+    #[tokio::test]
+    async fn an_admin_allowlisted_provider_address_creates_nothing() {
+        let stub = OidcStub::start().await;
+        let mut cfg = AppConfig::test_fixture();
+        cfg.oauth.cimd.allow_private_targets = true;
+        cfg.identity.oidc_providers = vec![stub.provider_config("stub")];
+        cfg.admin.allowed_emails = vec!["Root@X.test".into()];
+        let app = app_with(cfg).await;
+        let hop = start_hop(&app, "login", "", "stub").await;
+        let resp = stub_callback(&app, &stub, &hop, verified("root@x.TEST")).await;
+        assert!(session_cookie(&resp).is_none());
+        assert_eq!(
+            flow_messages(&app, &registration_flow(&resp)).await,
+            [4_000_007]
+        );
+        assert_eq!(identity_and_link_counts(&app.db).await, (0, 0));
+        let rows = audit_rows(&app.db).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(
+            rows[0].metadata.contains("admin_allowlisted_email"),
+            "{}",
+            rows[0].metadata
+        );
+    }
+
+    #[tokio::test]
+    async fn a_provider_sign_up_spends_the_registration_buckets_and_a_sign_in_does_not() {
+        let stub = OidcStub::start().await;
+        let mut cfg = AppConfig::test_fixture();
+        cfg.oauth.cimd.allow_private_targets = true;
+        cfg.identity.oidc_providers = vec![stub.provider_config("stub")];
+        cfg.auth.registration_ip_rate_per_minute = Some(1);
+        let app = app_with(cfg).await;
+        linked_user(&app, "linked@x.test", true).await;
+        for _ in 0..3 {
+            let hop = start_hop(&app, "login", "", "stub").await;
+            let resp = stub_callback(&app, &stub, &hop, serde_json::json!({})).await;
+            assert!(session_cookie(&resp).is_some(), "a sign-in is not counted");
+        }
+
+        let signed_up = |sub: &str, email: &str| serde_json::json!({"sub": sub, "email": email, "email_verified": true});
+        let hop = start_hop(&app, "login", "", "stub").await;
+        let resp = stub_callback(&app, &stub, &hop, signed_up("first", "first@x.test")).await;
+        assert!(
+            session_cookie(&resp).is_some(),
+            "the one sign-up the bucket holds"
+        );
+        assert_eq!(identity_and_link_counts(&app.db).await, (2, 2));
+
+        let hop = start_hop(&app, "login", "", "stub").await;
+        let resp = stub_callback(&app, &stub, &hop, signed_up("second", "second@x.test")).await;
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(resp.headers().contains_key("retry-after"));
+        assert!(session_cookie(&resp).is_none());
+        assert!(clears_state_cookie(&resp));
+        assert_eq!(
+            identity_and_link_counts(&app.db).await,
+            (2, 2),
+            "nothing created"
+        );
+        assert_ne!(app.row(&hop.flow).await.state, "passed_challenge");
+
+        let (id, cookie, token) = app.start("registration", "").await;
+        let limited = app
+            .post(
+                &format!("/self-service/registration?flow={id}"),
+                &cookie,
+                &format!("csrf_token={token}&method=profile&traits.email="),
+            )
+            .await;
+        assert_eq!(
+            limited.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "the registration submit shares the bucket"
+        );
+    }
+
+    impl Hop {
+        fn csrf(&self) -> &str {
+            self.cookie
+                .split("; ")
+                .find_map(|c| c.strip_prefix("forseti_csrf="))
+                .unwrap()
+        }
+    }
+
+    /// A callback without a verified address: the email-needed registration flow it opened.
+    async fn email_needed_flow(
+        app: &App,
+        stub: &OidcStub,
+        claims: serde_json::Value,
+    ) -> (Hop, String) {
+        let hop = start_hop(app, "login", "?return_to=%2Fsettings", "stub").await;
+        let resp = stub_callback(app, stub, &hop, claims).await;
+        assert!(session_cookie(&resp).is_none());
+        let next = registration_flow(&resp);
+        (hop, next)
+    }
+
+    async fn submit_address(
+        app: &App,
+        hop: &Hop,
+        flow: &str,
+        email: &str,
+        provider: &str,
+    ) -> Response {
+        app.post(
+            &format!("/self-service/registration?flow={flow}"),
+            &hop.cookie,
+            &format!(
+                "csrf_token={}&traits.email={}&provider={provider}",
+                hop.csrf(),
+                crate::web::urlencode(email)
+            ),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn without_a_verified_address_the_account_waits_sealed_on_an_email_needed_flow() {
+        let stub = OidcStub::start().await;
+        let app = stub_app(&stub, false).await;
+        for claims in [
+            serde_json::json!({"email": "u@x.test", "email_verified": false, "given_name": "Grace"}),
+            serde_json::json!({"email": "u@x.test", "given_name": "Grace"}),
+            serde_json::json!({"given_name": "Grace"}),
+        ] {
+            let (hop, next) = email_needed_flow(&app, &stub, claims.clone()).await;
+            let (old, new) = (app.row(&hop.flow).await, app.row(&next).await);
+            assert_eq!(old.state, "passed_challenge");
+            assert_eq!(new.binding, old.binding);
+            assert_eq!(new.return_to.as_deref(), Some("/settings"));
+            assert!(
+                !new.context.contains("stub-subject") && !new.context.contains("Grace"),
+                "{}",
+                new.context
+            );
+            let ctx = app.backend.load_flow(&next).await.unwrap().unwrap().ctx;
+            assert_eq!(ctx.email_needed.as_deref(), Some("stub"));
+            assert!(ctx.upstream.is_some(), "{claims}");
+            assert_eq!(ctx.traits, None, "an unverified address is not echoed");
+
+            let resp = app
+                .get(&format!("/registration?flow={next}"), &hop.cookie)
+                .await;
+            assert_eq!(resp.status(), StatusCode::OK);
+            let html = body(resp).await;
+            assert!(html.contains("share a verified email address"));
+            assert!(!html.contains("stub-subject") && !html.contains("Grace"));
+        }
+        assert_eq!(identity_and_link_counts(&app.db).await, (0, 0));
+        assert!(app.backend.mailed("u@x.test").await.is_empty());
+        assert!(audit_rows(&app.db).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_email_needed_submit_refuses_a_taken_address_without_a_new_hop() {
+        use crate::identity_native::test_support::identity_with_password;
+        let stub = OidcStub::start().await;
+        let app = stub_app(&stub, true).await;
+        identity_with_password(&app.db, "taken@x.test", true).await;
+        let (hop, flow) = email_needed_flow(&app, &stub, serde_json::json!({})).await;
+        let page = format!("/registration?flow={flow}");
+        for (email, provider) in [("Taken@x.test", "stub"), ("TAKEN@x.test", "other")] {
+            let resp = submit_address(&app, &hop, &flow, email, provider).await;
+            assert_eq!(location(&resp), page, "{email}: no provider hop");
+            assert!(
+                set_cookies(&resp)
+                    .iter()
+                    .all(|c| !c.starts_with(STATE_COOKIE))
+            );
+            assert_eq!(flow_messages(&app, &flow).await, [4_000_007], "{email}");
+            let ctx = app.backend.load_flow(&flow).await.unwrap().unwrap().ctx;
+            assert_eq!(
+                ctx.email_needed.as_deref(),
+                Some("stub"),
+                "the form's provider is ignored"
+            );
+            assert_eq!(ctx.oidc_state, None);
+            assert_eq!(
+                ctx.traits.unwrap().email,
+                email,
+                "the typed address is echoed"
+            );
+        }
+        let resp = submit_address(&app, &hop, &flow, "not-an-address", "stub").await;
+        assert_eq!(location(&resp), page);
+        assert_eq!(
+            messages_of(&app, &flow).await,
+            [("traits.email".to_string(), 4_000_001)]
+        );
+        assert_eq!(identity_and_link_counts(&app.db).await, (1, 0));
+        assert!(app.backend.mailed("taken@x.test").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_allowlisted_address_on_the_email_needed_screen_is_refused_at_the_code() {
+        let stub = OidcStub::start().await;
+        let mut cfg = AppConfig::test_fixture();
+        cfg.oauth.cimd.allow_private_targets = true;
+        cfg.identity.oidc_providers = vec![stub.provider_config("stub")];
+        cfg.admin.allowed_emails = vec!["root@x.test".into()];
+        let app = app_with(cfg).await;
+        let (hop, flow) = email_needed_flow(&app, &stub, serde_json::json!({})).await;
+        let verification = signup_verification(&app, &hop, &flow, "ROOT@x.test").await;
+        assert!(
+            flow_messages(&app, &flow).await.is_empty(),
+            "answered as a free address"
+        );
+        let code = app.backend.mailed("ROOT@x.test").await[0].code.clone();
+        let resp = enter_code(&app, &hop.cookie, hop.csrf(), &verification, &code).await;
+        assert!(session_cookie(&resp).is_none());
+        assert_eq!(flow_messages(&app, &verification).await, [4_000_007]);
+        assert_eq!(identity_and_link_counts(&app.db).await, (0, 0));
+        let rows = audit_rows(&app.db).await.unwrap();
+        assert!(
+            rows.iter()
+                .any(|r| r.metadata.contains("admin_allowlisted_email")),
+            "{rows:?}"
+        );
+    }
+
+    async fn messages_of(app: &App, id: &str) -> Vec<(String, u64)> {
+        let rec = app.backend.load_flow(id).await.unwrap().unwrap();
+        rec.ctx
+            .node_messages
+            .iter()
+            .map(|n| (n.node.clone(), n.message.id))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_sealed_provider_account_does_not_open_on_another_flow() {
+        use crate::identity_native::test_support::identity_with_password;
+        let stub = OidcStub::start().await;
+        let app = stub_app(&stub, false).await;
+        identity_with_password(&app.db, "taken@x.test", true).await;
+        let (_, first) = email_needed_flow(&app, &stub, serde_json::json!({"sub": "first"})).await;
+        let (hop, second) =
+            email_needed_flow(&app, &stub, serde_json::json!({"sub": "second"})).await;
+        let sealed = app
+            .backend
+            .load_flow(&first)
+            .await
+            .unwrap()
+            .unwrap()
+            .ctx
+            .upstream;
+        let mut rec = app.backend.load_flow(&second).await.unwrap().unwrap();
+        assert_ne!(rec.ctx.upstream, sealed);
+        rec.ctx.upstream = sealed;
+        assert_eq!(
+            rec.save(&app.db).await.unwrap(),
+            super::super::flows::Saved::Done
+        );
+
+        submit_address(&app, &hop, &second, "taken@x.test", "stub").await;
+        assert_eq!(
+            flow_messages(&app, &second).await,
+            [9_000_002],
+            "the copied account does not open, so the address is not even looked at"
+        );
+        assert_eq!(identity_and_link_counts(&app.db).await, (1, 0));
+    }
+
+    /// The callbacks of two hops, each with its code, run concurrently.
+    async fn race(app: &App, hops: &[(Hop, String)]) -> (Response, Response) {
+        let uris: Vec<String> = hops
+            .iter()
+            .map(|(hop, code)| hop.callback(&format!("&code={code}")))
+            .collect();
+        tokio::join!(
+            app.get(&uris[0], &hops[0].0.cookie),
+            app.get(&uris[1], &hops[1].0.cookie),
+        )
+    }
+
+    #[tokio::test]
+    async fn two_callbacks_racing_for_one_address_create_one_identity() {
+        let stub = OidcStub::start().await;
+        let app = stub_app(&stub, false).await;
+        let mut codes = Vec::new();
+        for subject in ["racer-a", "racer-b"] {
+            let hop = start_hop(&app, "login", "", "stub").await;
+            let claims =
+                serde_json::json!({"sub": subject, "email": "race@x.test", "email_verified": true});
+            let code = stub.issue(&hop.authorize, claims);
+            codes.push((hop, code));
+        }
+        let (a, b) = race(&app, &codes).await;
+        let (won, lost) = if session_cookie(&a).is_some() {
+            (a, b)
+        } else {
+            (b, a)
+        };
+        assert!(session_cookie(&won).is_some());
+        assert!(session_cookie(&lost).is_none(), "one sign-up only");
+        assert_eq!(
+            flow_messages(&app, &registration_flow(&lost)).await,
+            [4_000_007]
+        );
+        assert_eq!(identity_and_link_counts(&app.db).await, (1, 1));
+    }
+
+    #[tokio::test]
+    async fn two_callbacks_racing_for_one_provider_account_create_one_identity_and_link() {
+        let stub = OidcStub::start().await;
+        let app = stub_app(&stub, false).await;
+        let mut codes = Vec::new();
+        for email in ["one@x.test", "two@x.test"] {
+            let hop = start_hop(&app, "login", "", "stub").await;
+            let code = stub.issue(&hop.authorize, verified(email));
+            codes.push((hop, code));
+        }
+        let (a, b) = race(&app, &codes).await;
+        assert_eq!(identity_and_link_counts(&app.db).await, (1, 1));
+        let owner = store::link_owner(&app.db, "stub", "stub-subject")
+            .await
+            .unwrap()
+            .unwrap();
+        for resp in [a, b] {
+            if let Some(token) = session_cookie(&resp) {
+                assert_eq!(whoami_of(&app, &token).await.identity.unwrap().id, owner);
+            }
+        }
+    }
+
+    /// Submit the free `email` on the email-needed flow: the sign-up's verification flow.
+    async fn signup_verification(app: &App, hop: &Hop, flow: &str, email: &str) -> String {
+        let resp = submit_address(app, hop, flow, email, "stub").await;
+        assert!(session_cookie(&resp).is_none());
+        location(&resp)
+            .strip_prefix("/verification?flow=")
+            .expect("the sign-up's verification flow")
+            .to_string()
+    }
+
+    async fn enter_code(app: &App, cookie: &str, token: &str, flow: &str, code: &str) -> Response {
+        app.post(
+            &format!("/self-service/verification?flow={flow}"),
+            cookie,
+            &format!("csrf_token={token}&method=code&code={code}"),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn a_typed_address_creates_the_identity_only_when_its_code_comes_from_the_starting_browser()
+     {
+        let stub = OidcStub::start().await;
+        let app = stub_app(&stub, false).await;
+        let claims = serde_json::json!({"given_name": "Grace", "family_name": "Hopper"});
+        let (hop, flow) = email_needed_flow(&app, &stub, claims).await;
+        let verification = signup_verification(&app, &hop, &flow, "Typed@X.test").await;
+        assert_eq!(
+            identity_and_link_counts(&app.db).await,
+            (0, 0),
+            "nothing before the code"
+        );
+        assert_eq!(app.row(&flow).await.state, "passed_challenge");
+        let (registration, row) = (
+            app.backend.load_flow(&flow).await.unwrap().unwrap(),
+            app.row(&verification).await,
+        );
+        assert_eq!(row.binding, registration.row.binding);
+        assert_eq!(row.return_to.as_deref(), Some("/settings"));
+        let ctx = app
+            .backend
+            .load_flow(&verification)
+            .await
+            .unwrap()
+            .unwrap()
+            .ctx;
+        assert!(
+            ctx.upstream.is_some() && ctx.upstream != registration.ctx.upstream,
+            "sealed again"
+        );
+        assert!(!row.context.contains("stub-subject") && !row.context.contains("Grace"));
+        let outbox = app.backend.outbox_for("Typed@X.test").await.unwrap();
+        assert_eq!(outbox.len(), 1);
+        assert_eq!(outbox[0].identity_id, None);
+        let code = app.backend.mailed("Typed@X.test").await[0].code.clone();
+
+        let (_, other, other_token) = app.start("login", "").await;
+        let resp = enter_code(&app, &other, &other_token, &verification, &code).await;
+        assert_eq!(location(&resp), "/error?id=security_csrf_violation");
+        assert!(matches!(
+            app.fetch(FlowKind::Verification, &verification, &other)
+                .await,
+            FlowFetch::Gone
+        ));
+        let wrong = format!("{:06}", (code.parse::<u32>().unwrap() + 1) % 1_000_000);
+        let resp = enter_code(&app, &hop.cookie, hop.csrf(), &verification, &wrong).await;
+        assert!(session_cookie(&resp).is_none());
+        assert_eq!(flow_messages(&app, &verification).await, [4_070_006]);
+        assert_eq!(identity_and_link_counts(&app.db).await, (0, 0));
+
+        let resp = enter_code(&app, &hop.cookie, hop.csrf(), &verification, &code).await;
+        assert_eq!(location(&resp), "/settings");
+        let session = whoami_of(&app, &session_cookie(&resp).expect("signed in")).await;
+        let methods = session.authentication_methods.unwrap();
+        assert_eq!(
+            (methods[0].method.as_deref(), methods[0].provider.as_deref()),
+            (Some("oidc"), Some("stub"))
+        );
+        let identity = session.identity.unwrap();
+        let traits = identity.traits.as_ref().unwrap();
+        assert_eq!(traits["email"], "Typed@X.test");
+        assert_eq!(
+            (
+                traits["name"]["first"].as_str(),
+                traits["name"]["last"].as_str()
+            ),
+            (Some("Grace"), Some("Hopper"))
+        );
+        let stored = store::row_by_id(&app.db, &identity.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(stored.first_verified_at.is_some() && stored.email_verified_at.is_some());
+        assert_eq!(
+            store::link_owner(&app.db, "stub", "stub-subject")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(identity.id.as_str())
+        );
+        let rows = audit_rows(&app.db).await.unwrap();
+        let actions: Vec<&str> = rows.iter().map(|r| r.action.as_str()).collect();
+        assert_eq!(actions, ["identity.created", "auth.login"]);
+        for row in &rows {
+            let whole = format!("{row:?}");
+            assert!(!whole.contains("stub-subject") && !whole.contains(&code));
+            assert!(
+                row.metadata.contains(r#""provider":"stub""#),
+                "{}",
+                row.metadata
+            );
+        }
+        let again = enter_code(&app, &hop.cookie, hop.csrf(), &verification, &code).await;
+        assert!(session_cookie(&again).is_none());
+        assert_eq!(identity_and_link_counts(&app.db).await, (1, 1));
+    }
+
+    #[tokio::test]
+    async fn the_sign_up_code_is_checked_again_when_it_is_entered() {
+        use crate::identity_native::test_support::identity_with_password;
+        let stub = OidcStub::start().await;
+        let app = stub_app(&stub, false).await;
+
+        let (hop, flow) = email_needed_flow(&app, &stub, serde_json::json!({})).await;
+        let verification = signup_verification(&app, &hop, &flow, "late@x.test").await;
+        let code = app.backend.mailed("late@x.test").await[0].code.clone();
+        let taken = identity_with_password(&app.db, "LATE@x.test", false).await;
+        let resp = enter_code(&app, &hop.cookie, hop.csrf(), &verification, &code).await;
+        assert!(session_cookie(&resp).is_none());
+        assert_eq!(flow_messages(&app, &verification).await, [4_000_007]);
+        assert!(store::links_of(&app.db, &taken).await.unwrap().is_empty());
+        assert!(
+            store::row_by_id(&app.db, &taken)
+                .await
+                .unwrap()
+                .unwrap()
+                .email_verified_at
+                .is_none()
+        );
+
+        let (hop, flow) = email_needed_flow(&app, &stub, serde_json::json!({"sub": "raced"})).await;
+        let verification = signup_verification(&app, &hop, &flow, "mine@x.test").await;
+        let code = app.backend.mailed("mine@x.test").await[0].code.clone();
+        store::create_with_link(&app.db, "first@x.test", None, None, "stub", "raced")
+            .await
+            .unwrap();
+        let resp = enter_code(&app, &hop.cookie, hop.csrf(), &verification, &code).await;
+        assert!(session_cookie(&resp).is_none());
+        assert_eq!(flow_messages(&app, &verification).await, [9_000_002]);
+        assert!(
+            store::row_by_email(&app.db, "mine@x.test")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(identity_and_link_counts(&app.db).await, (2, 1));
+    }
+
+    #[tokio::test]
+    async fn sign_up_codes_and_identity_codes_never_stand_in_for_each_other() {
+        use crate::identity_native::codes::{CODE_ATTEMPTS, Purpose};
+        use crate::identity_native::test_support::identity_with_password;
+        let stub = OidcStub::start().await;
+        let app = stub_app(&stub, false).await;
+        let pending = identity_with_password(&app.db, "pending@x.test", false).await;
+
+        let (id, cookie, token) = app.start("verification", "").await;
+        app.backend
+            .send_signup_code(&id, "pending@x.test")
+            .await
+            .unwrap();
+        let code = app.backend.mailed("pending@x.test").await[0].code.clone();
+        enter_code(&app, &cookie, &token, &id, &code).await;
+        assert_eq!(
+            flow_messages(&app, &id).await,
+            [4_070_006],
+            "an ordinary flow refuses it"
+        );
+        assert!(
+            store::row_by_id(&app.db, &pending)
+                .await
+                .unwrap()
+                .unwrap()
+                .email_verified_at
+                .is_none()
+        );
+
+        let (hop, flow) = email_needed_flow(&app, &stub, serde_json::json!({})).await;
+        let verification = signup_verification(&app, &hop, &flow, "fresh@x.test").await;
+        let free = identity_with_password(&app.db, "other@x.test", false).await;
+        app.backend
+            .send_code(&verification, Purpose::Verification, &free, "fresh@x.test")
+            .await
+            .unwrap();
+        let code = app
+            .backend
+            .mailed("fresh@x.test")
+            .await
+            .last()
+            .unwrap()
+            .code
+            .clone();
+        let resp = enter_code(&app, &hop.cookie, hop.csrf(), &verification, &code).await;
+        assert!(session_cookie(&resp).is_none());
+        assert_eq!(
+            flow_messages(&app, &verification).await,
+            [4_070_006],
+            "a sign-up flow refuses it"
+        );
+
+        let resp = app
+            .post(
+                &format!("/self-service/verification?flow={verification}"),
+                &hop.cookie,
+                &format!(
+                    "csrf_token={}&method=code&email=victim%40x.test",
+                    hop.csrf()
+                ),
+            )
+            .await;
+        assert!(session_cookie(&resp).is_none());
+        assert!(
+            app.backend.mailed("victim@x.test").await.is_empty(),
+            "a resend goes to the flow's address"
+        );
+        let code = app
+            .backend
+            .mailed("fresh@x.test")
+            .await
+            .last()
+            .unwrap()
+            .code
+            .clone();
+        let wrong = format!("{:06}", (code.parse::<u32>().unwrap() + 1) % 1_000_000);
+        for _ in 0..CODE_ATTEMPTS {
+            enter_code(&app, &hop.cookie, hop.csrf(), &verification, &wrong).await;
+        }
+        let resp = enter_code(&app, &hop.cookie, hop.csrf(), &verification, &code).await;
+        assert!(session_cookie(&resp).is_none(), "the attempt limit applies");
+        assert_eq!(identity_and_link_counts(&app.db).await, (2, 0));
+    }
+
+    use crate::identity_native::test_support::{GithubAccount, GithubAddress, GithubStub};
+
+    async fn github_app(github: &GithubStub) -> App {
+        let mut cfg = AppConfig::test_fixture();
+        cfg.oauth.cimd.allow_private_targets = true;
+        cfg.identity.oidc_providers = vec![github.provider_config("gh")];
+        app_with_github(cfg, Some(github)).await
+    }
+
+    fn github_account(id: u64, emails: &[(&str, bool, bool)]) -> GithubAccount {
+        GithubAccount {
+            id,
+            name: Some("Grace Brewster Hopper".into()),
+            emails: emails
+                .iter()
+                .map(|(email, primary, verified)| GithubAddress {
+                    email: (*email).into(),
+                    primary: *primary,
+                    verified: *verified,
+                })
+                .collect(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_github_account_with_a_primary_verified_address_signs_up() {
+        let github = GithubStub::start().await;
+        let app = github_app(&github).await;
+        let hop = start_hop(&app, "registration", "", "gh").await;
+        let account = github_account(
+            4242,
+            &[("other@x.test", false, true), ("grace@x.test", true, true)],
+        );
+        let code = github.issue(&hop.authorize, account);
+        let resp = app
+            .get(&hop.callback(&format!("&code={code}")), &hop.cookie)
+            .await;
+        assert_eq!(location(&resp), "/");
+        let session = whoami_of(&app, &session_cookie(&resp).expect("signed in")).await;
+        assert_eq!(
+            session.authentication_methods.unwrap()[0]
+                .provider
+                .as_deref(),
+            Some("gh")
+        );
+        let identity = session.identity.unwrap();
+        let traits = identity.traits.as_ref().unwrap();
+        assert_eq!(traits["email"], "grace@x.test");
+        assert_eq!(traits["name"]["first"], "Grace");
+        assert_eq!(traits["name"]["last"], "Brewster Hopper");
+        assert!(identity.verifiable_addresses.as_ref().unwrap()[0].verified);
+        assert_eq!(
+            store::link_owner(&app.db, "gh", "4242")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(identity.id.as_str())
+        );
+        assert_eq!(github.refused_without_agent(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_github_account_without_a_primary_verified_address_needs_an_email() {
+        let github = GithubStub::start().await;
+        let app = github_app(&github).await;
+        let hop = start_hop(&app, "login", "", "gh").await;
+        let account = github_account(
+            7,
+            &[("grace@x.test", true, false), ("old@x.test", false, true)],
+        );
+        let code = github.issue(&hop.authorize, account);
+        let resp = app
+            .get(&hop.callback(&format!("&code={code}")), &hop.cookie)
+            .await;
+        assert!(session_cookie(&resp).is_none());
+        let next = registration_flow(&resp);
+        let ctx = app.backend.load_flow(&next).await.unwrap().unwrap().ctx;
+        assert_eq!(ctx.email_needed.as_deref(), Some("gh"));
+        assert!(ctx.upstream.is_some());
+        let html = body(
+            app.get(&format!("/registration?flow={next}"), &hop.cookie)
+                .await,
+        )
+        .await;
+        assert!(html.contains("share a verified email address"));
+        assert_eq!(identity_and_link_counts(&app.db).await, (0, 0));
+
+        let verification = signup_verification(&app, &hop, &next, "grace@x.test").await;
+        let code = app.backend.mailed("grace@x.test").await[0].code.clone();
+        let resp = enter_code(&app, &hop.cookie, hop.csrf(), &verification, &code).await;
+        assert_eq!(location(&resp), "/");
+        let session = whoami_of(&app, &session_cookie(&resp).expect("signed in")).await;
+        assert_eq!(
+            session.authentication_methods.unwrap()[0]
+                .provider
+                .as_deref(),
+            Some("gh")
+        );
+        let identity = session.identity.unwrap();
+        assert_eq!(
+            identity.traits.as_ref().unwrap()["name"]["last"],
+            "Brewster Hopper"
+        );
+        assert_eq!(
+            store::link_owner(&app.db, "gh", "7")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(identity.id.as_str())
+        );
+    }
+
+    const LINKED_PAGE: &str = "http://localhost:3000/settings/linked-providers";
+
+    /// A signed-in browser on a settings flow for `identity`: (flow id, cookie header, CSRF
+    /// token, session id).
+    async fn settings_browser(app: &App, identity: &str) -> (String, String, String, String) {
+        let (session, cookie, token) = app.signed_in(identity).await;
+        let flow = settings_flow(app, &cookie, "/settings/linked-providers").await;
+        (flow, cookie, token, session)
+    }
+
+    async fn settings_post(app: &App, flow: &str, cookie: &str, body: &str) -> Response {
+        app.post(&format!("/self-service/settings?flow={flow}"), cookie, body)
+            .await
+    }
+
+    /// Move the session's sign-in outside the privileged window.
+    async fn lapse_session(app: &App, session_id: &str) {
+        let id = session_id.to_string();
+        crate::identity_native::test_support::sql(&app.db, move |c| {
+            use crate::schema::identity_sessions;
+            diesel::update(identity_sessions::table.find(&id))
+                .set(identity_sessions::authenticated_at.eq("2026-01-01T00:00:00.000000+00:00"))
+                .execute(c)
+        })
+        .await;
+    }
+
+    fn param(url: &url::Url, name: &str) -> Option<String> {
+        url.query_pairs()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.into_owned())
+    }
+
+    async fn provider_links(app: &App, identity: &str) -> Vec<(String, String)> {
+        store::links_of(&app.db, identity)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|l| (l.provider, l.subject))
+            .collect()
+    }
+
+    fn pair(a: &str, b: &str) -> (String, String) {
+        (a.to_string(), b.to_string())
+    }
+
+    async fn flow_texts(app: &App, id: &str) -> Vec<(u64, String)> {
+        let rec = app.backend.load_flow(id).await.unwrap().unwrap();
+        rec.ctx
+            .messages
+            .iter()
+            .map(|m| (m.id, m.text.clone()))
+            .collect()
+    }
+
+    fn no_state_cookie(resp: &Response) -> bool {
+        set_cookies(resp)
+            .iter()
+            .all(|c| !c.starts_with(STATE_COOKIE))
+    }
+
+    #[tokio::test]
+    async fn a_settings_link_joins_the_provider_account_to_the_signed_in_identity() {
+        use crate::identity_native::test_support::identity_with_password;
+        let stub = OidcStub::start().await;
+        let app = stub_app(&stub, false).await;
+        let identity = identity_with_password(&app.db, "link@x.test", true).await;
+        let (flow, cookie, token, _) = settings_browser(&app, &identity).await;
+        let form = format!("csrf_token={token}&link=stub");
+        let hop = press(&app, "settings", &flow, &cookie, &form, "stub").await;
+        assert_eq!(param(&hop.authorize, "max_age"), None);
+        let resp = stub_callback(&app, &stub, &hop, serde_json::json!({})).await;
+        assert_eq!(location(&resp), LINKED_PAGE);
+        assert!(clears_state_cookie(&resp));
+        assert!(session_cookie(&resp).is_none(), "a link issues no session");
+        assert_eq!(
+            provider_links(&app, &identity).await,
+            [pair("stub", "stub-subject")]
+        );
+        assert_eq!(app.row(&flow).await.state, "success");
+        let page = app.flow(FlowKind::Settings, &flow, &cookie).await;
+        assert_eq!(
+            page.messages.iter().map(|m| m.id).collect::<Vec<_>>(),
+            [1_050_001]
+        );
+
+        let rows = audit_rows(&app.db).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].action, "identity.oidc.linked");
+        assert_eq!(rows[0].actor_id.as_deref(), Some(identity.as_str()));
+        let meta: serde_json::Value = serde_json::from_str(&rows[0].metadata).unwrap();
+        assert_eq!(meta["provider"], "stub");
+        let whole = format!("{:?}", rows[0]);
+        assert!(!whole.contains("stub-subject") && !whole.contains(&hop.state()));
+
+        let resp = app
+            .get(&format!("/settings/linked-providers?flow={flow}"), &cookie)
+            .await;
+        let html = body(resp).await;
+        assert!(action(&html, "unlink", "stub"), "{html}");
+        assert!(!action(&html, "link", "stub"));
+    }
+
+    #[tokio::test]
+    async fn a_lapsed_window_sends_link_and_unlink_where_a_password_change_goes() {
+        use crate::identity_native::test_support::identity_with_password;
+        let stub = OidcStub::start().await;
+        let app = stub_app(&stub, true).await;
+        let identity = identity_with_password(&app.db, "lapse@x.test", true).await;
+        store::insert_link(&app.db, &identity, "stub", "s-lapse")
+            .await
+            .unwrap();
+        let (flow, cookie, token, session) = settings_browser(&app, &identity).await;
+        lapse_session(&app, &session).await;
+        let expected = format!(
+            "/login?refresh=true&return_to={}",
+            crate::web::urlencode(LINKED_PAGE)
+        );
+        for body in [
+            "method=password&password=violet+staircase+42",
+            "link=other",
+            "unlink=stub",
+        ] {
+            let resp =
+                settings_post(&app, &flow, &cookie, &format!("csrf_token={token}&{body}")).await;
+            assert_eq!(location(&resp), expected, "{body}");
+            assert!(no_state_cookie(&resp), "{body}");
+        }
+        assert_eq!(
+            app.backend
+                .load_flow(&flow)
+                .await
+                .unwrap()
+                .unwrap()
+                .ctx
+                .oidc_state,
+            None
+        );
+        assert_eq!(stub.discovery_fetches(), 0, "no provider hop");
+        assert_eq!(
+            provider_links(&app, &identity).await,
+            [pair("stub", "s-lapse")]
+        );
+
+        let (flow, cookie, token, session) = settings_browser(&app, &identity).await;
+        let body = format!("csrf_token={token}&link=other");
+        let hop = press(&app, "settings", &flow, &cookie, &body, "other").await;
+        lapse_session(&app, &session).await;
+        let resp = stub_callback(&app, &stub, &hop, serde_json::json!({"sub": "late"})).await;
+        assert_eq!(location(&resp), expected, "a window lapsed during the hop");
+        assert!(clears_state_cookie(&resp));
+        assert_eq!(
+            store::link_owner(&app.db, "other", "late").await.unwrap(),
+            None
+        );
+        assert!(audit_rows(&app.db).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_settings_link_refuses_an_account_linked_elsewhere_and_a_second_link_to_the_provider()
+    {
+        use crate::identity_native::test_support::identity_with_password;
+        let stub = OidcStub::start().await;
+        let app = stub_app(&stub, false).await;
+        let owner = linked_user(&app, "owner@x.test", true).await;
+        let me = identity_with_password(&app.db, "me@x.test", true).await;
+        let (flow, cookie, token, _) = settings_browser(&app, &me).await;
+        let link = format!("csrf_token={token}&link=stub");
+        let page = format!("/settings?flow={flow}");
+
+        let hop = press(&app, "settings", &flow, &cookie, &link, "stub").await;
+        let resp = stub_callback(&app, &stub, &hop, serde_json::json!({})).await;
+        assert_eq!(location(&resp), page);
+        assert_eq!(flow_messages(&app, &flow).await, [4_000_007]);
+        assert_eq!(
+            store::link_owner(&app.db, "stub", "stub-subject")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(owner.as_str())
+        );
+        assert!(provider_links(&app, &me).await.is_empty());
+
+        store::insert_link(&app.db, &me, "stub", "mine")
+            .await
+            .unwrap();
+        let hop = press(&app, "settings", &flow, &cookie, &link, "stub").await;
+        let resp = stub_callback(&app, &stub, &hop, serde_json::json!({"sub": "another"})).await;
+        assert_eq!(location(&resp), page);
+        assert_eq!(flow_messages(&app, &flow).await, [4_000_007]);
+        assert_eq!(provider_links(&app, &me).await, [pair("stub", "mine")]);
+        assert_eq!(
+            store::link_owner(&app.db, "stub", "another").await.unwrap(),
+            None
+        );
+        assert!(audit_rows(&app.db).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_never_verified_identity_links_no_provider() {
+        use crate::identity_native::test_support::identity_with_password;
+        let stub = OidcStub::start().await;
+        let app = stub_app(&stub, false).await;
+        let pending = identity_with_password(&app.db, "pending@x.test", false).await;
+        let (flow, cookie, token, _) = settings_browser(&app, &pending).await;
+        let resp = settings_post(
+            &app,
+            &flow,
+            &cookie,
+            &format!("csrf_token={token}&link=stub"),
+        )
+        .await;
+        assert_eq!(location(&resp), format!("/settings?flow={flow}"));
+        assert!(no_state_cookie(&resp));
+        assert_eq!(flow_messages(&app, &flow).await, [4_000_010]);
+        assert_eq!(stub.discovery_fetches(), 0);
+
+        let verified = identity_with_password(&app.db, "verified@x.test", true).await;
+        let (flow, cookie, token, _) = settings_browser(&app, &verified).await;
+        let body = format!("csrf_token={token}&link=stub");
+        let hop = press(&app, "settings", &flow, &cookie, &body, "stub").await;
+        let id = verified.clone();
+        crate::identity_native::test_support::sql(&app.db, move |c| {
+            use crate::schema::identities;
+            diesel::update(identities::table.find(&id))
+                .set(identities::first_verified_at.eq(None::<String>))
+                .execute(c)
+        })
+        .await;
+        let resp = stub_callback(&app, &stub, &hop, serde_json::json!({})).await;
+        assert_eq!(location(&resp), format!("/settings?flow={flow}"));
+        assert_eq!(
+            flow_messages(&app, &flow).await,
+            [4_000_010],
+            "checked again at the callback"
+        );
+        assert_eq!(identity_and_link_counts(&app.db).await, (2, 0));
+    }
+
+    #[tokio::test]
+    async fn a_link_callback_in_another_identitys_browser_links_nothing() {
+        use crate::identity_native::test_support::identity_with_password;
+        let stub = OidcStub::start().await;
+        let app = stub_app(&stub, false).await;
+        let attacker = identity_with_password(&app.db, "attacker@x.test", true).await;
+        let victim = identity_with_password(&app.db, "victim@x.test", true).await;
+        let (flow, cookie, token, _) = settings_browser(&app, &attacker).await;
+        let body = format!("csrf_token={token}&link=stub");
+        let hop = press(&app, "settings", &flow, &cookie, &body, "stub").await;
+        let code = stub.issue(&hop.authorize, serde_json::json!({"sub": "attacker-sub"}));
+        let uri = hop.callback(&format!("&code={code}"));
+        let (_, victim_cookie, _) = app.signed_in(&victim).await;
+        let state_cookie = hop.cookie.split("; ").last().unwrap();
+        for (cookie, verified) in [
+            (victim_cookie.clone(), false),
+            (format!("{victim_cookie}; {state_cookie}"), true),
+        ] {
+            let resp = app.get(&uri, &cookie).await;
+            assert_eq!(
+                location(&resp),
+                "/error?id=security_csrf_violation",
+                "{cookie}"
+            );
+            assert_eq!(clears_state_cookie(&resp), verified, "{cookie}");
+            assert_eq!(no_state_cookie(&resp), !verified, "{cookie}");
+            assert!(session_cookie(&resp).is_none());
+        }
+        assert!(stub.client_auth().is_empty(), "nothing was exchanged");
+        assert!(provider_links(&app, &victim).await.is_empty());
+        assert_eq!(
+            store::link_owner(&app.db, "stub", "attacker-sub")
+                .await
+                .unwrap(),
+            None
+        );
+
+        let resp = app.get(&uri, &hop.cookie).await;
+        assert_eq!(
+            location(&resp),
+            LINKED_PAGE,
+            "the starting browser still completes it"
+        );
+        assert_eq!(
+            store::link_owner(&app.db, "stub", "attacker-sub")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(attacker.as_str())
+        );
+        assert!(provider_links(&app, &victim).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_unlink_removes_the_link_and_its_first_seen_date_and_keeps_the_session() {
+        use crate::identity_native::test_support::identity_with_password;
+        let stub = OidcStub::start().await;
+        let app = stub_app(&stub, true).await;
+        let identity = identity_with_password(&app.db, "unlink@x.test", true).await;
+        for (provider, subject) in [("stub", "hidden-subject-1"), ("other", "hidden-subject-2")] {
+            store::insert_link(&app.db, &identity, provider, subject)
+                .await
+                .unwrap();
+            crate::settings::oidc_links_db::upsert_seen(&app.db, &identity, provider)
+                .await
+                .unwrap();
+        }
+        let (session, cookie, token) = app.signed_in_by(&identity, "oidc", Some("stub")).await;
+        let flow = settings_flow(&app, &cookie, "/settings/linked-providers").await;
+        let resp = settings_post(
+            &app,
+            &flow,
+            &cookie,
+            &format!("csrf_token={token}&unlink=stub"),
+        )
+        .await;
+        assert_eq!(location(&resp), LINKED_PAGE);
+        assert!(no_state_cookie(&resp));
+        assert_eq!(
+            stub.discovery_fetches(),
+            0,
+            "an unlink never leaves for the provider"
+        );
+        assert_eq!(
+            provider_links(&app, &identity).await,
+            [pair("other", "hidden-subject-2")]
+        );
+        let seen = crate::settings::oidc_links_db::list_for_identity(&app.db, &identity)
+            .await
+            .unwrap();
+        assert_eq!(
+            seen.into_iter().map(|(p, _)| p).collect::<Vec<_>>(),
+            ["other"]
+        );
+        let page = app.flow(FlowKind::Settings, &flow, &cookie).await;
+        assert_eq!(
+            page.messages.iter().map(|m| m.id).collect::<Vec<_>>(),
+            [1_050_001]
+        );
+
+        let rows = audit_rows(&app.db).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].action, "identity.oidc.unlinked");
+        assert_eq!(rows[0].actor_id.as_deref(), Some(identity.as_str()));
+        let meta: serde_json::Value = serde_json::from_str(&rows[0].metadata).unwrap();
+        assert_eq!(meta["provider"], "stub");
+        assert!(!format!("{:?}", rows[0]).contains("hidden-subject"));
+        let WhoamiOutcome::Ok(live) = app.backend.whoami(Some(&cookie)).await.unwrap() else {
+            panic!("the session signed in through the unlinked provider stays live");
+        };
+        assert_eq!(live.id, session);
+    }
+
+    #[tokio::test]
+    async fn a_forged_unlink_of_the_last_usable_method_changes_nothing() {
+        let stub = OidcStub::start().await;
+        let app = stub_app(&stub, false).await;
+        let sole = app.user("sole@x.test").await;
+        for (provider, subject) in [("stub", "s1"), ("gone", "g1")] {
+            store::insert_link(&app.db, &sole, provider, subject)
+                .await
+                .unwrap();
+        }
+        let (flow, cookie, token, _) = settings_browser(&app, &sole).await;
+        let resp = settings_post(
+            &app,
+            &flow,
+            &cookie,
+            &format!("csrf_token={token}&unlink=stub"),
+        )
+        .await;
+        assert_eq!(location(&resp), format!("/settings?flow={flow}"));
+        assert_eq!(
+            flow_texts(&app, &flow).await,
+            [(
+                4_000_001,
+                "Unable to remove the last sign-in method.".to_string()
+            )]
+        );
+        assert_eq!(
+            provider_links(&app, &sole).await,
+            [pair("gone", "g1"), pair("stub", "s1")]
+        );
+        assert!(audit_rows(&app.db).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_unlink_of_a_provider_not_linked_or_not_configured_changes_nothing() {
+        use crate::identity_native::test_support::identity_with_password;
+        let stub = OidcStub::start().await;
+        let app = stub_app(&stub, true).await;
+        let identity = identity_with_password(&app.db, "forged@x.test", true).await;
+        for (provider, subject) in [("stub", "s1"), ("gone", "g1")] {
+            store::insert_link(&app.db, &identity, provider, subject)
+                .await
+                .unwrap();
+        }
+        let (flow, cookie, token, _) = settings_browser(&app, &identity).await;
+        for provider in ["other", "gone", "nope"] {
+            let resp = settings_post(
+                &app,
+                &flow,
+                &cookie,
+                &format!("csrf_token={token}&unlink={provider}"),
+            )
+            .await;
+            assert_eq!(
+                location(&resp),
+                format!("/settings?flow={flow}"),
+                "{provider}"
+            );
+            let texts = flow_texts(&app, &flow).await;
+            assert_eq!(texts.len(), 1, "{provider}");
+            assert_eq!(texts[0].0, 4_000_001, "{provider}");
+            assert!(
+                texts[0].1.starts_with("Could not find a strategy"),
+                "{provider}"
+            );
+        }
+        assert_eq!(
+            provider_links(&app, &identity).await,
+            [pair("gone", "g1"), pair("stub", "s1")]
+        );
+        assert!(audit_rows(&app.db).await.unwrap().is_empty());
+    }
+
+    /// A browser signed in to `identity` (raised to AAL2 when `aal2`) whose sign-in lies outside
+    /// the privileged window: (session id, cookie header, CSRF token).
+    async fn refresh_browser(app: &App, identity: &str, aal2: bool) -> (String, String, String) {
+        let (session, mut cookie, token) = app.signed_in(identity).await;
+        if aal2 {
+            let held = session::find_live(&app.db, &session)
+                .await
+                .unwrap()
+                .unwrap();
+            let session::StepUp::Rotated(raised) =
+                session::step_up(&app.db, &held, "totp", None, Aal::Aal2)
+                    .await
+                    .unwrap()
+            else {
+                panic!("a live session rotates");
+            };
+            cookie = format!("forseti_session={raised}; forseti_csrf={token}");
+        }
+        lapse_session(app, &session).await;
+        (session, cookie, token)
+    }
+
+    /// A refresh login flow returning to `/settings`, in the browser holding `cookie`.
+    async fn refresh_flow(app: &App, cookie: &str) -> String {
+        let resp = app
+            .get(
+                "/self-service/login/browser?refresh=true&return_to=%2Fsettings",
+                cookie,
+            )
+            .await;
+        location(&resp)
+            .strip_prefix("/login?flow=")
+            .expect("a refresh login flow")
+            .to_string()
+    }
+
+    async fn refresh_hop(app: &App, cookie: &str, token: &str, provider: &str) -> Hop {
+        let flow = refresh_flow(app, cookie).await;
+        let body = format!("csrf_token={token}&provider={provider}");
+        press(app, "login", &flow, cookie, &body, provider).await
+    }
+
+    /// The hop start time the flow of `hop` stored with its `state`.
+    async fn hop_started_at(app: &App, hop: &Hop) -> i64 {
+        let rec = app.backend.load_flow(&hop.flow).await.unwrap().unwrap();
+        rec.ctx.oidc_started_at.expect("stored with the state")
+    }
+
+    /// (aal, authenticated_at, methods, token hash) of the session.
+    async fn session_state(app: &App, id: &str) -> (String, String, String, String) {
+        let row = session::find_live(&app.db, id).await.unwrap().unwrap();
+        (row.aal, row.authenticated_at, row.methods, row.token_hash)
+    }
+
+    fn oidc_method(methods: &str) -> serde_json::Value {
+        let methods: serde_json::Value = serde_json::from_str(methods).unwrap();
+        methods
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["method"] == "oidc")
+            .cloned()
+            .expect("an oidc method")
+    }
+
+    #[tokio::test]
+    async fn a_refresh_through_an_oidc_provider_keeps_the_aal_and_advances_authenticated_at() {
+        let stub = OidcStub::start().await;
+        let app = stub_app(&stub, false).await;
+        let identity = linked_user(&app, "refresh@x.test", true).await;
+        let mut sessions = Vec::new();
+        for aal2 in [true, false] {
+            let (session, cookie, token) = refresh_browser(&app, &identity, aal2).await;
+            let before = session_state(&app, &session).await;
+            let hop = refresh_hop(&app, &cookie, &token, "stub").await;
+            assert_eq!(param(&hop.authorize, "max_age").as_deref(), Some("0"));
+            let started = hop_started_at(&app, &hop).await;
+            let resp =
+                stub_callback(&app, &stub, &hop, serde_json::json!({"auth_time": started})).await;
+            assert_eq!(location(&resp), "/settings");
+            assert!(clears_state_cookie(&resp));
+            assert!(
+                session_cookie(&resp).is_none(),
+                "the session keeps its token"
+            );
+            let after = session_state(&app, &session).await;
+            assert_eq!(after.0, if aal2 { "aal2" } else { "aal1" });
+            assert_eq!(after.3, before.3);
+            assert!(after.1 > before.1, "{} > {}", after.1, before.1);
+            assert_eq!(oidc_method(&after.2)["provider"], "stub");
+            assert_eq!(app.row(&hop.flow).await.state, "passed_challenge");
+            sessions.push(session);
+        }
+
+        let rows = audit_rows(&app.db).await.unwrap();
+        assert_eq!(rows.len(), 2);
+        for (row, session) in rows.iter().zip(&sessions) {
+            assert_eq!(row.action, "auth.login");
+            assert_eq!(row.actor_id.as_deref(), Some(identity.as_str()));
+            let meta: serde_json::Value = serde_json::from_str(&row.metadata).unwrap();
+            assert_eq!(meta["method"], "oidc");
+            assert_eq!(meta["provider"], "stub");
+            assert_eq!(meta["refresh"], true);
+            assert_eq!(meta["kratos_session_id"], session.as_str());
+            assert!(!format!("{row:?}").contains("stub-subject"));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refresh_without_a_fresh_auth_time_changes_nothing() {
+        let stub = OidcStub::start().await;
+        let app = stub_app(&stub, false).await;
+        let identity = linked_user(&app, "stale@x.test", true).await;
+        let (session, cookie, token) = refresh_browser(&app, &identity, true).await;
+        let before = session_state(&app, &session).await;
+        let skew = 60;
+        for case in ["missing", "before the hop", "ahead"] {
+            let hop = refresh_hop(&app, &cookie, &token, "stub").await;
+            let started = hop_started_at(&app, &hop).await;
+            let claims = match case {
+                "missing" => serde_json::json!({}),
+                "before the hop" => serde_json::json!({"auth_time": started - skew - 30}),
+                _ => serde_json::json!({"auth_time": started + 600}),
+            };
+            let resp = stub_callback(&app, &stub, &hop, claims.clone()).await;
+            assert_eq!(
+                location(&resp),
+                format!("/login?flow={}", hop.flow),
+                "{claims}"
+            );
+            assert!(session_cookie(&resp).is_none());
+            assert_eq!(
+                flow_messages(&app, &hop.flow).await,
+                [4_000_006],
+                "{claims}"
+            );
+            assert_eq!(app.row(&hop.flow).await.state, "choose_method");
+            assert_eq!(session_state(&app, &session).await, before, "{claims}");
+        }
+        let rows = audit_rows(&app.db).await.unwrap();
+        assert_eq!(rows.len(), 3);
+        for row in &rows {
+            assert_eq!(row.action, "auth.login_failed");
+            assert!(
+                row.metadata.contains("stale_authentication"),
+                "{}",
+                row.metadata
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refresh_start_for_a_provider_not_linked_to_the_session_identity_never_hops() {
+        let stub = OidcStub::start().await;
+        let app = stub_app(&stub, true).await;
+        let identity = linked_user(&app, "unlinked@x.test", true).await;
+        store::insert_link(&app.db, &identity, "gone", "g1")
+            .await
+            .unwrap();
+        let (_, cookie, token) = refresh_browser(&app, &identity, false).await;
+        let flow = refresh_flow(&app, &cookie).await;
+        for provider in ["other", "gone", "nope"] {
+            let resp = app
+                .post(
+                    &format!("/self-service/login?flow={flow}"),
+                    &cookie,
+                    &format!("csrf_token={token}&provider={provider}"),
+                )
+                .await;
+            assert_eq!(location(&resp), format!("/login?flow={flow}"), "{provider}");
+            assert!(no_state_cookie(&resp), "{provider}");
+            assert_eq!(flow_messages(&app, &flow).await, [4_000_006], "{provider}");
+        }
+        assert_eq!(
+            app.backend
+                .load_flow(&flow)
+                .await
+                .unwrap()
+                .unwrap()
+                .ctx
+                .oidc_state,
+            None
+        );
+        assert_eq!(stub.discovery_fetches(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_refresh_callback_for_another_or_no_identitys_account_changes_nothing() {
+        use crate::identity_native::test_support::identity_with_password;
+        let stub = OidcStub::start().await;
+        let app = stub_app(&stub, false).await;
+        let me = linked_user(&app, "me@x.test", true).await;
+        let other = identity_with_password(&app.db, "else@x.test", true).await;
+        store::insert_link(&app.db, &other, "stub", "else-sub")
+            .await
+            .unwrap();
+        let (session, cookie, token) = refresh_browser(&app, &me, false).await;
+        let before = session_state(&app, &session).await;
+        let now = chrono::Utc::now().timestamp();
+        for sub in ["else-sub", "nobody"] {
+            let hop = refresh_hop(&app, &cookie, &token, "stub").await;
+            let claims = serde_json::json!({
+                "sub": sub,
+                "auth_time": now,
+                "email": "new@x.test",
+                "email_verified": true,
+            });
+            let resp = stub_callback(&app, &stub, &hop, claims).await;
+            assert_eq!(
+                location(&resp),
+                format!("/login?flow={}", hop.flow),
+                "{sub}"
+            );
+            assert!(session_cookie(&resp).is_none(), "{sub}");
+            assert_eq!(flow_messages(&app, &hop.flow).await, [4_000_006], "{sub}");
+            assert_eq!(session_state(&app, &session).await, before, "{sub}");
+        }
+        assert_eq!(identity_and_link_counts(&app.db).await, (2, 2));
+        assert!(
+            store::row_by_email(&app.db, "new@x.test")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn github_is_neither_offered_nor_accepted_for_a_refresh() {
+        let stub = OidcStub::start().await;
+        let github = GithubStub::start().await;
+        let mut cfg = AppConfig::test_fixture();
+        cfg.oauth.cimd.allow_private_targets = true;
+        cfg.identity.oidc_providers =
+            vec![stub.provider_config("stub"), github.provider_config("gh")];
+        let app = app_with_github(cfg, Some(&github)).await;
+        let both = linked_user(&app, "both@x.test", true).await;
+        store::insert_link(&app.db, &both, "gh", "4242")
+            .await
+            .unwrap();
+        let (session, cookie, token) = refresh_browser(&app, &both, false).await;
+        let before = session_state(&app, &session).await;
+        let flow = refresh_flow(&app, &cookie).await;
+        assert_eq!(
+            oidc_inputs(&app.flow(FlowKind::Login, &flow, &cookie).await),
+            [named("provider", "stub")]
+        );
+        let resp = app
+            .post(
+                &format!("/self-service/login?flow={flow}"),
+                &cookie,
+                &format!("csrf_token={token}&provider=gh"),
+            )
+            .await;
+        assert_eq!(location(&resp), format!("/login?flow={flow}"));
+        assert!(no_state_cookie(&resp));
+        assert_eq!(flow_messages(&app, &flow).await, [4_000_006]);
+        let rec = app.backend.load_flow(&flow).await.unwrap().unwrap();
+        assert_eq!((rec.ctx.oidc_state, rec.ctx.oidc_started_at), (None, None));
+        assert_eq!(session_state(&app, &session).await, before);
+
+        let gh_only = app.user("gh@x.test").await;
+        store::insert_link(&app.db, &gh_only, "gh", "4243")
+            .await
+            .unwrap();
+        let (_, cookie, _) = refresh_browser(&app, &gh_only, false).await;
+        let flow = refresh_flow(&app, &cookie).await;
+        assert!(oidc_inputs(&app.flow(FlowKind::Login, &flow, &cookie).await).is_empty());
     }
 }

@@ -116,7 +116,7 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         std::process::exit(1);
     }
     #[cfg(feature = "identity-native")]
-    if let Err(msg) = check_native_identity(&cfg.identity) {
+    if let Err(msg) = check_native_identity(&cfg) {
         eprintln!("config error: {msg}");
         std::process::exit(1);
     }
@@ -321,8 +321,6 @@ pub(crate) async fn run() -> anyhow::Result<()> {
             &state.cfg.hydra,
         ));
     // SSO routes mount only when [saml] is configured; outside CSRF (Jackson's callback is a cross-site GET).
-    // The SAML flow mints a Kratos session, so the native build never mounts them.
-    #[cfg(feature = "identity-ory")]
     let public_app = if state.cfg.saml.is_some() {
         public_app.merge(crate::saml::router())
     } else {
@@ -595,8 +593,9 @@ fn require_native_mail(cfg: &AppConfig) {
 const MAX_SESSION_LIFESPAN_HOURS: u32 = 8760;
 
 #[cfg(feature = "identity-native")]
-fn check_native_identity(identity: &crate::config::IdentityConfig) -> Result<(), String> {
+pub(crate) fn check_native_identity(cfg: &AppConfig) -> Result<(), String> {
     use crate::identity_native::password::{MAX_LENGTH, MIN_LENGTH_FLOOR};
+    let identity = &cfg.identity;
     if !(1..=MAX_SESSION_LIFESPAN_HOURS).contains(&identity.session_lifespan_hours) {
         return Err(format!(
             "[identity].session_lifespan_hours must be between 1 and \
@@ -608,6 +607,11 @@ fn check_native_identity(identity: &crate::config::IdentityConfig) -> Result<(),
             "[identity].password_min_length must be between {MIN_LENGTH_FLOOR} and {MAX_LENGTH}."
         ));
     }
+    crate::identity_native::upstream::Upstream::from_config(
+        &identity.oidc_providers,
+        &cfg.self_.url,
+        cfg.oauth.cimd.allow_private_targets,
+    )?;
     Ok(())
 }
 
@@ -783,9 +787,9 @@ fn csp_origin_source(url: &str) -> Option<String> {
 /// Base CSP inputs the response-time middleware needs to rebuild the header for
 /// a single response.
 #[derive(Clone)]
-struct CspSources {
-    frame_ancestors: String,
-    form_action: String,
+pub(crate) struct CspSources {
+    pub(crate) frame_ancestors: String,
+    pub(crate) form_action: String,
 }
 
 /// Extra `form-action` origins for one response, attached by a handler that
@@ -836,7 +840,7 @@ pub(crate) fn allow_form_action_to(resp: &mut Response, uris: &[String]) {
 
 /// Forces `frame-ancestors 'none'` + `X-Frame-Options: DENY` on sensitive, state-changing pages,
 /// overriding global config, and folds in any per-response [`ExtraFormAction`].
-async fn strict_frame_for_sensitive(
+pub(crate) async fn strict_frame_for_sensitive(
     State(sources): State<CspSources>,
     req: axum::extract::Request,
     next: axum::middleware::Next,
@@ -885,22 +889,40 @@ mod tests {
     #[test]
     fn native_identity_bounds() {
         use super::check_native_identity;
-        let ok = crate::config::IdentityConfig::default();
+        use crate::config::AppConfig;
+        let ok = AppConfig::test_fixture();
         assert!(check_native_identity(&ok).is_ok());
         for (hours, accepted) in [(0, false), (1, true), (8760, true), (8761, false)] {
-            let cfg = crate::config::IdentityConfig {
-                session_lifespan_hours: hours,
-                ..ok.clone()
-            };
+            let mut cfg = ok.clone();
+            cfg.identity.session_lifespan_hours = hours;
             assert_eq!(check_native_identity(&cfg).is_ok(), accepted, "{hours}");
         }
         for (len, accepted) in [(7, false), (8, true), (256, true), (257, false)] {
-            let cfg = crate::config::IdentityConfig {
-                password_min_length: len,
-                ..ok.clone()
-            };
+            let mut cfg = ok.clone();
+            cfg.identity.password_min_length = len;
             assert_eq!(check_native_identity(&cfg).is_ok(), accepted, "{len}");
         }
+    }
+
+    #[cfg(feature = "identity-native")]
+    #[test]
+    fn native_identity_checks_providers_with_the_private_target_hatch() {
+        use super::check_native_identity;
+        use crate::config::{AppConfig, OidcProviderConfig, OidcProviderKind};
+        let mut cfg = AppConfig::test_fixture();
+        cfg.identity.oidc_providers = vec![OidcProviderConfig {
+            id: "local".into(),
+            kind: OidcProviderKind::Oidc,
+            issuer: Some("http://127.0.0.1:8092/default".into()),
+            client_id: "forseti".into(),
+            client_secret: Some("s".into()),
+            client_secret_env: None,
+            scopes: None,
+        }];
+        let err = check_native_identity(&cfg).unwrap_err();
+        assert!(err.contains("issuer URL must use https://"), "{err}");
+        cfg.oauth.cimd.allow_private_targets = true;
+        assert!(check_native_identity(&cfg).is_ok());
     }
 
     #[test]

@@ -12,8 +12,8 @@ use crate::db::DbPool;
 use crate::flow_view::Flow;
 
 use identity::{
-    CourierStatus, FlowFetch, FlowInit, FlowKind, FlowOutcome, Identity, IdentityState,
-    RecoveryCode, SelfServiceError, Session, WhoamiOutcome,
+    BrowserSession, CourierStatus, FlowFetch, FlowInit, FlowKind, FlowOutcome, Identity,
+    IdentityState, RecoveryCode, SelfServiceError, Session, SessionOrigin, WhoamiOutcome,
 };
 use oauth::{
     ConsentRequest, ConsentSession, DeviceAuthorization, DeviceTokenOutcome, IdTokenClaims,
@@ -100,8 +100,6 @@ pub trait IdentityBackend: Send + Sync + 'static {
     ) -> Result<Vec<Identity>>;
     async fn admin_list_identities_by_ids(&self, ids: Vec<String>) -> Result<Vec<Identity>>;
     async fn admin_find_identity_by_email(&self, email: &str) -> Result<Option<(Identity, bool)>>;
-    // Only the SAML flow calls these, and it is not built with `identity-native`.
-    #[cfg_attr(feature = "identity-native", expect(dead_code))]
     async fn admin_create_identity_verified(
         &self,
         schema_id: &str,
@@ -116,13 +114,14 @@ pub trait IdentityBackend: Send + Sync + 'static {
     async fn admin_remove_metadata_admin_key(&self, id: &str, key: &str) -> Result<bool>;
     async fn admin_delete_identity(&self, id: &str) -> Result<()>;
     async fn admin_create_recovery_code(&self, identity_id: &str) -> Result<RecoveryCode>;
-    #[cfg_attr(all(feature = "identity-native", not(test)), expect(dead_code))]
-    async fn admin_create_recovery_link(
+    /// Hand the browser a session for an identity the server has already authenticated.
+    /// `return_to` must already be validated by the caller.
+    async fn establish_browser_session(
         &self,
         identity_id: &str,
-        expires_in: &str,
-        return_to: Option<&str>,
-    ) -> Result<String>;
+        return_to: &str,
+        origin: SessionOrigin<'_>,
+    ) -> Result<BrowserSession>;
     async fn list_identity_schemas(&self) -> Result<Vec<String>>;
 
     async fn courier_backlog(&self, status: CourierStatus, page_size: i64) -> Result<u64>;

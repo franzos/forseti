@@ -8,9 +8,10 @@
 //
 // Chain under test (scenario 2): /sso/default → Jackson authorize
 // (127.0.0.1:5225) → mock-saml sign-in (127.0.0.1:4480) → SAMLResponse →
-// Jackson ACS → /sso/callback (code exchange + JIT identity) → Kratos
-// recovery-link redemption → dashboard with a native session. Everything
-// is browser-reachable because the Playwright container runs with
+// Jackson ACS → /sso/callback (code exchange + JIT identity) → session
+// from the identity backend (a Kratos recovery link on the Ory build, a
+// session cookie on the native build) → dashboard. Everything is
+// browser-reachable because the Playwright container runs with
 // `--network host` (see Makefile).
 //
 // Requires: active license with the `saml` feature activated via
@@ -37,6 +38,7 @@
 //     Not cleanly stageable; left to code review.
 import { test, expect, type Page } from '@playwright/test';
 import { adminCredsFromEnv, signInAdminAal2 } from '../../helpers/admin';
+import { sessionIsActive } from '../../helpers/identity';
 import { registerUser, logout, uniqueEmail } from '../../helpers/register';
 
 // Jackson 26.x only accepts localhost/HTTPS metadata URLs, which rules
@@ -138,9 +140,9 @@ test.describe.serial('SAML SSO via Jackson + mock-saml', () => {
     await signInAtMockSaml(page, email);
 
     // mock-saml POSTs the SAMLResponse to Jackson's ACS, Jackson 302s to
-    // /sso/callback, the portal redeems a Kratos recovery link and the
-    // post-recovery interception bounces the arrival to `/`. Generous
-    // timeout: four services round-trip plus assertion signing.
+    // /sso/callback, and the identity backend hands the browser its
+    // session on the way to `/`. Generous timeout: four services
+    // round-trip plus assertion signing.
     await page.waitForURL((u) => u.pathname === '/', { timeout: 60_000 });
 
     // Signed in: the header chrome shows the session's email.
@@ -182,7 +184,7 @@ test.describe.serial('SAML SSO via Jackson + mock-saml', () => {
     );
 
     // Register through the normal UI and deliberately skip verification —
-    // the address stays unverified on the Kratos identity.
+    // the address stays unverified on the identity.
     const user = await registerUser(page, 'saml-blocked');
     await logout(page);
 
@@ -290,8 +292,8 @@ test.describe.serial('SAML SSO via Jackson + mock-saml', () => {
     await createSamlConnection(page, `${orgName} (${orgSlug})`, acmeConnName, acmeMetadataUrl);
 
     // Provision a VERIFIED identity that is a member of Default only, via a
-    // fresh JIT login on /sso/default. (JIT creates a verified Kratos
-    // identity and joins Default — exactly the member-of-A-only shape.)
+    // fresh JIT login on /sso/default. (JIT creates a verified identity
+    // and joins Default — exactly the member-of-A-only shape.)
     const email = uniqueEmail('saml-xorg');
     await context.clearCookies();
     await page.goto('/sso/default');
@@ -312,13 +314,13 @@ test.describe.serial('SAML SSO via Jackson + mock-saml', () => {
     await expect(page.getByText(/isn't a member of this organization/)).toBeVisible();
 
     // Security-load-bearing: NO session was minted. Three checks:
-    //  1. Kratos whoami in this browser context is 401 (no native session).
+    //  1. The identity backend sees no live session in this browser context.
     const cookies = await context.cookies();
     const cookieHeader = cookies.map((c) => `${c.name}=${c.value}`).join('; ');
-    const whoami = await request.get('http://localhost:4433/sessions/whoami', {
-      headers: cookieHeader ? { cookie: cookieHeader } : {},
-    });
-    expect(whoami.status(), 'cross-org block must not establish a Kratos session').toBe(401);
+    expect(
+      await sessionIsActive(request, cookieHeader),
+      'cross-org block must not establish a session',
+    ).toBe(false);
 
     //  2. The dashboard bounces to /login (RequireSession, unauthenticated).
     await page.goto('/');

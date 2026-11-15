@@ -77,7 +77,7 @@ selfservice:
     # OIDC upstream providers (Google / GitHub / Microsoft / Apple) aren't
     # configured in the playground. Use
     # `forseti config oidc enable <google|github|microsoft|apple>` to add one
-    # — see docs/operator-guide.md's "Managing configuration with forseti
+    # — see docs/operator-guide-kratos.md's "Managing configuration with forseti
     # config" section.
 
   flows:

@@ -69,6 +69,7 @@ where
         error_handler,
         Scope::Router,
     )
+    .0
 }
 
 /// Which requests a bucket counts.
@@ -81,6 +82,11 @@ enum Scope {
     Routes,
 }
 
+/// One token from a bucket for a key; `Err` carries the bucket's replenish interval.
+type Take<Key> = Arc<dyn Fn(&Key) -> Result<(), std::time::Duration> + Send + Sync>;
+
+/// Mount one bucket onto `r`; the second value takes a token from the same bucket, `None` when
+/// the bucket is disabled.
 fn attach<K, F>(
     r: Router<AppState>,
     extractor: K,
@@ -88,14 +94,14 @@ fn attach<K, F>(
     per_window: u32,
     error_handler: F,
     scope: Scope,
-) -> Router<AppState>
+) -> (Router<AppState>, Option<Take<K::Key>>)
 where
     K: tower_governor::key_extractor::KeyExtractor + Send + Sync + 'static,
     <K as tower_governor::key_extractor::KeyExtractor>::Key: Send + Sync + 'static,
     F: Fn(tower_governor::GovernorError) -> Response + Send + Sync + 'static,
 {
     if per_window == 0 {
-        return r;
+        return (r, None);
     }
     let per_ms = (total_ms / per_window as u64).max(1);
     let Some(cfg) = GovernorConfigBuilder::default()
@@ -104,7 +110,7 @@ where
         .key_extractor(extractor)
         .finish()
     else {
-        return r;
+        return (r, None);
     };
     let cfg = Arc::new(cfg);
     let limiter = cfg.limiter().clone();
@@ -112,11 +118,19 @@ where
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .push(Box::new(move || limiter.retain_recent()));
+    let limiter = cfg.limiter().clone();
+    let take: Take<K::Key> = Arc::new(move |key| {
+        limiter
+            .check_key(key)
+            .map(|_| ())
+            .map_err(|refused| refused.quota().replenish_interval())
+    });
     let layer = GovernorLayer::new(cfg).error_handler(error_handler);
-    match scope {
+    let r = match scope {
         Scope::Router => r.layer(layer),
         Scope::Routes => r.route_layer(layer),
-    }
+    };
+    (r, Some(take))
 }
 
 /// Plain-text `429` for browser-facing endpoints, with `Retry-After` when the
@@ -259,12 +273,13 @@ where
 {
     let key = ClientIpKeyExtractor::from_config(proxy);
     // The layer attached last runs first: a request the minute bucket refuses keeps its hour token.
-    let r = attach(r, key, 3_600_000, per_hour, error_handler, Scope::Routes);
-    attach(r, key, 60_000, per_minute, error_handler, Scope::Routes)
+    let (r, _) = attach(r, key, 3_600_000, per_hour, error_handler, Scope::Routes);
+    attach(r, key, 60_000, per_minute, error_handler, Scope::Routes).0
 }
 
 /// [`route_dual_window`] in front of a global pair: a request the per-client buckets refuse never
-/// reaches the global ones, so one client cannot drain the shared budget.
+/// reaches the global ones, so one client cannot drain the shared budget. The buckets are returned
+/// as well, so a handler can charge them.
 #[cfg(feature = "identity-native")]
 pub(crate) fn route_dual_window_then_global<F>(
     r: Router<AppState>,
@@ -274,12 +289,13 @@ pub(crate) fn route_dual_window_then_global<F>(
     global_per_minute: u32,
     global_per_hour: u32,
     error_handler: F,
-) -> Router<AppState>
+) -> (Router<AppState>, SharedBuckets)
 where
     F: Fn(tower_governor::GovernorError) -> Response + Copy + Send + Sync + 'static,
 {
+    let key = ClientIpKeyExtractor::from_config(proxy);
     // The layer attached last runs first.
-    let r = attach(
+    let (r, global_hour) = attach(
         r,
         GlobalKeyExtractor,
         3_600_000,
@@ -287,7 +303,7 @@ where
         error_handler,
         Scope::Routes,
     );
-    let r = attach(
+    let (r, global_minute) = attach(
         r,
         GlobalKeyExtractor,
         60_000,
@@ -295,7 +311,41 @@ where
         error_handler,
         Scope::Routes,
     );
-    route_dual_window(r, proxy, per_minute, per_hour, error_handler)
+    let (r, client_hour) = attach(r, key, 3_600_000, per_hour, error_handler, Scope::Routes);
+    let (r, client_minute) = attach(r, key, 60_000, per_minute, error_handler, Scope::Routes);
+    let buckets = SharedBuckets {
+        client: [client_minute, client_hour].into_iter().flatten().collect(),
+        global: [global_minute, global_hour].into_iter().flatten().collect(),
+    };
+    (r, buckets)
+}
+
+/// Buckets mounted as route layers that a handler charges as well, in the layers' order.
+#[cfg(feature = "identity-native")]
+#[derive(Clone, Default)]
+pub(crate) struct SharedBuckets {
+    client: Vec<Take<std::net::IpAddr>>,
+    global: Vec<Take<()>>,
+}
+
+#[cfg(feature = "identity-native")]
+impl SharedBuckets {
+    /// One token from each bucket for the client at `ip`, stopping at the first refusal as the
+    /// layers do. `Err` carries the `Retry-After` seconds; no `ip` is refused like a request
+    /// whose key cannot be extracted.
+    pub(crate) fn admit(&self, ip: Option<std::net::IpAddr>) -> Result<(), Option<u64>> {
+        let refused = |wait| Some(retry_after_secs(wait));
+        if !self.client.is_empty() {
+            let key = ip.map(crate::client_ip::limiter_key).ok_or(None)?;
+            for take in &self.client {
+                take(&key).map_err(refused)?;
+            }
+        }
+        for take in &self.global {
+            take(&()).map_err(refused)?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -355,6 +405,40 @@ mod tests {
             dual_window_with_backstop(r, &ProxyConfig::default(), 5, 30, plain_text_error("test"));
         let after = RETAINERS.lock().unwrap().len();
         assert_eq!(after, before + 4);
+    }
+
+    #[cfg(feature = "identity-native")]
+    #[test]
+    fn shared_buckets_charge_the_layers_buckets_per_client_then_global() {
+        let _guard = TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let r: Router<AppState> = Router::new().route("/", axum::routing::get(|| async {}));
+        let (_r, buckets) = route_dual_window_then_global(
+            r,
+            &ProxyConfig::default(),
+            2,
+            100,
+            3,
+            100,
+            plain_text_error("test"),
+        );
+        let a = Some("192.0.2.1".parse().unwrap());
+        let b = Some("192.0.2.2".parse().unwrap());
+        assert_eq!(buckets.admit(a), Ok(()));
+        assert_eq!(buckets.admit(a), Ok(()));
+        assert!(matches!(buckets.admit(a), Err(Some(s)) if s >= 1));
+        assert_eq!(
+            buckets.admit(b),
+            Ok(()),
+            "the refused client left the global bucket alone"
+        );
+        assert!(
+            buckets.admit(b).is_err(),
+            "the global bucket caps the total"
+        );
+        assert_eq!(buckets.admit(None), Err(None));
+        assert_eq!(SharedBuckets::default().admit(None), Ok(()));
     }
 
     #[test]

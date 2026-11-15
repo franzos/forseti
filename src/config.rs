@@ -968,8 +968,6 @@ pub struct MetricsConfig {
 
 /// SAML SSO bridge (commercial, opt-in). Absent = `/sso/*` unmounted, zero SAML footprint. The bridge
 /// (Jackson / Ory Polis) is operator-deployed; Forseti only orchestrates against it. See `docs/commercial/saml.md`.
-// Parsed on both builds; only the Ory build mounts SAML.
-#[cfg_attr(feature = "identity-native", expect(dead_code))]
 #[derive(Debug, Clone, Deserialize)]
 pub struct SamlConfig {
     /// Browser-facing base URL of the Jackson instance, e.g.
@@ -994,10 +992,8 @@ pub struct SamlConfig {
 }
 
 /// Jackson's default `samlAudience`: the SP entity id the customer's IdP admin configures when `[saml].sp_entity_id` is unset.
-#[cfg(feature = "identity-ory")]
 pub const DEFAULT_SP_ENTITY_ID: &str = "https://saml.boxyhq.com";
 
-#[cfg(feature = "identity-ory")]
 impl SamlConfig {
     pub fn internal_url(&self) -> &str {
         self.jackson_internal_url
@@ -1052,6 +1048,43 @@ pub struct IdentityConfig {
     #[cfg(feature = "identity-native")]
     #[serde(default = "default_login_identifier_rate_per_15m")]
     pub login_identifier_rate_per_15m: u32,
+    /// Upstream sign-in providers, `[[identity.oidc_providers]]`.
+    #[cfg(feature = "identity-native")]
+    #[serde(default)]
+    pub oidc_providers: Vec<OidcProviderConfig>,
+}
+
+/// Protocol of an upstream sign-in provider.
+#[cfg(feature = "identity-native")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OidcProviderKind {
+    /// OpenID Connect with discovery from `issuer`.
+    Oidc,
+    /// GitHub OAuth2: no ID token, the profile comes from the REST API.
+    Github,
+}
+
+/// One `[[identity.oidc_providers]]` entry; checked at boot by
+/// `identity_native::upstream::Upstream::from_config`.
+#[cfg(feature = "identity-native")]
+#[derive(Debug, Clone, Deserialize)]
+pub struct OidcProviderConfig {
+    /// Stable id: in the callback path, on provider links and in `idp_hint`.
+    pub id: String,
+    pub kind: OidcProviderKind,
+    /// Discovery issuer, `oidc` only; compared verbatim with the document's `issuer`.
+    #[serde(default)]
+    pub issuer: Option<String>,
+    pub client_id: String,
+    #[serde(default)]
+    pub client_secret: Option<Redacted>,
+    /// Name of an environment variable holding the client secret.
+    #[serde(default)]
+    pub client_secret_env: Option<String>,
+    /// Requested scopes; defaults per kind.
+    #[serde(default)]
+    pub scopes: Option<Vec<String>>,
 }
 
 impl Default for IdentityConfig {
@@ -1071,6 +1104,8 @@ impl Default for IdentityConfig {
             login_ip_rate_per_hour: default_login_ip_rate_per_hour(),
             #[cfg(feature = "identity-native")]
             login_identifier_rate_per_15m: default_login_identifier_rate_per_15m(),
+            #[cfg(feature = "identity-native")]
+            oidc_providers: Vec::new(),
         }
     }
 }
@@ -2136,6 +2171,52 @@ mod tests {
             r#"{"from_address":"a@b.com","provider":"smtp","host":"127.0.0.1","port":1025,"tls":"none"}"#,
         );
         assert!(cfg_with_email(Some(cfg)).validate_email().is_ok());
+    }
+
+    #[cfg(feature = "identity-native")]
+    #[test]
+    fn oidc_providers_parse_from_toml() {
+        #[derive(Deserialize)]
+        struct I {
+            identity: IdentityConfig,
+        }
+        let i: I = Figment::new()
+            .merge(Toml::string(
+                r#"
+                [[identity.oidc_providers]]
+                id = "google"
+                kind = "oidc"
+                issuer = "https://accounts.google.com"
+                client_id = "c"
+                client_secret = "s3cret"
+
+                [[identity.oidc_providers]]
+                id = "github"
+                kind = "github"
+                client_id = "c"
+                client_secret_env = "GH"
+                scopes = ["user:email"]
+                "#,
+            ))
+            .extract()
+            .unwrap();
+        let [google, github] = &i.identity.oidc_providers[..] else {
+            panic!("two providers");
+        };
+        assert_eq!(google.kind, OidcProviderKind::Oidc);
+        assert_eq!(
+            google.issuer.as_deref(),
+            Some("https://accounts.google.com")
+        );
+        assert_eq!(google.scopes, None);
+        assert!(!format!("{google:?}").contains("s3cret"));
+        assert_eq!(github.kind, OidcProviderKind::Github);
+        assert_eq!(github.client_secret_env.as_deref(), Some("GH"));
+        assert_eq!(
+            github.scopes.as_deref(),
+            Some(&["user:email".to_string()][..])
+        );
+        assert!(IdentityConfig::default().oidc_providers.is_empty());
     }
 
     // --- WebhookTokens -------------------------------------------------

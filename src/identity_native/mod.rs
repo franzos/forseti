@@ -27,6 +27,7 @@ mod store;
 mod test_support;
 mod totp;
 mod ui;
+pub(crate) mod upstream;
 
 pub struct NativeBackend {
     db: DbPool,
@@ -38,6 +39,8 @@ pub struct NativeBackend {
     /// Issuer shown in authenticator apps.
     totp_issuer: String,
     keys: Keys,
+    /// Operator cookie secret; [`crate::signed_cookie::SignedCookie`] derives per-cookie keys from it.
+    cookie_secret: Box<[u8]>,
     limiters: Limiters,
     hash_permits: Arc<Semaphore>,
     breach_check: Option<password::BreachCheck>,
@@ -45,6 +48,9 @@ pub struct NativeBackend {
     mail_worker: WorkerHandle,
     /// Wakes the mail worker as soon as a row is queued.
     mail_wake: Arc<Notify>,
+    upstream: upstream::Upstream,
+    /// `[admin].allowed_emails`; a provider sign-up never creates an identity for one.
+    admin: crate::config::AdminConfig,
 }
 
 /// Keys each in-process attempt counter tracks at most; see [`KeyedQuota::bounded`] for a full map.
@@ -94,6 +100,7 @@ struct Keys {
     code_mac: codes::MacKey,
     lookup_mac: codes::MacKey,
     logout: codes::MacKey,
+    upstream_pkce: upstream::PkceKey,
 }
 
 impl Keys {
@@ -115,6 +122,10 @@ impl Keys {
                 cookie_secret,
                 b"forseti::identity::logout::v1",
             )),
+            upstream_pkce: upstream::PkceKey(derive_subkey(
+                cookie_secret,
+                b"forseti::identity::upstream-pkce::v1",
+            )),
         }
     }
 }
@@ -134,6 +145,7 @@ impl NativeBackend {
             https: cfg.self_.is_https(),
             totp_issuer: if brand.is_empty() { "Forseti" } else { brand }.to_string(),
             keys: Keys::derive(cookie_secret),
+            cookie_secret: cookie_secret.into(),
             limiters: Limiters::new(&cfg.identity),
             hash_permits: Arc::new(Semaphore::new(hash_concurrency)),
             breach_check: cfg
@@ -142,6 +154,14 @@ impl NativeBackend {
                 .then(password::BreachCheck::new),
             mail_worker: WorkerHandle::new(),
             mail_wake: Arc::new(Notify::new()),
+            // Both entry points run `app::check_native_identity` first, which builds the same value.
+            upstream: upstream::Upstream::from_config(
+                &cfg.identity.oidc_providers,
+                &cfg.self_.url,
+                cfg.oauth.cimd.allow_private_targets,
+            )
+            .expect("[identity].oidc_providers is checked before the backend is built"),
+            admin: cfg.admin.clone(),
         }
     }
 
@@ -153,6 +173,19 @@ impl NativeBackend {
     #[cfg(test)]
     pub(crate) fn for_test(db: &DbPool) -> Arc<Self> {
         Self::new(&AppConfig::test_fixture(), db, &[0x42; 32])
+    }
+
+    /// [`NativeBackend::new`] with the GitHub provider's endpoints at `github`.
+    #[cfg(test)]
+    pub(crate) fn with_github(
+        cfg: &AppConfig,
+        db: &DbPool,
+        cookie_secret: &[u8],
+        github: upstream::GithubUrls,
+    ) -> Arc<Self> {
+        let mut built = Self::build(cfg, db, cookie_secret);
+        built.upstream = built.upstream.with_github_urls(github);
+        Arc::new(built)
     }
 }
 
@@ -187,10 +220,14 @@ mod tests {
         assert_eq!(keys.logout.hex(&["a"]), logout.hex(&["a"]));
         assert_ne!(keys.code_mac.hex(&["a"]), keys.lookup_mac.hex(&["a"]));
         assert_ne!(keys.code_mac.hex(&["a"]), keys.logout.hex(&["a"]));
+        assert_eq!(
+            keys.upstream_pkce.0,
+            derive_subkey(&secret, b"forseti::identity::upstream-pkce::v1")
+        );
 
         assert_eq!(
             format!("{keys:?}"),
-            "Keys { seal: SealKey(..), code_mac: MacKey(..), lookup_mac: MacKey(..), logout: MacKey(..) }"
+            "Keys { seal: SealKey(..), code_mac: MacKey(..), lookup_mac: MacKey(..), logout: MacKey(..), upstream_pkce: PkceKey(..) }"
         );
     }
 }

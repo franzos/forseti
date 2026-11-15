@@ -8,9 +8,9 @@
 # identities; it reads `[kratos]` and requires `[audit].webhook_token`. The
 # native build (`--no-default-features --features identity-native`) keeps
 # identities, sessions and self-service flows in Forseti's own database; it
-# ignores `[kratos]` and `[audit].webhook_token`, does not mount the SAML routes, and
-# refuses to boot without `[security].cookie_secret` and `[email]` with
-# `enabled = true`. Its settings live under `[identity]` further down.
+# ignores `[kratos]` and `[audit].webhook_token`, and refuses to boot without
+# `[security].cookie_secret` and `[email]` with `enabled = true`. Its settings
+# live under `[identity]` further down.
 
 # Ory build only.
 [kratos]
@@ -70,7 +70,10 @@ url = "http://localhost:3000"
 # through. A missing origin shows up as a sign-in page that never navigates: the
 # server logs a clean 303, the browser drops it. OAuth clients need nothing here;
 # Forseti hands back to Hydra with a document, so no consent or logout chain
-# reaches a client while it is still a form submission.
+# reaches a client while it is still a form submission. On the native build
+# each `[[identity.oidc_providers]]` issuer origin (github.com for GitHub) is
+# allowed too; add a provider here only when its authorization endpoint is on
+# another host than its issuer.
 # extra_form_action = ["https://idp.example.com"]
 
 [brand]
@@ -290,6 +293,28 @@ support_email = "support@example.com"
 # login_ip_rate_per_minute = 20
 # login_ip_rate_per_hour = 200
 # login_identifier_rate_per_15m = 10
+#
+# Upstream sign-in providers, native build only, at most 16. `id` (A-Z, a-z,
+# 0-9, `.`, `_`, `-`; unique ignoring case) names the provider in the redirect
+# URI `<[self].url>/self-service/methods/oidc/callback/<id>`. `kind` is "oidc"
+# (needs `issuer`, discovery-based, `scopes` must include "openid") or
+# "github" (no `issuer`). Give the secret as `client_secret` or as
+# `client_secret_env`, the name of an environment variable, not both.
+# Default `scopes`: ["openid", "email", "profile"] for oidc,
+# ["read:user", "user:email"] for github. Links are stored by (id, subject):
+# never point an existing `id` at another issuer or kind, add a new entry.
+# [[identity.oidc_providers]]
+# id = "google"
+# kind = "oidc"
+# issuer = "https://accounts.google.com"
+# client_id = "..."
+# client_secret_env = "FORSETI_GOOGLE_CLIENT_SECRET"
+#
+# [[identity.oidc_providers]]
+# id = "github"
+# kind = "github"
+# client_id = "..."
+# client_secret = "..."
 
 # Internal HTTP listener for machine-to-machine endpoints (the POSIX resolver,
 # `/metrics`, and on the Ory build the Kratos audit webhook receiver). Defaults
@@ -505,7 +530,7 @@ support_email = "support@example.com"
 
 # Enterprise SAML SSO (commercial feature — requires a license with `saml`).
 # Strictly opt-in: omit this whole section and Forseti has no SAML surface.
-# Ory build only: the native build does not mount the SAML routes.
+# Works on both builds; the native build does not read `identity_schema_id`.
 # Requires a deployed SAML Jackson / Ory Polis instance; see
 # docs/commercial/saml.md.
 # [saml]

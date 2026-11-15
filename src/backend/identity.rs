@@ -137,6 +137,9 @@ pub struct Identity {
     pub recovery_addresses: Option<Vec<RecoveryAddress>>,
     /// Keyed by credential type (`password`, `oidc`, ...).
     pub credentials: Option<HashMap<String, Credential>>,
+    /// Whether upstream links are the identity's only way in, as the backend counts them.
+    /// `None` when the backend leaves that to the credential configs.
+    pub sole_sign_in_is_oidc: Option<bool>,
 }
 
 /// One-shot admin-minted recovery code and the link that redeems it.
@@ -144,6 +147,23 @@ pub struct Identity {
 pub struct RecoveryCode {
     pub recovery_code: String,
     pub recovery_link: String,
+}
+
+/// The method and device a server-established browser session is recorded with.
+// Kratos records the method and device of its recovery-link session itself.
+#[cfg_attr(feature = "identity-ory", expect(dead_code))]
+#[derive(Clone, Copy, Debug)]
+pub struct SessionOrigin<'a> {
+    pub method: &'a str,
+    pub ip: Option<std::net::IpAddr>,
+    pub user_agent: Option<&'a str>,
+}
+
+/// Where to send the browser and the cookies that carry it in signed in.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BrowserSession {
+    pub location: String,
+    pub set_cookies: Vec<String>,
 }
 
 /// Courier message status the admin status page counts.

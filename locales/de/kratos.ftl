@@ -110,3 +110,4 @@ kratos-4070006 = Der Bestätigungscode ist ungültig oder wurde bereits verwende
 
 # --- Drosselung (9000xxx) ---
 kratos-9000001 = Gerade gibt es zu viele Anmeldeversuche. Bitte versuchen Sie es in ein paar Minuten erneut.
+kratos-9000002 = Die Anmeldung über den Anbieter hat nicht funktioniert. Bitte versuchen Sie es erneut.

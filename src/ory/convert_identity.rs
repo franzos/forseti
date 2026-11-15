@@ -191,6 +191,8 @@ impl From<sdk::Identity> for Identity {
             credentials: i
                 .credentials
                 .map(|m| m.into_iter().map(|(k, c)| (k, c.into())).collect()),
+            // Readers fall back to the credential configs.
+            sole_sign_in_is_oidc: None,
         }
     }
 }

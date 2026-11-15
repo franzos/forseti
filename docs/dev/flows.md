@@ -16,15 +16,16 @@ Forseti's own CSRF (a double-submit cookie token, `src/csrf.rs`) only protects F
 
 ### Native identity build
 
-With `--features identity-native` the same handlers (`src/auth/*`, `src/settings/*`) render the same templates, but `IdentityImpl` is `NativeBackend` (`src/identity_native/mod.rs`) and the flows live in Forseti's `identity_flows` table. Each flow is stored as a row with a JSON context; `flow_document` (`src/identity_native/flows.rs:884`) builds a Kratos-shaped document from it (`src/identity_native/ui.rs`) and `get_flow` (`src/identity_native/backend.rs:60`) runs it through the same `flow_json::project`, so node names, states and message ids match the Kratos fixtures in `tests/fixtures/kratos_flows/`.
+With `--features identity-native` the same handlers (`src/auth/*`, `src/settings/*`) render the same templates, but `IdentityImpl` is `NativeBackend` (`src/identity_native/mod.rs`) and the flows live in Forseti's `identity_flows` table. Each flow is stored as a row with a JSON context; `flow_document` (`src/identity_native/flows.rs:1009`) builds a Kratos-shaped document from it (`src/identity_native/ui.rs`) and `get_flow` (`src/identity_native/backend.rs:76`) runs it through the same `flow_json::project`, so node names, states and message ids match the Kratos fixtures in `tests/fixtures/kratos_flows/`.
 
 Shared machinery, used by every flow below:
 
-- **Routes** (`router`, `src/identity_native/routes.rs:43`, mounted in the CSRF-protected public router): `GET /self-service/{kind}/browser` (`init`, `src/identity_native/routes.rs:165`) creates a flow and 303s to `/{kind}?flow=<id>`; `POST /self-service/{kind}?flow=<id>` (`submit`, `src/identity_native/routes.rs:273`) handles the form; `GET /self-service/{verification,recovery,logout}` (`link`, `src/identity_native/routes.rs:199`) serves the mail link, the admin recovery link and logout. Every path is literal; there is no `{kind}` parameter. `flow_init_url` returns the relative init URL (`src/identity_native/backend.rs:56`), so the handlers' redirects land on Forseti.
-- **Init** (`init_flow`, `src/identity_native/flows.rs:666`): `return_to` is kept only when `safe_return_to` leaves it unchanged and it fits 2048 bytes. Login, registration, recovery and verification flows are bound to the SHA-256 of the browser's `forseti_csrf` token; settings flows to the session and identity.
-- **Submit** (`submit_flow`, `src/identity_native/flows.rs:1018`): `check` (`src/identity_native/flows.rs:766`) loads the flow and compares kind, expiry and binding; the form's `csrf_token` is checked with `csrf::verify_csrf`; then `dispatch` (`src/identity_native/flows.rs:457`) hands it to the per-kind module. The engine returns a `SubmitOutcome` (show the flow again, or redirect with cookies), the audit rows, and an optional after-effect; the route writes the audit rows with the request's `AuditCtx` and runs the after-effect. A missing or expired flow goes to `/error?id=self_service_flow_expired`, a foreign one to `/error?id=security_csrf_violation` (`src/identity_native/errors.rs`).
-- **Sessions** (`src/identity_native/session.rs`): `create` (`:181`) issues the `forseti_session` cookie (`__Host-` prefixed on https), `step_up` (`:308`) raises the AAL and rotates the token, `refresh` (`:330`) advances `authenticated_at`. `whoami` (`:412`) answers `InsufficientAal` for an AAL1 session of an identity with TOTP, which drives the existing step-up.
-- **Mail**: codes and their outbox rows are written in one transaction (`send_code`, `src/identity_native/codes.rs:79`); `spawn_worker` (`src/identity_native/mail.rs:185`) sends them through `mailer::send_text`.
+- **Routes** (`router`, `src/identity_native/routes.rs:44`, mounted in the CSRF-protected public router): `GET /self-service/{kind}/browser` (`init`, `src/identity_native/routes.rs:167`) creates a flow and 303s to `/{kind}?flow=<id>`; `POST /self-service/{kind}?flow=<id>` (`submit`, `src/identity_native/routes.rs:345`) handles the form; `GET /self-service/{verification,recovery,logout}` (`link`, `src/identity_native/routes.rs:201`) serves the mail link, the admin recovery link and logout; `GET /self-service/methods/oidc/callback/{provider}` (`callback`, `src/identity_native/routes.rs:297`) takes the upstream provider's redirect back (see [Upstream sign-in (native build)](#upstream-sign-in-native-build)). Every path except the callback's provider segment is literal; there is no `{kind}` parameter. `flow_init_url` returns the relative init URL (`src/identity_native/backend.rs:72`), so the handlers' redirects land on Forseti.
+- **Init** (`init_flow`, `src/identity_native/flows.rs:768`): `return_to` is kept only when `safe_return_to` leaves it unchanged and it fits 2048 bytes. Login, registration, recovery and verification flows are bound to the SHA-256 of the browser's `forseti_csrf` token; settings flows to the session and identity.
+- **Submit** (`submit_flow`, `src/identity_native/flows.rs:1171`): `check` (`src/identity_native/flows.rs:868`) loads the flow and compares kind, expiry and binding; the form's `csrf_token` is checked with `csrf::verify_csrf`; then `dispatch` (`src/identity_native/flows.rs:519`) hands a provider submit on a login, registration or settings flow to `flows/upstream.rs` and everything else to the per-kind module. The engine returns a `SubmitOutcome` (show the flow again, or redirect with cookies), the audit rows, and an optional after-effect; the route writes the audit rows with the request's `AuditCtx` and runs the after-effect. A missing or expired flow goes to `/error?id=self_service_flow_expired`, a foreign one to `/error?id=security_csrf_violation` (`src/identity_native/errors.rs`).
+- **Sessions** (`src/identity_native/session.rs`): `create` (`:176`) issues the `forseti_session` cookie (`__Host-` prefixed on https), `step_up` (`:308`) raises the AAL and rotates the token, `refresh` (`:331`) advances `authenticated_at`. Each stored method carries an optional provider id (set for `oidc`). `whoami` (`:421`) answers `InsufficientAal` for an AAL1 session of an identity with TOTP, which drives the existing step-up.
+- **Mail**: codes and their outbox rows are written in one transaction (`send_code`, `src/identity_native/codes.rs:81`); `spawn_worker` (`src/identity_native/mail.rs:185`) sends them through `mailer::send_text`. A provider sign-up mails a code before any identity exists (`send_signup_code`, `src/identity_native/codes.rs:96`), so code and outbox rows may carry no identity.
+- **Never verified**: `identities.first_verified_at` is set the first time the address is proven (a mailed code, or a verified creation) and never cleared. It gates TOTP enrolment, backup codes and provider links, and decides whether a recovery resets the account (Recovery, native build, below).
 
 ### Registration
 
@@ -97,7 +98,7 @@ Edge cases:
 
 #### Native build
 
-`GET /self-service/registration/browser` and `POST /self-service/registration` sit behind the `[auth].registration_*` limiters. `submit` (`src/identity_native/flows/registration.rs:32`) has two steps, as Kratos's progressive registration: step 1 (`profile`, `:83`) validates and stores the traits on the flow; step 2 (`credential`, `:98`) checks the password policy (length, similarity to the address, optional breach check), hashes it with Argon2id and inserts the identity and its password credential in one transaction (`store::create_with_password`). A taken address gives message 4000007 and returns to step 1. `finish` (`:176`) then issues an AAL1 session, creates a verification flow in `sent_email` with the same `return_to` and queues the code mail. The route sets the session cookie, writes `identity.created` and 303s to `/verification?flow=<id>`.
+`GET /self-service/registration/browser` and `POST /self-service/registration` sit behind the `[auth].registration_*` limiters. `submit` (`src/identity_native/flows/registration.rs:30`) has two steps, as Kratos's progressive registration: step 1 (`profile`, `:81`) validates and stores the traits on the flow; step 2 (`credential`, `:96`) checks the password policy (length, similarity to the address, optional breach check), hashes it with Argon2id and inserts the identity and its password credential in one transaction (`store::create_with_password`). A taken address gives message 4000007 and returns to step 1. `finish` (`:174`) then issues an AAL1 session, creates a verification flow in `sent_email` with the same `return_to` and queues the code mail. The route sets the session cookie, writes `identity.created` and 303s to `/verification?flow=<id>`. Both steps carry the configured providers' `provider` submits (message 1040002); a sign-up through one of them is described under [Upstream sign-in (native build)](#upstream-sign-in-native-build).
 
 ```mermaid
 sequenceDiagram
@@ -205,13 +206,13 @@ Edge cases:
 
 #### Native build
 
-`POST /self-service/login` is limited per client IP (`[identity].login_ip_rate_per_minute` / `_per_hour`). `init_flow` (`src/identity_native/flows.rs:666`) creates one of three flows, and `submit` (`src/identity_native/flows/login.rs:42`) picks the matching path:
+`POST /self-service/login` is limited per client IP (`[identity].login_ip_rate_per_minute` / `_per_hour`). `init_flow` (`src/identity_native/flows.rs:768`) creates one of three flows, and `submit` (`src/identity_native/flows/login.rs:42`) picks the matching path:
 
 - **Password** (no session): `password_login` (`:162`). The per-address attempt counter is checked before the lookup; unknown address and wrong password both run one Argon2 verify and answer 4000006; an unverified address answers 4000010, only after the password verified. Success marks the flow spent, issues an AAL1 session (`[{password, aal1, now}]`) and audits `auth.login`.
 - **Second factor** (`aal=aal2` on an AAL1 session): `second_factor` (`:270`) takes `totp_code` or `lookup_secret`, counted per identity. A TOTP step at or below the last accepted one is refused (`consume_totp`, `:334`); a backup code is marked used with a compare-and-swap (`consume_lookup`, `:360`). Success calls `session::step_up`, which raises the session to AAL2 and moves it to a new token; no `auth.login` row, as on the Ory build. For an identity without TOTP the flow carries only message 1010004.
-- **Refresh** (`refresh=true` on a session): `refresh` (`:223`) takes the password of the session's identity and advances `authenticated_at` on the same session, keeping its token and AAL, then audits `auth.login`.
+- **Refresh** (`refresh=true` on a session): `refresh` (`:223`) takes the password of the session's identity and advances `authenticated_at` on the same session, keeping its token and AAL, then audits `auth.login`. The refresh screen also offers the configured `oidc` providers linked to the identity (see [Upstream sign-in (native build)](#upstream-sign-in-native-build)).
 
-The flow's `session_id` ties second-factor and refresh flows to the session that started them; another session's submit is refused as foreign.
+The password screen carries a `provider` submit (message 1010002) per configured provider; the second-factor screen carries none. The flow's `session_id` ties second-factor and refresh flows to the session that started them; another session's submit is refused as foreign.
 
 ```mermaid
 sequenceDiagram
@@ -227,6 +228,123 @@ sequenceDiagram
     P->>DB: step_up: aal2, new token
     P-->>B: 303 return_to (Set-Cookie: forseti_session=new)
 ```
+
+### Upstream sign-in (native build)
+
+On the Ory build Kratos runs the provider round trip (see [OIDC / social registration](#oidc--social-registration) and [OIDC login](#oidc-login)). On the native build Forseti does, for the providers in `[[identity.oidc_providers]]`.
+
+`Upstream` (`src/identity_native/upstream.rs:82`) is built at boot by `from_config` (`:127`) without network I/O. `authorize_url` (`:269`) derives the PKCE verifier and the nonce from `state` under the `upstream-pkce` key, so the browser carries nothing secret; `exchange` (`:305`) redeems the code: `oidc` through `discovery::exchange_code_with` and `id_token::verify_claims` (the address is kept only with `email_verified`), GitHub through its token endpoint, `/user` and `/user/emails` (the address marked primary and verified). Discovery is cached for an hour and the JWKS for 10 minutes, with one forced key refresh per minute on an unknown `kid` and the stale copy served for 60 s after a failed refresh; each outbound request times out after 5 s. Links live in `identity_oidc_links`, primary key `(provider, subject)`, `UNIQUE (identity_id, provider)`.
+
+**Start** (`start`, `src/identity_native/flows/upstream.rs:189`). `dispatch` sends here a submit with `method=oidc`, or without `method` but with `provider`, `link` or `unlink` (`is_upstream_submit`, `:82`):
+
+- login password screen and registration: `hop` (`:397`) to the named provider;
+- refresh login: `refresh_start` accepts only a configured `oidc` provider linked to the session's identity (GitHub or anything else: 4000006, no hop, nothing stored) and hops with `reauthenticate`, which adds `max_age=0`;
+- second-factor login: 4010002;
+- registration showing the email-needed screen: `email_needed_submit` (`:236`);
+- settings: `settings_start` (`:337`).
+
+`hop` stores a fresh random `state` in `Context.oidc_state` and the server's unix time in `Context.oidc_started_at` with a compare-and-swap save, sets the signed `forseti_upstream_state` cookie (`state_cookie`, `:52`: salt `forseti::identity::upstream-state::v1`, 600 s, `Path=/self-service/methods/oidc/callback`, `HttpOnly`, `SameSite=Lax`, `Secure` on https; payload `{p, k, f, s}`: provider, flow kind, flow id, `state`) and 303s to the authorization endpoint. An unconfigured provider or a failed discovery answers 9000002 on the flow, with no cookie and no audit row.
+
+**Callback** (`callback`, `src/identity_native/routes.rs:297`, its own per-IP bucket of 60 per minute and 600 per hour; `upstream_callback`, `src/identity_native/flows/upstream.rs:478`). Checks, in order:
+
+1. the provider in the path is configured;
+2. the state cookie verifies and names this provider;
+3. the query's `state` equals the cookie's (constant time);
+4. the cookie's flow kind is login, registration or settings, and the flow passes `check` (binding, or session ownership for settings and refresh flows);
+5. the flow's `oidc_state` equals `state` and is consumed, with `oidc_started_at`, in a compare-and-swap save (`consume_state`), so a replayed callback stops here;
+6. `answer` (`:555`): for an `oidc` provider, `iss` must equal the configured issuer when present and must be present when discovery advertises `authorization_response_iss_parameter_supported` (RFC 9207); GitHub's is ignored;
+7. no provider `error`, a non-empty `code`, and a successful exchange.
+
+Failures of 1 to 5 go to `/error?id=security_csrf_violation`; a missing or expired flow to `/error?id=self_service_flow_expired`; `check`'s `NoSession` to `/login?return_to=/settings` and `Aal2Required` to the step-up. Failures of 6 and 7 put 9000002 on the flow and audit `auth.login_failed` (`issuer_mismatch`, `upstream_error`, `exchange_failed`). A response clears the state cookie only once checks 1 to 3 passed, whatever the outcome from there; a request that fails 1 to 3 leaves the cookie, so a cross-site request to the callback path cannot break the genuine callback (RFC 9700 4.2.4).
+
+| Flow | Condition | Outcome |
+|---|---|---|
+| login or registration, no session | link exists, identity active, `first_verified_at` set | `linked_sign_in` (`:608`): flow spent, AAL1 session with method `oidc` and the provider, `auth.login`, 303 `return_to` |
+| same | link exists, identity inactive | 4000006, `auth.login_failed` |
+| same | link exists, never verified | 4000010, `auth.login_failed` |
+| same | no link, provider-verified address, free, not on `[admin].allowed_emails` | `unlinked_sign_in` takes a token from each `[auth].registration_*` bucket of `POST /self-service/registration` (per client IP, then global; `rate_limit::SharedBuckets`), then `store::create_with_link` (identity verified, link, one transaction), `signed_up` (`:788`): session, `identity.created` and `auth.login`, 303 `return_to` |
+| same | no link, provider-verified address, a registration bucket empty | plain `429` with `Retry-After`, nothing created, no audit row, flow not spent |
+| same | no link, address taken or admin-allowlisted | `refuse` (`:763`): flow spent, new registration flow (same binding and `return_to`) showing 4000007, `auth.login_failed`, no session |
+| same | no link, no verified address | `email_needed` (`:775`): flow spent, new registration flow with `ctx.email_needed` and the provider account sealed to it (purpose `flow-upstream`, bound to that flow id) |
+| same | a concurrent callback linked the provider account first | 9000002 (`link_taken`), no session |
+| refresh login | `oidc` provider, link owned by the session's identity, `auth_time` no earlier than `oidc_started_at` minus 60 s and no later than now plus 60 s (`fresh_login`) | `refresh_callback` (`:848`): `session::refresh(.., "oidc", Some(provider), Aal1)`, token and stored AAL kept, `auth.login` with `refresh: true`, 303 `return_to` |
+| refresh login | another identity's or no link, not an `oidc` provider, missing `auth_time` or one outside that window, identity inactive | 4000006, `auth.login_failed` |
+| refresh login | address not verified | 4000010, `auth.login_failed` |
+| settings link | window still open, `first_verified_at` set, provider account free | `settings_callback` (`:899`), `store::link_for` under `admit`: `identity.oidc.linked`, flow `success` (1050001), 303 `return_to` |
+| settings link | privileged window lapsed during the hop | 303 `/login?refresh=true&return_to=<page>`, nothing linked |
+| settings link | provider account linked to another identity, or this provider already linked | 4000007 |
+| settings link | never verified | 4000010 |
+
+```mermaid
+sequenceDiagram
+    participant B as Browser
+    participant P as Forseti
+    participant DB as Forseti DB
+    participant U as Upstream provider
+
+    B->>P: POST /self-service/login?flow=abc (provider=google)
+    P->>DB: ctx.oidc_state = state (compare-and-swap)
+    P-->>B: 303 authorization endpoint (Set-Cookie: forseti_upstream_state)
+    B->>U: sign in
+    U-->>B: 302 /self-service/methods/oidc/callback/google?code&state
+    B->>P: GET callback (state cookie)
+    P->>P: cookie, state, flow check, consume oidc_state, iss
+    P->>U: token request (code, PKCE verifier, client secret)
+    U-->>P: ID token
+    P->>DB: link_owner(google, sub)
+    alt linked
+        P->>DB: session (oidc, google, aal1)
+    else no link, verified address
+        P->>DB: create_with_link, session
+    end
+    P-->>B: 303 return_to (Set-Cookie: forseti_session, state cookie cleared)
+```
+
+**Email-needed.** The new registration flow renders `Registration::EmailNeeded` (`traits.email` and the provider submit), which `auth/registration.rs` recognises by its shape. `email_needed_submit` (`:236`) uses the provider account sealed on the flow and ignores the provider in the form. A malformed address goes back with the field message; a taken address gets 4000007, as password registration answers it. An address on `[admin].allowed_emails` is not tested here, so the screen does not reveal the allowlist. Otherwise the registration flow is spent, a verification flow with the same binding is stored with the account sealed to it, and a code without identity is mailed (`send_signup_code`), then 303 `/verification?flow=<id>`. `check` (`src/identity_native/flows.rs:909`) lets only the bound browser use that flow. `signup_code_submit` (`:287`): an empty code mails a new one unless the address now has an account; a code mailed to the flow's address without identity runs `create_with_link` (the allowlist is checked again; `EmailTaken` gives 4000007, `LinkTaken` 9000002), then `signed_up`. No identity or link exists before the code.
+
+```mermaid
+sequenceDiagram
+    participant B as Browser
+    participant P as Forseti
+    participant DB as Forseti DB
+    participant M as Mail worker
+
+    B->>P: GET callback (no verified address)
+    P->>DB: spend flow; registration flow def (email_needed, sealed account)
+    P-->>B: 303 /registration?flow=def
+    B->>P: POST /self-service/registration?flow=def (traits.email)
+    P->>DB: verification flow ghi (same binding, sealed account), code without identity
+    M->>M: send code
+    P-->>B: 303 /verification?flow=ghi
+    B->>P: POST /self-service/verification?flow=ghi (code, same browser)
+    P->>DB: create_with_link (verified), session
+    P-->>B: 303 return_to (Set-Cookie: forseti_session)
+```
+
+**Link and unlink in settings** (`settings_start`, `:337`). Both need the privileged window (else the refresh redirect). `link=<id>` additionally needs `first_verified_at` (else 4000010) and hops as above. `unlink=<id>` posts with no provider hop: an unconfigured provider gets the settings 4000001 "no strategy" text; `store::delete_link` (`src/identity_native/store.rs:1284`) locks the identity row and deletes only while a password or a link to another configured provider remains. `Deleted` audits `identity.oidc.unlinked` and marks the flow `success`; `LastMethod` answers 4000001 "Unable to remove the last sign-in method."; `NotLinked` the "no strategy" text. The settings screen offers `link=<id>` (1050002) for each configured provider not linked and `unlink=<id>` (1050003) for a linked one only under the same guard; `Identity.sole_sign_in_is_oidc` carries the guard to `/settings/linked-providers`. Links to a provider removed from config get no button and do not count for the guard.
+
+```mermaid
+sequenceDiagram
+    participant B as Browser
+    participant P as Forseti
+    participant DB as Forseti DB
+    participant U as GitHub
+
+    B->>P: POST /self-service/settings?flow=abc (link=github)
+    P->>P: privileged window, first_verified_at
+    P-->>B: 303 github.com/login/oauth/authorize (Set-Cookie: forseti_upstream_state)
+    B->>U: authorize
+    U-->>B: 302 /self-service/methods/oidc/callback/github?code&state
+    B->>P: GET callback
+    P->>U: token, /user, /user/emails
+    P->>DB: privileged window again, link_for (admit)
+    P-->>B: 303 return_to (settings saved)
+    B->>P: POST /self-service/settings?flow=xyz (unlink=github)
+    P->>DB: delete_link (password or another configured link remains)
+    P-->>B: 303 return_to
+```
+
+**Discovery and CSP.** `probe_oidc_provider_ids` (`src/identity_native/backend.rs:112`) returns the configured ids, so `idp_hint` and `idp_hints_supported` work as on the Ory build. `oidc_providers::flow_auth_origins` adds each configured provider's issuer origin (`https://github.com` for GitHub) to `form-action` on the flows that show its button.
 
 ### Recovery (Password Reset)
 
@@ -311,12 +429,32 @@ Edge cases:
 
 `POST /self-service/recovery` shares a per-IP limit with verification submits. `submit` (`src/identity_native/flows/recovery.rs:23`) has two inputs:
 
-- **Email**: `request_code` (`src/identity_native/flows/verification.rs:80`) moves the flow to `sent_email` for every address. A code (6 digits, 15 minutes, 5 guesses) and its mail are queued only for an active identity with that address and while the address is under its hourly mail quota; otherwise the flow's earlier code is dropped. The mail carries the code only, no link.
-- **Code**: `check_code` (`:40`) spends one guess. A match marks the address verified (a mailed code proved the mailbox), marks the flow spent, issues an AAL1 session with method `code_recovery`, and `handoff` (`:113`) creates a settings flow with `recovery_handoff` set and a `request_url` containing `/self-service/recovery`, so `settings_section_from_flow` routes it to the password page and the handoff template shows as on the Ory build. The route writes `password.recovered` and 303s to `/settings?flow=<id>`.
+- **Email**: `request_code` (`src/identity_native/flows/verification.rs:87`) moves the flow to `sent_email` for every address. A code (6 digits, 15 minutes, 5 guesses) and its mail are queued only for an active identity with that address and while the address is under its hourly mail quota; otherwise the flow's earlier code is dropped. The mail carries the code only, no link.
+- **Code**: `check_code` (`:40`) spends one guess. A match goes through `recovered_identity` (`:147`), which marks the address verified (a mailed code proved the mailbox) and resets a never-verified identity (below); then the flow is marked spent, an AAL1 session with method `code_recovery` is issued, and `handoff` (`:168`) creates a settings flow with `recovery_handoff` set and a `request_url` containing `/self-service/recovery`, so `settings_section_from_flow` routes it to the password page and the handoff template shows as on the Ory build. The route writes `password.recovered` and 303s to `/settings?flow=<id>`.
 
 An identity with TOTP still needs AAL2 for settings, so the recovery session steps up first, exactly as above.
 
-**Admin recovery code.** `admin_create_recovery_code` (`src/identity_native/backend.rs:247`) calls `admin_code` (`src/identity_native/flows/recovery.rs:131`): it refuses an inactive identity, drops the identity's earlier recovery codes, and creates a recovery flow in `sent_email` with no binding, a code that is returned instead of mailed, and the link `<self>/self-service/recovery?flow=<id>`. `GET /self-service/recovery?flow=` (`link`) only sets the CSRF cookie and sends the browser to `/recovery?flow=<id>`; a GET never binds, and an unbound flow renders for any browser (it shows no identity data). The first CSRF-valid submit binds the flow to that browser's token (`adopt`, `src/identity_native/flows.rs:841`, a compare-and-swap on a NULL binding); later browsers get the expired-flow error. A code from an admin proves no mailbox, so it leaves the address's verified state alone.
+**Never-verified reset.** For a mailed code, `store::verify_recovered` (`src/identity_native/store.rs:1367`) takes the identity row lock and reads `first_verified_at`. When it is null, the same transaction revokes the identity's live sessions, deletes every credential (password, TOTP, backup codes), every provider link and its `oidc_links` first-seen rows, the offline passphrase, the identity's codes and its pending address-change flows, then sets `email_verified_at` and `first_verified_at`. `check_code` returns `AfterEffect::AccountReset`, and the route (`submit`, `src/identity_native/routes.rs:345`) calls `end_op_sessions_for_subject` with no kept session and `GrantRevocation::Revoke`, logging at `error` when Hydra does not confirm all of it. Only then does the recovering browser get its session; the handoff asks for a new password. `password.recovered` carries `unverified_reset`, `sessions_revoked`, `methods_removed`, `links_removed` and `offline_access_removed`. If the flow cannot be finished after a reset, the audit row and the after-effect still go out and the browser gets the expired-flow error. A verified identity's recovery resets nothing, and an admin code (below) neither verifies nor resets.
+
+```mermaid
+sequenceDiagram
+    participant B as Browser
+    participant P as Forseti
+    participant DB as Forseti DB
+    participant H as Hydra
+
+    B->>P: POST /self-service/recovery?flow=abc (mailed code)
+    P->>DB: use code; verify_recovered (row lock)
+    alt first_verified_at is null
+        P->>DB: revoke sessions, delete credentials, links, offline secret, codes, pending changes
+    end
+    P->>DB: set email_verified_at, first_verified_at
+    P->>DB: session (code_recovery, aal1), settings handoff flow
+    P->>H: reset only: end OP sessions, revoke grants
+    P-->>B: 303 /settings?flow=<settings_id> (Set-Cookie: forseti_session)
+```
+
+**Admin recovery code.** `admin_create_recovery_code` (`src/identity_native/backend.rs:273`) calls `admin_code` (`src/identity_native/flows/recovery.rs:186`): it refuses an inactive identity, drops the identity's earlier recovery codes, and creates a recovery flow in `sent_email` with no binding, a code that is returned instead of mailed, and the link `<self>/self-service/recovery?flow=<id>`. `GET /self-service/recovery?flow=` (`link`) only sets the CSRF cookie and sends the browser to `/recovery?flow=<id>`; a GET never binds, and an unbound flow renders for any browser (it shows no identity data). The first CSRF-valid submit binds the flow to that browser's token (`adopt`, `src/identity_native/flows.rs:966`, a compare-and-swap on a NULL binding); later browsers get the expired-flow error. A code from an admin proves no mailbox, so it leaves the address's verified state alone.
 
 ```mermaid
 sequenceDiagram
@@ -392,11 +530,30 @@ Edge cases:
 
 #### Native build
 
-`submit` (`src/identity_native/flows/verification.rs:20`) takes an email or a code. An email goes through `request_code` (`:80`), as recovery does, but mails only an address that is not verified yet. A code goes to `check_code` (`:108`): a match sets `email_verified_at` for the address the code was mailed to (and only that one), moves the flow to `passed_challenge` (`passed`, `:138`, which retries the save until it lands) and audits `verification.completed`. No session is issued, so the flow is not bound to a browser on submit; the code is the proof.
+`submit` (`src/identity_native/flows/verification.rs:21`) takes an email or a code. A flow carrying a sealed provider account goes to `upstream::signup_code_submit` (see [Upstream sign-in (native build)](#upstream-sign-in-native-build)), an address-change flow to `address_change_submit` (below). Otherwise an email goes through `request_code` (`:87`), as recovery does, but mails only an address that is not verified yet. A code goes to `check_code` (`:115`): a match sets `email_verified_at` (and `first_verified_at`, if unset) for the identity and address the code was mailed to (and only that one), moves the flow to `passed_challenge` (`passed`, `:224`, which retries the save until it lands) and audits `verification.completed`. A code without identity belongs to a provider sign-up and verifies nothing here. No session is issued, so the flow is not bound to a browser on submit; the code is the proof.
 
-- **Logged-in short-circuit**: `verify_known_email` (`src/identity_native/backend.rs:88`) calls `request_for_known` (`src/identity_native/flows/verification.rs:155`), which does the email step in-process for the session's address.
-- **Mail link**: the mail carries `<self>/self-service/verification?flow=<id>&code=<code>`. `GET` on it (`link`, `src/identity_native/routes.rs:199`) neither verifies nor spends a guess: `prefill_verification_code` (`src/identity_native/flows.rs:1073`) seals the code into the flow for the browser that followed the link, and the page shows it filled in for the user to submit.
-- **Registration and address changes** create the flow already in `sent_email` with the code queued, and send the browser straight to `/verification?flow=<id>`.
+- **Logged-in short-circuit**: `verify_known_email` (`src/identity_native/backend.rs:104`) calls `request_for_known` (`src/identity_native/flows/verification.rs:241`), which does the email step in-process for the session's address.
+- **Mail link**: the mail carries `<self>/self-service/verification?flow=<id>&code=<code>`. `GET` on it (`link`, `src/identity_native/routes.rs:201`) neither verifies nor spends a guess: `prefill_verification_code` (`src/identity_native/flows.rs:1219`) seals the code into the flow for the browser that followed the link, and the page shows it filled in for the user to submit. For an address-change flow, `address_change_detour` (`src/identity_native/flows.rs:704`) first sends a browser without a session to sign in, and an AAL1 session of an identity with TOTP to the step-up, both returning to the flow.
+- **Registration** creates the flow already in `sent_email` with the code queued, and sends the browser straight to `/verification?flow=<id>`.
+
+**Address change.** A settings email change (Settings, native build, below) creates a verification flow with `ctx.address_change`, the identity id and the new address, and mails the code to the new address; the identity keeps its current address until then. `check` (`src/identity_native/flows.rs:895`) accepts a submit on that flow only from a live session of that identity (no session: sign in first; AAL1 with TOTP: step up first; another identity: foreign). `address_change_submit` (`src/identity_native/flows/verification.rs:149`) mails a fresh code to the pending address on an empty code; a code whose row names the same identity and address runs `store::apply_address_change` (`src/identity_native/store.rs:822`) under `admit`: the new address, `email_verified_at` now, `first_verified_at` if unset, and every code of the identity retired, in one transaction. A taken address answers 4000007, a gone or inactive identity 4070006, a session that ended in between the sign-in redirect. Audits `verification.completed` with `address_change: applied`.
+
+```mermaid
+sequenceDiagram
+    participant B as Browser (signed in)
+    participant P as Forseti
+    participant DB as Forseti DB
+
+    B->>P: POST /self-service/settings?flow=abc (traits.email=new)
+    P->>DB: names; drop older pending changes; change flow def, code, outbox row (one transaction)
+    P-->>B: 303 return_to (address unchanged)
+    B->>P: GET /self-service/verification?flow=def&code=123456 (mail link)
+    P->>P: address_change_detour: session of this identity at the needed AAL
+    P-->>B: 303 /verification?flow=def&code=123456
+    B->>P: POST /self-service/verification?flow=def (code)
+    P->>DB: apply_address_change (admit, row lock)
+    P-->>B: 303 /verification?flow=def (passed_challenge)
+```
 
 ```mermaid
 sequenceDiagram
@@ -459,7 +616,7 @@ Edge cases:
 
 #### Native build
 
-`POST /logout` runs the same handler and the same OP-session steps. `fetch_logout_url` (`src/identity_native/backend.rs:48`) returns `/self-service/logout?token=<mac>`, where the token is an HMAC of the session id under the logout subkey (`logout_url`, `src/identity_native/session.rs:749`). `GET /self-service/logout` (`link`, `src/identity_native/routes.rs:199`) calls `logout` (`src/identity_native/flows.rs:1099`): a token matching the cookie's session revokes it; the response clears the session cookie and 303s to `/login`. A browser without a session gets the same redirect; a wrong token goes to `/error?id=security_csrf_violation`.
+`POST /logout` runs the same handler and the same OP-session steps. `fetch_logout_url` (`src/identity_native/backend.rs:64`) returns `/self-service/logout?token=<mac>`, where the token is an HMAC of the session id under the logout subkey (`logout_url`, `src/identity_native/session.rs:756`). `GET /self-service/logout` (`link`, `src/identity_native/routes.rs:201`) calls `logout` (`src/identity_native/flows.rs:1245`): a token matching the cookie's session revokes it; the response clears the session cookie and 303s to `/login`. A browser without a session gets the same redirect; a wrong token goes to `/error?id=security_csrf_violation`.
 
 ```mermaid
 sequenceDiagram
@@ -506,16 +663,16 @@ CSRF for the flow form itself, since the form action is Kratos's public URL).
 
 ### Native build
 
-The pages and `fetch_settings_subpage` are the same; the flow comes from `init_flow` (`src/identity_native/flows.rs:666`) through `create_settings_flow` (`src/identity_native/flows.rs:542`). One flow holds every group (profile, password, TOTP, and backup codes once TOTP is enrolled), is tied to the session and identity that opened it, and carries the page URL as `return_to`. GET and POST refuse an AAL1 session of an identity with TOTP (`PrivilegedRequired(Aal2Required)`, then the step-up), and another session's flow is refused as foreign.
+The pages and `fetch_settings_subpage` are the same; the flow comes from `init_flow` (`src/identity_native/flows.rs:768`) through `create_settings_flow` (`src/identity_native/flows.rs:611`). One flow holds every group (profile, password, TOTP, backup codes once TOTP is enrolled, and the provider link and unlink submits), is tied to the session and identity that opened it, and carries the page URL as `return_to`. GET and POST refuse an AAL1 session of an identity with TOTP (`PrivilegedRequired(Aal2Required)`, then the step-up), and another session's flow is refused as foreign.
 
-`POST /self-service/settings` is limited per client IP. `submit` (`src/identity_native/flows/settings.rs:39`) dispatches on `method`:
+`POST /self-service/settings` is limited per client IP. A `link` or `unlink` submit goes to `flows/upstream.rs` (see [Upstream sign-in (native build)](#upstream-sign-in-native-build)); every other submit to `submit` (`src/identity_native/flows/settings.rs:40`), which dispatches on `method`:
 
-- `profile` (`:201`): a name change saves at once. A new address needs the privileged window (else 303 to `/login?refresh=true&return_to=<page>`), the per-identity change quota and the address's mail quota (9000001 when either is spent); the address, the cleared `email_verified_at`, the retired old codes, and a new verification flow with its code and outbox row are written in one transaction (`store::update_profile`). A taken address gives 4000007 and writes nothing. Audits `profile.updated`.
-- `password` (`:253`): privileged window and change quota, then policy, Argon2id hash and credential replace. Audits `password.changed`; the route then calls `end_op_sessions_for_subject` sparing the current session, so the other browsers' OP sessions and grants end while their identity sessions stay.
-- `totp` (`:294`): a code for the pending secret sealed on the flow stores the credential (the enrolment step counts as used), raises the current session to AAL2 with a new token and audits `mfa.totp.enrolled`; `totp_unlink` deletes TOTP and backup codes and audits `mfa.totp.disabled`.
-- `lookup_secret` (`:348`): regenerate keeps 10 new codes sealed on the flow and shows them; confirm clears them from the flow, then stores their MACs (`mfa.lookup.regenerated`), so one set can be stored only once; disable deletes them (`mfa.lookup.disabled`).
+- `profile` (`:224`): a name change saves at once. A new address needs the privileged window (else 303 to `/login?refresh=true&return_to=<page>`), the per-identity change quota and the address's mail quota (9000001 when either is spent). The address itself does not change: `store::update_profile` (`src/identity_native/store.rs:745`) writes the names, drops the identity's earlier pending address changes with their codes, and stores an address-change verification flow (`address_change_flow`, `src/identity_native/flows.rs:693`) with its code and outbox row for the new address, in one transaction. The identity keeps its address, verified mark and sign-in until that code is entered (Email Verification, native build, above). A taken address gives 4000007 and writes nothing. Audits `profile.updated`, with `address_change: requested` when an address was asked for.
+- `password` (`change_password`, `:280`): privileged window and change quota, then policy, Argon2id hash and credential replace. Audits `password.changed`; the route then calls `end_op_sessions_for_subject` sparing the current session, so the other browsers' OP sessions and grants end while their identity sessions stay.
+- `totp` (`totp_method`, `:324`): a code for the pending secret sealed on the flow stores the credential (the enrolment step counts as used), raises the current session to AAL2 with a new token and audits `mfa.totp.enrolled`; an identity without `first_verified_at` gets 4000010 instead. `totp_unlink` deletes TOTP and backup codes and audits `mfa.totp.disabled`.
+- `lookup_secret` (`lookup_method`, `:384`): regenerate keeps 10 new codes sealed on the flow and shows them; confirm clears them from the flow, then stores their MACs (`mfa.lookup.regenerated`), so one set can be stored only once; both answer 4000010 without `first_verified_at`. Disable deletes them (`mfa.lookup.disabled`).
 
-A stored change marks the flow `success` (message 1050001) and redirects to the flow's `return_to`, or back to the flow without one; a concurrent save of the flow is reloaded and retried.
+The profile, password, TOTP, backup-code and provider-link writes go through `store::admit`, which takes the identity row lock and re-checks inside the write's transaction that the session is still live and, for TOTP, backup codes and links, that `first_verified_at` is set; a session revoked in between gets the sign-in redirect and nothing is written. A stored change marks the flow `success` (message 1050001) and redirects to the flow's `return_to`, or back to the flow without one; a concurrent save of the flow is reloaded and retried.
 
 ### Settings overview
 
@@ -622,7 +779,7 @@ sequenceDiagram
 ### Linked Providers (OIDC)
 
 `GET /settings/linked-providers` — handler `settings_linked_providers`
-(`src/settings/linked_providers.rs:37`), template `templates/settings_linked_providers.html`.
+(`src/settings/linked_providers.rs:64`), template `templates/settings_linked_providers.html`.
 
 Renders the `oidc` node group of the settings flow. Each enabled provider
 shows up as either a "Link" or an "Unlink" button (Kratos emits the right
@@ -635,6 +792,8 @@ OAuth dance (Kratos redirects, the IdP sends the user back to Kratos, Kratos
 issues a final 303 to the UI URL); the unlink flow is a single POST.
 
 Same privileged-session and gone-flow handling as Profile/Password.
+
+On the native build the same page renders the native settings flow's `link` and `unlink` nodes, the buttons post to Forseti, and the "last sign-in method" state comes from `Identity.sole_sign_in_is_oidc` (`sole_credential`, `src/settings/linked_providers.rs:310`) instead of the Kratos credential configs; the round trip is under [Upstream sign-in (native build)](#upstream-sign-in-native-build). After a link the browser lands on the page's `return_to`, a new flow, so the page shows the linked state rather than message 1050001.
 
 ### Sessions
 
@@ -1207,7 +1366,10 @@ and an empty one (retried after 30s) on a cold failure.
 `hydra_front::augment_discovery_doc` adds them as
 `idp_hints_supported: [{id, name}]`, names from `oidc_providers::display_name`
 (a custom id gets its first letter capitalised), and leaves the key out when
-the list is empty.
+the list is empty. On the native build `probe_oidc_provider_ids` returns the
+`[[identity.oidc_providers]]` ids without a network call, and the hand-off
+page posts to Forseti's own flow, which hops to the provider (see
+[Upstream sign-in (native build)](#upstream-sign-in-native-build)).
 
 ### Consent
 
@@ -1676,15 +1838,15 @@ plain OAuth2 authorization-code exchange with a dynamic client id
 `CLIENT_SECRET_VERIFIER` as the client secret.
 
 The `/sso/*` routes mount only when `[saml]` is configured
-(`src/app.rs:189`). The feature is gated on `Feature::Saml`: `Locked`
+(`src/app.rs:324`), on both identity backends. The feature is gated on `Feature::Saml`: `Locked`
 renders the neutral "SSO unavailable" page for users and the upsell page on
 the admin surface; `GraceReadOnly` keeps logins working but disables admin
 mutations.
 
 ### SSO login
 
-`GET /sso/{org-slug}` — `start` (`src/saml/flow.rs:94`).
-`GET /sso/callback` — `callback` (`src/saml/flow.rs:160`).
+`GET /sso/{org-slug}` — `start` (`src/saml/flow.rs:136`).
+`GET /sso/callback` — `callback` (`src/saml/flow.rs:202`).
 
 Customers wire `/sso/{org-slug}` into their IdP portal / bookmarks; it's
 the only entry point (SP-initiated only — no IdP-initiated flow in v1).
@@ -1694,10 +1856,10 @@ the only entry point (SP-initiated only — no IdP-initiated flow in v1).
 1. Checks, in order: `[saml]` present, license not `Locked`, org slug
    resolves, connection exists and is enabled. **Every** can't-start cause
    renders one uniform neutral page (`neutral_unavailable`,
-   `src/saml/flow.rs:56`) so the URL can't be used to probe which orgs
+   `src/saml/flow.rs:59`) so the URL can't be used to probe which orgs
    have SSO configured.
 2. Mints a nonce and sets the signed `forseti_saml_state` cookie
-   (10-minute TTL, `state_cookie` at `src/saml/mod.rs:28`) carrying
+   (10-minute TTL, `state_cookie` at `src/saml/mod.rs:27`) carrying
    `{nonce, org_id}` — the callback never trusts a query param for tenant
    selection.
 3. 302 to Jackson's authorize endpoint (`authorize_url`,
@@ -1711,7 +1873,7 @@ the only entry point (SP-initiated only — no IdP-initiated flow in v1).
    and `?code` is non-empty. Failure → 400 + audit `saml.login.failed`
    (`reason = state_mismatch`).
 2. Code → token → userinfo against Jackson's server-side URL
-   (`exchange_code` / `userinfo`, `src/saml/jackson.rs:61` / `:98`;
+   (`exchange_code` / `userinfo`, `src/saml/jackson.rs:63` / `:100`;
    `jackson_internal_url` when set).
 3. Email normalised (trim, lowercase) and bounded (≤ 254 octets, RFC
    5321); missing/oversized → error page + audit.
@@ -1721,7 +1883,7 @@ the only entry point (SP-initiated only — no IdP-initiated flow in v1).
      a route to an operator account, and checking this ahead of the link
      lookups means it holds for every login, not just the first.
    - `saml_links` row for (org, subject) or (org, email) → re-validated
-     against Kratos (stale rows pruned), then the linked identity's live
+     against the identity backend (stale rows pruned), then the linked identity's live
      facts go through the same `saml_link_decision` a fresh match does
      (`resolve_established_link`): refused if it is no longer a member of
      the org, or if any of its verified addresses is admin-allowlisted.
@@ -1736,7 +1898,8 @@ the only entry point (SP-initiated only — no IdP-initiated flow in v1).
        in front of it controls Forseti's alice@corp (RFC 9700 §4.16), so
        nothing is written and no session is minted. Forseti stashes the
        pending link in a signed cookie and bounces the user through a
-       Kratos login with `refresh=true`, returning to `/sso/confirm`.
+       login with `refresh=true` (on the native build the password or a
+       linked `oidc` provider), returning to `/sso/confirm`.
      - An **unverified** match, or a verified one that is not a member of
        this org, fails closed to the blocked page
        (`templates/saml_blocked.html`).
@@ -1747,7 +1910,7 @@ the only entry point (SP-initiated only — no IdP-initiated flow in v1).
        provision an arbitrary address it does not own.
 
    `GET /sso/confirm` is the return leg (`confirm`,
-   `src/saml/flow.rs:441`). It links **only** when the live Kratos
+   `src/saml/flow.rs:441`). It links **only** when the live
    session's identity id equals the one in the pending cookie, and that
    session signed in no earlier than the cookie was minted
    (`authenticated_since`, `src/saml/flow.rs:937`, with 60 s of slack for
@@ -1760,19 +1923,33 @@ the only entry point (SP-initiated only — no IdP-initiated flow in v1).
    the session.
 5. Org membership ensured (`member` role; best-effort — a DB blip must
    not abort an otherwise valid login).
-6. Session establishment: `admin_create_recovery_link`
-   (`src/ory/kratos.rs:726`, 15-minute TTL) mints a Kratos recovery
-   (magic) link — OSS Kratos has no admin session-creation API, so the
-   browser redeems the link and receives a native `ory_kratos_session`
-   cookie. **Requires `selfservice.methods.link.enabled: true` in the
-   Kratos config.**
-7. Audit `saml.login.succeeded`, then 302 to the recovery link, plus the
-   `forseti_sso_arrival` breadcrumb cookie (60 s, `Path=/settings`).
-8. Kratos's recovery redemption lands the browser on `/settings/password`
-   (the `recovery.after` settings flow). `settings_password`
-   (`src/settings/password.rs:46`) sees the breadcrumb, clears it, and
-   bounces to `/` — the dashboard — instead of rendering the password
-   form.
+6. Session establishment: `IdentityBackend::establish_browser_session`
+   (`src/backend/mod.rs:119`) with `return_to = /` and a `SessionOrigin`
+   of method `saml`, the client IP and the user agent. It answers a
+   `BrowserSession { location, set_cookies }`:
+   - Kratos build (`src/ory/kratos_backend.rs:231`):
+     `admin_create_recovery_link` (`src/ory/kratos.rs:726`, 1-minute
+     TTL) mints a Kratos recovery (magic) link — OSS Kratos has no admin
+     session-creation API, so the browser redeems the link and receives
+     an `ory_kratos_session` cookie. `location` is the link, and
+     `set_cookies` carries the `forseti_sso_arrival` breadcrumb (60 s,
+     `Path=/settings`). **Requires `selfservice.methods.link.enabled:
+     true` in the Kratos config.**
+   - Native build (`src/identity_native/backend.rs`): refuses a
+     missing or inactive identity, or one with `first_verified_at`
+     unset, otherwise `issue_session` with method
+     `saml`, no provider, AAL1; `location` is `/` and `set_cookies` the
+     `forseti_session` cookie. No `amr` is emitted for a `saml` session.
+   A refusal or error renders the retry page and audits
+   `saml.login.failed` (reason `recovery_link` on both builds).
+7. Audit `saml.login.succeeded`, then 302 to `location` with the
+   cleared state cookie and `set_cookies`.
+8. Kratos build only: the recovery redemption lands the browser on
+   `/settings/password` (the `recovery.after` settings flow).
+   `settings_password` (`src/settings/password.rs:44`) sees the
+   breadcrumb, clears it, and bounces to `/` — the dashboard — instead of
+   rendering the password form. On the native build the browser is
+   already on `/`.
 
 ```mermaid
 sequenceDiagram
@@ -1780,7 +1957,7 @@ sequenceDiagram
     participant P as Forseti
     participant J as Jackson
     participant I as Corporate IdP
-    participant K as Kratos
+    participant K as Identity backend
     U->>P: GET /sso/{org-slug}
     P->>P: config + license + org + connection checks
     alt any check fails
@@ -1801,25 +1978,32 @@ sequenceDiagram
     alt unverified match or create conflict
         P-->>U: blocked page (saml.login.blocked_unverified)
     end
-    P->>K: admin_create_recovery_link(identity, 15m)
-    P-->>U: 302 → recovery link (+ forseti_sso_arrival cookie)
-    U->>K: redeem recovery link → ory_kratos_session cookie
-    K-->>U: 302 → /settings/password (recovery.after hook)
-    U->>P: GET /settings/password
-    P-->>U: breadcrumb seen → clear it, 302 → / (dashboard)
+    P->>K: establish_browser_session(identity, "/", saml)
+    alt Kratos build
+        K-->>P: recovery link (1m) + forseti_sso_arrival cookie
+        P-->>U: 302 → recovery link
+        U->>K: redeem recovery link → ory_kratos_session cookie
+        K-->>U: 302 → /settings/password (recovery.after hook)
+        U->>P: GET /settings/password
+        P-->>U: breadcrumb seen → clear it, 302 → / (dashboard)
+    else native build
+        K-->>P: session (saml, aal1) + forseti_session cookie
+        P-->>U: 302 → / (dashboard)
+    end
 ```
 
 Sessions established this way are **AAL1** — MFA happens at the corporate
 IdP, and Forseti doesn't step the session up. AAL2-gated surfaces (the
-admin UI) still demand a second factor enrolled in Kratos.
+admin UI) still demand a second factor enrolled in Forseti (Kratos on the
+Ory build).
 
 ### Connection management (`/admin/saml`)
 
 Operator-only (Forseti-tier — SAML connections cross org boundaries, so
 org-scoped owners don't see this surface; the org overview page shows them
 a read-only status line instead). Handlers in `src/admin/saml.rs`: `list`
-(`:145`), `new` / `create` (`:218` / `:243`), `toggle` (`:372`),
-`delete_confirm` / `delete` (`:435` / `:491`). One connection per org
+(`:139`), `new` / `create` (`:212` / `:235`), `toggle` (`:358`),
+`delete_confirm` / `delete` (`:415` / `:468`). One connection per org
 (`saml_connections.org_id` is the PK).
 
 - **List** shows the SP values the operator hands to the customer's IdP
@@ -1827,7 +2011,7 @@ a read-only status line instead). Handlers in `src/admin/saml.rs`: `list`
   (Jackson's `samlAudience`, default `https://saml.boxyhq.com`), plus the
   per-org `/sso/{slug}` URL.
 - **Create** takes exactly one of an IdP metadata URL or a raw metadata
-  XML paste (`MetadataInput`, `src/saml/jackson.rs:128`). Jackson 26.x
+  XML paste (`MetadataInput`, `src/saml/jackson.rs:130`). Jackson 26.x
   only fetches localhost or HTTPS metadata URLs — plain-HTTP IdPs need
   the XML paste. Order: Jackson create first, then the local anchor row
   (IdP metadata and certificates live in Jackson; Forseti keeps only

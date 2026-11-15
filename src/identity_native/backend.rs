@@ -7,8 +7,9 @@ use super::flows::Found;
 use super::{NativeBackend, errors, mail, session, store};
 use crate::backend::IdentityBackend;
 use crate::backend::identity::{
-    CourierStatus, FlowFetch, FlowInit, FlowKind, FlowOutcome, Identity, IdentityState,
-    PrivilegedReason, RecoveryCode, SelfServiceError, Session, WhoamiOutcome, browser_init_url,
+    Aal, BrowserSession, CourierStatus, FlowFetch, FlowInit, FlowKind, FlowOutcome, Identity,
+    IdentityState, PrivilegedReason, RecoveryCode, SelfServiceError, Session, SessionOrigin,
+    WhoamiOutcome, browser_init_url,
 };
 use crate::flow_view::Flow;
 
@@ -18,6 +19,21 @@ fn not_found(id: &str) -> anyhow::Error {
 
 fn no_session() -> anyhow::Error {
     anyhow::anyhow!("no live session cookie")
+}
+
+impl NativeBackend {
+    /// Sets [`Identity::sole_sign_in_is_oidc`]: linked, no password, and at most one link to a
+    /// configured provider. Links to providers removed from config are no way in.
+    fn with_sign_in_fact(&self, mut identity: Identity) -> Identity {
+        let links = crate::settings::linked_providers::linked_provider_ids(&identity);
+        let has_password = identity
+            .credentials
+            .as_ref()
+            .is_some_and(|c| c.contains_key("password"));
+        let usable = self.upstream.ids().filter(|p| links.contains(*p)).count();
+        identity.sole_sign_in_is_oidc = Some(!links.is_empty() && !has_password && usable <= 1);
+        identity
+    }
 }
 
 impl IdentityBackend for NativeBackend {
@@ -94,7 +110,7 @@ impl IdentityBackend for NativeBackend {
     }
 
     async fn probe_oidc_provider_ids(&self) -> Result<Vec<String>> {
-        Ok(Vec::new())
+        Ok(self.upstream.ids().map(str::to_string).collect())
     }
 
     async fn list_my_sessions(&self, cookie: Option<&str>) -> Result<Vec<Session>> {
@@ -168,7 +184,9 @@ impl IdentityBackend for NativeBackend {
     }
 
     async fn admin_get_identity_optional(&self, id: &str) -> Result<Option<Identity>> {
-        store::get(&self.db, id).await
+        Ok(store::get(&self.db, id)
+            .await?
+            .map(|i| self.with_sign_in_fact(i)))
     }
 
     // Credential configs hold secrets and are never handed out, so "full" is the same view.
@@ -186,15 +204,25 @@ impl IdentityBackend for NativeBackend {
         page_token: Option<&str>,
         credentials_identifier: Option<&str>,
     ) -> Result<Vec<Identity>> {
-        store::list(&self.db, page_size, page_token, credentials_identifier).await
+        let found = store::list(&self.db, page_size, page_token, credentials_identifier).await?;
+        Ok(found
+            .into_iter()
+            .map(|i| self.with_sign_in_fact(i))
+            .collect())
     }
 
     async fn admin_list_identities_by_ids(&self, ids: Vec<String>) -> Result<Vec<Identity>> {
-        store::list_by_ids(&self.db, ids).await
+        let found = store::list_by_ids(&self.db, ids).await?;
+        Ok(found
+            .into_iter()
+            .map(|i| self.with_sign_in_fact(i))
+            .collect())
     }
 
     async fn admin_find_identity_by_email(&self, email: &str) -> Result<Option<(Identity, bool)>> {
-        store::find_by_email(&self.db, email).await
+        Ok(store::find_by_email(&self.db, email)
+            .await?
+            .map(|(i, verified)| (self.with_sign_in_fact(i), verified)))
     }
 
     async fn admin_create_identity_verified(
@@ -204,7 +232,15 @@ impl IdentityBackend for NativeBackend {
         first: &str,
         last: &str,
     ) -> Result<Option<Identity>> {
-        store::create(&self.db, email, Some(first), Some(last), true).await
+        let max = store::NAME_MAX_CHARS;
+        if first.chars().count() > max || last.chars().count() > max {
+            anyhow::bail!("name longer than {max} characters");
+        }
+        Ok(
+            store::create(&self.db, email, Some(first), Some(last), true)
+                .await?
+                .map(|i| self.with_sign_in_fact(i)),
+        )
     }
 
     async fn admin_set_identity_language(&self, id: &str, lang: &str) -> Result<Identity> {
@@ -248,14 +284,31 @@ impl IdentityBackend for NativeBackend {
         self.admin_recovery_code(identity_id).await
     }
 
-    // Only the SAML bridge mints recovery links, and it is not mounted on this backend.
-    async fn admin_create_recovery_link(
+    // AAL1 like a password sign-in: whoami still asks an identity with TOTP for its second factor.
+    // A never-verified identity gets none, as on the provider path.
+    async fn establish_browser_session(
         &self,
-        _identity_id: &str,
-        _expires_in: &str,
-        _return_to: Option<&str>,
-    ) -> Result<String> {
-        anyhow::bail!("recovery links are not supported by the native identity backend")
+        identity_id: &str,
+        return_to: &str,
+        origin: SessionOrigin<'_>,
+    ) -> Result<BrowserSession> {
+        if !store::row_by_id(&self.db, identity_id)
+            .await?
+            .is_some_and(|row| store::is_active(&row) && row.first_verified_at.is_some())
+        {
+            anyhow::bail!("identity {identity_id} is missing, inactive or never verified");
+        }
+        let device = session::Device {
+            ip: origin.ip,
+            user_agent: origin.user_agent,
+        };
+        let issued = self
+            .issue_session(identity_id, origin.method, None, Aal::Aal1, device)
+            .await?;
+        Ok(BrowserSession {
+            location: return_to.to_string(),
+            set_cookies: vec![self.session_set_cookie(&issued.token)],
+        })
     }
 
     async fn list_identity_schemas(&self) -> Result<Vec<String>> {
@@ -296,12 +349,6 @@ mod tests {
         assert!(backend.version().await.unwrap().starts_with("native "));
         assert_eq!(backend.list_identity_schemas().await.unwrap(), ["default"]);
         assert!(backend.probe_oidc_provider_ids().await.unwrap().is_empty());
-        assert!(
-            backend
-                .admin_create_recovery_link("id", "1h", None)
-                .await
-                .is_err()
-        );
         assert_eq!(
             backend.flow_init_url(
                 FlowKind::Login,
@@ -311,6 +358,103 @@ mod tests {
                 }
             ),
             "/self-service/login/browser?aal=aal2"
+        );
+    }
+
+    const ORIGIN: SessionOrigin<'static> = SessionOrigin {
+        method: "saml",
+        ip: Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, 9))),
+        user_agent: Some("Mozilla/5.0 sso"),
+    };
+
+    fn cookie_header(set_cookie: &str) -> String {
+        set_cookie.split(';').next().unwrap().to_string()
+    }
+
+    #[tokio::test]
+    async fn an_established_browser_session_is_an_aal1_session_cookie_for_return_to() {
+        let db = crate::db::test_pool().await;
+        let backend = NativeBackend::for_test(&db);
+        let id = store::create(&db, "sso@x.test", None, None, true)
+            .await
+            .unwrap()
+            .unwrap()
+            .id;
+        let established = backend
+            .establish_browser_session(&id, "/", ORIGIN)
+            .await
+            .unwrap();
+        assert_eq!(established.location, "/");
+        let [set_cookie] = established.set_cookies.as_slice() else {
+            panic!("one cookie expected: {:?}", established.set_cookies);
+        };
+        let token = cookie_header(set_cookie)
+            .strip_prefix("forseti_session=")
+            .unwrap()
+            .to_string();
+        assert_eq!(set_cookie, &backend.session_set_cookie(&token));
+        let WhoamiOutcome::Ok(s) = backend
+            .whoami(Some(&cookie_header(set_cookie)))
+            .await
+            .unwrap()
+        else {
+            panic!("the cookie carries a session");
+        };
+        assert_eq!(s.authenticator_assurance_level, Some(Aal::Aal1));
+        let [method] = s.authentication_methods.as_deref().unwrap() else {
+            panic!("one method expected");
+        };
+        assert_eq!(method.method.as_deref(), Some("saml"));
+        assert_eq!(method.provider, None);
+        let device = &s.devices.as_deref().unwrap()[0];
+        assert_eq!(device.ip_address.as_deref(), Some("192.0.2.9"));
+        assert_eq!(device.user_agent.as_deref(), Some("Mozilla/5.0 sso"));
+
+        super::super::test_support::plant_totp(&backend, &id).await;
+        assert!(matches!(
+            backend
+                .whoami(Some(&cookie_header(set_cookie)))
+                .await
+                .unwrap(),
+            WhoamiOutcome::InsufficientAal
+        ));
+    }
+
+    #[tokio::test]
+    async fn no_browser_session_for_a_missing_inactive_or_never_verified_identity() {
+        let db = crate::db::test_pool().await;
+        let backend = NativeBackend::for_test(&db);
+        let missing = "00000000-0000-4000-8000-000000000000";
+        assert!(
+            backend
+                .establish_browser_session(missing, "/", ORIGIN)
+                .await
+                .is_err()
+        );
+        let id = store::create(&db, "off@x.test", None, None, true)
+            .await
+            .unwrap()
+            .unwrap()
+            .id;
+        store::set_state(&db, &id, IdentityState::Inactive)
+            .await
+            .unwrap();
+        assert!(
+            backend
+                .establish_browser_session(&id, "/", ORIGIN)
+                .await
+                .is_err()
+        );
+        let never_verified = store::create(&db, "new@x.test", None, None, false)
+            .await
+            .unwrap()
+            .unwrap()
+            .id;
+        assert!(
+            backend
+                .establish_browser_session(&never_verified, "/", ORIGIN)
+                .await
+                .is_err()
         );
     }
 

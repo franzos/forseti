@@ -16,9 +16,9 @@ TAILWIND_RUN  := guix shell glibc gcc-toolchain -- bash -c 'export LD_LIBRARY_PA
 endif
 
 .PHONY: css css-watch dev build check check-native clean run run-native test-integration \
-	test-integration-native fuzz stack-up stack-up-native stack-up-saml stack-wait stack-down \
+	test-integration-native fuzz stack-up stack-up-native stack-up-saml stack-up-native-saml stack-wait stack-down \
 	stack-reset stack-logs seed-admin seed-admin-native \
-	e2e e2e-native e2e-expired e2e-licensed e2e-trace license-fixtures \
+	e2e e2e-native e2e-expired e2e-licensed e2e-licensed-native e2e-trace license-fixtures \
 	test-linux-host linux-test-seed linux-test-unseed linux-test-build
 
 # Compose engine. Defaults to podman-compose for local GUIX dev; CI overrides
@@ -113,6 +113,10 @@ stack-up-native: ## Bring up Hydra, Mailcrab and the mock OIDC upstream (no Krat
 # profile as a flag — works for both podman-compose and docker compose.
 stack-up-saml: ## stack-up plus the Jackson + mock-saml SAML bridge
 	$(MAKE) stack-up COMPOSE_PROFILE_FLAGS="--profile saml"
+
+stack-up-native-saml: ## stack-up-native plus the Jackson + mock-saml SAML bridge
+	$(COMPOSE) --profile saml -f $(COMPOSE_FILE) up -d postgres hydra-migrate hydra mailslurper mock-oidc jackson mock-saml
+	@$(MAKE) stack-wait ORY_READY_URLS="http://127.0.0.1:4445/health/ready http://127.0.0.1:5225/api/health"
 
 stack-wait: ## Block until Kratos + Hydra report ready (90s timeout per service)
 	@for url in $(ORY_READY_URLS); do \
@@ -249,8 +253,7 @@ e2e-expired: ## Run expired-bucket Playwright e2e (requires expired license acti
 	fi
 	$(call PLAYWRIGHT_RUN,expired)
 
-e2e-licensed: ## Run licensed-bucket Playwright e2e (requires active license activated)
-	$(call FORSETI_HEALTH_CHECK)
+define ACTIVE_LICENSE_CHECK
 	@row=$$(sqlite3 $(FORSETI_DB) "SELECT COALESCE(NULLIF(expires_at,''),'lifetime') FROM forseti_license LIMIT 1" 2>/dev/null); \
 	now=$$(date -u +%Y-%m-%dT%H:%M:%S+00:00); \
 	if [ -z "$$row" ]; then \
@@ -264,7 +267,17 @@ e2e-licensed: ## Run licensed-bucket Playwright e2e (requires active license act
 		echo "Activate tests/fixtures/license/active.blob via /admin/license first."; \
 		exit 1; \
 	fi
+endef
+
+e2e-licensed: ## Run licensed-bucket Playwright e2e (requires active license activated)
+	$(call FORSETI_HEALTH_CHECK)
+	$(call ACTIVE_LICENSE_CHECK)
 	$(call PLAYWRIGHT_RUN,licensed)
+
+e2e-licensed-native: ## Run licensed-bucket Playwright e2e against a native Forseti (requires active license activated)
+	$(call FORSETI_HEALTH_CHECK)
+	$(call ACTIVE_LICENSE_CHECK)
+	$(call PLAYWRIGHT_RUN,licensed,$(PLAYWRIGHT_NATIVE_FLAGS))
 
 # Mint the two test blobs via the signet issuer CLI (`--product forseti` selects
 # the signing key under signet's keys/forseti/). First run compiles the issuer

@@ -116,3 +116,5 @@ kratos-4070006 = The verification code is invalid or has already been used. Plea
 # --- Throttling (9000xxx) ---
 # 9000001 is Forseti's own id; Kratos has none for throttled attempts.
 kratos-9000001 = Too many sign-in attempts right now. Please try again in a few minutes.
+# 9000002 is Forseti's own id; Kratos has none for a failed upstream sign-in.
+kratos-9000002 = Signing in with the provider did not work. Please try again.

@@ -154,7 +154,8 @@ mod tests {
 
     async fn mail_row(db: &DbPool, backend: &NativeBackend, email: &str, state: &str, age: i64) {
         let identity = identity_with_password(db, email, false).await;
-        let mut row = backend.outbox_row(Purpose::Verification, &identity, email, "f", "123456");
+        let mut row =
+            backend.outbox_row(Purpose::Verification, Some(&identity), email, "f", "123456");
         row.state = state.to_string();
         row.created_at = days_ago(age);
         sql(db, move |c| {
@@ -221,6 +222,7 @@ mod tests {
             .issue_session(
                 &identity,
                 "password",
+                None,
                 crate::backend::identity::Aal::Aal1,
                 session::Device::default(),
             )
