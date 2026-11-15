@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.2.30] - 2026-11-15
+
+### Added
+- Native build: upstream sign-in through OpenID Connect providers and GitHub (`[[identity.oidc_providers]]`)
+- Native build: Enterprise SAML SSO
+- Native build: link and unlink providers under Settings
+- `make stack-up-native-saml`, `e2e-licensed-native`
+- Separate operator guides for the Kratos and native identity backends
+
+### Changed
+- Native build: an email change waits for the code mailed to the new address
+- Native build: recovering a never-verified account resets its credentials and sessions
+- Native build: a never-verified account cannot enrol TOTP or link a provider
+- Upstream OIDC discovery and token calls time out after 5 s (was 10 s)
+
 ## [0.2.29] - 2026-11-14
 
 ### Fixed
