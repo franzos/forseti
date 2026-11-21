@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.2.31] - 2026-11-21
+
+### Added
+- Native build: limit of 15 code guesses per address per hour
+- Prometheus histograms are trimmed without a scraper
+
+### Changed
+- The config tool is its own binary: `forseti config ...` becomes `forseti-config ...`
+- Packages and the container image ship `forseti` and `forseti-config`
+- The Ory SDK is gone; Kratos and Hydra calls use one HTTP client
+- SAML metadata URLs are fetched by Forseti: HTTPS and public hosts only
+- Email addresses with quotes, brackets, commas or colons are refused
+- Hydra public endpoint calls do not follow redirects
+
+### Fixed
+- SAML: an email link bound to another subject needs confirmation
+- SAML: linking failed on Postgres when the link already existed
+- `/hydra` passthrough: dot segments answer 400, responses capped at 2 MiB
+- PAM module: reentrant shadow lookup
+- Advisories: lettre, quinn-udp, rustix updated
+
 ## [0.2.30] - 2026-11-15
 
 ### Added

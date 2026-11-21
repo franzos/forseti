@@ -1263,7 +1263,7 @@ dependencies = [
 
 [[package]]
 name = "forseti"
-version = "0.2.30"
+version = "0.2.31"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -1318,14 +1318,14 @@ dependencies = [
 
 [[package]]
 name = "forseti-common"
-version = "0.2.30"
+version = "0.2.31"
 dependencies = [
  "url",
 ]
 
 [[package]]
 name = "forseti-config"
-version = "0.2.30"
+version = "0.2.31"
 dependencies = [
  "anyhow",
  "clap",

@@ -21,7 +21,7 @@ members = ["forseti-config", "forseti-common"]
 exclude = ["forseti-unix", "fuzz"]
 
 [workspace.package]
-version = "0.2.30"
+version = "0.2.31"
 
 [lints.clippy]
 # Handler helpers return `Result<_, Response>`; an axum Response is large by
