@@ -10,8 +10,8 @@
 //! TODO: move to `private_key_jwt` (client publishes a JWKS, Forseti holds
 //! the private key) so there's no shared secret at rest.
 
+use crate::backend::OAuthImpl;
 use crate::backend::oauth::OAuthClient;
-use crate::backend::{OAuthBackend, OAuthImpl};
 use crate::config::PosixConfig;
 use anyhow::Result;
 

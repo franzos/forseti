@@ -72,16 +72,16 @@ pub(crate) async fn show_profile(
     // 404 (not 403, and decided before the Kratos lookup) when the viewer can't
     // see the target in any shared org, so a hidden target is indistinguishable
     // from a nonexistent one (no status/timing oracle).
-    let viewer_memberships = crate::orgs::list_memberships(&state.db, &sess.identity_id)
-        .await
-        .unwrap_or_default();
+    let viewer_memberships = crate::orgs::memberships_or_empty(
+        crate::orgs::list_memberships(&state.db, &sess.identity_id).await,
+    );
     let viewer_orgs: HashSet<&str> = viewer_memberships
         .iter()
         .map(|m| m.org_id.as_str())
         .collect();
-    let target_memberships = crate::orgs::list_memberships(&state.db, &identity_id)
-        .await
-        .unwrap_or_default();
+    let target_memberships = crate::orgs::memberships_or_empty(
+        crate::orgs::list_memberships(&state.db, &identity_id).await,
+    );
     let shared: Vec<&crate::orgs::Membership> = target_memberships
         .iter()
         .filter(|m| viewer_orgs.contains(m.org_id.as_str()))

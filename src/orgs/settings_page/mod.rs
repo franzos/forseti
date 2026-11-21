@@ -389,9 +389,7 @@ pub(super) async fn build_nav(
 ) -> orgs::nav::OrgNav {
     let memberships = match cached {
         Some(m) => m.to_vec(),
-        None => orgs::list_memberships(&state.db, identity_id)
-            .await
-            .unwrap_or_default(),
+        None => orgs::memberships_or_empty(orgs::list_memberships(&state.db, identity_id).await),
     };
     let active = orgs::active_org(
         &memberships,

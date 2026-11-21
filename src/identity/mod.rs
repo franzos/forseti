@@ -205,7 +205,7 @@ pub struct PruneOrphan {
 /// ones through [`delete_identity`]. `only` restricts the run to one identity
 /// id, fetched directly instead of listed.
 ///
-/// Single-page bounded: the typed Kratos SDK doesn't surface the `Link:
+/// Single-page bounded: `list_identities` doesn't return the `Link:
 /// <...>; rel="next"` header that carries the cursor for the next page,
 /// so we can't safely walk past one page without risking re-scanning the
 /// same rows. We log a `warn!` if a full page came back (caller should
@@ -263,7 +263,7 @@ pub async fn prune_unverified(
         tracing::warn!(
             page_size,
             "unverified-prune: full page returned; Kratos likely has more identities than \
-             one page. The SDK doesn't expose the Link header cursor, so additional pages \
+             one page. The Link header cursor isn't read, so additional pages \
              aren't walked — re-run `forseti unverified-prune` until the run reports a \
              non-full page."
         );
@@ -285,9 +285,8 @@ pub async fn prune_unverified(
 /// are ignored too: they're typically API-only identities (or test
 /// fixtures) that have no concept of "verified".
 fn should_prune(ident: &crate::backend::identity::Identity, cutoff: DateTime<Utc>) -> bool {
-    // Kratos returns `created_at` as an ISO-8601 string in the SDK
-    // (`Option<String>`). Parse it; an unparseable timestamp is suspicious
-    // enough that we skip rather than delete.
+    // `created_at` is an ISO-8601 string; an unparseable timestamp is
+    // suspicious enough that we skip rather than delete.
     let Some(created_at_str) = ident.created_at.as_deref() else {
         return false;
     };

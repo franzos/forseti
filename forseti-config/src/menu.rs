@@ -1,4 +1,4 @@
-//! `forseti config` with no subcommand: an interactive menu over the same
+//! `forseti-config` with no subcommand: an interactive menu over the same
 //! read (`catalog`/`check`) and write (`modify`) primitives every other
 //! `config` subcommand uses — this module is wiring + rendering only, no new
 //! mutation logic. All prompts/echo go through [`MenuIo`] so the whole loop
@@ -264,7 +264,7 @@ fn render_header(
         (Some(p), false) => format!("{} (unreadable)", p.display()),
         (None, _) => "(absent)".to_string(),
     };
-    let _ = writeln!(io.output, "forseti config");
+    let _ = writeln!(io.output, "forseti-config");
     let _ = writeln!(io.output, "  kratos.yml:  {}", kratos_path.display());
     let _ = writeln!(io.output, "  hydra.yml:   {}", hydra_path.display());
     let _ = writeln!(io.output, "  config.toml: {forseti_desc}");
@@ -547,7 +547,7 @@ fn run_oidc_enable(io: &mut MenuIo, paths: &PathArgs, provider: &str) {
 fn run_oidc_disable(io: &mut MenuIo, paths: &PathArgs, kratos_path: &Path, id: &str) {
     let admin_url = std::fs::read_to_string(kratos_path)
         .ok()
-        .and_then(|t| crate::config_cli::yamlutil::parse_yaml(&t).ok())
+        .and_then(|t| crate::yamlutil::parse_yaml(&t).ok())
         .and_then(|r| dig_str(&r, &["serve", "admin", "base_url"]).map(str::to_string));
 
     let result = match build_menu_ctx(paths, io.output.clone(), io.input.clone()) {
@@ -608,7 +608,7 @@ fn run_smtp_edit(io: &mut MenuIo, paths: &PathArgs) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config_cli::yamlutil::secret_entries;
+    use crate::yamlutil::secret_entries;
     use std::io::{BufRead as _, Cursor};
 
     /// A scripted line source that reports itself as a TTY, so the confirm
@@ -681,8 +681,8 @@ mod tests {
     fn menu_renders_all_settings_and_quits_on_q() {
         let (mut io, out) = menu_io(b"q\n");
         let paths = PathArgs {
-            kratos: Some(PathBuf::from("infra/kratos/kratos.yml")),
-            hydra: Some(PathBuf::from("infra/hydra/hydra.yml")),
+            kratos: Some(crate::repo_file("infra/kratos/kratos.yml")),
+            hydra: Some(crate::repo_file("infra/hydra/hydra.yml")),
             forseti_config: Some(nonexistent_forseti_toml()),
             dry_run: false,
             yes: false,
@@ -711,8 +711,8 @@ mod tests {
     fn selecting_setting_shows_detail_then_back() {
         let (mut io, out) = menu_io(b"1\nb\nq\n");
         let paths = PathArgs {
-            kratos: Some(PathBuf::from("infra/kratos/kratos.yml")),
-            hydra: Some(PathBuf::from("infra/hydra/hydra.yml")),
+            kratos: Some(crate::repo_file("infra/kratos/kratos.yml")),
+            hydra: Some(crate::repo_file("infra/hydra/hydra.yml")),
             forseti_config: Some(nonexistent_forseti_toml()),
             dry_run: false,
             yes: false,
@@ -841,8 +841,8 @@ mod tests {
     fn eof_exits_cleanly() {
         let (mut io, _out) = menu_io(b"");
         let paths = PathArgs {
-            kratos: Some(PathBuf::from("infra/kratos/kratos.yml")),
-            hydra: Some(PathBuf::from("infra/hydra/hydra.yml")),
+            kratos: Some(crate::repo_file("infra/kratos/kratos.yml")),
+            hydra: Some(crate::repo_file("infra/hydra/hydra.yml")),
             forseti_config: Some(nonexistent_forseti_toml()),
             dry_run: false,
             yes: false,

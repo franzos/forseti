@@ -302,10 +302,18 @@ pub async fn create(
         }
     }
 
-    let (metadata, source) = if metadata_url.is_empty() {
-        (jackson::MetadataInput::RawXml(metadata_xml.clone()), "xml")
+    let (xml, source) = if metadata_url.is_empty() {
+        (metadata_xml.clone(), "xml")
     } else {
-        (jackson::MetadataInput::Url(metadata_url.clone()), "url")
+        match jackson::fetch_metadata(&metadata_url, state.cfg.oauth.cimd.allow_private_targets)
+            .await
+        {
+            Ok(xml) => (xml, "url"),
+            Err(e) => {
+                tracing::warn!(error = %e, org_id, "admin/saml: metadata fetch failed");
+                rerender!(format!("Couldn't load the IdP metadata: {e}."));
+            }
+        }
     };
     if let Err(e) = jackson::create_connection(
         cfg,
@@ -313,7 +321,7 @@ pub async fn create(
         &state.cfg.self_.url,
         &org_id,
         &display_name,
-        metadata,
+        &xml,
     )
     .await
     {
@@ -323,13 +331,7 @@ pub async fn create(
 
     if let Err(e) = db::insert_connection(&state.db, &org_id, &display_name, &ctx.identity_id).await
     {
-        if matches!(
-            e.downcast_ref::<diesel::result::Error>(),
-            Some(diesel::result::Error::DatabaseError(
-                diesel::result::DatabaseErrorKind::UniqueViolation,
-                _
-            ))
-        ) {
+        if e.downcast_ref::<db::ConnectionExists>().is_some() {
             rerender!("That organization already has a SAML connection.");
         }
         tracing::error!(error = ?e, org_id, "admin/saml: insert_connection failed");

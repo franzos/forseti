@@ -66,7 +66,7 @@ For production hardening (TLS, DB choice, secrets), follow the [Ory Polis deploy
 
 Connections are operator-managed at `/admin/saml` (Forseti-tier admin only — org owners see a read-only status line on their org's overview page instead). One connection per org.
 
-`/admin/saml/new` takes the org, a display name, and the IdP metadata as **either** a metadata URL **or** a raw XML paste. Jackson 26.x only fetches metadata URLs that are localhost or HTTPS — for an IdP serving plain-HTTP metadata, paste the XML.
+`/admin/saml/new` takes the org, a display name, and the IdP metadata as **either** a metadata URL **or** a raw XML paste. Forseti fetches a metadata URL itself and hands Jackson the XML. The URL must be `https` with a public host; redirects aren't followed and the document is capped at 1 MiB. For an IdP serving plain-HTTP or internal metadata, paste the XML.
 
 Hand the customer's IdP admin the SP values shown on the `/admin/saml` list page:
 
@@ -86,7 +86,7 @@ The **enable/disable toggle** on `/admin/saml` is an instant kill switch: disabl
 Forseti resolves the assertion to an identity, in order:
 
 0. **Durable subject link** — a prior SSO login recorded a link keyed on the stable SAML subject (NameID) for this org; reuse that identity. This is the primary key, so logins survive an email change at the IdP. Stale links (identity since deleted) are pruned automatically.
-1. **Existing email link** — a legacy or bootstrap link for this (org, email) pair; reuse that identity and backfill its subject so step 0 carries it next time.
+1. **Existing email link** — a legacy or bootstrap link for this (org, email) pair; reuse that identity and backfill its subject so step 0 carries it next time. A link already bound to a different subject is skipped, so the login continues with steps 2 and 3.
 2. **Verified-email match** — an existing identity whose verified address matches is linked once the user confirms it by signing in to that identity with its own credential (the password, or an upstream provider linked to it), and used from then on.
 3. **JIT create** — no match, and the address's domain is a verified domain of the org: a new identity is created with the email pre-verified (on the Kratos build through the Kratos admin API, under `[saml].identity_schema_id`).
 

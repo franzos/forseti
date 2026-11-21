@@ -226,6 +226,10 @@ pub(crate) async fn run() -> anyhow::Result<()> {
     let cfg_public_bind = cfg.self_.bind.clone();
     let cfg_internal_bind = cfg.internal.bind.clone();
     let metrics_handle = crate::metrics::install_metrics_recorder();
+    background.push(crate::metrics::spawn_upkeep(
+        metrics_handle.clone(),
+        shutdown.clone(),
+    ));
     let ip_salt: Arc<str> = crate::audit::ip_salt(&cfg, &cookie_secret).into();
 
     let state = AppState {

@@ -1,7 +1,6 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{IsTerminal as _, Read as _, Write as _};
 use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
-use std::os::unix::io::AsRawFd as _;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -23,7 +22,7 @@ pub(crate) struct Target {
 /// join the final component back on without resolving it: a symlinked final
 /// component is rejected unless `follow_symlink` is set, in which case the
 /// fully resolved path is used instead. A nonexistent file under an existing
-/// parent directory is fine (the config-init case).
+/// parent directory is fine (the `forseti-config init` case).
 pub(crate) fn resolve_target(path: &Path, follow_symlink: bool) -> anyhow::Result<Target> {
     let parent = match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p,
@@ -60,7 +59,7 @@ pub(crate) fn resolve_target(path: &Path, follow_symlink: bool) -> anyhow::Resul
 // ---------------------------------------------------------------------------
 
 #[derive(Debug)]
-pub(crate) struct LockGuard(#[allow(dead_code)] File); // held only for its Drop (releases the flock)
+pub(crate) struct LockGuard(#[allow(dead_code)] File); // held only for its Drop (releases the lock)
 
 /// Advisory `flock(2)` on `<dir>/.forseti-config.lock`. Locks are per open
 /// file description (unlike `fcntl` record locks, which are per-process and
@@ -77,12 +76,13 @@ pub(crate) fn lock_config_dir(dir: &Path) -> anyhow::Result<LockGuard> {
         .open(&lock_path)
         .map_err(|e| anyhow::anyhow!("{}: {e}", lock_path.display()))?;
 
-    // SAFETY: `file` is a valid, open fd owned by this scope for the flock call.
-    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-    if rc != 0 {
-        return Err(anyhow::anyhow!("another forseti config modify is running"));
+    match file.try_lock() {
+        Ok(()) => Ok(LockGuard(file)),
+        Err(fs::TryLockError::WouldBlock) => {
+            Err(anyhow::anyhow!("another forseti-config modify is running"))
+        }
+        Err(fs::TryLockError::Error(e)) => Err(anyhow::anyhow!("{}: {e}", lock_path.display())),
     }
-    Ok(LockGuard(file))
 }
 
 // ---------------------------------------------------------------------------
@@ -576,7 +576,7 @@ mod tests {
 
         let _guard = lock_config_dir(&dir).unwrap();
         let err = lock_config_dir(&dir).unwrap_err();
-        assert_eq!(err.to_string(), "another forseti config modify is running");
+        assert_eq!(err.to_string(), "another forseti-config modify is running");
 
         drop(_guard);
         // Once released, a fresh acquisition must succeed again.

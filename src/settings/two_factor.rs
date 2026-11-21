@@ -72,9 +72,9 @@ pub(crate) async fn settings_2fa(
     .await
     {
         Ok((session, flow)) => {
-            let memberships = crate::orgs::list_memberships(&state.db, &sess.identity_id)
-                .await
-                .unwrap_or_default();
+            let memberships = crate::orgs::memberships_or_empty(
+                crate::orgs::list_memberships(&state.db, &sess.identity_id).await,
+            );
             render_2fa(
                 &state,
                 &memberships,

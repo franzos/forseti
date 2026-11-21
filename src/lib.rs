@@ -15,7 +15,6 @@ mod client_ip;
 mod client_logo;
 mod commercial;
 mod config;
-mod config_cli;
 mod cookies;
 mod csrf;
 mod dashboard;
@@ -69,11 +68,8 @@ pub mod native_test_support;
 
 pub(crate) use web::{FlowQuery, render_error_boundary, safe_return_to};
 
-use backend::OAuthBackend as _;
 use clap::Parser as _;
 use cli::{Cli, Cmd};
-#[cfg(feature = "identity-ory")]
-use cli::{ConfigCmd, PruneCmd, RotateCmd};
 
 /// Process entry point: parse the CLI and run the server or a subcommand.
 pub async fn run_cli() -> anyhow::Result<()> {
@@ -183,13 +179,6 @@ pub async fn run_cli() -> anyhow::Result<()> {
                 }
             }
         }
-        // Pure file operations: Forseti can't read Kratos's live config via API, so these lint/generate the files.
-        #[cfg(feature = "identity-ory")]
-        Some(Cmd::ConfigCheckAlias(args)) => std::process::exit(config_cli::check(&args)),
-        #[cfg(feature = "identity-ory")]
-        Some(Cmd::ConfigInitAlias(args)) => std::process::exit(config_cli::init(&args)),
-        #[cfg(feature = "identity-ory")]
-        Some(Cmd::Config(args)) => std::process::exit(dispatch_config(args).await),
     }
 }
 
@@ -203,65 +192,6 @@ fn init_cli_tracing() {
         .with_writer(std::io::stderr)
         .with_env_filter(filter)
         .try_init();
-}
-
-/// `config` subcommand dispatch. Bare `forseti config` (`cmd: None`) drops
-/// into the interactive menu when stdin is a TTY; otherwise it prints the
-/// same clap help it always did and exits 2.
-#[cfg(feature = "identity-ory")]
-async fn dispatch_config(args: cli::ConfigArgs) -> i32 {
-    use clap::CommandFactory;
-    use std::io::{IsTerminal as _, Write};
-
-    let cli::ConfigArgs { cmd, paths } = args;
-    match cmd {
-        Some(ConfigCmd::Check(args)) => config_cli::check(&args),
-        Some(ConfigCmd::Init(args)) => config_cli::init(&args),
-        Some(ConfigCmd::Status { json }) => config_cli::status(&paths, json),
-        Some(ConfigCmd::Oidc { cmd }) => config_cli::run_oidc(cmd, &paths).await,
-        Some(ConfigCmd::Rotate {
-            cmd: RotateCmd::WebhookToken,
-        }) => config_cli::run_rotate_webhook_token(&paths),
-        Some(ConfigCmd::Rotate {
-            cmd: RotateCmd::KratosSecrets { cookie, cipher },
-        }) => config_cli::run_rotate_kratos_secrets(&paths, cookie, cipher),
-        Some(ConfigCmd::Rotate {
-            cmd: RotateCmd::HydraSystem,
-        }) => config_cli::run_rotate_hydra_system(&paths),
-        Some(ConfigCmd::Rotate {
-            cmd: RotateCmd::PairwiseSalt { confirmed },
-        }) => config_cli::run_rotate_pairwise_salt(&paths, confirmed).await,
-        Some(ConfigCmd::Prune {
-            cmd: PruneCmd::WebhookToken,
-        }) => config_cli::run_prune_webhook_token(&paths),
-        Some(ConfigCmd::Prune {
-            cmd: PruneCmd::KratosSecrets { cookie, cipher },
-        }) => config_cli::run_prune_kratos_secrets(&paths, cookie, cipher),
-        Some(ConfigCmd::Prune {
-            cmd: PruneCmd::HydraSystem,
-        }) => config_cli::run_prune_hydra_system(&paths),
-        Some(ConfigCmd::Restore { from }) => config_cli::run_restore(&paths, from),
-        Some(ConfigCmd::Smtp { cmd }) => config_cli::run_smtp(cmd, &paths),
-        None if std::io::stdin().is_terminal() => {
-            use std::cell::RefCell;
-            use std::rc::Rc;
-            let input: Rc<RefCell<dyn config_cli::LineSource>> =
-                Rc::new(RefCell::new(config_cli::StdinLines));
-            let output: Rc<RefCell<dyn std::io::Write>> =
-                Rc::new(RefCell::new(config_cli::RealStdout));
-            let mut io = config_cli::MenuIo::new(input, output, true);
-            config_cli::run_menu(&mut io, &paths)
-        }
-        None => {
-            // Not a TTY (script/CI context): print clap-generated help instead.
-            let mut config_cmd = Cli::command()
-                .find_subcommand("config")
-                .expect("config subcommand not found")
-                .clone();
-            let _ = writeln!(std::io::stderr(), "{}", config_cmd.render_help());
-            2
-        }
-    }
 }
 
 // Kratos ignores the cookie secret; resolving it here would add the server's boot checks to the CLI.
@@ -300,8 +230,8 @@ async fn bootstrap_db(cfg: &config::AppConfig) -> anyhow::Result<db::DbPool> {
 /// best-effort run at boot would transiently render legacy operator clients
 /// unverified on the consent screen. Returns `(stamped, seen)`.
 ///
-/// One page, deliberately. The SDK drops Hydra's `Link: rel="next"` header, so
-/// there is no honest way to follow the cursor from here — a full page means
+/// One page, deliberately. `list_clients` doesn't return Hydra's `Link: rel="next"`
+/// cursor, so there is no honest way to follow the cursor from here — a full page means
 /// the caller is told to re-run rather than being handed a silently short
 /// answer.
 async fn reconcile_client_metadata(

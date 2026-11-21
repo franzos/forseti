@@ -76,12 +76,9 @@ async fn passthrough(
         return augmented_discovery(&state).await;
     }
 
-    let base = state.cfg.hydra.public_url.trim_end_matches('/');
-    let mut url = format!("{base}/{rest}");
-    if let Some(q) = query.as_deref() {
-        url.push('?');
-        url.push_str(q);
-    }
+    let Ok(url) = upstream_url(&state.cfg.hydra.public_url, &rest, query.as_deref()) else {
+        return (StatusCode::BAD_REQUEST, "invalid path").into_response();
+    };
 
     // A proxy must hand Hydra's redirects to the browser, never follow them itself.
     static NO_REDIRECT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
@@ -93,9 +90,9 @@ async fn passthrough(
             .expect("reqwest client")
     });
     let mut req = if method == Method::POST {
-        client.post(&url)
+        client.post(url)
     } else {
-        client.get(&url)
+        client.get(url)
     };
     for name in [
         header::CONTENT_TYPE,
@@ -152,13 +149,28 @@ async fn passthrough(
             out_headers.append(header::SET_COOKIE, hv);
         }
     }
-    match resp.bytes().await {
-        Ok(b) => (status, out_headers, b.to_vec()).into_response(),
+    match crate::outbound::read_capped(resp, PROXY_BODY_LIMIT_BYTES).await {
+        Ok(b) => (status, out_headers, b).into_response(),
         Err(e) => {
-            tracing::warn!(error = %e, "hydra front proxy: upstream body read failed");
+            tracing::warn!(error = ?e, "hydra front proxy: upstream body read failed");
             (StatusCode::BAD_GATEWAY, "hydra upstream read failed").into_response()
         }
     }
+}
+
+/// `base` with the decoded wildcard appended segment by segment, so `?`, `#`
+/// and `%` stay in the path. `Err` on a `.` or `..` segment or a control character.
+fn upstream_url(base: &str, rest: &str, query: Option<&str>) -> Result<url::Url, ()> {
+    // `url` strips tab, CR and LF from a segment, which would turn `.\t.` into `..`.
+    if rest.chars().any(|c| c.is_control()) || rest.split('/').any(|s| s == "." || s == "..") {
+        return Err(());
+    }
+    let mut url = url::Url::parse(base.trim_end_matches('/')).map_err(|_| ())?;
+    url.path_segments_mut()?
+        .pop_if_empty()
+        .extend(rest.split('/'));
+    url.set_query(query);
+    Ok(url)
 }
 
 async fn augmented_discovery_route(State(state): State<AppState>) -> Response {
@@ -260,7 +272,18 @@ fn augment_discovery_doc(
 
 #[cfg(test)]
 mod tests {
-    use super::augment_discovery_doc;
+    use std::net::SocketAddr;
+    use std::sync::{Arc, Mutex};
+
+    use axum::Router;
+    use axum::body::{Body, Bytes};
+    use axum::extract::connect_info::MockConnectInfo;
+    use axum::http::{HeaderMap, Method, Request, StatusCode, Uri, header};
+    use tower::ServiceExt;
+
+    use super::{PROXY_BODY_LIMIT_BYTES, augment_discovery_doc, router, upstream_url};
+    use crate::config::AppConfig;
+    use crate::state::AppState;
 
     #[test]
     fn augmentation_trims_to_supported_features_and_keeps_the_rest() {
@@ -374,5 +397,225 @@ mod tests {
     #[test]
     fn augmentation_rejects_non_object_doc() {
         assert!(augment_discovery_doc(&serde_json::json!([1, 2]), Some("hydra"), &[]).is_none());
+    }
+
+    const BASE: &str = "http://hydra:4444";
+
+    #[test]
+    fn upstream_url_rejects_dot_segments() {
+        for rest in [
+            ".", "..", "../x", "a/../b", "a/./b", "a/.", "a/..", "a/.\t./x", "a/\n./x", "a/..\r/x",
+        ] {
+            assert!(upstream_url(BASE, rest, None).is_err(), "{rest}");
+        }
+        for rest in [".well-known/jwks.json", "...", ".x/..y", "a./b"] {
+            assert!(upstream_url(BASE, rest, None).is_ok(), "{rest}");
+        }
+    }
+
+    #[test]
+    fn upstream_url_encodes_query_and_fragment_chars_in_path() {
+        let url = upstream_url(BASE, "a?b#c/100%/x y", None).unwrap();
+        assert_eq!(url.as_str(), "http://hydra:4444/a%3Fb%23c/100%25/x%20y");
+        assert_eq!(url.query(), None);
+        assert_eq!(url.fragment(), None);
+    }
+
+    #[test]
+    fn upstream_url_keeps_trailing_and_double_slashes() {
+        assert_eq!(
+            upstream_url(BASE, "oauth2/token/", None).unwrap().as_str(),
+            "http://hydra:4444/oauth2/token/"
+        );
+        assert_eq!(
+            upstream_url(BASE, "a//b", None).unwrap().as_str(),
+            "http://hydra:4444/a//b"
+        );
+    }
+
+    #[test]
+    fn upstream_url_keeps_base_path_prefix() {
+        for base in ["http://hydra:4444/prefix", "http://hydra:4444/prefix/"] {
+            assert_eq!(
+                upstream_url(base, "oauth2/auth", None).unwrap().as_str(),
+                "http://hydra:4444/prefix/oauth2/auth"
+            );
+        }
+        assert_eq!(
+            upstream_url("http://hydra:4444/", "userinfo", None)
+                .unwrap()
+                .as_str(),
+            "http://hydra:4444/userinfo"
+        );
+    }
+
+    #[test]
+    fn upstream_url_forwards_query_verbatim() {
+        assert_eq!(
+            upstream_url(BASE, "userinfo", None).unwrap().as_str(),
+            "http://hydra:4444/userinfo"
+        );
+        assert_eq!(
+            upstream_url(BASE, "userinfo", Some("")).unwrap().as_str(),
+            "http://hydra:4444/userinfo?"
+        );
+        let raw = "scope=openid+email&state=a%20b&redirect_uri=https%3A%2F%2Fapp%2Fcb\
+                   &resource=https://api.example/x&a=1&a=2&empty=&flag";
+        assert_eq!(
+            upstream_url(BASE, "oauth2/auth", Some(raw))
+                .unwrap()
+                .as_str(),
+            format!("http://hydra:4444/oauth2/auth?{raw}")
+        );
+        // Same URL as parsing the interpolated string, for every endpoint shape the consumers use.
+        for rest in [
+            "oauth2/auth",
+            "oauth2/token",
+            "oauth2/revoke",
+            "oauth2/device/auth",
+            "oauth2/device/verify",
+            "oauth2/register/0b8c4f2e-1d7a-4c5e-9f3a-2b6d8e1c7a90",
+            "oauth2/sessions/logout",
+            "userinfo",
+            ".well-known/jwks.json",
+        ] {
+            for query in [None, Some(""), Some(raw), Some("q='\"<x> y")] {
+                let mut old = format!("{BASE}/{rest}");
+                if let Some(q) = query {
+                    old.push('?');
+                    old.push_str(q);
+                }
+                assert_eq!(
+                    upstream_url(BASE, rest, query).unwrap(),
+                    url::Url::parse(&old).unwrap(),
+                    "{old}"
+                );
+            }
+        }
+    }
+
+    type Seen = Arc<Mutex<Vec<(Method, String, Option<String>, Option<String>, Vec<u8>)>>>;
+
+    /// Stub Hydra recording method, raw path and query, `Authorization`,
+    /// and body; replies with `body`.
+    async fn stub_upstream(body: Vec<u8>) -> (String, Seen) {
+        let seen = Seen::default();
+        let recorder = seen.clone();
+        let app = Router::new().fallback(
+            move |method: Method, uri: Uri, headers: HeaderMap, req_body: Bytes| {
+                let recorder = recorder.clone();
+                let body = body.clone();
+                async move {
+                    recorder.lock().unwrap().push((
+                        method,
+                        uri.path().to_string(),
+                        uri.query().map(str::to_string),
+                        headers
+                            .get(header::AUTHORIZATION)
+                            .map(|v| v.to_str().unwrap().to_string()),
+                        req_body.to_vec(),
+                    ));
+                    let mut out = HeaderMap::new();
+                    out.insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
+                    out.append(header::SET_COOKIE, "a=1".parse().unwrap());
+                    out.append(header::SET_COOKIE, "b=2".parse().unwrap());
+                    out.insert("x-not-forwarded", "1".parse().unwrap());
+                    (StatusCode::CREATED, out, body)
+                }
+            },
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (url, seen)
+    }
+
+    async fn proxy_app(upstream: &str) -> Router {
+        let mut cfg = AppConfig::test_fixture();
+        cfg.hydra.public_url = upstream.to_string();
+        cfg.hydra.front_proxy = true;
+        let db = crate::db::test_pool().await;
+        let identity = crate::backend::build_identity(&cfg, &db, &[0x42; 32]);
+        let router = router(&cfg.hydra);
+        router
+            .with_state(AppState::for_test(cfg, db, identity, &[0x42; 32]))
+            .layer(MockConnectInfo(SocketAddr::from(([127, 0, 0, 1], 9))))
+    }
+
+    #[tokio::test]
+    async fn passthrough_forwards_normal_response() {
+        let (upstream, seen) = stub_upstream(b"{\"ok\":true}".to_vec()).await;
+        let app = proxy_app(&upstream).await;
+
+        let query = "a=1+2&b=%20x&c=http%3A%2F%2Fx%2Fy&a=3&d=&redirect_uri=https%3A%2F%2Fapp%2Fcb";
+        let form = b"grant_type=authorization_code&code=abc+d%2Fe".to_vec();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post(format!("/hydra/oauth2/token?{query}"))
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header(header::AUTHORIZATION, "Basic Y2xpZW50OnNlY3JldA==")
+                    .body(Body::from(form.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        assert_eq!(resp.headers()[header::CONTENT_TYPE], "application/json");
+        let cookies: Vec<_> = resp.headers().get_all(header::SET_COOKIE).iter().collect();
+        assert_eq!(cookies, ["a=1", "b=2"]);
+        assert!(resp.headers().get("x-not-forwarded").is_none());
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], b"{\"ok\":true}");
+
+        let resp = app
+            .oneshot(Request::get("/hydra/userinfo").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        let (method, path, q, auth, body) = &seen[0];
+        assert_eq!(method, Method::POST);
+        assert_eq!(path, "/oauth2/token");
+        assert_eq!(q.as_deref(), Some(query));
+        assert_eq!(auth.as_deref(), Some("Basic Y2xpZW50OnNlY3JldA=="));
+        assert_eq!(body, &form);
+        let (method, path, q, auth, body) = &seen[1];
+        assert_eq!(method, Method::GET);
+        assert_eq!(path, "/userinfo");
+        assert_eq!(q, &None);
+        assert_eq!(auth, &None);
+        assert!(body.is_empty());
+    }
+
+    #[tokio::test]
+    async fn passthrough_caps_the_response_body() {
+        let (upstream, seen) = stub_upstream(vec![b'x'; PROXY_BODY_LIMIT_BYTES + 1]).await;
+        let app = proxy_app(&upstream).await;
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::get("/hydra/.well-known/jwks.json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+
+        let resp = app
+            .oneshot(
+                Request::get("/hydra/a/%2e%2e/b")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(seen.lock().unwrap().len(), 1);
     }
 }

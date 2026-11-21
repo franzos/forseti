@@ -1,6 +1,6 @@
 #![no_main]
 
-use forseti::fuzz_api::{parse_yaml, to_yaml, yaml_scalar};
+use forseti_config::{parse_yaml, to_yaml, yaml_scalar};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|s: &str| {

@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": 409,
+    "status": "Conflict",
+    "reason": "This identity conflicts with another identity that already exists.",
+    "message": "The resource could not be created due to a conflict"
+  }
+}

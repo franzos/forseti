@@ -37,7 +37,7 @@ impl WorkerHandle {
         }
     }
 
-    #[cfg(all(test, feature = "identity-native"))]
+    #[cfg(test)]
     pub(crate) fn for_test() -> Self {
         Self::new()
     }

@@ -7,7 +7,7 @@ use diesel::prelude::*;
 
 use serde::Serialize;
 
-use crate::backend::{IdentityBackend, IdentityImpl, OAuthBackend, OAuthImpl};
+use crate::backend::{IdentityBackend, IdentityImpl, OAuthImpl};
 use crate::db::DbPool;
 use crate::db_interact;
 use crate::schema::{hydra_consent_grants, hydra_login_sessions};

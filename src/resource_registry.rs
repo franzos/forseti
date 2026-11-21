@@ -95,6 +95,18 @@ impl std::fmt::Display for ClaimConflict {
 
 impl std::error::Error for ClaimConflict {}
 
+/// The `resource_registry.resource` unique constraint rejected the insert.
+#[derive(Debug)]
+pub struct ResourceTaken;
+
+impl std::fmt::Display for ResourceTaken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("resource already registered")
+    }
+}
+
+impl std::error::Error for ResourceTaken {}
+
 enum TxnError {
     Db(diesel::result::Error),
     Conflict(String),
@@ -594,7 +606,7 @@ pub async fn list_all(db: &DbPool) -> anyhow::Result<Vec<Row>> {
 /// create form can surface the conflict; the config-import path uses
 /// [`insert_ignore`] instead.
 pub async fn insert(db: &DbPool, new: NewResource) -> anyhow::Result<()> {
-    db_interact!(db, |conn| {
+    let result = db_interact!(db, |conn| {
         diesel::insert_into(rr::table)
             .values(InsertRow {
                 resource: &new.resource,
@@ -603,9 +615,17 @@ pub async fn insert(db: &DbPool, new: NewResource) -> anyhow::Result<()> {
                 created_by: &new.created_by,
             })
             .execute(conn)
-            .map(|_| ())
-    })?;
-    Ok(())
+    });
+    match result {
+        Ok(_) => Ok(()),
+        // `self_service_claim` is left empty here, so the partial index on it
+        // can't fire and the violation is on `resource`.
+        Err(diesel::result::Error::DatabaseError(
+            diesel::result::DatabaseErrorKind::UniqueViolation,
+            _,
+        )) => Err(ResourceTaken.into()),
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// Idempotent INSERT via ON CONFLICT DO NOTHING for the startup config
@@ -683,6 +703,21 @@ mod tests {
             org_id: "default".to_string(),
             created_by: "test@example.com".to_string(),
         }
+    }
+
+    #[tokio::test]
+    async fn insert_resource_twice_is_resource_taken() {
+        let db = crate::orgs::db::test_pool().await;
+        insert(&db, new_resource("https://a.example.com/mcp"))
+            .await
+            .expect("first insert");
+        let err = insert(&db, new_resource("https://a.example.com/mcp"))
+            .await
+            .expect_err("duplicate insert must fail");
+        assert!(
+            err.downcast_ref::<ResourceTaken>().is_some(),
+            "expected ResourceTaken, got: {err}"
+        );
     }
 
     #[tokio::test]

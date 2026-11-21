@@ -1,29 +1,13 @@
-//! Kratos SDK model to domain type conversions. Identity write paths keep the
-//! SDK models so `Option<Option<_>>` fields survive a round trip; only plain
-//! enums map back.
+//! Kratos wire bodies to domain types.
 
-use ory_client::models as sdk;
-use ory_client::models::identity::StateEnum;
-use ory_client::models::session_authentication_method::MethodEnum;
-use ory_client::models::update_identity_body::StateEnum as UpdateStateEnum;
-use ory_client::models::verifiable_identity_address::ViaEnum;
-
+use super::kratos_wire as wire;
 use crate::backend::identity::{
-    Aal, AuthMethod, CourierStatus, Credential, Identity, IdentityState, RecoveryAddress,
-    RecoveryCode, Session, SessionDevice, VerifiableAddress,
+    Aal, AuthMethod, Credential, Identity, IdentityState, RecoveryAddress, RecoveryCode, Session,
+    SessionDevice, VerifiableAddress,
 };
 
-impl From<IdentityState> for UpdateStateEnum {
-    fn from(v: IdentityState) -> Self {
-        match v {
-            IdentityState::Active => UpdateStateEnum::Active,
-            IdentityState::Inactive => UpdateStateEnum::Inactive,
-        }
-    }
-}
-
-impl From<sdk::RecoveryCodeForIdentity> for RecoveryCode {
-    fn from(v: sdk::RecoveryCodeForIdentity) -> Self {
+impl From<wire::RecoveryCodeForIdentity> for RecoveryCode {
+    fn from(v: wire::RecoveryCodeForIdentity) -> Self {
         RecoveryCode {
             recovery_code: v.recovery_code,
             recovery_link: v.recovery_link,
@@ -31,66 +15,32 @@ impl From<sdk::RecoveryCodeForIdentity> for RecoveryCode {
     }
 }
 
-impl From<CourierStatus> for sdk::CourierMessageStatus {
-    fn from(v: CourierStatus) -> Self {
+impl From<wire::AuthenticatorAssuranceLevel> for Aal {
+    fn from(v: wire::AuthenticatorAssuranceLevel) -> Self {
         match v {
-            CourierStatus::Queued => sdk::CourierMessageStatus::Queued,
-            CourierStatus::Abandoned => sdk::CourierMessageStatus::Abandoned,
+            wire::AuthenticatorAssuranceLevel::Aal0 => Aal::Aal0,
+            wire::AuthenticatorAssuranceLevel::Aal1 => Aal::Aal1,
+            wire::AuthenticatorAssuranceLevel::Aal2 => Aal::Aal2,
+            wire::AuthenticatorAssuranceLevel::Aal3 => Aal::Aal3,
         }
     }
 }
 
-impl From<sdk::AuthenticatorAssuranceLevel> for Aal {
-    fn from(v: sdk::AuthenticatorAssuranceLevel) -> Self {
+impl From<wire::StateEnum> for IdentityState {
+    fn from(v: wire::StateEnum) -> Self {
         match v {
-            sdk::AuthenticatorAssuranceLevel::Aal0 => Aal::Aal0,
-            sdk::AuthenticatorAssuranceLevel::Aal1 => Aal::Aal1,
-            sdk::AuthenticatorAssuranceLevel::Aal2 => Aal::Aal2,
-            sdk::AuthenticatorAssuranceLevel::Aal3 => Aal::Aal3,
+            wire::StateEnum::Active => IdentityState::Active,
+            wire::StateEnum::Inactive => IdentityState::Inactive,
         }
     }
 }
 
-impl From<StateEnum> for IdentityState {
-    fn from(v: StateEnum) -> Self {
-        match v {
-            StateEnum::Active => IdentityState::Active,
-            StateEnum::Inactive => IdentityState::Inactive,
-        }
-    }
-}
-
-fn method_name(m: MethodEnum) -> &'static str {
-    match m {
-        MethodEnum::Password => "password",
-        MethodEnum::Oidc => "oidc",
-        MethodEnum::Totp => "totp",
-        MethodEnum::LookupSecret => "lookup_secret",
-        MethodEnum::Webauthn => "webauthn",
-        MethodEnum::Code => "code",
-        MethodEnum::Passkey => "passkey",
-        MethodEnum::Profile => "profile",
-        MethodEnum::Saml => "saml",
-        MethodEnum::Deviceauthn => "deviceauthn",
-        MethodEnum::IdentifierFirst => "identifier_first",
-        MethodEnum::LinkRecovery => "link_recovery",
-        MethodEnum::CodeRecovery => "code_recovery",
-    }
-}
-
-fn via_name(v: ViaEnum) -> &'static str {
-    match v {
-        ViaEnum::Email => "email",
-        ViaEnum::Sms => "sms",
-    }
-}
-
-impl From<sdk::SessionAuthenticationMethod> for AuthMethod {
-    fn from(m: sdk::SessionAuthenticationMethod) -> Self {
+impl From<wire::SessionAuthenticationMethod> for AuthMethod {
+    fn from(m: wire::SessionAuthenticationMethod) -> Self {
         AuthMethod {
             aal: m.aal.map(Aal::from),
             completed_at: m.completed_at,
-            method: m.method.map(|x| method_name(x).to_string()),
+            method: m.method.map(|x| x.as_str().to_string()),
             organization: m.organization,
             provider: m.provider,
             upstream_acr: m.upstream_acr,
@@ -99,8 +49,8 @@ impl From<sdk::SessionAuthenticationMethod> for AuthMethod {
     }
 }
 
-impl From<sdk::SessionDevice> for SessionDevice {
-    fn from(d: sdk::SessionDevice) -> Self {
+impl From<wire::SessionDevice> for SessionDevice {
+    fn from(d: wire::SessionDevice) -> Self {
         SessionDevice {
             ip_address: d.ip_address,
             user_agent: d.user_agent,
@@ -109,8 +59,8 @@ impl From<sdk::SessionDevice> for SessionDevice {
     }
 }
 
-impl From<sdk::Session> for Session {
-    fn from(s: sdk::Session) -> Self {
+impl From<wire::Session> for Session {
+    fn from(s: wire::Session) -> Self {
         Session {
             id: s.id,
             active: s.active,
@@ -129,12 +79,12 @@ impl From<sdk::Session> for Session {
     }
 }
 
-impl From<sdk::VerifiableIdentityAddress> for VerifiableAddress {
-    fn from(a: sdk::VerifiableIdentityAddress) -> Self {
+impl From<wire::VerifiableIdentityAddress> for VerifiableAddress {
+    fn from(a: wire::VerifiableIdentityAddress) -> Self {
         VerifiableAddress {
             id: a.id,
             value: a.value,
-            via: via_name(a.via).to_string(),
+            via: a.via.as_str().to_string(),
             status: a.status,
             verified: a.verified,
             verified_at: a.verified_at,
@@ -144,8 +94,8 @@ impl From<sdk::VerifiableIdentityAddress> for VerifiableAddress {
     }
 }
 
-impl From<sdk::RecoveryIdentityAddress> for RecoveryAddress {
-    fn from(a: sdk::RecoveryIdentityAddress) -> Self {
+impl From<wire::RecoveryIdentityAddress> for RecoveryAddress {
+    fn from(a: wire::RecoveryIdentityAddress) -> Self {
         RecoveryAddress {
             id: a.id,
             value: a.value,
@@ -156,8 +106,8 @@ impl From<sdk::RecoveryIdentityAddress> for RecoveryAddress {
     }
 }
 
-impl From<sdk::IdentityCredentials> for Credential {
-    fn from(c: sdk::IdentityCredentials) -> Self {
+impl From<wire::IdentityCredentials> for Credential {
+    fn from(c: wire::IdentityCredentials) -> Self {
         Credential {
             identifiers: c.identifiers,
             config: c.config,
@@ -168,8 +118,8 @@ impl From<sdk::IdentityCredentials> for Credential {
     }
 }
 
-impl From<sdk::Identity> for Identity {
-    fn from(i: sdk::Identity) -> Self {
+impl From<wire::Identity> for Identity {
+    fn from(i: wire::Identity) -> Self {
         Identity {
             id: i.id,
             schema_id: i.schema_id,
@@ -179,7 +129,7 @@ impl From<sdk::Identity> for Identity {
             created_at: i.created_at,
             updated_at: i.updated_at,
             external_id: i.external_id,
-            organization_id: i.organization_id.flatten(),
+            organization_id: i.organization_id,
             metadata_public: i.metadata_public.flatten(),
             metadata_admin: i.metadata_admin.flatten(),
             verifiable_addresses: i
@@ -203,81 +153,84 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn enum_names_match_the_sdk_wire_strings() {
-        for m in [
-            MethodEnum::Password,
-            MethodEnum::Oidc,
-            MethodEnum::Totp,
-            MethodEnum::LookupSecret,
-            MethodEnum::Webauthn,
-            MethodEnum::Code,
-            MethodEnum::Passkey,
-            MethodEnum::Profile,
-            MethodEnum::Saml,
-            MethodEnum::Deviceauthn,
-            MethodEnum::IdentifierFirst,
-            MethodEnum::LinkRecovery,
-            MethodEnum::CodeRecovery,
-        ] {
-            assert_eq!(json!(m), json!(method_name(m)));
-        }
-        for v in [ViaEnum::Email, ViaEnum::Sms] {
-            assert_eq!(json!(v), json!(via_name(v)));
-        }
-        for a in [
-            sdk::AuthenticatorAssuranceLevel::Aal0,
-            sdk::AuthenticatorAssuranceLevel::Aal1,
-            sdk::AuthenticatorAssuranceLevel::Aal2,
-            sdk::AuthenticatorAssuranceLevel::Aal3,
-        ] {
-            assert_eq!(json!(a), json!(Aal::from(a)));
-            assert_eq!(a.to_string(), Aal::from(a).to_string());
-        }
-        for s in [StateEnum::Active, StateEnum::Inactive] {
-            assert_eq!(json!(s), json!(IdentityState::from(s)));
-            assert_eq!(
-                json!(s),
-                json!(UpdateStateEnum::from(IdentityState::from(s)))
+    fn enums_map_to_domain_values_with_the_same_wire_names() {
+        for s in ["aal0", "aal1", "aal2", "aal3"] {
+            let aal = Aal::from(
+                serde_json::from_value::<wire::AuthenticatorAssuranceLevel>(json!(s)).unwrap(),
             );
+            assert_eq!((json!(aal), aal.to_string()), (json!(s), s.to_string()));
         }
-        assert_eq!(
-            sdk::CourierMessageStatus::from(CourierStatus::Queued),
-            sdk::CourierMessageStatus::Queued
+        for s in ["active", "inactive"] {
+            let state =
+                IdentityState::from(serde_json::from_value::<wire::StateEnum>(json!(s)).unwrap());
+            assert_eq!(json!(state), json!(s));
+        }
+        for s in [
+            "password",
+            "oidc",
+            "totp",
+            "lookup_secret",
+            "webauthn",
+            "code",
+            "passkey",
+            "profile",
+            "saml",
+            "deviceauthn",
+            "identifier_first",
+            "link_recovery",
+            "code_recovery",
+        ] {
+            let m: wire::MethodEnum = serde_json::from_value(json!(s)).unwrap();
+            assert_eq!(m.as_str(), s);
+        }
+        for s in ["email", "sms"] {
+            let v: wire::ViaEnum = serde_json::from_value(json!(s)).unwrap();
+            assert_eq!(v.as_str(), s);
+        }
+        assert!(serde_json::from_value::<wire::MethodEnum>(json!("magic_link")).is_err());
+        assert!(serde_json::from_value::<wire::ViaEnum>(json!("pigeon")).is_err());
+        assert!(
+            serde_json::from_value::<wire::AuthenticatorAssuranceLevel>(json!("aal4")).is_err()
         );
+        assert!(serde_json::from_value::<wire::StateEnum>(json!("deleted")).is_err());
+    }
+
+    #[test]
+    fn auth_method_serialises_in_the_export_field_order() {
+        let full: wire::SessionAuthenticationMethod = serde_json::from_value(json!({
+            "upstream_amr": ["pwd"], "upstream_acr": "acr", "provider": "github",
+            "organization": "org", "method": "oidc", "completed_at": "2026-04-01T10:00:00Z",
+            "aal": "aal2",
+        }))
+        .unwrap();
         assert_eq!(
-            sdk::CourierMessageStatus::from(CourierStatus::Abandoned),
-            sdk::CourierMessageStatus::Abandoned
+            serde_json::to_string(&AuthMethod::from(full)).unwrap(),
+            r#"{"aal":"aal2","completed_at":"2026-04-01T10:00:00Z","method":"oidc","organization":"org","provider":"github","upstream_acr":"acr","upstream_amr":["pwd"]}"#
+        );
+        let empty: wire::SessionAuthenticationMethod = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(
+            serde_json::to_string(&AuthMethod::from(empty)).unwrap(),
+            "{}"
         );
     }
 
     #[test]
-    fn auth_method_serialises_like_the_sdk() {
-        let mut full = sdk::SessionAuthenticationMethod::new();
-        full.aal = Some(sdk::AuthenticatorAssuranceLevel::Aal2);
-        full.completed_at = Some("2026-04-01T10:00:00Z".to_string());
-        full.method = Some(MethodEnum::Oidc);
-        full.organization = Some("org".to_string());
-        full.provider = Some("github".to_string());
-        full.upstream_acr = Some("acr".to_string());
-        full.upstream_amr = Some(vec!["pwd".to_string()]);
-        for m in [full, sdk::SessionAuthenticationMethod::new()] {
-            assert_eq!(
-                serde_json::to_string(&m).unwrap(),
-                serde_json::to_string(&AuthMethod::from(m.clone())).unwrap()
-            );
-        }
-    }
-
-    #[test]
-    fn double_options_flatten_to_none() {
-        let mut i = sdk::Identity::new("id".into(), "default".into(), String::new(), None);
-        i.metadata_admin = Some(None);
-        i.metadata_public = Some(None);
-        i.organization_id = Some(None);
+    fn null_metadata_and_organization_flatten_to_none() {
+        let i: wire::Identity = serde_json::from_value(json!({
+            "id": "id", "schema_id": "default", "schema_url": "", "traits": null,
+            "metadata_admin": null, "metadata_public": null, "organization_id": null,
+        }))
+        .unwrap();
+        assert_eq!(i.metadata_admin, Some(None));
         let d = Identity::from(i);
         assert_eq!(
-            (d.metadata_admin, d.metadata_public, d.organization_id),
-            (None, None, None)
+            (
+                d.metadata_admin,
+                d.metadata_public,
+                d.organization_id,
+                d.traits
+            ),
+            (None, None, None, None)
         );
     }
 }

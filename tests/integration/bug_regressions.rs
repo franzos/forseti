@@ -1521,7 +1521,7 @@ fn read_webhook_state(row_id: &str) -> Option<String> {
 }
 
 /// Fetch the live Kratos identity's `state` field via the admin API.
-/// Minimal URL-encode that matches what `ory_client::apis::urlencode`
+/// Minimal URL-encode that matches what Forseti's `web::urlencode`
 /// emits for an email's `@` (`%40`) and `.` (verbatim). Sufficient for
 /// asserting that the redirect URL carries the freed email.
 fn urlencode_for_compare(s: &str) -> String {

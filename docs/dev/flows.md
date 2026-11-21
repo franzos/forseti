@@ -33,8 +33,8 @@ Shared machinery, used by every flow below:
 
 If the user already has a session, the handler short-circuits to `safe_return_to(query.return_to, "/")` (`src/web.rs:41`). Otherwise:
 
-- No `?flow=` → 302 to `<kratos_public>/self-service/registration/browser?return_to=...` (`flow_init_url`, `src/ory/kratos_backend.rs:79`). Kratos creates the flow, sets the continuity cookie, and 303s back to `/registration?flow=<id>`.
-- `?flow=<id>` present → fetch the flow JSON (`get_flow`, `src/ory/kratos.rs:48`) and render `templates/registration.html` via `render_registration` (`src/auth/registration.rs:76`).
+- No `?flow=` → 302 to `<kratos_public>/self-service/registration/browser?return_to=...` (`flow_init_url`, `src/ory/kratos_backend.rs:83`). Kratos creates the flow, sets the continuity cookie, and 303s back to `/registration?flow=<id>`.
+- `?flow=<id>` present → fetch the flow JSON (`get_flow`, `src/ory/kratos.rs:64`) and render `templates/registration.html` via `render_registration` (`src/auth/registration.rs:76`).
 
 The template renders a single form whose `action` is Kratos's `<kratos_public>/self-service/registration?flow=<id>` (extracted by `flow_json::project` at `src/flow_json.rs:37`). Kratos's `selfservice.flows.registration.after.<method>.hooks: [session]` (`infra/kratos/kratos.yml`) auto-logs the new identity in for every method, so the browser lands on `/` immediately after a successful submit. Each method also ships a `web_hook` that fires Forseti's `/internal/audit/kratos?action=identity.created` receiver (on the internal listener — `[internal].bind`, defaults to `127.0.0.1:8081`) to record the event in the audit log. The Default-org floor is applied lazily on the user's first authenticated request — see "Default floor on first authenticated request" below.
 
@@ -57,7 +57,7 @@ The trigger button's `onclick` comes straight from Kratos (`InputView::onclick`,
 
 The Kratos config ships OIDC providers commented out (`infra/kratos/kratos.yml:60-90`) — no real credentials in the playground. When enabled, providers surface as `groups.oidc` and the template renders one button per provider beneath an "Or continue with" divider (`templates/registration.html:75-86`). Submitting redirects the browser through Kratos's OAuth dance with the upstream IdP; the same `session` hook auto-logs the resulting identity in.
 
-**What the upstream email is worth.** The pinned jsonnet mappers (`src/config_cli/modify.rs`) decide this, and there are two shapes. All four supported providers gate the `email` trait on `claims.email_verified`, so an address the upstream didn't verify never becomes a trait — the identity schema requires `traits.email`, so registration fails validation and Kratos re-renders the form for the user to supply an address themselves. Apple, and Google for `@gmail.com` addresses or tokens carrying `hd` (Workspace), additionally emit `identity.verified_addresses`, which Kratos honours in `processRegistration` to store the address already-verified; any other Google address, and GitHub and Microsoft, go through `/verification`.
+**What the upstream email is worth.** The pinned jsonnet mappers (`forseti-config/src/modify.rs`) decide this, and there are two shapes. All four supported providers gate the `email` trait on `claims.email_verified`, so an address the upstream didn't verify never becomes a trait — the identity schema requires `traits.email`, so registration fails validation and Kratos re-renders the form for the user to supply an address themselves. Apple, and Google for `@gmail.com` addresses or tokens carrying `hd` (Workspace), additionally emit `identity.verified_addresses`, which Kratos honours in `processRegistration` to store the address already-verified; any other Google address, and GitHub and Microsoft, go through `/verification`.
 
 Two things to hold onto when touching this. Kratos merges mapper traits with the user-submitted registration form and the *form* wins, which is why `verified_addresses` must sit behind the same gate as the trait — ungated, an address the user typed on the bounce-back form would match it. And the carry-over runs at identity creation only: it does nothing on login, nothing on linking a provider to an existing identity, and nothing retroactive.
 
@@ -124,7 +124,7 @@ The handler accepts three meaningful query params: `flow`, `return_to`, `aal`, `
 1. `aal=aal2` requested but the current session is at `aal1` (step-up). This fires for an OAuth client's `acr_values`, **and** for the 2FA enforcement bounce — any enrolled identity whose AAL1 session is 403'd by Kratos's `session.whoami.required_aal: highest_available` gets redirected here by `RequireSession` (see [AAL enforcement model](#aal-enforcement-model) below). Without this carve-out the user would loop between the protected page (or `/oauth/login`) and `/login`.
 2. `refresh=true` (privileged-session re-auth bouncing back from `/settings/password` or similar). Without this the user would livelock at `privileged_session_max_age`.
 
-Both fall through to `flow_init_url` (`src/ory/kratos_backend.rs:79`) so Kratos starts a flow that demands the appropriate credential.
+Both fall through to `flow_init_url` (`src/ory/kratos_backend.rs:83`) so Kratos starts a flow that demands the appropriate credential.
 
 Render path matches registration: render `templates/login.html` via `render_login` (`src/auth/login.rs:123`). The flow JSON's `action` URL points at `<kratos_public>/self-service/login?flow=<id>` and the form submits directly.
 
@@ -148,7 +148,7 @@ Same `groups.oidc` rendering as registration. Clicking a provider button POSTs t
 
 #### 2FA / AAL2 step-up
 
-When an OAuth client requests `acr_values=aal2` (handled in `oauth_login`, `src/oauth/login.rs:22` — out of scope for this section), or when something else demands a stronger session, the user lands on `/login?aal=aal2&return_to=...`. The handler forces Kratos to issue a fresh login flow with `aal=aal2` in the init URL (`src/ory/kratos_backend.rs:79`). Kratos then renders TOTP / lookup_secret / webauthn nodes in `groups.other` (no dedicated group slot — they fall through `GroupedNodes::from_flow` at `src/flow_view.rs:99`). The template's `groups.other` branch (`templates/login.html:99-117`) renders these generically.
+When an OAuth client requests `acr_values=aal2` (handled in `oauth_login`, `src/oauth/login.rs:22` — out of scope for this section), or when something else demands a stronger session, the user lands on `/login?aal=aal2&return_to=...`. The handler forces Kratos to issue a fresh login flow with `aal=aal2` in the init URL (`src/ory/kratos_backend.rs:83`). Kratos then renders TOTP / lookup_secret / webauthn nodes in `groups.other` (no dedicated group slot — they fall through `GroupedNodes::from_flow` at `src/flow_view.rs:99`). The template's `groups.other` branch (`templates/login.html:99-117`) renders these generically.
 
 #### AAL enforcement model
 
@@ -375,7 +375,7 @@ Email recovery alone does **not** bypass 2FA. With `selfservice.flows.settings.r
 
 The full path is: email recovery → AAL1 session → step up with the second factor *or* a `lookup_secret` recovery code (either satisfies AAL2) → back to the focused password page → reset. Forseti keeps the password handoff intact across the step-up by preserving the `?flow=<settings_id>` in the step-up's `return_to`, so the user returns to `settings_password_handoff.html` after clearing AAL2 rather than a generic settings or dashboard view.
 
-This is also why an email inbox is *not* enough to defeat 2FA: whoever controls the inbox gets only an AAL1 session, which can't strip the second factor (settings is AAL2-gated) and can't reset the password without first presenting a real second factor or recovery code. A user who has lost their device, has no recovery codes, and forgot their password is locked out of self-service by design — the escape hatch is an admin-minted recovery link/code (`admin_create_recovery_code`, `src/ory/kratos.rs:713`), see the operator guide's break-glass section.
+This is also why an email inbox is *not* enough to defeat 2FA: whoever controls the inbox gets only an AAL1 session, which can't strip the second factor (settings is AAL2-gated) and can't reset the password without first presenting a real second factor or recovery code. A user who has lost their device, has no recovery codes, and forgot their password is locked out of self-service by design — the escape hatch is an admin-minted recovery link/code (`admin_create_recovery_code`, `src/ory/kratos.rs:733`), see the operator guide's break-glass section.
 
 ```mermaid
 sequenceDiagram
@@ -423,13 +423,13 @@ Edge cases:
 - Expired code → `flow_messages` carries the error; user can request a new code.
 - Privileged window lapses before the user submits the new password → JS replaces the countdown with "Your recovery window expired. Start again" linking to `/recovery` (`templates/settings_password_handoff.html:94-100`).
 - `/recovery` accessed by an already-signed-in user → no short-circuit; Kratos handles re-auth itself.
-- Admin-issued recovery codes: operators can mint a one-shot code via the admin UI (`admin_create_recovery_code`, `src/ory/kratos.rs:713`) and hand it over out-of-band — same `/recovery` flow, code path only.
+- Admin-issued recovery codes: operators can mint a one-shot code via the admin UI (`admin_create_recovery_code`, `src/ory/kratos.rs:733`) and hand it over out-of-band — same `/recovery` flow, code path only.
 
 #### Native build
 
 `POST /self-service/recovery` shares a per-IP limit with verification submits. `submit` (`src/identity_native/flows/recovery.rs:23`) has two inputs:
 
-- **Email**: `request_code` (`src/identity_native/flows/verification.rs:87`) moves the flow to `sent_email` for every address. A code (6 digits, 15 minutes, 5 guesses) and its mail are queued only for an active identity with that address and while the address is under its hourly mail quota; otherwise the flow's earlier code is dropped. The mail carries the code only, no link.
+- **Email**: `request_code` (`src/identity_native/flows/verification.rs:87`) moves the flow to `sent_email` for every address. A code (6 digits, 15 minutes, 5 guesses, at most 15 guesses per address per hour across codes) and its mail are queued only for an active identity with that address and while the address is under its hourly mail quota; otherwise the flow's earlier code is dropped. The mail carries the code only, no link.
 - **Code**: `check_code` (`:40`) spends one guess. A match goes through `recovered_identity` (`:147`), which marks the address verified (a mailed code proved the mailbox) and resets a never-verified identity (below); then the flow is marked spent, an AAL1 session with method `code_recovery` is issued, and `handoff` (`:168`) creates a settings flow with `recovery_handoff` set and a `request_url` containing `/self-service/recovery`, so `settings_section_from_flow` routes it to the password page and the handoff template shows as on the Ory build. The route writes `password.recovered` and 303s to `/settings?flow=<id>`.
 
 An identity with TOTP still needs AAL2 for settings, so the recovery session steps up first, exactly as above.
@@ -484,7 +484,7 @@ Three template states (`templates/verification.html:5-15`):
 - `sent_email` — code input.
 - `passed_challenge` — success message. When the flow carries a `return_to` (registration started from an OAuth login or an invite link, and Kratos threads it onto the verification flow), the page offers it as the primary "Continue" (`continue_href`, `src/auth/verification.rs`), so the user resumes the OAuth login or lands back on the invite instead of the dashboard. The target is pinned to Forseti's own origin with `safe_return_to` on top of Kratos's `allowed_return_urls` check; without one, the footer link below is shown as before.
 
-**Logged-in short-circuit.** The handler does an optional `whoami` (`src/auth/verification.rs:43`). When the request carries a valid session and the flow is sitting at `choose_method` with an unverified address on that identity, Forseti POSTs `method=code` + the session email + the flow's CSRF token to Kratos's `ui.action` server-side (`verify_known_email`, `src/ory/kratos.rs:162`), then bounces the browser back to the same flow ID — by then Kratos has transitioned the flow to `sent_email` and the user lands directly on the code-entry screen. Failure (transport, CSRF mismatch, etc.) falls through to the regular template render, so the worst-case UX is the form they'd see today. The footer's back link follows the same signal: `is_logged_in` switches "Back to sign in" → "Back to dashboard".
+**Logged-in short-circuit.** The handler does an optional `whoami` (`src/auth/verification.rs:43`). When the request carries a valid session and the flow is sitting at `choose_method` with an unverified address on that identity, Forseti POSTs `method=code` + the session email + the flow's CSRF token to Kratos's `ui.action` server-side (`verify_known_email`, `src/ory/kratos.rs:178`), then bounces the browser back to the same flow ID — by then Kratos has transitioned the flow to `sent_email` and the user lands directly on the code-entry screen. Failure (transport, CSRF mismatch, etc.) falls through to the regular template render, so the worst-case UX is the form they'd see today. The footer's back link follows the same signal: `is_logged_in` switches "Back to sign in" → "Back to dashboard".
 
 Verification is **not enforced** at sign-in time (`infra/kratos/kratos.yml:122-128`). The playground deliberately uses a soft prompt: `Session::needs_verification` (`src/backend/identity.rs:350`) returns true while any of the identity's `verifiable_addresses` has `verified=false`. The dashboard renders a banner that links to `/verification`, and the profile page (`templates/settings_profile.html`) surfaces a "Not verified · Send verification email →" hint below the email field via the `email_verified` flag on `SettingsProfileTemplate`. Operators who need hard enforcement (banks, healthcare) can add `{ hook: show_verification_ui }` to each registration method.
 
@@ -576,7 +576,7 @@ sequenceDiagram
 Steps:
 
 1. Verify Forseti's own double-submit CSRF token (`csrf::verify_csrf`, `src/csrf.rs`). 403 on mismatch.
-2. Forward the cookies to Kratos's `/self-service/logout/browser` (`fetch_logout_url`, `src/ory/kratos.rs:897`). Kratos returns `{ logout_url: "...&logout_token=..." }` — the URL embeds a single-use token.
+2. Forward the cookies to Kratos's `/self-service/logout/browser` (`fetch_logout_url`, `src/ory/kratos.rs:944`). Kratos returns `{ logout_url: "...&logout_token=..." }` — the URL embeds a single-use token.
 3. End the Hydra login sessions this browser signed in to, best-effort (`op_sessions::end_op_sessions_for_browser`, `src/oauth/op_sessions.rs`). `/oauth/login` records each accepted Hydra `sid` against the subject and the Kratos session in `hydra_login_sessions`, because Hydra only sends back-channel logout when a login session is revoked by `sid` and has no API to list a subject's sessions. Each recorded `sid` is revoked at Hydra, which notifies every client with a `backchannel_logout_uri`; the subject's sessions in other browsers and its consent grants stay, so offline refresh tokens survive a plain logout (Back-Channel Logout 1.0 §2.7). Logout then sweeps the subject's `sid`s whose recorded Kratos session is no longer active, such as one the browser rotated away from (`op_sessions::sweep_dead_browser_sessions`); a failed Kratos lookup skips the sweep. The account switcher (both the switcher and the consent-screen "not you?") ends one Kratos session's `sid`s the same way.
 
    A security event ends `sid`s and also revokes their grants (RFC 9700 §4.14.2): single-session revoke and revoke-others on the Sessions page, the admin single-session revoke, and a password change (which spares the current browser). `/oauth/consent` records each accepted consent request against its `sid` in `hydra_consent_grants`, and ending a `sid` this way revokes each recorded grant at Hydra by `consent_request_id`, falling back to Hydra's consent listing by login session when none is recorded. Admin disable, identity delete and account self-deletion end every recorded `sid` of the subject, then revoke the subject's login and consent sessions as a backstop for sessions recorded before the table existed; those subject-wide revokes kill the grants but send no back-channel logout.
@@ -705,10 +705,10 @@ flow with a "Your changes have been saved" message and stays on the same UI URL.
 
 Ory calls (via `fetch_settings_subpage`):
 
-- `kratos::whoami` (`src/ory/kratos.rs:28`)
-- `flow_init_url` for `FlowKind::Settings` (`src/ory/kratos_backend.rs:79`) when
+- `kratos::whoami` (`src/ory/kratos.rs:44`)
+- `flow_init_url` for `FlowKind::Settings` (`src/ory/kratos_backend.rs:83`) when
   no flow ID is present
-- `kratos::get_flow` (`src/ory/kratos.rs:48`)
+- `kratos::get_flow` (`src/ory/kratos.rs:64`)
 
 ### Password
 
@@ -810,11 +810,11 @@ session from `whoami` and stamps a "Current" badge on it
 Ory calls:
 
 - `kratos::whoami`
-- `kratos::list_my_sessions` (`src/ory/kratos.rs:305`)
+- `kratos::list_my_sessions` (`src/ory/kratos.rs:331`)
 
 `POST /settings/sessions/{id}/revoke` — `settings_sessions_revoke`
 (`src/settings/sessions.rs:152`). Verifies CSRF, re-checks the session, calls
-`kratos::revoke_session` (`src/ory/kratos.rs:317`), ends the Hydra login
+`kratos::revoke_session` (`src/ory/kratos.rs:344`), ends the Hydra login
 sessions that Kratos session signed in to and revokes their grants, since
 revoking a session is a security event (see [Logout](#logout)), and 303s
 back to the list with a flash cookie set ("Session signed out." / "Could not
@@ -822,7 +822,7 @@ sign out that session.").
 
 `POST /settings/sessions/revoke-others` — `settings_sessions_revoke_others`
 (`src/settings/sessions.rs:188`). Calls `kratos::revoke_other_sessions`
-(`src/ory/kratos.rs:326`) which returns the count of revoked sessions, then
+(`src/ory/kratos.rs:357`) which returns the count of revoked sessions, then
 ends every recorded Hydra `sid` of the user except this browser's and revokes
 their grants; flash message reflects the number.
 
@@ -849,13 +849,13 @@ flag is set.
 Ory calls:
 
 - `kratos::whoami`
-- `hydra::list_consent_sessions_by_subject` (`src/ory/hydra.rs:652`)
+- `HydraBackend::list_consent_sessions_by_subject` (`src/ory/hydra.rs:1001`)
 
 `POST /settings/authorized-apps/{client_id}/revoke` —
 `settings_authorized_apps_revoke` (`src/settings/authorized_apps.rs:214`).
 Verifies CSRF, re-checks the session, calls
-`hydra::revoke_consent_sessions_for_client` (`src/ory/hydra.rs:802`) — which
-hits Hydra's `revokeOAuth2ConsentSessions?subject=…&client=…&all=true` —
+`HydraBackend::revoke_consent_sessions_for_client` (`src/ory/hydra.rs:1117`) — which
+hits Hydra's `DELETE /admin/oauth2/auth/sessions/consent?subject=…&client=…` —
 and 303s back to the list with a flash. Audited as
 `action::OAUTH_CONSENT_REVOKED` (`src/audit/mod.rs:111`) with the client
 ID as the target and `reason=settings_self_serve` in metadata.
@@ -872,9 +872,9 @@ Self-service values for registry rows that name an upstream issuer, client id an
 
 `POST /settings/resource-claims/{id}/start`: `settings_resource_claims_start` (`src/settings/resource_claims.rs:308`), CSRF-checked, behind a per-IP bucket of 30 per 10 minutes (`resource_claims_router`, `src/settings/mod.rs:130`) and a per-identity `KeyedQuota` of 10 per 10 minutes. `usable_row` (`src/settings/resource_claims.rs:203`) re-checks enabled, configured and visible. The submitted value must match the template (`claim_template::Template::matches`, `src/claim_template.rs:80`). Discovery (`oidc_rp::discovery::discover`, `src/oidc_rp/discovery.rs:152`) requires the document's `issuer` to equal the configured one and every endpoint on the issuer's origin. A fresh `state` goes into the signed `forseti_claim_link` cookie (`{s,i,r,v}`: state, identity, row, value; 10 minutes, `Path=/settings/resource-claims`, `SameSite=Lax`); the PKCE verifier and nonce are HMACs of `state` under `oidc_rp::link_key(cookie_secret)` (`src/oidc_rp/mod.rs:25`), so the cookie carries no secret.
 
-`GET /settings/resource-claims/callback`: `settings_resource_claims_callback` (`src/settings/resource_claims.rs:397`) and `finish_link` (`src/settings/resource_claims.rs:415`), per-IP bucket of 60 per 10 minutes (`src/settings/mod.rs:145`). Every outcome clears the link cookie. A missing or invalid cookie is logged (`link_missing`) and not audited; with a verified cookie, every failure writes `resource.claim.link_failed` with its reason, in check order: `no_session` (no bounce through login, the code would sit in the return URL), `state_mismatch`, `identity_mismatch`, `upstream_error`, `code_missing`, `not_available` / `template_invalid` / `invalid_value` (the row is re-read; nothing about it is taken from the cookie), `discovery_failed`, `issuer_mismatch` (RFC 9207 `iss`), `exchange_failed`, `jwks_failed`, `id_token_invalid` (`oidc_rp::id_token::verify`, `src/oidc_rp/id_token.rs:78`: RS256/ES256, `iss`, `aud`, `azp`, `exp`, `iat`, nonce), `sub_unrenderable`, `value_mismatch`, `write_failed`. Success writes the key with `kratos::admin_set_metadata_admin_key` (`src/ory/kratos.rs:671`) and audits `resource.claim.linked` (critical).
+`GET /settings/resource-claims/callback`: `settings_resource_claims_callback` (`src/settings/resource_claims.rs:397`) and `finish_link` (`src/settings/resource_claims.rs:415`), per-IP bucket of 60 per 10 minutes (`src/settings/mod.rs:145`). Every outcome clears the link cookie. A missing or invalid cookie is logged (`link_missing`) and not audited; with a verified cookie, every failure writes `resource.claim.link_failed` with its reason, in check order: `no_session` (no bounce through login, the code would sit in the return URL), `state_mismatch`, `identity_mismatch`, `upstream_error`, `code_missing`, `not_available` / `template_invalid` / `invalid_value` (the row is re-read; nothing about it is taken from the cookie), `discovery_failed`, `issuer_mismatch` (RFC 9207 `iss`), `exchange_failed`, `jwks_failed`, `id_token_invalid` (`oidc_rp::id_token::verify`, `src/oidc_rp/id_token.rs:78`: RS256/ES256, `iss`, `aud`, `azp`, `exp`, `iat`, nonce), `sub_unrenderable`, `value_mismatch`, `write_failed`. Success writes the key with `kratos::admin_set_metadata_admin_key` (`src/ory/kratos.rs:687`) and audits `resource.claim.linked` (critical).
 
-`POST /settings/resource-claims/{id}/remove`: `settings_resource_claims_remove` (`src/settings/resource_claims.rs:570`), CSRF-checked, not rate-limited, same `usable_row` gate. `kratos::admin_remove_metadata_admin_key` (`src/ory/kratos.rs:683`) patches out the key and reports whether it held a value: if so, `resource.claim.removed` (critical); if not, "nothing to remove" and no audit row. Failures are logged, not audited.
+`POST /settings/resource-claims/{id}/remove`: `settings_resource_claims_remove` (`src/settings/resource_claims.rs:570`), CSRF-checked, not rate-limited, same `usable_row` gate. `kratos::admin_remove_metadata_admin_key` (`src/ory/kratos.rs:699`) patches out the key and reports whether it held a value: if so, `resource.claim.removed` (critical); if not, "nothing to remove" and no audit row. Failures are logged, not audited.
 
 ```mermaid
 sequenceDiagram
@@ -1192,7 +1192,7 @@ sequenceDiagram
     end
 ```
 
-`GET /handoff` — handler `handoff_enter` (`src/handoff/mod.rs`). Query params: `referrer` (Hydra `client_id`), `referrer_uri` (absolute URL), `action` (verb mapped to a path via the whitelist in `action_target`). Validates the client via `hydra::get_client` and origin-matches the URI against the client's `redirect_uris` and `client_uri`. Sets `forseti_app_referrer` (signed HMAC-SHA256, 1h TTL, deterministic key from `cfg.self_.url`) and 302s to the action target. Both referrer params are co-required; if neither is set, the endpoint acts as a stable deep-link target with no banner (useful for Forseti-internal emails).
+`GET /handoff` — handler `handoff_enter` (`src/handoff/mod.rs`). Query params: `referrer` (Hydra `client_id`), `referrer_uri` (absolute URL), `action` (verb mapped to a path via the whitelist in `action_target`). Validates the client via `HydraBackend::get_client` and origin-matches the URI against the client's `redirect_uris` and `client_uri`. Sets `forseti_app_referrer` (signed HMAC-SHA256, 1h TTL, deterministic key from `cfg.self_.url`) and 302s to the action target. Both referrer params are co-required; if neither is set, the endpoint acts as a stable deep-link target with no banner (useful for Forseti-internal emails).
 
 `GET /handoff/return` — handler `handoff_return`. Reads the cookie's stored `referrer_uri`, clears the cookie, 302s to that URI. Writes `app.referrer.returned`. The "Return to <App>" anchor on the banner targets this.
 
@@ -1234,7 +1234,7 @@ call from the relying party.
 
 Behaviour:
 
-1. `hydra::get_login_request` to resolve the challenge.
+1. `HydraBackend::get_login_request` to resolve the challenge.
 2. `prompt` is read from the challenge's `request_url` (`reauth::parse_prompt`).
    `none` combined with any other value is rejected with `invalid_request`
    (behind Hydra v26 this rarely triggers: with `login` in the value Hydra
@@ -1283,7 +1283,7 @@ Behaviour:
 7. Otherwise: record the Hydra `sid` (`op_sessions::record`; a failed write
    rejects with `temporarily_unavailable`, since logout couldn't find an
    unrecorded `sid`), then
-   `hydra::accept_login_request` with `subject = identity.id`,
+   `HydraBackend::accept_login_request` with `subject = identity.id`,
    `remember = true`, `amr` mapped onto RFC 8176 values from
    `session.authentication_methods` (left out for an upstream-provider-only
    login, whose methods Forseti doesn't know), and `acr = session_aal`.
@@ -1437,16 +1437,16 @@ on any decision, deny included, so a deny posted from another account's
 browser hits the subject gate (`access_denied`) and is never recorded as the
 owner's decision. A failed fetch rejects with `temporarily_unavailable`.
 
-- `decision = deny` → `hydra::reject_consent_request` with
+- `decision = deny` → `HydraBackend::reject_consent_request` with
   `access_denied`. RP gets an OAuth2 error redirect.
-- `decision = accept` → `finalize_consent` (`src/oauth/consent.rs:1281`).
+- `decision = accept` → `finalize_consent` (`src/oauth/consent.rs:1321`).
   Resolves the audience policy (below), fetches the identity, folds
   traits into id_token claims by granted scope
   (`build_id_token_claims`, `src/oauth/consent.rs:1110`), copies the
   `metadata_admin` keys named by the registry rows of the granted audiences
   into `session.access_token` (`access_token_claim_keys`,
   `build_access_token_claims`), then
-  `hydra::accept_consent_request` with the granted audiences and
+  `HydraBackend::accept_consent_request` with the granted audiences and
   `remember = form.remember == "true"`. Once Hydra accepts, the consent
   request is recorded against its login session (`op_sessions::record_consent`,
   `hydra_consent_grants`) so a security event ending that `sid` can revoke
@@ -1456,7 +1456,7 @@ owner's decision. A failed fetch rejects with `temporarily_unavailable`.
 Audience resolution (both grant paths go through `finalize_consent`, so
 neither can miss it):
 
-- `resolve_granted_audience` (`src/oauth/consent.rs:894`) unions both
+- `resolve_granted_audience` (`src/oauth/consent.rs:895`) unions both
   carriers — Hydra's `requested_access_token_audience` (its non-standard
   `audience=` parameter) and RFC 8707 `resource=` values parsed off the
   challenge's `request_url` — and default-denies anything that is not on
@@ -1470,7 +1470,7 @@ neither can miss it):
   (`operator_written_audiences`, `src/oauth/consent.rs:761`) — CIMD/DCR
   rows and row-less clients never count.
 - Granted audiences are then healed onto the client record
-  (`hydra::add_client_audiences`, `src/ory/hydra.rs:615`) because fosite
+  (`HydraBackend::add_client_audiences`, `src/ory/hydra.rs:969`) because fosite
   re-validates the granted audience against the client record on the
   **refresh** grant, not the code exchange.
 - Scopes are then downscoped to the granted audience
@@ -1622,7 +1622,7 @@ Code references:
 Edge cases worth knowing:
 
 - **No `aud` binding.** If the requested resource has no enabled `resource_registry` row (and isn't on an admin-created client's registered audience), consent drops it — the issued token has no `aud`. The MCP server must reject tokens with missing/mismatched `aud`, otherwise any Hydra-issued token works at it.
-- **The refresh leg.** fosite re-validates the granted audience against the *client record* on the refresh grant only, which is why `finalize_consent` heals granted audiences onto the record (`add_client_audiences`, `src/ory/hydra.rs:615`). Without it a client gets one working access token and then `invalid_request` on every refresh — the failure mode a naive E2E test misses.
+- **The refresh leg.** fosite re-validates the granted audience against the *client record* on the refresh grant only, which is why `finalize_consent` heals granted audiences onto the record (`add_client_audiences`, `src/ory/hydra.rs:969`). Without it a client gets one working access token and then `invalid_request` on every refresh — the failure mode a naive E2E test misses.
 - **JWT vs opaque.** Default is JWT with a 5m TTL (`strategies.access_token: jwt`, `ttl.access_token: 5m` in `hydra.yml`) — RSes validate locally against JWKS, revocation lag is bounded to 5 minutes. Operators can flip to `opaque` for true immediate revocation, but introspection then requires admin-API reach (`/admin/oauth2/introspect` on `:4445`, **private network only**). Forseti doesn't choose; the operator does.
 - **Scope spelling.** Hydra emits granted scopes as a `scp` JSON array, not RFC 9068's `scope` string; resource servers must accept either.
 
@@ -1681,7 +1681,7 @@ sequenceDiagram
         P->>P: validate_doc (src/oauth/cimd.rs:560): client_id byte-equal, auth method none,<br/>code flow only, https/loopback redirect URIs
         P->>P: match_redirect_uri (src/oauth/cimd.rs:619): exact, or loopback any-port
         P->>P: discover_scopes (src/oauth/cimd.rs:739): global allowlist, then registry rows named by resource=,<br/>then one throttled RFC 9728 re-fetch of a named row
-        P->>H: GET /admin/clients/{id} (get_client_opt, src/ory/hydra.rs:534)
+        P->>H: GET /admin/clients/{id} (get_client_opt, src/ory/hydra.rs:904)
         alt warm path: doc hash unchanged && redirect_uri and allowed scopes already on row
             Note over P: skip every write (src/oauth/cimd.rs:358)
         else cold path
@@ -1752,11 +1752,13 @@ The front proxy (`hydra_front::passthrough`, `src/hydra_front.rs:60`,
 gated on `[hydra].front_proxy`) forwards
 Content-Type/Accept/Authorization/Cookie/X-Forwarded-\* request headers
 and Content-Type/Location/WWW-Authenticate/Cache-Control/Vary + all
-Set-Cookie response headers, buffers bodies under a 2 MiB cap, and never
-follows redirects — Hydra's 302s belong to the browser. `GET
-/hydra/.well-known/openid-configuration` (the path-appending form)
+Set-Cookie response headers, buffers bodies under a 2 MiB cap (502 when
+Hydra's response exceeds it), and never follows redirects; Hydra's 302s
+belong to the browser. The decoded path is appended segment by segment,
+so `?`, `#` and `%` stay in the path; a `.` or `..` segment gets a 400.
+`GET /hydra/.well-known/openid-configuration` (the path-appending form)
 through the passthrough is served augmented, never proxied verbatim
-(`src/hydra_front.rs:68-75`).
+(`src/hydra_front.rs:70-77`).
 
 Trust state: the shim inserts `oauth_client_metadata` rows with
 `source = 'cimd'`, `verification = 'unverified'`
@@ -1781,7 +1783,7 @@ skips the screen. The admin list's "Self-registered" pill covers both
 
 The GET handler used to tear down the session immediately, which meant a
 malicious link could sign someone out without their interaction. It now
-just validates the challenge (`hydra::get_logout_request`) and renders a
+just validates the challenge (`HydraBackend::get_logout_request`) and renders a
 confirmation page; the actual tear-down only happens on the POST.
 
 POST path:
@@ -1804,10 +1806,10 @@ POST path:
    and nothing is torn down.
 3. Best-effort Kratos session teardown — if the cookie's present, fetch
    the Kratos logout URL via `kratos::fetch_logout_url`
-   (`src/ory/kratos.rs:897`) and hit it server-side. We don't follow Kratos's
+   (`src/ory/kratos.rs:944`) and hit it server-side. We don't follow Kratos's
    post-logout redirect because Hydra's redirect is authoritative for
    this flow.
-4. `hydra::accept_logout_request` → returns the RP-specified
+4. `HydraBackend::accept_logout_request` → returns the RP-specified
    post-logout URL. 302 there. Hydra sends back-channel logout to every
    client of that login session.
 
@@ -1834,7 +1836,7 @@ bridge. Forseti never parses SAML itself — Jackson owns the SAML leg
 (assertion validation, XML-DSIG, IdP quirks) and exposes it to Forseti as a
 plain OAuth2 authorization-code exchange with a dynamic client id
 (`tenant=<org_id>&product=forseti`, `dyn_client_id` at
-`src/saml/jackson.rs:14`) paired with Jackson's instance-wide
+`src/saml/jackson.rs:17`) paired with Jackson's instance-wide
 `CLIENT_SECRET_VERIFIER` as the client secret.
 
 The `/sso/*` routes mount only when `[saml]` is configured
@@ -1863,7 +1865,7 @@ the only entry point (SP-initiated only — no IdP-initiated flow in v1).
    `{nonce, org_id}` — the callback never trusts a query param for tenant
    selection.
 3. 302 to Jackson's authorize endpoint (`authorize_url`,
-   `src/saml/jackson.rs:23`, browser-facing `jackson_url`). Jackson
+   `src/saml/jackson.rs:26`, browser-facing `jackson_url`). Jackson
    redirects to the IdP, validates the SAML response at its ACS, and
    redirects back with `?code=…&state=…`.
 
@@ -1873,7 +1875,7 @@ the only entry point (SP-initiated only — no IdP-initiated flow in v1).
    and `?code` is non-empty. Failure → 400 + audit `saml.login.failed`
    (`reason = state_mismatch`).
 2. Code → token → userinfo against Jackson's server-side URL
-   (`exchange_code` / `userinfo`, `src/saml/jackson.rs:63` / `:100`;
+   (`exchange_code` / `userinfo`, `src/saml/jackson.rs:66` / `:103`;
    `jackson_internal_url` when set).
 3. Email normalised (trim, lowercase) and bounded (≤ 254 octets, RFC
    5321); missing/oversized → error page + audit.
@@ -1883,7 +1885,11 @@ the only entry point (SP-initiated only — no IdP-initiated flow in v1).
      a route to an operator account, and checking this ahead of the link
      lookups means it holds for every login, not just the first.
    - `saml_links` row for (org, subject) or (org, email) → re-validated
-     against the identity backend (stale rows pruned), then the linked identity's live
+     against the identity backend (stale rows pruned). The (org, email) row
+     counts only when its stored subject is NULL (backfilled from this
+     assertion through `backfill_subject`), equals the asserted one, or the
+     assertion carries no subject; a row bound to a different subject falls
+     through to the fresh-match path below. Then the linked identity's live
      facts go through the same `saml_link_decision` a fresh match does
      (`resolve_established_link`): refused if it is no longer a member of
      the org, or if any of its verified addresses is admin-allowlisted.
@@ -1928,7 +1934,7 @@ the only entry point (SP-initiated only — no IdP-initiated flow in v1).
    of method `saml`, the client IP and the user agent. It answers a
    `BrowserSession { location, set_cookies }`:
    - Kratos build (`src/ory/kratos_backend.rs:231`):
-     `admin_create_recovery_link` (`src/ory/kratos.rs:726`, 1-minute
+     `admin_create_recovery_link` (`src/ory/kratos.rs:749`, 1-minute
      TTL) mints a Kratos recovery (magic) link — OSS Kratos has no admin
      session-creation API, so the browser redeems the link and receives
      an `ory_kratos_session` cookie. `location` is the link, and
@@ -2002,8 +2008,8 @@ Ory build).
 Operator-only (Forseti-tier — SAML connections cross org boundaries, so
 org-scoped owners don't see this surface; the org overview page shows them
 a read-only status line instead). Handlers in `src/admin/saml.rs`: `list`
-(`:139`), `new` / `create` (`:212` / `:235`), `toggle` (`:358`),
-`delete_confirm` / `delete` (`:415` / `:468`). One connection per org
+(`:139`), `new` / `create` (`:212` / `:235`), `toggle` (`:366`),
+`delete_confirm` / `delete` (`:423` / `:476`). One connection per org
 (`saml_connections.org_id` is the PK).
 
 - **List** shows the SP values the operator hands to the customer's IdP
@@ -2011,9 +2017,10 @@ a read-only status line instead). Handlers in `src/admin/saml.rs`: `list`
   (Jackson's `samlAudience`, default `https://saml.boxyhq.com`), plus the
   per-org `/sso/{slug}` URL.
 - **Create** takes exactly one of an IdP metadata URL or a raw metadata
-  XML paste (`MetadataInput`, `src/saml/jackson.rs:130`). Jackson 26.x
-  only fetches localhost or HTTPS metadata URLs — plain-HTTP IdPs need
-  the XML paste. Order: Jackson create first, then the local anchor row
+  XML paste. Forseti fetches a metadata URL itself (`fetch_metadata` in
+  `src/saml/jackson.rs`: `outbound::client`, no redirects, 1 MiB cap,
+  `https` unless `[oauth.cimd].allow_private_targets`) and always sends
+  Jackson the raw XML. Order: Jackson create first, then the local anchor row
   (IdP metadata and certificates live in Jackson; Forseti keeps only
   org ↔ connection, the enabled flag, and a display name).
 - **Toggle** flips `enabled` on the anchor row — an instant kill switch,
@@ -2073,7 +2080,7 @@ the action handler verifies both before proceeding via `ConfirmForm`
 ### Clients
 
 `/admin/clients/*` — `src/admin/clients.rs`. Hydra OAuth2 client CRUD via
-the typed admin SDK.
+the Hydra admin API.
 
 | Route | Method | Handler | File:line |
 | --- | --- | --- | --- |
@@ -2090,14 +2097,14 @@ the typed admin SDK.
 Templates: `clients_list.html`, `client_form.html`, `client_show.html`,
 `confirm.html`.
 
-Ory calls (all `hydra::*`):
+Ory calls (all `HydraBackend` methods):
 
-- `list_clients(limit=50, page_token, filter_name)` — `src/ory/hydra.rs:506`
-- `get_client(id)` — `src/ory/hydra.rs:526`
-- `create_client(payload)` — `src/ory/hydra.rs:542`
-- `update_client(id, payload)` — `src/ory/hydra.rs:551`
-- `rotate_client_secret(id)` — `src/ory/hydra.rs:633`
-- `delete_client(id)` — `src/ory/hydra.rs:562`
+- `list_clients(limit=50, page_token, filter_name)` — `src/ory/hydra.rs:866`
+- `get_client(id)` — `src/ory/hydra.rs:897`
+- `create_client(payload)` — `src/ory/hydra.rs:912`
+- `update_client(id, payload)` — `src/ory/hydra.rs:926`
+- `rotate_client_secret(id)` — `src/ory/hydra.rs:987`
+- `delete_client(id)` — `src/ory/hydra.rs:938`
 
 Edit semantics: on update, an empty form field means "leave alone"
 (`parse_list` / `parse_string` in `ClientForm::to_oauth2_client`,
@@ -2120,8 +2127,8 @@ way a multi-instance deployment can mint on one node and reveal on
 another without sticky routing. TTL is enforced application-side on
 take (rows older than `REVEAL_TTL` are pruned best-effort).
 
-Pagination on the list view is best-effort — Hydra's SDK doesn't return a
-next-page token, so a full page hints at "there might be more" using the
+Pagination on the list view is best-effort — `HydraBackend::list_clients` doesn't
+read Hydra's `Link` header, so a full page hints at "there might be more" using the
 last `client_id` as the cursor.
 
 ```mermaid
@@ -2196,13 +2203,13 @@ organizations.
 
 Ory calls (all `kratos::*`):
 
-- `list_identities(limit=50, page_token, filter_email)` — `src/ory/kratos.rs:457`
-- `admin_get_identity_full(id)` — `src/ory/kratos.rs:521`
-- `list_identity_sessions(id)` — `src/ory/kratos.rs:336` (per-identity, surfaced
+- `list_identities(limit=50, page_token, filter_email)` — `src/ory/kratos.rs:484`
+- `admin_get_identity_full(id)` — `src/ory/kratos.rs:535`
+- `list_identity_sessions(id)` — `src/ory/kratos.rs:372` (per-identity, surfaced
   in the show view)
-- `admin_create_recovery_code(id)` — `src/ory/kratos.rs:713`
-- `admin_update_identity_state(id, Active|Inactive)` — `src/ory/kratos.rs:589`
-- `admin_delete_identity(id)` — `src/ory/kratos.rs:693`, called from
+- `admin_create_recovery_code(id)` — `src/ory/kratos.rs:733`
+- `admin_update_identity_state(id, Active|Inactive)` — `src/ory/kratos.rs:612`
+- `admin_delete_identity(id)` — `src/ory/kratos.rs:709`, called from
   inside `delete_identity`
 
 The show view aggregates: traits (pretty-printed JSON), enrolled
@@ -2264,7 +2271,7 @@ Templates: `sessions_list.html`, `confirm.html`.
 Ory calls:
 
 - `kratos::admin_list_all_sessions(limit=100, page_token, active_only)` —
-  `src/ory/kratos.rs:799`
+  `src/ory/kratos.rs:837`
 - `kratos::admin_get_session(id)` (identity expanded), then
   `kratos::admin_revoke_session(id)` — `src/ory/kratos.rs`
 
@@ -2329,7 +2336,7 @@ submitted identity field to a canonical UUID — accepting **either** a UUID
 - `crate::format::looks_like_uuid` (`src/format.rs:107`) true → treat as a
   UUID, confirm it exists via `admin_get_identity_optional`.
 - otherwise → resolve the typed email via
-  `kratos::admin_find_identity_by_email` (`src/ory/kratos.rs:777`), a unique
+  `kratos::admin_find_identity_by_email` (`src/ory/kratos.rs:815`), a unique
   `credentials_identifier` lookup. **Caveat:** an identity that exists only
   through OIDC/SAML has no password credentials identifier, so a typed email
   may not resolve — the picker (authoritative hidden UUID) is the reliable
@@ -2474,16 +2481,16 @@ debug builds panic, release builds drop the key and `warn!`-log.
 Probes (every one is best-effort — a failure renders that row as "down"
 with the error text in the detail column, without aborting the page):
 
-- `kratos::health_alive` (`src/ory/kratos.rs:847`)
-- `kratos::health_ready` (`src/ory/kratos.rs:852`)
-- `hydra::health_alive` (`src/ory/hydra.rs:842`)
-- `hydra::health_ready` (`src/ory/hydra.rs:846`)
+- `kratos::health_alive` (`src/ory/kratos.rs:896`)
+- `kratos::health_ready` (`src/ory/kratos.rs:901`)
+- `HydraBackend::health_alive` (`src/ory/hydra.rs:1161`)
+- `HydraBackend::health_ready` (`src/ory/hydra.rs:1165`)
 
 Plus:
 
 - `kratos::list_courier_messages(limit=100, Queued)` → pending count
 - `kratos::list_courier_messages(limit=100, Abandoned)` → failed count
-- `kratos::version` / `hydra::version`
+- `kratos::version` / `HydraBackend::version`
 - Forseti version from `env!("CARGO_PKG_VERSION")` (constant
   `FORSETI_VERSION`, `src/web.rs`)
 
@@ -2912,7 +2919,7 @@ one NAT exhaust the poll bucket. The real backoff is Forseti owning the
   Forseti hands the daemon a longer `interval` so it owns the backoff. On a
   token it runs the binding.
 - **`handle_token`** (`src/posix/device.rs:328`) — validates the id_token
-  (`hydra::verify_id_token`, issuer from `[posix].hydra_issuer` ?? `[hydra].public_url`,
+  (`HydraBackend::verify_id_token`, issuer from `[posix].hydra_issuer` ?? `[hydra].public_url`,
   audience pinned to `pam_client_id`, `iat` within `id_token_iat_window_secs`),
   resolves the approver's account by the token `sub`, runs the pure
   `evaluate_binding`, then **atomically** approves (the `WHERE status='pending'`

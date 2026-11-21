@@ -16,7 +16,7 @@ use uuid::Uuid;
 use crate::audit::{self, AuditCtx, AuditEvent, SafeMetadata, action, target_kind};
 use crate::audit_metadata;
 use crate::backend::identity::Identity;
-use crate::backend::{IdentityBackend, IdentityImpl, OAuthBackend, OAuthImpl};
+use crate::backend::{IdentityBackend, IdentityImpl, OAuthImpl};
 use crate::config::AppConfig;
 use crate::db::DbPool;
 use crate::oauth::op_sessions::{GrantRevocation, end_op_sessions_for_subject, forget_subject};

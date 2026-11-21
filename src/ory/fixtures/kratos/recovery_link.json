@@ -1,0 +1,4 @@
+{
+  "recovery_link": "http://localhost:4433/self-service/recovery?flow=61b1e11e-d92d-46c2-9ec1-99352d07e85a&token=fixture-recovery-token",
+  "expires_at": "2026-11-20T21:10:17.267094462Z"
+}

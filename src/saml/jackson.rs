@@ -2,10 +2,13 @@
 //! SSO flow drives, plus connection CRUD against Jackson's admin API.
 //! <https://www.ory.com/docs/polis/sso-flow>
 
+use std::time::Duration;
+
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde::Deserialize;
 
 use crate::config::SamlConfig;
+use crate::outbound::{self, FetchError};
 
 pub const PRODUCT: &str = "forseti";
 
@@ -124,12 +127,31 @@ pub async fn userinfo(
         .map_err(|e| anyhow::anyhow!("jackson userinfo decode failed: {e}"))
 }
 
-/// IdP metadata input for connection creation: raw XML (base64-encoded on
-/// the wire as `encodedRawMetadata`) or a URL Jackson fetches itself.
-#[derive(Debug)]
-pub enum MetadataInput {
-    RawXml(String),
-    Url(String),
+const METADATA_LIMIT: usize = 1024 * 1024;
+const METADATA_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// GET IdP metadata XML from an operator-supplied URL through the SSRF-guarded
+/// outbound client. Errors read as a sentence fragment for the form.
+pub async fn fetch_metadata(url: &str, allow_private: bool) -> Result<String, String> {
+    let parsed = url::Url::parse(url).map_err(|_| "metadata URL is not a valid URL".to_string())?;
+    outbound::check_target(&parsed, allow_private).map_err(|e| format!("metadata URL {e}"))?;
+    let fetch_err = |e: FetchError| match e {
+        FetchError::Transport(e) => format!("metadata fetch failed: {e}"),
+        FetchError::Status(s) => format!("metadata URL returned HTTP {s}"),
+        FetchError::TooLarge => "metadata document exceeds 1 MiB".to_string(),
+    };
+    let resp = outbound::get_ok(
+        outbound::client(allow_private),
+        parsed.as_str(),
+        None,
+        METADATA_TIMEOUT,
+    )
+    .await
+    .map_err(fetch_err)?;
+    let body = outbound::read_capped(resp, METADATA_LIMIT)
+        .await
+        .map_err(fetch_err)?;
+    String::from_utf8(body).map_err(|_| "metadata document is not UTF-8".to_string())
 }
 
 pub async fn create_connection(
@@ -138,28 +160,21 @@ pub async fn create_connection(
     self_url: &str,
     org_id: &str,
     name: &str,
-    metadata: MetadataInput,
+    metadata_xml: &str,
 ) -> anyhow::Result<()> {
     let url = format!(
         "{}/api/v1/connections",
         cfg.internal_url().trim_end_matches('/')
     );
     let callback = redirect_uri(self_url);
-    let mut body = serde_json::json!({
+    let body = serde_json::json!({
         "tenant": org_id,
         "product": PRODUCT,
         "name": name,
         "defaultRedirectUrl": callback,
         "redirectUrl": [callback],
+        "encodedRawMetadata": BASE64.encode(metadata_xml),
     });
-    match metadata {
-        MetadataInput::RawXml(xml) => {
-            body["encodedRawMetadata"] = BASE64.encode(xml).into();
-        }
-        MetadataInput::Url(u) => {
-            body["metadataUrl"] = u.into();
-        }
-    }
     let resp = client
         .post(&url)
         .header(
@@ -253,6 +268,54 @@ mod tests {
         assert!(url.contains("client_id=tenant%3Dacme%26product%3Dforseti"));
         assert!(url.contains("redirect_uri=https%3A%2F%2Fid.example.com%2Fsso%2Fcallback"));
         assert!(url.contains("state=st4te"));
+    }
+
+    async fn serve_metadata(body: Vec<u8>) -> String {
+        let app = axum::Router::new().route(
+            "/metadata",
+            axum::routing::get(move || {
+                let body = body.clone();
+                async move { body }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://{addr}/metadata")
+    }
+
+    #[tokio::test]
+    async fn fetch_metadata_refuses_loopback_when_guarded() {
+        for raw in [
+            "https://127.0.0.1:9/metadata",
+            "https://localhost/metadata",
+            "https://[::1]/metadata",
+            "https://10.0.0.1/metadata",
+        ] {
+            let err = fetch_metadata(raw, false).await.unwrap_err();
+            assert!(
+                err.starts_with("metadata URL ") && !err.contains("returned HTTP"),
+                "{raw} got: {err}"
+            );
+        }
+        let url = serve_metadata(b"<EntityDescriptor/>".to_vec()).await;
+        assert!(fetch_metadata(&url, false).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn fetch_metadata_rejects_oversize_body() {
+        let url = serve_metadata(vec![b'a'; METADATA_LIMIT + 1]).await;
+        assert_eq!(
+            fetch_metadata(&url, true).await.unwrap_err(),
+            "metadata document exceeds 1 MiB"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_metadata_returns_xml_from_stub() {
+        let xml = "<EntityDescriptor entityID=\"https://idp.example\"/>";
+        let url = serve_metadata(xml.as_bytes().to_vec()).await;
+        assert_eq!(fetch_metadata(&url, true).await.unwrap(), xml);
     }
 
     #[test]

@@ -124,51 +124,15 @@ async fn resolve_scope(state: &AppState, host: &RequirePosixHost) -> Result<Host
 async fn passwd_all(State(state): State<AppState>, host: RequirePosixHost) -> Response {
     let accounts = match resolve_scope(&state, &host).await {
         Ok(HostScope::WholeOrg(org)) => db::accounts_in_org(&state.db, &org).await,
-        Ok(HostScope::Teams(org, teams)) => accounts_in_teams(&state, &org, &teams).await,
+        Ok(HostScope::Teams(org, teams)) => {
+            db::accounts_in_teams(&state.db, &org, &teams, true).await
+        }
         Err(r) => return r,
     };
     match accounts {
         Ok(a) => Json(a.into_iter().map(PasswdEntry::from).collect::<Vec<_>>()).into_response(),
         Err(e) => db_error(e, "passwd_all failed"),
     }
-}
-
-/// Union of provisioned members across teams, deduped by identity, stable by username.
-async fn accounts_in_teams(
-    state: &AppState,
-    org: &str,
-    teams: &[String],
-) -> anyhow::Result<Vec<db::PosixAccount>> {
-    let mut seen = std::collections::HashSet::new();
-    let mut out = Vec::new();
-    for tid in teams {
-        for a in db::accounts_in_team(&state.db, org, tid).await? {
-            if seen.insert(a.identity_id.clone()) {
-                out.push(a);
-            }
-        }
-    }
-    out.sort_by(|a, b| a.username.cmp(&b.username));
-    Ok(out)
-}
-
-/// Uncapped [`accounts_in_teams`]: offline-verifier projection only.
-async fn all_accounts_in_teams(
-    state: &AppState,
-    org: &str,
-    teams: &[String],
-) -> anyhow::Result<Vec<db::PosixAccount>> {
-    let mut seen = std::collections::HashSet::new();
-    let mut out = Vec::new();
-    for tid in teams {
-        for a in db::all_accounts_in_team(&state.db, org, tid).await? {
-            if seen.insert(a.identity_id.clone()) {
-                out.push(a);
-            }
-        }
-    }
-    out.sort_by(|a, b| a.username.cmp(&b.username));
-    Ok(out)
 }
 
 async fn passwd_by_name(
@@ -436,7 +400,7 @@ async fn offline_verifiers(State(state): State<AppState>, host: RequirePosixHost
             Err(e) => return db_error(e, "offline_verifiers org query failed"),
         },
         Ok(HostScope::Teams(org, teams)) => {
-            match all_accounts_in_teams(&state, &org, &teams).await {
+            match db::accounts_in_teams(&state.db, &org, &teams, false).await {
                 Ok(rows) => rows,
                 Err(e) => return db_error(e, "offline_verifiers team query failed"),
             }

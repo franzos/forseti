@@ -1,6 +1,6 @@
 [package]
 name = "forseti"
-version = "0.2.30"
+version.workspace = true
 edition = "2024"
 description = "Self-service UI and Hydra login/consent bridge for Ory Kratos + Hydra"
 # Forseti is dual-licensed: everything outside `src/commercial/` is
@@ -13,6 +13,15 @@ description = "Self-service UI and Hydra login/consent bridge for Ory Kratos + H
 # crates.io; the commercial subdirectory is documented in README.md
 # and enforced at runtime by `LicenseHandle::feature`.
 license = "AGPL-3.0-or-later"
+
+# The root package is a member implicitly. With "." listed, cargo treats
+# fuzz/ as a member despite `exclude`.
+[workspace]
+members = ["forseti-config", "forseti-common"]
+exclude = ["forseti-unix", "fuzz"]
+
+[workspace.package]
+version = "0.2.30"
 
 [lints.clippy]
 # Handler helpers return `Result<_, Response>`; an axum Response is large by
@@ -44,13 +53,12 @@ askama = "0.16"
 include_dir = "0.7"
 mime_guess = "2"
 serde = { version = "1", features = ["derive"] }
-# `preserve_order`: the config CLI edits Kratos/Hydra YAML as a
-# `serde_json::Value`, and rewritten files must keep their key order.
+# `preserve_order` is explicit so JSON key order doesn't depend on whether
+# forseti-config, which needs it, is built in the same cargo invocation.
 serde_json = { version = "1", features = ["preserve_order"] }
-# YAML parsing for the `config-*` operator subcommands, in safe Rust.
-serde-saphyr = "2"
+forseti-common = { path = "forseti-common" }
 # No `cookies` feature: every reqwest::Client in `src/` is a
-# server-to-server caller (Hydra admin, webhook delivery) where a
+# server-to-server caller (Kratos, Hydra, webhook delivery) where a
 # persistent cookie jar would let upstream `Set-Cookie` responses leak
 # across unrelated requests. Tests carry their own `cookies`-enabled
 # reqwest under `[dev-dependencies]` because they drive flows like a
@@ -59,21 +67,16 @@ serde-saphyr = "2"
 # verifier (`orgs::domains::verify_http_file`) — a bounded
 # `bytes_stream()` walk instead of an unbounded `.bytes()` buffer,
 # since the target is owner-submitted and attacker-influenceable.
-reqwest = { version = "0.13", default-features = false, features = ["json", "form", "rustls", "stream"] }
-# `ory_client` 1.22 pins reqwest 0.12 internally. To set a timeout on the
-# SDK's HTTP client we need a 0.12 client instance; rename the older
-# version under a distinct ident so the rest of the codebase keeps using
-# 0.13. Once `ory_client` ships a reqwest-0.13 release this dep goes.
-ory_reqwest = { package = "reqwest", version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# `query` builds the Kratos and Hydra API query strings (`src/ory/`).
+reqwest = { version = "0.13", default-features = false, features = ["json", "form", "query", "rustls", "stream"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
 figment = { version = "0.10", features = ["toml", "env"] }
-ory-client = "1.22"
 rand = "0.10"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
-diesel = { version = "2.2", features = ["sqlite", "postgres", "chrono", "serde_json", "r2d2"] }
+diesel = { version = "2.2", features = ["sqlite", "postgres", "chrono"] }
 diesel_migrations = { version = "2.2", features = ["sqlite", "postgres"] }
 deadpool-diesel = { version = "0.6", features = ["sqlite", "postgres", "rt_tokio_1"] }
 libsqlite3-sys = { version = "0.37", features = ["bundled"] }
@@ -161,12 +164,6 @@ hickory-resolver = "0.26"
 # markdown is dropped, never emitted, so the output is safe to `|safe` into the
 # themed page even though this app ships no CSP `script-src` backstop.
 comrak = { version = "0.54", default-features = false }
-# Masked TTY password prompts for `config modify --*-prompt` secret input.
-rpassword = "7"
-# Unified diffs for the redacted config-modify preview (`config_cli::io::redacted_diff`).
-similar = "3"
-# `flock(2)` advisory locking for `config_cli::io::lock_config_dir`.
-libc = "0.2"
 # Native identity backend (`identity-native`): AES-256-GCM sealing, HMAC-SHA1
 # for TOTP and SHA-1 for the breach-check prefix, from the aws-lc-rs rustls
 # already pulls in; `qrcode` renders the TOTP enrolment QR as SVG only (no
@@ -174,12 +171,6 @@ libc = "0.2"
 aws-lc-rs = { version = "1.18", optional = true }
 qrcode = { version = "0.14", default-features = false, features = ["svg"], optional = true }
 base32 = { version = "0.5", optional = true }
-# Format-preserving TOML editing for the `config.toml` cross-link check and
-# future `config modify`/`rotate` writers (`config_cli::check::load_forseti_toml`).
-# `figment` already pulls a `toml_edit` transitively for its own TOML
-# provider, but that's an internal detail we can't rely on as a public API —
-# declared directly so `DocumentMut` is a supported dependency.
-toml_edit = "0.25"
 
 [profile.release]
 strip = true
@@ -187,7 +178,7 @@ lto = "thin"
 codegen-units = 1
 
 # `static/`, `locales/` and `migrations/` are compiled into the binary, so both
-# packages are the binary plus an example config. Runtime deps (libpq) are
+# packages are the two binaries plus an example config. Runtime deps (libpq) are
 # resolved from the linked libraries by dpkg-shlibdeps and rpm's find-requires.
 [package.metadata.deb]
 maintainer = "Franz Geffke <mail@gofranz.com>"
@@ -198,9 +189,11 @@ extended-description = """
 Forseti renders every Ory Kratos self-service flow - login, registration, \
 recovery, MFA - along with the Hydra OAuth2 consent screens and an admin \
 console, in one server-rendered binary.
-It needs a reachable Kratos and Hydra, and a config.toml."""
+It needs a reachable Kratos and Hydra, and a config.toml. forseti-config \
+lints, generates and edits the Kratos, Hydra and Forseti config files."""
 assets = [
     ["target/release/forseti", "usr/bin/", "755"],
+    ["target/release/forseti-config", "usr/bin/", "755"],
     ["config.example.toml", "usr/share/doc/forseti/", "644"],
     ["README.md", "usr/share/doc/forseti/", "644"],
 ]
@@ -208,6 +201,7 @@ assets = [
 [package.metadata.generate-rpm]
 assets = [
     { source = "target/release/forseti", dest = "/usr/bin/forseti", mode = "755" },
+    { source = "target/release/forseti-config", dest = "/usr/bin/forseti-config", mode = "755" },
     { source = "config.example.toml", dest = "/usr/share/doc/forseti/config.example.toml", mode = "644" },
     { source = "README.md", dest = "/usr/share/doc/forseti/README.md", mode = "644" },
 ]
@@ -255,6 +249,8 @@ jsonwebtoken = { version = "11", default-features = false, features = ["use_pem"
 # derives a per-call code via RFC 6238 (SHA1 / 30s / 6 digits).
 totp-lite = "2"
 base32 = "0.5"
+# `tests/support/native_seed.rs` reads the cookie secret from the native config.
+toml_edit = "0.25"
 
 fluent-syntax = "0.12.0"
 

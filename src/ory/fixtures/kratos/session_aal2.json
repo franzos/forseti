@@ -1,0 +1,71 @@
+{
+  "id": "9f32043a-c310-42e2-83de-6cc7ba9485e8",
+  "active": true,
+  "expires_at": "2026-11-21T21:09:17.170056Z",
+  "authenticated_at": "2026-11-20T21:09:17.170056Z",
+  "authenticator_assurance_level": "aal2",
+  "authentication_methods": [
+    {
+      "method": "password",
+      "aal": "aal1",
+      "completed_at": "2026-11-20T21:09:17.142136078Z"
+    },
+    {
+      "method": "totp",
+      "aal": "aal2",
+      "completed_at": "2026-11-20T21:09:17.170049358Z"
+    }
+  ],
+  "issued_at": "2026-11-20T21:09:17.142195Z",
+  "identity": {
+    "id": "79a2099c-af9b-4cd9-941b-2aeca5187330",
+    "external_id": "fixture-external-1",
+    "schema_id": "default",
+    "schema_url": "http://localhost:4433/schemas/ZGVmYXVsdA",
+    "state": "active",
+    "state_changed_at": "2026-11-20T21:08:30.655997Z",
+    "traits": {
+      "name": {
+        "last": "Person",
+        "first": "Fixture"
+      },
+      "email": "fixture-full@example.test",
+      "preferred_language": "de"
+    },
+    "verifiable_addresses": [
+      {
+        "id": "e735db35-1aab-46c2-bca2-2790e3461457",
+        "value": "fixture-full@example.test",
+        "verified": true,
+        "via": "email",
+        "status": "completed",
+        "verified_at": "2026-11-20T21:08:30.658455Z",
+        "created_at": "2026-11-20T21:08:30.65851Z",
+        "updated_at": "2026-11-20T21:08:30.65851Z"
+      }
+    ],
+    "recovery_addresses": [
+      {
+        "id": "3a61f2e5-d303-4b06-ad5f-1bfae57121d1",
+        "value": "fixture-full@example.test",
+        "via": "email",
+        "created_at": "2026-11-20T21:08:30.659096Z",
+        "updated_at": "2026-11-20T21:08:30.659096Z"
+      }
+    ],
+    "metadata_public": {
+      "plan": "pro"
+    },
+    "created_at": "2026-11-20T21:08:30.657411Z",
+    "updated_at": "2026-11-20T21:09:11.859719Z",
+    "organization_id": null
+  },
+  "devices": [
+    {
+      "id": "85564369-7045-4556-911b-78ac2c6a44e7",
+      "ip_address": "10.89.12.11:54496",
+      "user_agent": "Python-urllib/3.12",
+      "location": ""
+    }
+  ]
+}

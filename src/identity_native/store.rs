@@ -162,16 +162,9 @@ pub(super) struct CredentialRow {
 /// Kratos's identity schema caps the address at 320 characters.
 pub(super) const EMAIL_MAX_CHARS: usize = 320;
 
-/// Whether `email` may be stored and mailed to: [`crate::mailer::is_valid_email`] without the
-/// RFC 5322 specials that let an address carry a display name, a comment or a second recipient.
+/// Whether `email` may be stored and mailed to.
 pub(super) fn is_mailable(email: &str) -> bool {
     crate::mailer::is_valid_email(email)
-        && !email.chars().any(|c| {
-            matches!(
-                c,
-                '<' | '>' | '(' | ')' | '[' | ']' | ',' | ';' | ':' | '"' | '\\'
-            )
-        })
 }
 
 fn ensure_mailable(email: &str) -> Result<()> {

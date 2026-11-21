@@ -679,36 +679,14 @@ impl DatabaseConfig {
         }
     }
 
-    /// Best-effort check for "this deployment looks production-shaped" used
-    /// to warn about the multi-instance sqlite footgun. True iff Forseti's
-    /// own URL is https AND the host is not localhost / 127.0.0.1 / RFC1918.
-    /// Can't auto-detect actual instance count, only deployment shape.
+    /// Production-shaped deployment check, see [`forseti_common::looks_like_production`].
     pub fn looks_like_production(self_url: &str) -> bool {
-        let Ok(parsed) = url::Url::parse(self_url) else {
-            return false;
-        };
-        if parsed.scheme() != "https" {
-            return false;
-        }
-        let Some(host) = parsed.host() else {
-            return false;
-        };
-        match host {
-            url::Host::Domain(name) => name != "localhost",
-            url::Host::Ipv4(v4) => !(v4.is_loopback() || v4.is_private()),
-            // Note: 2001:db8::/32 (documentation prefix) is intentionally
-            // NOT treated as non-prod: it's reserved for examples, not
-            // private deployments.
-            url::Host::Ipv6(v6) => {
-                !(v6.is_loopback() || v6.is_unique_local() || v6.is_unicast_link_local())
-            }
-        }
+        forseti_common::looks_like_production(self_url)
     }
 }
 
-/// Shortest audit webhook token accepted on a production-shaped deployment.
 #[cfg(feature = "identity-ory")]
-pub const WEBHOOK_TOKEN_MIN_LEN: usize = 32;
+pub use forseti_common::WEBHOOK_TOKEN_MIN_LEN;
 
 /// One token (string) or an accept list (array) during rotation. The
 /// receiver in `audit::kratos_webhook` accepts a request when the presented
@@ -753,7 +731,7 @@ impl WebhookTokens {
     /// token value.
     ///
     /// A placeholder is refused only on a production-shaped deployment: the
-    /// shipped dev and CI configs carry one on purpose, and `config check`
+    /// shipped dev and CI configs carry one on purpose, and `forseti-config check`
     /// flags it everywhere.
     pub fn validate(&self, self_url: &str) -> Result<(), String> {
         let entries = self.entries();
@@ -767,9 +745,7 @@ impl WebhookTokens {
             }
         }
         if DatabaseConfig::looks_like_production(self_url)
-            && entries
-                .iter()
-                .any(|t| crate::config_cli::yamlutil::is_placeholder(t))
+            && entries.iter().any(|t| forseti_common::is_placeholder(t))
         {
             return Err(
                 "audit.webhook_token is a placeholder; generate a real secret \

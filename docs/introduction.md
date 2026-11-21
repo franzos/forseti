@@ -6,7 +6,7 @@ These docs are split by what you're here to do:
 
 - [User guide](./user-guide.md) — for people using an account: signing in, registering, recovery, MFA, and account settings.
 - [Operator guide](./operator-guide.md) — deployment topology, shared configuration, Hydra, secrets, backups.
-- [Identity: Kratos](./operator-guide-kratos.md) — what only the Kratos build needs: `kratos.yml`, 2FA enforcement, the `forseti config` tooling.
+- [Identity: Kratos](./operator-guide-kratos.md) — what only the Kratos build needs: `kratos.yml`, 2FA enforcement, the `forseti-config` tooling.
 - [Identity: native](./operator-guide-native.md) — the build without Kratos: building it, sessions, throttles, upstream providers.
 - [Reverse proxy](./operator-guide-proxy.md) — proxy topology, cookies, CSRF, CORS.
 - [Integration guide](./integration-guide.md) — consuming Forseti as an OIDC provider.

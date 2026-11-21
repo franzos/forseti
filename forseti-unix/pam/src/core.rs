@@ -96,25 +96,52 @@ pub fn decide_account_unreachable(
 /// hash (a genuine local account, not an NSS-only Forseti user).
 ///
 /// Locked/placeholder fields (empty, or only `*`/`!`/`x`) are NOT real hashes.
-/// Must run as root (the account phase does) for `getspnam` to see shadow.
+/// Must run as root (the account phase does) for `getspnam_r` to see shadow.
 pub fn has_local_shadow_entry(username: &str) -> bool {
     use std::ffi::{CStr, CString};
+
+    const INITIAL_BUF: usize = 1024;
+    const MAX_BUF: usize = 64 * 1024;
 
     let Ok(name) = CString::new(username) else {
         return false; // embedded NUL ⇒ treat as not-local ⇒ fail closed
     };
 
-    // SAFETY: `name` outlives the call; `getspnam` returns a pointer to a static
-    // buffer which we read immediately and never retain.
-    let hash = unsafe {
-        let spwd = libc::getspnam(name.as_ptr());
-        if spwd.is_null() || (*spwd).sp_pwdp.is_null() {
+    let mut buf_len = INITIAL_BUF;
+    loop {
+        let mut buf = vec![0 as libc::c_char; buf_len];
+        // SAFETY: all-zero is a valid `spwd` (null pointers, zero integers).
+        let mut spwd: libc::spwd = unsafe { std::mem::zeroed() };
+        let mut result: *mut libc::spwd = std::ptr::null_mut();
+
+        // SAFETY: `name`, `spwd`, `buf` and `result` all outlive the call, and
+        // `buf_len` is the real length of `buf`.
+        let rc = unsafe {
+            libc::getspnam_r(
+                name.as_ptr(),
+                &raw mut spwd,
+                buf.as_mut_ptr(),
+                buf_len,
+                &raw mut result,
+            )
+        };
+
+        if rc == libc::ERANGE && buf_len < MAX_BUF {
+            buf_len *= 2;
+            continue;
+        }
+        if rc != 0 || result.is_null() || spwd.sp_pwdp.is_null() {
             return false;
         }
-        CStr::from_ptr((*spwd).sp_pwdp)
-    };
+        // SAFETY: on success `sp_pwdp` is a NUL-terminated string inside `buf`,
+        // which is still alive here.
+        let hash = unsafe { CStr::from_ptr(spwd.sp_pwdp) };
+        return is_real_hash(hash.to_bytes());
+    }
+}
 
-    let pwd = hash.to_bytes();
+/// `true` unless the shadow password field is empty or only `*`/`!`/`x`.
+fn is_real_hash(pwd: &[u8]) -> bool {
     !pwd.is_empty() && pwd.iter().any(|&b| b != b'*' && b != b'!' && b != b'x')
 }
 
@@ -335,6 +362,35 @@ mod tests {
             decide_account_unreachable("alice", |_| false),
             PamResultCode::PAM_AUTHINFO_UNAVAIL
         );
+    }
+
+    #[test]
+    fn real_hash_classification() {
+        let cases: &[(&[u8], bool)] = &[
+            (b"", false),
+            (b"*", false),
+            (b"!", false),
+            (b"x", false),
+            (b"!!", false),
+            (b"*!x", false),
+            (b"!$6$salt$hash", true),
+            (b"$6$salt$hash", true),
+            (b"$y$j9T$salt$hash", true),
+        ];
+        for &(pwd, want) in cases {
+            assert_eq!(
+                is_real_hash(pwd),
+                want,
+                "{:?}",
+                String::from_utf8_lossy(pwd)
+            );
+        }
+    }
+
+    #[test]
+    fn nonexistent_user_is_not_local() {
+        assert!(!has_local_shadow_entry("forseti-no-such-user-7f3a"));
+        assert!(!has_local_shadow_entry("nul\0byte"));
     }
 
     #[test]

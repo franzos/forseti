@@ -5,9 +5,9 @@ use axum::http::{HeaderMap, Uri};
 use axum::response::{IntoResponse, Redirect, Response};
 use serde::Deserialize;
 
+use crate::backend::IdentityBackend;
 use crate::backend::identity::{WhoamiOutcome, address_is_verified};
 use crate::backend::oauth::LoginRequest;
-use crate::backend::{IdentityBackend, OAuthBackend};
 use crate::db::DbPool;
 use crate::extractors::OptionalSession;
 use crate::signed_cookie::unix_seconds_now;

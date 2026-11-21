@@ -573,9 +573,9 @@ pub(crate) async fn settings_subpage(
             Ok(pair) => pair,
             Err(resp) => return resp,
         };
-    let memberships = crate::orgs::list_memberships(&state.db, &sess.identity_id)
-        .await
-        .unwrap_or_default();
+    let memberships = crate::orgs::memberships_or_empty(
+        crate::orgs::list_memberships(&state.db, &sess.identity_id).await,
+    );
     let is_profile = matches!(section, InlineRenderSection::Profile);
     // Load the Forseti-owned fields only for the profile section. The handle
     // is shown regardless of `[profiles].enabled`; the template hides the rest.

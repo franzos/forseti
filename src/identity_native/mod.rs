@@ -69,6 +69,11 @@ const RECIPIENT_MAILS: usize = 5;
 
 const RECIPIENT_WINDOW: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 
+/// Code guesses against one address per [`CODE_GUESS_WINDOW`], across every code mailed to it.
+const CODE_GUESSES: usize = 15;
+
+const CODE_GUESS_WINDOW: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
 /// In-process attempt counters; the per-IP limits are `tower_governor` layers in [`routes`].
 struct Limiters {
     /// Password attempts, keyed by [`store::address_key`] of the identifier.
@@ -79,6 +84,8 @@ struct Limiters {
     settings_changes: KeyedQuota,
     /// Code mail requests, keyed by [`store::address_key`] of the address typed.
     recipient: KeyedQuota,
+    /// Guesses on any code, keyed by [`store::address_key`] of the code's address.
+    code_guesses: KeyedQuota,
 }
 
 impl Limiters {
@@ -89,6 +96,7 @@ impl Limiters {
             second_factor: quota(SECOND_FACTOR_ATTEMPTS),
             settings_changes: quota(SETTINGS_CHANGES),
             recipient: KeyedQuota::bounded(RECIPIENT_WINDOW, RECIPIENT_MAILS, LIMITER_MAX_KEYS),
+            code_guesses: KeyedQuota::bounded(CODE_GUESS_WINDOW, CODE_GUESSES, LIMITER_MAX_KEYS),
         }
     }
 }

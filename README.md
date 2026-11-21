@@ -56,7 +56,7 @@ The choice is made at compile time with a cargo feature; a binary carries exactl
 | **Upstream sign-in** | Every provider Kratos supports | OpenID Connect providers and GitHub (no Apple) |
 | **Enterprise SAML SSO** *(licensed)* | Yes | Yes |
 | **Mail** | Kratos courier for flow mail, Forseti for invites | Forseti for everything |
-| **Config tooling** | `forseti config` lints and edits the Ory config files | Nothing to lint: it's all in `config.toml` |
+| **Config tooling** | `forseti-config` lints and edits the Ory config files | Nothing to lint: it's all in `config.toml` |
 | **Existing Kratos identities** | Stay where they are | No import; fresh installs only |
 | **How you get it** | Release tarballs, packages, container image | Build from source: `--no-default-features --features identity-native` |
 
@@ -145,7 +145,7 @@ cp config.example.toml config.toml   # then edit it
 ./forseti
 ```
 
-Debian, Ubuntu and the RPM distros install the same binary to `/usr/bin/forseti`, with the example config at `/usr/share/doc/forseti/config.example.toml`. Grab the file for the version you want from the release page, then:
+Debian, Ubuntu and the RPM distros install the same binaries to `/usr/bin/forseti` and `/usr/bin/forseti-config`, with the example config at `/usr/share/doc/forseti/config.example.toml`. Grab the file for the version you want from the release page, then:
 
 ```bash
 sudo apt install ./forseti_0.2.7-1_amd64.deb      # Debian, Ubuntu
@@ -165,7 +165,7 @@ podman run --rm -p 3000:3000 \
   ghcr.io/franzos/forseti:latest
 ```
 
-All of them are the Kratos build and need a reachable Kratos and Hydra — see the [operator guide](docs/operator-guide.md). The native build needs Hydra only and is built from source — see [Identity: native](docs/operator-guide-native.md). The binary reads `./config.toml` (override with `FORSETI_CONFIG_PATH`); web assets, translations and database migrations are compiled into it, so there is nothing else to deploy alongside.
+All of them are the Kratos build and need a reachable Kratos and Hydra — see the [operator guide](docs/operator-guide.md). The native build needs Hydra only and is built from source — see [Identity: native](docs/operator-guide-native.md). The binary reads `./config.toml` (override with `FORSETI_CONFIG_PATH`); web assets, translations and database migrations are compiled into it, so there is nothing else to deploy alongside. Next to it sits `forseti-config`, which lints and edits the Kratos, Hydra and Forseti config files; in the container image run it with `--entrypoint forseti-config`.
 
 > **Runtime note:** the binary links dynamically against `libpq` (the Postgres client). On a bare host install `libpq5` (Debian/Ubuntu) or `libpq` (most other distros); the container image already includes it. SQLite is bundled, so it needs nothing extra.
 
@@ -242,7 +242,7 @@ Full documentation is published at **<https://franzos.github.io/forseti/>**.
 
 - [User guide](docs/user-guide.md) — for people using an account: signing in, registration, recovery, MFA, account settings
 - [Operator guide](docs/operator-guide.md) — deployment topology, shared config, Hydra, secrets, backups
-- [Operator guide — identity: Kratos](docs/operator-guide-kratos.md) — Kratos config, 2FA enforcement, the `forseti config` verbs
+- [Operator guide — identity: Kratos](docs/operator-guide-kratos.md) — Kratos config, 2FA enforcement, the `forseti-config` verbs
 - [Operator guide — identity: native](docs/operator-guide-native.md) — building the native backend, upstream providers, sessions, mail
 - [Operator guide — reverse proxy](docs/operator-guide-proxy.md) — proxy topology, cookies, CSRF, CORS
 - [Integration guide](docs/integration-guide.md) — consuming Forseti as an OIDC provider

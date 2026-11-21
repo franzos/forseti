@@ -1,7 +1,6 @@
 //! `/admin/clients/*` — Hydra OAuth2 client CRUD.
 //!
-//! Hydra issues clients via its admin API. We use the typed SDK calls (the
-//! Kratos `ui.nodes` deserialization bug doesn't affect Hydra responses).
+//! Hydra issues clients via its admin API.
 //! Secrets are shown exactly once on creation / rotation; subsequent views
 //! display only the metadata fields.
 //!

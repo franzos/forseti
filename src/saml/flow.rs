@@ -40,8 +40,7 @@ use crate::web::{append_set_cookie, render_error_boundary};
 const VALIDATION_FAILED_KEY: &str = "error-boundary-sso-validation-failed-body";
 const UPSTREAM_FAILED_KEY: &str = "error-boundary-sso-upstream-failed-body";
 
-/// Jackson speaks the workspace reqwest (0.13); the Ory SDK's shared client
-/// is the renamed reqwest-0.12 type, so it can't be reused here.
+/// The Jackson client: the Kratos client's timeouts, its own pool.
 pub(crate) fn http_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
@@ -789,11 +788,22 @@ async fn resolve_established_link(
     }
 }
 
+/// Whether an email-keyed link may be reused: its stored subject is unset or
+/// matches the asserted one, or the assertion carries no subject (transient
+/// NameID, where refusing would leave the user no way to rebind).
+fn stored_subject_usable(stored: Option<&str>, asserted: Option<&str>) -> bool {
+    match (stored, asserted) {
+        (Some(stored), Some(asserted)) => stored == asserted,
+        _ => true,
+    }
+}
+
 /// Subject → email → Kratos identity decision tree. Durable hit: a
 /// saml_links row keyed on the stable IdP subject (NameID) survives an
-/// email change at the IdP. Falls back to the legacy email-keyed row, then
-/// a verified-email match (link on first login), then JIT create. Both
-/// link paths backfill the subject. Unverified matches and create-conflicts
+/// email change at the IdP. Falls back to the legacy email-keyed row (unless
+/// it is bound to a different subject), then a verified-email match (link on
+/// first login), then JIT create. The email path backfills a missing
+/// subject. Unverified matches and create-conflicts
 /// fail closed to the blocked page.
 async fn resolve_identity(
     state: &AppState,
@@ -837,12 +847,18 @@ async fn resolve_identity(
         }
     }
 
-    // Legacy/bootstrap: existing email-keyed link.
-    if let Some(linked) = db::link_for(&state.db, org_id, email).await? {
+    // Legacy/bootstrap: existing email-keyed link. A row bound to another
+    // subject falls through to the fresh-match path below.
+    if let Some((linked, stored_subject)) = db::link_for(&state.db, org_id, email).await?
+        && stored_subject_usable(stored_subject.as_deref(), subject_opt)
+    {
         match state.identity.admin_get_identity_optional(&linked).await? {
-            // Backfill the subject onto the legacy row.
             Some(identity) => {
-                db::upsert_link(&state.db, org_id, email, subject_opt, &identity.id).await?;
+                if stored_subject.is_none()
+                    && let Some(subject) = subject_opt
+                {
+                    db::backfill_subject(&state.db, org_id, email, subject).await?;
+                }
                 return resolve_established_link(state, org_id, identity).await;
             }
             None => db::delete_link(&state.db, org_id, email).await?,
@@ -1176,6 +1192,23 @@ mod link_decision_tests {
     }
 
     #[test]
+    fn stored_subject_usable_table() {
+        for (stored, asserted, usable) in [
+            (None, None, true),
+            (None, Some("s1"), true),
+            (Some("s1"), None, true),
+            (Some("s1"), Some("s1"), true),
+            (Some("s1"), Some("s2"), false),
+        ] {
+            assert_eq!(
+                stored_subject_usable(stored, asserted),
+                usable,
+                "stored {stored:?}, asserted {asserted:?}"
+            );
+        }
+    }
+
+    #[test]
     fn a_match_never_falls_through_to_provisioning() {
         // Whatever the domain state, a matched identity is never JIT-created.
         for domain_verified in [true, false] {
@@ -1210,7 +1243,7 @@ mod native_callback_tests {
     const EMAIL: &str = "sso@acme.test";
     const SUBJECT: &str = "idp-subject-1";
 
-    async fn jackson_stub() -> String {
+    async fn jackson_stub(subject: &'static str) -> String {
         let app = Router::new()
             .route(
                 "/api/oauth/token",
@@ -1218,7 +1251,7 @@ mod native_callback_tests {
             )
             .route(
                 "/api/oauth/userinfo",
-                get(|headers: HeaderMap| async move {
+                get(move |headers: HeaderMap| async move {
                     let bearer = headers
                         .get(header::AUTHORIZATION)
                         .and_then(|v| v.to_str().ok());
@@ -1226,7 +1259,7 @@ mod native_callback_tests {
                         return StatusCode::UNAUTHORIZED.into_response();
                     }
                     Json(serde_json::json!({
-                        "id": SUBJECT,
+                        "id": subject,
                         "email": EMAIL,
                         "firstName": "Sam",
                         "lastName": "So",
@@ -1245,9 +1278,19 @@ mod native_callback_tests {
     async fn callback_for_linked(
         verified: bool,
     ) -> (Response, Arc<NativeBackend>, crate::db::DbPool, String) {
+        callback_for(verified, Some(SUBJECT), SUBJECT).await
+    }
+
+    /// As [`callback_for_linked`], with the link's stored subject and the asserted subject (empty:
+    /// none) given.
+    async fn callback_for(
+        verified: bool,
+        stored_subject: Option<&str>,
+        asserted_subject: &'static str,
+    ) -> (Response, Arc<NativeBackend>, crate::db::DbPool, String) {
         let mut cfg = AppConfig::test_fixture();
         cfg.saml = Some(SamlConfig {
-            jackson_url: jackson_stub().await,
+            jackson_url: jackson_stub(asserted_subject).await,
             jackson_internal_url: None,
             jackson_api_key: Redacted("api-key".to_string()),
             client_secret_verifier: Redacted("verifier".to_string()),
@@ -1283,7 +1326,7 @@ mod native_callback_tests {
         orgs::db::add_member_race_safe(&db, &identity.id, "o1", orgs::Role::Member)
             .await
             .unwrap();
-        db::upsert_link(&db, "o1", EMAIL, Some(SUBJECT), &identity.id)
+        db::upsert_link(&db, "o1", EMAIL, stored_subject, &identity.id)
             .await
             .unwrap();
         let state = AppState::for_test(cfg, db.clone(), backend.clone(), SECRET);
@@ -1376,5 +1419,54 @@ mod native_callback_tests {
         let meta: serde_json::Value = serde_json::from_str(&failed.metadata).unwrap();
         assert_eq!(meta["org_id"], "o1");
         assert_eq!(meta["reason"], "recovery_link");
+    }
+
+    fn has_session(resp: &Response) -> bool {
+        set_cookies(resp)
+            .iter()
+            .any(|c| c.starts_with("forseti_session="))
+    }
+
+    async fn stored_subject(db: &crate::db::DbPool) -> Option<String> {
+        db::link_for(db, "o1", EMAIL).await.unwrap().unwrap().1
+    }
+
+    #[tokio::test]
+    async fn email_link_with_other_subject_goes_to_confirmation() {
+        let (resp, _, db, _) = callback_for(true, Some("idp-subject-other"), SUBJECT).await;
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+        let location = resp.headers()[header::LOCATION].to_str().unwrap();
+        assert!(location.starts_with("/login?refresh=true"), "{location}");
+        assert!(
+            set_cookies(&resp)
+                .iter()
+                .any(|c| c.starts_with("forseti_saml_pending="))
+        );
+        assert!(!has_session(&resp), "no session");
+        assert_eq!(
+            stored_subject(&db).await.as_deref(),
+            Some("idp-subject-other")
+        );
+    }
+
+    #[tokio::test]
+    async fn email_link_without_subject_logs_in_and_backfills() {
+        let (resp, _, db, _) = callback_for(true, None, SUBJECT).await;
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+        assert_eq!(resp.headers()[header::LOCATION], "/");
+        assert!(has_session(&resp));
+        assert_eq!(stored_subject(&db).await.as_deref(), Some(SUBJECT));
+    }
+
+    #[tokio::test]
+    async fn assertion_without_subject_logs_in_and_keeps_the_stored_subject() {
+        let (resp, _, db, _) = callback_for(true, Some("idp-subject-other"), "").await;
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+        assert_eq!(resp.headers()[header::LOCATION], "/");
+        assert!(has_session(&resp));
+        assert_eq!(
+            stored_subject(&db).await.as_deref(),
+            Some("idp-subject-other")
+        );
     }
 }

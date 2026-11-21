@@ -83,9 +83,9 @@ pub(crate) async fn settings_linked_providers(
         Ok((session, flow)) => {
             // Linking POSTs to the identity backend, which 303s on to the provider.
             let auth_origins = crate::oidc_providers::flow_auth_origins(&flow, &state.cfg.identity);
-            let memberships = crate::orgs::list_memberships(&state.db, &sess.identity_id)
-                .await
-                .unwrap_or_default();
+            let memberships = crate::orgs::memberships_or_empty(
+                crate::orgs::list_memberships(&state.db, &sess.identity_id).await,
+            );
             render_linked_providers(
                 &state,
                 &memberships,

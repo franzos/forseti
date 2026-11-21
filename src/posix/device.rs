@@ -19,8 +19,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::audit::{self, AuditCtx, AuditEvent, action};
 use crate::audit_metadata;
+use crate::backend::IdentityBackend;
 use crate::backend::oauth::{DeviceTokenOutcome, TokenSet};
-use crate::backend::{IdentityBackend, OAuthBackend};
 use crate::posix::db::{self, DeviceSession, device_status};
 use crate::posix::host_auth::RequirePosixHost;
 use crate::posix::scope;

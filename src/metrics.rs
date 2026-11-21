@@ -3,7 +3,8 @@ use axum::http::{HeaderMap, Method, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
-use std::time::Instant;
+use std::time::{Duration, Instant};
+use tokio_util::sync::CancellationToken;
 
 use crate::commercial::license::{Feature, FeatureStatus};
 use crate::state::AppState;
@@ -22,6 +23,35 @@ pub fn install_metrics_recorder() -> PrometheusHandle {
         tracing::warn!("metrics recorder already installed; /metrics may render stale data");
     }
     handle
+}
+
+/// Histogram samples pile up until drained; `render` drains too, but only when something scrapes.
+pub(crate) fn spawn_upkeep(
+    handle: PrometheusHandle,
+    shutdown: CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    spawn_every(Duration::from_secs(5), shutdown, move || {
+        handle.run_upkeep()
+    })
+}
+
+fn spawn_every<F>(
+    period: Duration,
+    shutdown: CancellationToken,
+    mut f: F,
+) -> tokio::task::JoinHandle<()>
+where
+    F: FnMut() + Send + 'static,
+{
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(period);
+        loop {
+            tokio::select! {
+                () = shutdown.cancelled() => break,
+                _ = tick.tick() => f(),
+            }
+        }
+    })
 }
 
 pub fn scrape_allowed(status: FeatureStatus) -> bool {
@@ -183,6 +213,27 @@ mod tests {
         let out = handle.render();
         assert!(out.contains("http_requests_total"), "got:\n{out}");
         assert!(out.contains("path=\"/ping\""), "got:\n{out}");
+    }
+
+    #[tokio::test]
+    async fn spawn_every_ticks_and_stops_on_cancel() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let count = Arc::new(AtomicUsize::new(0));
+        let shutdown = CancellationToken::new();
+        let c = count.clone();
+        let task = spawn_every(Duration::from_millis(10), shutdown.clone(), move || {
+            c.fetch_add(1, Ordering::SeqCst);
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(count.load(Ordering::SeqCst) >= 2);
+
+        shutdown.cancel();
+        task.await.unwrap();
+        let stopped = count.load(Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(count.load(Ordering::SeqCst), stopped);
     }
 
     #[test]

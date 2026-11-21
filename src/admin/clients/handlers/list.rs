@@ -7,7 +7,6 @@ use axum::{
 use serde::Deserialize;
 
 use crate::admin::{AdminSection, render_admin_error};
-use crate::backend::OAuthBackend;
 use crate::extractors::Csrf;
 use crate::format::looks_like_uuid;
 use crate::oauth_client_metadata;
@@ -155,7 +154,7 @@ pub async fn list(
         })
         .collect();
 
-    // The SDK exposes no next-page token; on a full page use the last row's ID
+    // `list_clients` returns no next-page token; on a full page use the last row's ID
     // (Hydra accepts client_id there). Compute before any client-side filter so
     // later pages don't skip Hydra rows filtered out on this page.
     let next_page_token = if rows.len() == CLIENTS_PAGE_SIZE as usize && !looks_like_uuid(&filter_q)

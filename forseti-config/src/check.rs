@@ -4,7 +4,7 @@ use serde_json::Value;
 use toml_edit::DocumentMut;
 
 use crate::cli::{CheckArgs, PathArgs};
-use crate::config::{DatabaseConfig, WEBHOOK_TOKEN_MIN_LEN};
+use forseti_common::{WEBHOOK_TOKEN_MIN_LEN, looks_like_production};
 
 use super::catalog;
 use super::init::is_dev_smtp;
@@ -359,7 +359,7 @@ pub(crate) fn check_hydra(root: &Value) -> Vec<Finding> {
         Some(salt) if is_placeholder(salt) => findings.push(Finding::fail(
             PAIRWISE_SALT,
             salt,
-            "a random secret (`forseti config rotate pairwise-salt`)",
+            "a random secret (`forseti-config rotate pairwise-salt`)",
             "placeholder pairwise salt; pairwise subjects are reversible by anyone who knows it.",
         )),
         Some(_) => findings.push(Finding::ok(PAIRWISE_SALT, "<set>")),
@@ -385,7 +385,7 @@ const OIDC_PROVIDER_FIELDS: &[&str] = &[
 ];
 
 /// Scan every scalar for a leftover `CHANGEME` placeholder (case-insensitive
-/// — `config-init` always emits it upper-case, but a hand-edited file might
+/// — `forseti-config init` always emits it upper-case, but a hand-edited file might
 /// not) or the literal dev-playground hook token, and FAIL on each. `already`
 /// covers keys the specific checks handled; a specific finding whose key is a
 /// prefix of the scalar's path (e.g. `secrets.cipher` vs the scalar at
@@ -413,7 +413,7 @@ pub(crate) fn placeholder_findings(root: &Value, already: &[Finding]) -> Vec<Fin
                 path,
                 value,
                 "a real value",
-                "unfilled placeholder left by `config-init` — supply a real value.",
+                "unfilled placeholder left by `forseti-config init` — supply a real value.",
             ));
         }
     });
@@ -746,14 +746,14 @@ fn check_mapper_url(provider: &Value, id: &str, base: &str, config_dir: &Path) -
                     findings.push(Finding::warn(
                         &format!("{mapper_key}.pinned"),
                         "matches an older Forseti pinned mapper",
-                        &format!("regenerate with `forseti config oidc enable {id}`"),
+                        &format!("regenerate with `forseti-config oidc enable {id}`"),
                         "this is Forseti's own pinned body from an earlier release, not a hand-rolled mapper: it still gates the `email` trait on `email_verified`, but misses later fixes (an unverified upstream may hard-fail the sign-in, and Google's may carry over verification for addresses Google isn't authoritative for).",
                     ));
                 } else {
                     findings.push(Finding::warn(
                         &format!("{mapper_key}.pinned"),
                         "differs from Forseti's pinned mapper",
-                        "regenerate with `forseti config oidc enable`, or restore the pinned body",
+                        "regenerate with `forseti-config oidc enable`, or restore the pinned body",
                         "this provider's mapper doesn't match Forseti's reviewed pinned body; if it emits `email` without gating on `email_verified` it's an account-takeover vector — review it against the pinned mapper.",
                     ));
                 }
@@ -1042,8 +1042,9 @@ pub(crate) fn check_forseti_webhook_length(doc: &DocumentMut) -> Vec<Finding> {
         "<{short} of {} entries under {WEBHOOK_TOKEN_MIN_LEN} bytes>",
         entries.len()
     );
-    let recommended = "`config rotate webhook-token`, then `config prune webhook-token`";
-    if DatabaseConfig::looks_like_production(forseti_self_url(doc)) {
+    let recommended =
+        "`forseti-config rotate webhook-token`, then `forseti-config prune webhook-token`";
+    if looks_like_production(forseti_self_url(doc)) {
         vec![Finding::fail(
             key,
             current,
@@ -1077,7 +1078,7 @@ pub(crate) fn check_forseti_cimd_private_targets(doc: &DocumentMut) -> Vec<Findi
         .and_then(|c| c.get("allow_private_targets"))
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    if !enabled || !DatabaseConfig::looks_like_production(forseti_self_url(doc)) {
+    if !enabled || !looks_like_production(forseti_self_url(doc)) {
         return Vec::new();
     }
     vec![Finding::fail(
@@ -1422,7 +1423,7 @@ mod tests {
     use super::*;
 
     fn parse(yaml: &str) -> Value {
-        crate::config_cli::yamlutil::parse_yaml(yaml).expect("test yaml parses")
+        crate::yamlutil::parse_yaml(yaml).expect("test yaml parses")
     }
 
     fn severity_of(findings: &[Finding], key: &str) -> Option<Severity> {
@@ -1447,11 +1448,11 @@ mod tests {
 
     #[test]
     fn resolve_default_used_when_it_exists() {
-        // Cargo runs tests from the crate root, where infra/ exists.
-        let (path, source) =
-            resolve_config_path(None, DEFAULT_KRATOS, "Kratos", "--kratos", ENV_KRATOS)
-                .expect("dev default exists at crate root");
-        assert_eq!(path, PathBuf::from(DEFAULT_KRATOS));
+        let default = crate::repo_file(DEFAULT_KRATOS);
+        let default = default.to_str().expect("utf-8 path");
+        let (path, source) = resolve_config_path(None, default, "Kratos", "--kratos", ENV_KRATOS)
+            .expect("dev default exists at the repo root");
+        assert_eq!(path, PathBuf::from(default));
         assert_eq!(source, "dev default");
     }
 
@@ -1541,7 +1542,7 @@ selfservice:
 
     #[test]
     fn playground_kratos_passes_the_verified_address_lint() {
-        let v = load_yaml(Path::new(DEFAULT_KRATOS)).expect("playground kratos.yml parses");
+        let v = load_yaml(&crate::repo_file(DEFAULT_KRATOS)).expect("playground kratos.yml parses");
         let findings = check_kratos(&v);
         assert_eq!(severity_of(&findings, PW_HOOK_KEY), Some(Severity::Ok));
         assert_eq!(severity_of(&findings, PK_HOOK_KEY), Some(Severity::Ok));
@@ -1685,7 +1686,8 @@ webhook_token = "0f3b8c1d9a2e4f7b6c5d8e9a0b1c2d3e"
     #[test]
     fn the_committed_configs_pass_the_cimd_private_targets_check() {
         for path in ["config.ci.toml", "config.example.toml"] {
-            let text = std::fs::read_to_string(path).expect("committed config exists");
+            let text =
+                std::fs::read_to_string(crate::repo_file(path)).expect("committed config exists");
             let doc: DocumentMut = text.parse().expect("committed config parses");
             let findings = check_forseti_cimd_private_targets(&doc);
             assert!(
@@ -1716,7 +1718,8 @@ webhook_token = ["0f3b8c1d9a2e4f7b6c5d8e9a0b1c2d3e", "change-me"]
         // `config.ci.toml` ships `...-change-me` literals on purpose; the
         // point of this lint is that carrying that file into a real
         // deployment fails loudly rather than silently.
-        let text = std::fs::read_to_string("config.ci.toml").expect("config.ci.toml exists");
+        let text = std::fs::read_to_string(crate::repo_file("config.ci.toml"))
+            .expect("config.ci.toml exists");
         let doc: DocumentMut = text.parse().expect("config.ci.toml parses");
         let findings = check_forseti_placeholders(&doc);
         assert!(
@@ -1848,7 +1851,7 @@ webfinger:
     /// The playground's discovery lists must match what the consent handler issues.
     #[test]
     fn playground_hydra_advertises_the_issued_scopes_and_claims() {
-        let v = load_yaml(Path::new(DEFAULT_HYDRA)).expect("playground hydra.yml parses");
+        let v = load_yaml(&crate::repo_file(DEFAULT_HYDRA)).expect("playground hydra.yml parses");
         let list = |key: &str| -> Vec<String> {
             dig(&v, &["webfinger", "oidc_discovery", key])
                 .and_then(Value::as_array)
@@ -1857,19 +1860,13 @@ webfinger:
                 .filter_map(|x| x.as_str().map(str::to_string))
                 .collect()
         };
-        assert_eq!(
-            list("supported_scope"),
-            crate::oauth::consent::SUPPORTED_SCOPES
-        );
-        assert_eq!(
-            list("supported_claims"),
-            crate::oauth::consent::SUPPORTED_CLAIMS
-        );
+        assert_eq!(list("supported_scope"), forseti_common::SUPPORTED_SCOPES);
+        assert_eq!(list("supported_claims"), crate::SUPPORTED_CLAIMS);
     }
 
     #[test]
     fn playground_hydra_passes_the_dcr_lint() {
-        let v = load_yaml(Path::new(DEFAULT_HYDRA)).expect("playground hydra.yml parses");
+        let v = load_yaml(&crate::repo_file(DEFAULT_HYDRA)).expect("playground hydra.yml parses");
         let findings = check_hydra(&v);
         assert_eq!(
             severity_of(&findings, "oidc.dynamic_client_registration.enabled"),

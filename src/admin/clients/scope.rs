@@ -230,9 +230,9 @@ pub(super) async fn resolve_create_target_org(
     if let AdminScope::Org { id, .. } = scope {
         return id.clone();
     }
-    let memberships = crate::orgs::list_memberships(&state.db, &ctx.identity_id)
-        .await
-        .unwrap_or_default();
+    let memberships = crate::orgs::memberships_or_empty(
+        crate::orgs::list_memberships(&state.db, &ctx.identity_id).await,
+    );
     let active = crate::orgs::active_org(
         &memberships,
         &state.cookie_secret,

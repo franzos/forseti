@@ -16,7 +16,6 @@ use axum::response::{IntoResponse, Redirect, Response};
 
 use crate::admin::{AdminSection, ConfirmForm, render_admin_error, with_org};
 use crate::audit::{self, AuditCtx, action, target_kind};
-use crate::backend::OAuthBackend;
 use crate::backend::oauth::OAuthClient;
 use crate::csrf::CsrfForm;
 use crate::extractors::{Csrf, RequireAdminScoped};
@@ -55,7 +54,7 @@ pub(crate) struct DeadRow {
     pub event_id_short: String,
     pub event_id: String,
     pub client_id: String,
-    /// Resolved via `hydra::get_client`; falls back to `client_id` if the
+    /// Resolved via `HydraBackend::get_client`; falls back to `client_id` if the
     /// client was deleted before the admin opened this page.
     pub client_name: String,
     pub client_exists: bool,

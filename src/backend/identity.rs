@@ -259,9 +259,7 @@ pub enum PrivilegedReason {
 }
 
 /// Outcome of fetching a Kratos self-service flow, surfacing 404/410 (missing/expired) and the settings-flow
-/// 403 as plain variants. The flow is projected from raw JSON by `flow_json::project`, not the typed
-/// `LoginFlow`/etc, because the SDK's `UiNodeAttributes` deserializer is broken for the real Kratos wire
-/// shape (see `get_flow`).
+/// 403 as plain variants. The flow is projected from raw JSON by `flow_json::project`.
 pub enum FlowFetch {
     Ok(Box<Flow>),
     /// The flow ID is unknown or expired; restart the flow.

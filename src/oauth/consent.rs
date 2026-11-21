@@ -10,8 +10,8 @@ use serde::Deserialize;
 
 use crate::audit::{self, AuditCtx, AuditEvent, action, severity, target_kind};
 use crate::audit_metadata;
+use crate::backend::IdentityBackend;
 use crate::backend::identity::{Identity, WhoamiOutcome};
-use crate::backend::{IdentityBackend, OAuthBackend};
 use crate::csrf::CsrfForm;
 use crate::extractors::{Csrf, OptionalSession};
 use crate::locale::LanguageIdentifier;
@@ -225,20 +225,20 @@ pub(crate) async fn oauth_consent(
             crate::oauth::login::parse_organization_id_param(request_url).filter(|s| !s.is_empty());
         return finalize_consent(
             &state,
-            &challenge,
-            client_id_lookup,
-            &subject,
-            requested_scope,
-            requested_audience,
-            request_url,
-            // Remembered, so Hydra can answer the next `prompt=none` itself.
-            true,
-            false,
-            &headers,
-            requested_org_id.as_deref(),
-            locale,
-            req.login_session_id.as_deref(),
-            req.consent_request_id.as_deref(),
+            ConsentGrant {
+                challenge: &challenge,
+                client_id: client_id_lookup,
+                subject: &subject,
+                grant_scope: requested_scope,
+                requested_audience,
+                request_url,
+                path: GrantPath::Auto,
+                headers: &headers,
+                requested_org_id: requested_org_id.as_deref(),
+                consent_locale: locale,
+                login_session_id: req.login_session_id.as_deref(),
+                consent_request_id: req.consent_request_id.as_deref(),
+            },
         )
         .await
         .into_response();
@@ -604,19 +604,20 @@ pub(crate) async fn oauth_consent_submit(
         crate::oauth::login::parse_organization_id_param(&request_url).filter(|s| !s.is_empty());
     let outcome = finalize_consent(
         &state,
-        &form.consent_challenge,
-        &client_id,
-        &subject,
-        grant_scope,
-        requested_audience,
-        &request_url,
-        remember,
-        true,
-        &headers,
-        requested_org_id.as_deref(),
-        consent_locale,
-        req.login_session_id.as_deref(),
-        req.consent_request_id.as_deref(),
+        ConsentGrant {
+            challenge: &form.consent_challenge,
+            client_id: &client_id,
+            subject: &subject,
+            grant_scope,
+            requested_audience,
+            request_url: &request_url,
+            path: GrantPath::Interactive { remember },
+            headers: &headers,
+            requested_org_id: requested_org_id.as_deref(),
+            consent_locale,
+            login_session_id: req.login_session_id.as_deref(),
+            consent_request_id: req.consent_request_id.as_deref(),
+        },
     )
     .await;
 
@@ -1270,34 +1271,70 @@ fn resolve_claim_active_org(
     }
 }
 
-/// Build the id_token claims from identity traits + granted scopes, then
-/// accept the consent challenge. Shared by the auto-grant and Allow paths.
-/// `requested_org_id` (the auth request's `organization_id`, if any) pins the
-/// `org`/`groups` claims to that org; see `resolve_claim_active_org`.
-/// `request_url` is the original `/oauth2/auth` URL, the carrier of RFC 8707
-/// `resource=`; the audience policy lives here so no grant path can miss it.
-// Cohesive consent-finalization inputs; splitting into a struct adds no clarity.
-#[allow(clippy::too_many_arguments)]
-async fn finalize_consent(
-    state: &AppState,
-    challenge: &str,
-    client_id: &str,
-    subject: &str,
+/// How the consent was reached.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GrantPath {
+    /// Hydra `skip` or the client's `skip_consent`: no human saw the audience.
+    Auto,
+    /// The user clicked Allow on the consent screen.
+    Interactive { remember: bool },
+}
+
+impl GrantPath {
+    fn remember(self) -> bool {
+        match self {
+            // Remembered, so Hydra can answer the next `prompt=none` itself.
+            GrantPath::Auto => true,
+            GrantPath::Interactive { remember } => remember,
+        }
+    }
+
+    fn user_approved(self) -> bool {
+        matches!(self, GrantPath::Interactive { .. })
+    }
+}
+
+/// Inputs to [`finalize_consent`].
+struct ConsentGrant<'a> {
+    challenge: &'a str,
+    client_id: &'a str,
+    subject: &'a str,
     grant_scope: Vec<String>,
     requested_audience: Vec<String>,
-    request_url: &str,
-    remember: bool,
-    // `false` on the auto-grant path (Hydra `skip` or the client's
-    // `skip_consent`), where no human saw the audience.
-    user_approved: bool,
-    headers: &axum::http::HeaderMap,
-    requested_org_id: Option<&str>,
+    /// The original `/oauth2/auth` URL, the carrier of RFC 8707 `resource=`.
+    request_url: &'a str,
+    path: GrantPath,
+    headers: &'a axum::http::HeaderMap,
+    /// The auth request's `organization_id`, if any; pins the `org`/`groups`
+    /// claims to that org (see `resolve_claim_active_org`).
+    requested_org_id: Option<&'a str>,
     consent_locale: LanguageIdentifier,
-    // Hydra's ids for this consent, recorded so revoking the session can
-    // revoke the grant.
-    login_session_id: Option<&str>,
-    consent_request_id: Option<&str>,
-) -> FinalizeOutcome {
+    /// Hydra's ids for this consent, recorded so revoking the session can
+    /// revoke the grant.
+    login_session_id: Option<&'a str>,
+    consent_request_id: Option<&'a str>,
+}
+
+/// Build the id_token claims from identity traits + granted scopes, then
+/// accept the consent challenge. Shared by the auto-grant and Allow paths.
+/// The audience policy lives here so no grant path can miss it.
+async fn finalize_consent(state: &AppState, grant: ConsentGrant<'_>) -> FinalizeOutcome {
+    let ConsentGrant {
+        challenge,
+        client_id,
+        subject,
+        grant_scope,
+        requested_audience,
+        request_url,
+        path,
+        headers,
+        requested_org_id,
+        consent_locale,
+        login_session_id,
+        consent_request_id,
+    } = grant;
+    let remember = path.remember();
+    let user_approved = path.user_approved();
     // Both policy arms are fetched lazily: skipped entirely when nothing was
     // requested, so a consent with no audience carrier costs no extra
     // round-trips.
@@ -1367,7 +1404,7 @@ async fn finalize_consent(
             }
         };
         let (id_res, mem_res) = tokio::join!(identity_fut, memberships_fut);
-        (id_res, mem_res.unwrap_or_default())
+        (id_res, crate::orgs::memberships_or_empty(mem_res))
     } else {
         (identity_fut.await, Vec::new())
     };
@@ -1557,49 +1594,7 @@ fn project_group_slugs(raw: &[String], cap: usize) -> (Vec<String>, bool) {
     (slugs, truncated)
 }
 
-/// Scopes [`build_id_token_claims`] acts on, advertised through Hydra's
-/// `webfinger.oidc_discovery.supported_scope` (Hydra adds `openid`,
-/// `offline` and `offline_access` itself).
-pub(crate) const SUPPORTED_SCOPES: [&str; 6] = [
-    "email",
-    "profile",
-    "org",
-    "orgs",
-    "groups",
-    "extended_profile",
-];
-
-/// Claims Forseti and Hydra put in ID tokens, advertised through Hydra's
-/// `webfinger.oidc_discovery.supported_claims`.
-#[cfg(feature = "identity-ory")]
-pub(crate) const SUPPORTED_CLAIMS: [&str; 26] = [
-    "sub",
-    "iss",
-    "aud",
-    "exp",
-    "iat",
-    "auth_time",
-    "nonce",
-    "acr",
-    "amr",
-    "sid",
-    "email",
-    "email_verified",
-    "name",
-    "given_name",
-    "family_name",
-    "picture",
-    "website",
-    "preferred_username",
-    "locale",
-    "updated_at",
-    "org",
-    "orgs",
-    "groups",
-    "bio",
-    "pronouns",
-    "links",
-];
+pub(crate) use forseti_common::SUPPORTED_SCOPES;
 
 /// Claim keys of the registry rows whose resource is a granted audience,
 /// matched verbatim or canonically like [`resolve_granted_audience`].
@@ -1884,6 +1879,18 @@ fn build_id_token_claims(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn grant_path_derives_remember_and_approval() {
+        use super::GrantPath;
+        assert!(GrantPath::Auto.remember());
+        assert!(!GrantPath::Auto.user_approved());
+        for remember in [true, false] {
+            let path = GrantPath::Interactive { remember };
+            assert_eq!(path.remember(), remember);
+            assert!(path.user_approved());
+        }
+    }
+
     #[test]
     fn consent_hides_the_clients_own_id_from_the_audience_list() {
         let granted = vec![

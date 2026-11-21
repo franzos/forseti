@@ -138,7 +138,7 @@ pub async fn list(
         .collect();
 
     // Next-page heuristic: the last row's session ID doubles as Kratos's
-    // opaque token, since the typed SDK doesn't surface the Link header.
+    // opaque token, since `admin_list_all_sessions` doesn't return the Link header.
     let next_page_token = if rows.len() == SESSIONS_PAGE_SIZE as usize {
         rows.last().map(|r| r.id.clone()).unwrap_or_default()
     } else {

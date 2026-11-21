@@ -1,150 +1,418 @@
-//! Hydra OAuth2 bridge wrappers (admin-API operations).
+//! Hydra admin and public API calls over plain HTTP.
 //!
-//! Hydra's admin API does not produce the broken `ui.nodes` shape that the
-//! Kratos flow models do, so the SDK models deserialize directly and convert
-//! to domain types; request bodies are built from SDK models.
+//! Responses deserialize into `crate::backend::oauth` types; request bodies
+//! are private wire structs. Paths, methods and query names follow Hydra's
+//! OpenAPI spec (`/admin/...` on the admin endpoint, `/oauth2/...` and
+//! `/.well-known/...` on the public one). Failures read
+//! `hydra <operation> failed: error in <reqwest|serde|response>: ...`.
 
-use super::convert::{
-    client_from_sdk, client_to_sdk, consent_request_from_sdk, consent_session_from_sdk,
-    login_request_from_sdk, logout_request_from_sdk,
-};
+use reqwest::Method;
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+use serde_json::{Map, Value};
+
 use super::*;
 use crate::backend::oauth::JwkSummary;
 use crate::backend::oauth::{
     ConsentRequest, ConsentSession, LoginRequest, LogoutRequest, OAuthClient, RedirectTo,
 };
-use ory_client::apis::o_auth2_api;
-use ory_client::models::{
-    AcceptOAuth2ConsentRequest, AcceptOAuth2ConsentRequestSession, AcceptOAuth2LoginRequest,
-    OAuth2ConsentSession, RejectOAuth2Request,
-};
+use crate::web::urlencode;
 
-pub async fn get_login_request(clients: &OryClients, challenge: &str) -> Result<LoginRequest> {
-    o_auth2_api::get_o_auth2_login_request(&clients.hydra_admin, challenge)
-        .await
-        .map_err(|e| anyhow::anyhow!("hydra get_login_request failed: {e}"))
-        .and_then(login_request_from_sdk)
+fn decode<T: DeserializeOwned>(v: Value) -> Result<T, CallError> {
+    serde_json::from_value(v).map_err(|e| CallError::Decode(e.to_string()))
 }
 
-/// Accept a Hydra login challenge for a Kratos subject. `amr`/`acr` mirror the OIDC claims RPs see;
-/// `remember` extends Hydra's login session so subsequent SSO hits skip re-prompting Kratos, for
-/// `remember_for` seconds (`0` = Hydra's maximum duration).
-pub async fn accept_login_request(
-    clients: &OryClients,
-    challenge: &str,
-    subject: &str,
+// --- OAuth client wire shape ---------------------------------------------
+
+/// Every OAuth2 client field in Hydra's OpenAPI spec, sorted.
+const CLIENT_FIELDS: &[&str] = &[
+    "access_token_strategy",
+    "allowed_cors_origins",
+    "audience",
+    "authorization_code_grant_access_token_lifespan",
+    "authorization_code_grant_id_token_lifespan",
+    "authorization_code_grant_refresh_token_lifespan",
+    "backchannel_logout_session_required",
+    "backchannel_logout_uri",
+    "client_credentials_grant_access_token_lifespan",
+    "client_id",
+    "client_name",
+    "client_secret",
+    "client_secret_expires_at",
+    "client_uri",
+    "contacts",
+    "created_at",
+    "device_authorization_grant_access_token_lifespan",
+    "device_authorization_grant_id_token_lifespan",
+    "device_authorization_grant_refresh_token_lifespan",
+    "frontchannel_logout_session_required",
+    "frontchannel_logout_uri",
+    "grant_types",
+    "implicit_grant_access_token_lifespan",
+    "implicit_grant_id_token_lifespan",
+    "jwks",
+    "jwks_uri",
+    "jwt_bearer_grant_access_token_lifespan",
+    "logo_uri",
+    "metadata",
+    "owner",
+    "policy_uri",
+    "post_logout_redirect_uris",
+    "redirect_uris",
+    "refresh_token_grant_access_token_lifespan",
+    "refresh_token_grant_id_token_lifespan",
+    "refresh_token_grant_refresh_token_lifespan",
+    "registration_access_token",
+    "registration_client_uri",
+    "request_object_signing_alg",
+    "request_uris",
+    "response_types",
+    "scope",
+    "sector_identifier_uri",
+    "skip_consent",
+    "skip_logout_consent",
+    "subject_type",
+    "token_endpoint_auth_method",
+    "token_endpoint_auth_signing_alg",
+    "tos_uri",
+    "updated_at",
+    "userinfo_signed_response_alg",
+];
+
+/// The client fields the spec marks nullable: an explicit `null` survives, on every other field it is dropped.
+const CLIENT_NULLABLE_FIELDS: &[&str] = &[
+    "authorization_code_grant_access_token_lifespan",
+    "authorization_code_grant_id_token_lifespan",
+    "authorization_code_grant_refresh_token_lifespan",
+    "client_credentials_grant_access_token_lifespan",
+    "device_authorization_grant_access_token_lifespan",
+    "device_authorization_grant_id_token_lifespan",
+    "device_authorization_grant_refresh_token_lifespan",
+    "implicit_grant_access_token_lifespan",
+    "implicit_grant_id_token_lifespan",
+    "jwt_bearer_grant_access_token_lifespan",
+    "refresh_token_grant_access_token_lifespan",
+    "refresh_token_grant_id_token_lifespan",
+    "refresh_token_grant_refresh_token_lifespan",
+];
+
+/// JSON Web Key fields in Hydra's OpenAPI spec, sorted.
+const JWK_FIELDS: &[&str] = &[
+    "alg", "crv", "d", "dp", "dq", "e", "k", "kid", "kty", "n", "p", "q", "qi", "use", "x", "x5c",
+    "y",
+];
+
+/// Keep only `fields` (in that order) and drop `null`s outside `nullable`.
+fn retain_fields(map: &mut Map<String, Value>, fields: &[&str], nullable: &[&str]) {
+    let mut src = std::mem::take(map);
+    for &k in fields {
+        if let Some(v) = src.remove(k)
+            && (!v.is_null() || nullable.contains(&k))
+        {
+            map.insert(k.to_string(), v);
+        }
+    }
+}
+
+/// Reduce a client object to the spec's fields, so a get-then-put round
+/// trip sends Hydra only fields it documents and `null` only where it is
+/// meaningful. Applied to every client read and written.
+fn wire_client(v: &mut Value) {
+    let Value::Object(map) = v else { return };
+    retain_fields(map, CLIENT_FIELDS, CLIENT_NULLABLE_FIELDS);
+    if let Some(Value::Object(jwks)) = map.get_mut("jwks") {
+        let keys = jwks.remove("keys");
+        jwks.clear();
+        if let Some(mut keys) = keys.filter(|k| !k.is_null()) {
+            if let Value::Array(items) = &mut keys {
+                for key in items {
+                    if let Value::Object(key) = key {
+                        retain_fields(key, JWK_FIELDS, &[]);
+                    }
+                }
+            }
+            jwks.insert("keys".to_string(), keys);
+        }
+    }
+}
+
+/// [`wire_client`] on the `client` of a login/consent/logout request, and
+/// on the request inside a consent session.
+fn wire_nested_clients(v: &mut Value) {
+    match v {
+        Value::Array(items) => items.iter_mut().for_each(wire_nested_clients),
+        Value::Object(map) => {
+            if let Some(c) = map.get_mut("client") {
+                wire_client(c);
+            }
+            if let Some(r) = map.get_mut("consent_request") {
+                wire_nested_clients(r);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn client_from_wire(mut v: Value) -> Result<OAuthClient, CallError> {
+    wire_client(&mut v);
+    decode(v)
+}
+
+fn client_to_wire(c: OAuthClient) -> Result<Value> {
+    let mut v = serde_json::to_value(c)?;
+    wire_client(&mut v);
+    Ok(v)
+}
+
+fn with_nested_clients<T: DeserializeOwned>(mut v: Value) -> Result<T, CallError> {
+    wire_nested_clients(&mut v);
+    decode(v)
+}
+
+// --- Request bodies -----------------------------------------------------
+
+#[derive(Serialize)]
+struct AcceptLoginBody<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    acr: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    amr: Vec<String>,
     remember: bool,
     remember_for: i64,
-    amr: Vec<String>,
-    acr: Option<String>,
-) -> Result<RedirectTo> {
-    let mut body = AcceptOAuth2LoginRequest::new(subject.to_string());
-    body.remember = Some(remember);
-    body.remember_for = Some(remember_for);
-    if !amr.is_empty() {
-        body.amr = Some(amr);
-    }
-    body.acr = acr;
-    o_auth2_api::accept_o_auth2_login_request(&clients.hydra_admin, challenge, Some(body))
-        .await
-        .map(RedirectTo::from)
-        .map_err(|e| anyhow::anyhow!("hydra accept_login_request failed: {e}"))
+    subject: &'a str,
 }
 
-/// Reject a login challenge, sending the OAuth2 `error` / `error_description`
-/// back to the relying party (`login_required`, `interaction_required`, ...).
-pub async fn reject_login_request(
-    clients: &OryClients,
-    challenge: &str,
-    error: &str,
-    error_description: &str,
-) -> Result<RedirectTo> {
-    let body = RejectOAuth2Request {
-        error: Some(error.to_string()),
-        error_debug: None,
-        error_description: Some(error_description.to_string()),
-        error_hint: None,
-        status_code: None,
-    };
-    o_auth2_api::reject_o_auth2_login_request(&clients.hydra_admin, challenge, Some(body))
-        .await
-        .map(RedirectTo::from)
-        .map_err(|e| anyhow::anyhow!("hydra reject_login_request failed: {e}"))
+#[derive(Serialize)]
+struct RejectBody<'a> {
+    error: &'a str,
+    error_description: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status_code: Option<i64>,
 }
 
-pub async fn get_consent_request(clients: &OryClients, challenge: &str) -> Result<ConsentRequest> {
-    o_auth2_api::get_o_auth2_consent_request(&clients.hydra_admin, challenge)
-        .await
-        .map_err(|e| anyhow::anyhow!("hydra get_consent_request failed: {e}"))
-        .and_then(consent_request_from_sdk)
-}
-
-/// Accept a Hydra consent challenge with the granted scopes and the id_token and access-token claim payloads (Hydra's `session.id_token` / `session.access_token`).
-/// A remembered consent (`remember == true`) persists indefinitely, until the user revokes it from Authorized apps.
-pub async fn accept_consent_request(
-    clients: &OryClients,
-    challenge: &str,
+#[derive(Serialize)]
+struct AcceptConsentBody {
+    grant_access_token_audience: Vec<String>,
     grant_scope: Vec<String>,
-    grant_audience: Vec<String>,
     remember: bool,
-    id_token_session: serde_json::Value,
-    access_token_session: serde_json::Map<String, serde_json::Value>,
-) -> Result<RedirectTo> {
-    let mut session = AcceptOAuth2ConsentRequestSession::new();
-    // `Option<Option<Value>>` mirrors openapi-generator's "nullable optional"
-    // shape; the outer `Some` says "field present", the inner `Some` says
-    // "value non-null".
-    session.id_token = Some(Some(id_token_session));
-    if !access_token_session.is_empty() {
-        session.access_token = Some(Some(serde_json::Value::Object(access_token_session)));
+    remember_for: i64,
+    session: ConsentClaims,
+}
+
+/// Hydra's `session.access_token` / `session.id_token` claim payloads.
+#[derive(Serialize)]
+struct ConsentClaims {
+    #[serde(skip_serializing_if = "Map::is_empty")]
+    access_token: Map<String, Value>,
+    id_token: Value,
+}
+
+#[derive(Serialize)]
+struct AcceptUserCodeBody<'a> {
+    user_code: &'a str,
+}
+
+/// One RFC 6902 operation.
+#[derive(Serialize)]
+struct JsonPatchOp {
+    op: &'static str,
+    path: &'static str,
+    value: Value,
+}
+
+// --- Response bodies ----------------------------------------------------
+
+#[derive(serde::Deserialize)]
+struct VersionBody {
+    version: String,
+}
+
+/// Hydra's JWKS. `alg`, `kid`, `kty` and `use` are required by its spec.
+#[derive(serde::Deserialize)]
+struct JsonWebKeySet {
+    keys: Option<Vec<JsonWebKey>>,
+}
+
+#[derive(serde::Deserialize)]
+struct JsonWebKey {
+    alg: String,
+    kid: String,
+    kty: String,
+    #[serde(rename = "use")]
+    use_: String,
+    n: Option<String>,
+    e: Option<String>,
+}
+
+pub struct HydraBackend {
+    pub(super) clients: Arc<OryClients>,
+}
+
+// --- Login, consent, logout ---------------------------------------------
+
+impl HydraBackend {
+    pub(crate) fn from_config(cfg: &AppConfig) -> Arc<HydraBackend> {
+        Arc::new(HydraBackend {
+            clients: OryClients::from_config(cfg),
+        })
     }
 
-    let mut body = AcceptOAuth2ConsentRequest::new();
-    body.grant_scope = Some(grant_scope);
-    body.grant_access_token_audience = Some(grant_audience);
-    body.remember = Some(remember);
-    body.remember_for = Some(0);
-    body.session = Some(Box::new(session));
+    pub async fn get_login_request(&self, challenge: &str) -> Result<LoginRequest> {
+        let req = self
+            .clients
+            .hydra_admin
+            .request(Method::GET, "/admin/oauth2/auth/requests/login")
+            .query(&[("login_challenge", challenge)]);
+        send_json(req)
+            .await
+            .and_then(with_nested_clients)
+            .map_err(|e| anyhow::anyhow!("hydra get_login_request failed: {e}"))
+    }
 
-    o_auth2_api::accept_o_auth2_consent_request(&clients.hydra_admin, challenge, Some(body))
-        .await
-        .map(RedirectTo::from)
-        .map_err(|e| anyhow::anyhow!("hydra accept_consent_request failed: {e}"))
-}
+    /// Accept a Hydra login challenge for a Kratos subject. `amr`/`acr` mirror the OIDC claims RPs see;
+    /// `remember` extends Hydra's login session so subsequent SSO hits skip re-prompting Kratos, for
+    /// `remember_for` seconds (`0` = Hydra's maximum duration).
+    pub async fn accept_login_request(
+        &self,
+        challenge: &str,
+        subject: &str,
+        remember: bool,
+        remember_for: i64,
+        amr: Vec<String>,
+        acr: Option<String>,
+    ) -> Result<RedirectTo> {
+        let body = AcceptLoginBody {
+            acr,
+            amr,
+            remember,
+            remember_for,
+            subject,
+        };
+        let req = self
+            .clients
+            .hydra_admin
+            .request(Method::PUT, "/admin/oauth2/auth/requests/login/accept")
+            .query(&[("login_challenge", challenge)])
+            .json(&body);
+        send_json(req)
+            .await
+            .map_err(|e| anyhow::anyhow!("hydra accept_login_request failed: {e}"))
+    }
 
-/// Reject a consent challenge, propagating an OAuth2 `error` / `error_description`
-/// back to the relying party.
-pub async fn reject_consent_request(
-    clients: &OryClients,
-    challenge: &str,
-    error: &str,
-    error_description: &str,
-) -> Result<RedirectTo> {
-    let body = RejectOAuth2Request {
-        error: Some(error.to_string()),
-        error_debug: None,
-        error_description: Some(error_description.to_string()),
-        error_hint: None,
-        status_code: Some(403),
-    };
-    o_auth2_api::reject_o_auth2_consent_request(&clients.hydra_admin, challenge, Some(body))
-        .await
-        .map(RedirectTo::from)
-        .map_err(|e| anyhow::anyhow!("hydra reject_consent_request failed: {e}"))
-}
+    /// Reject a login challenge, sending the OAuth2 `error` / `error_description`
+    /// back to the relying party (`login_required`, `interaction_required`, ...).
+    pub async fn reject_login_request(
+        &self,
+        challenge: &str,
+        error: &str,
+        error_description: &str,
+    ) -> Result<RedirectTo> {
+        let body = RejectBody {
+            error,
+            error_description,
+            status_code: None,
+        };
+        let req = self
+            .clients
+            .hydra_admin
+            .request(Method::PUT, "/admin/oauth2/auth/requests/login/reject")
+            .query(&[("login_challenge", challenge)])
+            .json(&body);
+        send_json(req)
+            .await
+            .map_err(|e| anyhow::anyhow!("hydra reject_login_request failed: {e}"))
+    }
 
-pub async fn get_logout_request(clients: &OryClients, challenge: &str) -> Result<LogoutRequest> {
-    o_auth2_api::get_o_auth2_logout_request(&clients.hydra_admin, challenge)
-        .await
-        .map_err(|e| anyhow::anyhow!("hydra get_logout_request failed: {e}"))
-        .and_then(logout_request_from_sdk)
-}
+    pub async fn get_consent_request(&self, challenge: &str) -> Result<ConsentRequest> {
+        let req = self
+            .clients
+            .hydra_admin
+            .request(Method::GET, "/admin/oauth2/auth/requests/consent")
+            .query(&[("consent_challenge", challenge)]);
+        send_json(req)
+            .await
+            .and_then(with_nested_clients)
+            .map_err(|e| anyhow::anyhow!("hydra get_consent_request failed: {e}"))
+    }
 
-pub async fn accept_logout_request(clients: &OryClients, challenge: &str) -> Result<RedirectTo> {
-    o_auth2_api::accept_o_auth2_logout_request(&clients.hydra_admin, challenge)
-        .await
-        .map(RedirectTo::from)
-        .map_err(|e| anyhow::anyhow!("hydra accept_logout_request failed: {e}"))
+    /// Accept a Hydra consent challenge with the granted scopes and the id_token and access-token claim payloads (Hydra's `session.id_token` / `session.access_token`).
+    /// A remembered consent (`remember == true`) persists indefinitely, until the user revokes it from Authorized apps.
+    pub async fn accept_consent_request(
+        &self,
+        challenge: &str,
+        grant_scope: Vec<String>,
+        grant_audience: Vec<String>,
+        remember: bool,
+        id_token_session: Value,
+        access_token_session: Map<String, Value>,
+    ) -> Result<RedirectTo> {
+        let body = AcceptConsentBody {
+            grant_access_token_audience: grant_audience,
+            grant_scope,
+            remember,
+            remember_for: 0,
+            session: ConsentClaims {
+                access_token: access_token_session,
+                id_token: id_token_session,
+            },
+        };
+        let req = self
+            .clients
+            .hydra_admin
+            .request(Method::PUT, "/admin/oauth2/auth/requests/consent/accept")
+            .query(&[("consent_challenge", challenge)])
+            .json(&body);
+        send_json(req)
+            .await
+            .map_err(|e| anyhow::anyhow!("hydra accept_consent_request failed: {e}"))
+    }
+
+    /// Reject a consent challenge, propagating an OAuth2 `error` / `error_description`
+    /// back to the relying party.
+    pub async fn reject_consent_request(
+        &self,
+        challenge: &str,
+        error: &str,
+        error_description: &str,
+    ) -> Result<RedirectTo> {
+        let body = RejectBody {
+            error,
+            error_description,
+            status_code: Some(403),
+        };
+        let req = self
+            .clients
+            .hydra_admin
+            .request(Method::PUT, "/admin/oauth2/auth/requests/consent/reject")
+            .query(&[("consent_challenge", challenge)])
+            .json(&body);
+        send_json(req)
+            .await
+            .map_err(|e| anyhow::anyhow!("hydra reject_consent_request failed: {e}"))
+    }
+
+    pub async fn get_logout_request(&self, challenge: &str) -> Result<LogoutRequest> {
+        let req = self
+            .clients
+            .hydra_admin
+            .request(Method::GET, "/admin/oauth2/auth/requests/logout")
+            .query(&[("logout_challenge", challenge)]);
+        send_json(req)
+            .await
+            .and_then(with_nested_clients)
+            .map_err(|e| anyhow::anyhow!("hydra get_logout_request failed: {e}"))
+    }
+
+    pub async fn accept_logout_request(&self, challenge: &str) -> Result<RedirectTo> {
+        let req = self
+            .clients
+            .hydra_admin
+            .request(Method::PUT, "/admin/oauth2/auth/requests/logout/accept")
+            .query(&[("logout_challenge", challenge)]);
+        send_json(req)
+            .await
+            .map_err(|e| anyhow::anyhow!("hydra accept_logout_request failed: {e}"))
+    }
 }
 
 // --- Device Authorization Grant (RFC 8628) ---------------------------
@@ -152,55 +420,20 @@ pub async fn accept_logout_request(clients: &OryClients, challenge: &str) -> Res
 // Wrappers driven by the Part-B device endpoints (`src/posix/device.rs`)
 // and the browser verification UI (`src/oauth/device_verify.rs`).
 mod device_grant {
-    use super::{OryClients, RedirectTo, Result, o_auth2_api};
+    use super::{
+        AcceptUserCodeBody, HydraBackend, JsonWebKeySet, Method, RedirectTo, Result, send_json,
+    };
     use crate::backend::oauth::{DeviceAuthorization, DeviceTokenOutcome, IdTokenClaims, TokenSet};
 
-    /// Start the device grant against Hydra's public `/oauth2/device/auth`. POSTs directly with HTTP Basic
-    /// client auth because the SDK's `o_auth2_device_flow` sends none, and the confidential client must authenticate.
-    pub async fn device_authorization(
-        clients: &OryClients,
-        client_id: &str,
-        client_secret: &str,
-        scope: &str,
-    ) -> Result<DeviceAuthorization> {
-        let cfg = &clients.hydra_public;
-        let url = format!("{}/oauth2/device/auth", cfg.base_path.trim_end_matches('/'));
-        let resp = cfg
-            .client
-            .post(&url)
-            .basic_auth(client_id, Some(client_secret))
-            // RFC 8628 §3.1 requires `client_id` in the body; Hydra cross-checks
-            // it against the Basic-auth client and 400s on a mismatch (incl. an
-            // absent body client_id), so send it in both.
-            .form(&[("client_id", client_id), ("scope", scope)])
-            .send()
-            .await
-            .map_err(|e| anyhow::anyhow!("hydra device_authorization transport: {e}"))?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!(
-                "hydra device_authorization returned {status}: {body}"
-            ));
-        }
-        let raw: ory_client::models::DeviceAuthorization = resp
-            .json()
-            .await
-            .map_err(|e| anyhow::anyhow!("hydra device_authorization decode: {e}"))?;
-        Ok(DeviceAuthorization {
-            device_code: raw
-                .device_code
-                .ok_or_else(|| anyhow::anyhow!("device_authorization: missing device_code"))?,
-            user_code: raw
-                .user_code
-                .ok_or_else(|| anyhow::anyhow!("device_authorization: missing user_code"))?,
-            verification_uri: raw
-                .verification_uri
-                .ok_or_else(|| anyhow::anyhow!("device_authorization: missing verification_uri"))?,
-            verification_uri_complete: raw.verification_uri_complete,
-            expires_in: raw.expires_in.unwrap_or(600),
-            interval: raw.interval.unwrap_or(5),
-        })
+    /// Hydra's `/oauth2/device/auth` success body (RFC 8628 §3.2).
+    #[derive(serde::Deserialize)]
+    struct DeviceAuthorizationBody {
+        device_code: Option<String>,
+        user_code: Option<String>,
+        verification_uri: Option<String>,
+        verification_uri_complete: Option<String>,
+        expires_in: Option<i64>,
+        interval: Option<i64>,
     }
 
     /// Hydra's `/oauth2/token` error body shape (RFC 6749 §5.2).
@@ -220,84 +453,6 @@ mod device_grant {
     }
 
     const DEVICE_CODE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
-
-    /// Poll Hydra's public token endpoint for a device_code (RFC 8628 §3.4).
-    /// Client-authenticated (`client_secret_basic`): the confidential client means this leg can't be driven
-    /// without Forseti's credential. NEVER log `device_code` or the returned tokens.
-    pub async fn poll_device_token(
-        clients: &OryClients,
-        client_id: &str,
-        client_secret: &str,
-        device_code: &str,
-    ) -> Result<DeviceTokenOutcome> {
-        let cfg = &clients.hydra_public;
-        let url = format!("{}/oauth2/token", cfg.base_path.trim_end_matches('/'));
-        let resp = cfg
-            .client
-            .post(&url)
-            .basic_auth(client_id, Some(client_secret))
-            .form(&[
-                ("grant_type", DEVICE_CODE_GRANT),
-                ("device_code", device_code),
-            ])
-            .send()
-            .await
-            .map_err(|e| anyhow::anyhow!("hydra poll_device_token transport: {e}"))?;
-
-        let status = resp.status();
-        let body = resp
-            .text()
-            .await
-            .map_err(|e| anyhow::anyhow!("hydra poll_device_token body: {e}"))?;
-
-        if status.is_success() {
-            let tok: TokenResponse = serde_json::from_str(&body)
-                .map_err(|e| anyhow::anyhow!("hydra poll_device_token decode: {e}"))?;
-            return Ok(DeviceTokenOutcome::Token(Box::new(TokenSet {
-                access_token: tok.access_token,
-                id_token: tok.id_token,
-                expires_in: tok.expires_in,
-            })));
-        }
-
-        // 4xx with an RFC 6749 `error` body. Map the device-grant error codes;
-        // anything else is a genuine failure (bad client auth, misconfig).
-        let parsed: TokenError = serde_json::from_str(&body)
-            .map_err(|_| anyhow::anyhow!("hydra poll_device_token returned {status}"))?;
-        Ok(map_device_token_error(&parsed.error))
-    }
-
-    /// Map an RFC 6749 / RFC 8628 token-endpoint `error` code to an outcome.
-    /// Unknown codes surface as an `Err` from the caller; the four spec codes
-    /// are the only non-terminal/terminal device states.
-    pub(super) fn map_device_token_error(error: &str) -> DeviceTokenOutcome {
-        match error {
-            "authorization_pending" => DeviceTokenOutcome::Pending,
-            "slow_down" => DeviceTokenOutcome::SlowDown,
-            "expired_token" => DeviceTokenOutcome::Expired,
-            "access_denied" => DeviceTokenOutcome::Denied,
-            // Treat any other error (e.g. invalid_grant once consumed) as a
-            // dead flow rather than retrying forever.
-            _ => DeviceTokenOutcome::Expired,
-        }
-    }
-
-    /// Accept a device user-code verification challenge (Part B entry point).
-    /// `PUT /admin/oauth2/auth/requests/device/accept`. Forseti calls this
-    /// from the `device_verify` page after the user types a valid `user_code`; Hydra then drives login + consent.
-    pub async fn accept_user_code_request(
-        clients: &OryClients,
-        device_challenge: &str,
-        user_code: &str,
-    ) -> Result<RedirectTo> {
-        let body = ory_client::models::AcceptDeviceUserCodeRequest {
-            user_code: Some(user_code.to_string()),
-        };
-        o_auth2_api::accept_user_code_request(&clients.hydra_admin, device_challenge, Some(body))
-            .await
-            .map(RedirectTo::from)
-            .map_err(|e| anyhow::anyhow!("hydra accept_user_code_request failed: {e}"))
-    }
 
     // --- id_token verification -------------------------------------------
 
@@ -336,38 +491,160 @@ mod device_grant {
         }
     }
 
-    /// Verify a device id_token against Hydra's JWKS and the configured
-    /// security set. Pins **RS256** (rejects `none` and every other alg),
-    /// validates `iss`/`aud`/`exp` via jsonwebtoken, then cross-checks
-    /// `azp == client_id` and a tight `iat` freshness window on top of `exp`.
-    ///
-    /// Validate-and-discard: the returned claims carry only what the binding
-    /// needs (`sub`/`acr`/`amr`/`auth_time`); the token itself is never logged
-    /// or persisted (R3 / R10, no introspection).
-    pub async fn verify_id_token(
-        clients: &OryClients,
-        id_token: &str,
-        issuer: &str,
-        client_id: &str,
-        iat_window_secs: u64,
-    ) -> Result<IdTokenClaims> {
-        let jwks = fetch_jwks(clients).await?;
-        verify_id_token_with_jwks(id_token, &jwks, issuer, client_id, iat_window_secs)
+    impl HydraBackend {
+        /// Start the device grant against Hydra's public `/oauth2/device/auth` with HTTP Basic client auth:
+        /// the confidential client must authenticate.
+        pub async fn device_authorization(
+            &self,
+            client_id: &str,
+            client_secret: &str,
+            scope: &str,
+        ) -> Result<DeviceAuthorization> {
+            let ep = &self.clients.hydra_public;
+            let url = format!("{}/oauth2/device/auth", ep.base.trim_end_matches('/'));
+            let resp = ep
+                .http
+                .post(&url)
+                .basic_auth(client_id, Some(client_secret))
+                // RFC 8628 §3.1 requires `client_id` in the body; Hydra cross-checks
+                // it against the Basic-auth client and 400s on a mismatch (incl. an
+                // absent body client_id), so send it in both.
+                .form(&[("client_id", client_id), ("scope", scope)])
+                .send()
+                .await
+                .map_err(|e| anyhow::anyhow!("hydra device_authorization transport: {e}"))?;
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                return Err(anyhow::anyhow!(
+                    "hydra device_authorization returned {status}: {body}"
+                ));
+            }
+            let raw: DeviceAuthorizationBody = resp
+                .json()
+                .await
+                .map_err(|e| anyhow::anyhow!("hydra device_authorization decode: {e}"))?;
+            Ok(DeviceAuthorization {
+                device_code: raw
+                    .device_code
+                    .ok_or_else(|| anyhow::anyhow!("device_authorization: missing device_code"))?,
+                user_code: raw
+                    .user_code
+                    .ok_or_else(|| anyhow::anyhow!("device_authorization: missing user_code"))?,
+                verification_uri: raw.verification_uri.ok_or_else(|| {
+                    anyhow::anyhow!("device_authorization: missing verification_uri")
+                })?,
+                verification_uri_complete: raw.verification_uri_complete,
+                expires_in: raw.expires_in.unwrap_or(600),
+                interval: raw.interval.unwrap_or(5),
+            })
+        }
+
+        /// Poll Hydra's public token endpoint for a device_code (RFC 8628 §3.4).
+        /// Client-authenticated (`client_secret_basic`): the confidential client means this leg can't be driven
+        /// without Forseti's credential. NEVER log `device_code` or the returned tokens.
+        pub async fn poll_device_token(
+            &self,
+            client_id: &str,
+            client_secret: &str,
+            device_code: &str,
+        ) -> Result<DeviceTokenOutcome> {
+            let ep = &self.clients.hydra_public;
+            let url = format!("{}/oauth2/token", ep.base.trim_end_matches('/'));
+            let resp = ep
+                .http
+                .post(&url)
+                .basic_auth(client_id, Some(client_secret))
+                .form(&[
+                    ("grant_type", DEVICE_CODE_GRANT),
+                    ("device_code", device_code),
+                ])
+                .send()
+                .await
+                .map_err(|e| anyhow::anyhow!("hydra poll_device_token transport: {e}"))?;
+
+            let status = resp.status();
+            let body = resp
+                .text()
+                .await
+                .map_err(|e| anyhow::anyhow!("hydra poll_device_token body: {e}"))?;
+
+            if status.is_success() {
+                let tok: TokenResponse = serde_json::from_str(&body)
+                    .map_err(|e| anyhow::anyhow!("hydra poll_device_token decode: {e}"))?;
+                return Ok(DeviceTokenOutcome::Token(Box::new(TokenSet {
+                    access_token: tok.access_token,
+                    id_token: tok.id_token,
+                    expires_in: tok.expires_in,
+                })));
+            }
+
+            // 4xx with an RFC 6749 `error` body. Map the device-grant error codes;
+            // anything else is a genuine failure (bad client auth, misconfig).
+            let parsed: TokenError = serde_json::from_str(&body)
+                .map_err(|_| anyhow::anyhow!("hydra poll_device_token returned {status}"))?;
+            Ok(map_device_token_error(&parsed.error))
+        }
+
+        /// Accept a device user-code verification challenge (Part B entry point).
+        /// `PUT /admin/oauth2/auth/requests/device/accept`. Forseti calls this
+        /// from the `device_verify` page after the user types a valid `user_code`; Hydra then drives login + consent.
+        pub async fn accept_user_code_request(
+            &self,
+            device_challenge: &str,
+            user_code: &str,
+        ) -> Result<RedirectTo> {
+            let req = self
+                .clients
+                .hydra_admin
+                .request(Method::PUT, "/admin/oauth2/auth/requests/device/accept")
+                .query(&[("device_challenge", device_challenge)])
+                .json(&AcceptUserCodeBody { user_code });
+            send_json(req)
+                .await
+                .map_err(|e| anyhow::anyhow!("hydra accept_user_code_request failed: {e}"))
+        }
+
+        /// Verify a device id_token against Hydra's JWKS and the configured
+        /// security set. Pins **RS256** (rejects `none` and every other alg),
+        /// validates `iss`/`aud`/`exp` via jsonwebtoken, then cross-checks
+        /// `azp == client_id` and a tight `iat` freshness window on top of `exp`.
+        ///
+        /// Validate-and-discard: the returned claims carry only what the binding
+        /// needs (`sub`/`acr`/`amr`/`auth_time`); the token itself is never logged
+        /// or persisted (R3 / R10, no introspection).
+        pub async fn verify_id_token(
+            &self,
+            id_token: &str,
+            issuer: &str,
+            client_id: &str,
+            iat_window_secs: u64,
+        ) -> Result<IdTokenClaims> {
+            let jwks = self.fetch_jwks().await?;
+            verify_id_token_with_jwks(id_token, &jwks, issuer, client_id, iat_window_secs)
+        }
     }
 
-    /// Hydra's JWKS, fetched fresh from the public `jwks_uri`. Reuses the SDK
-    /// helper already used by [`signing_keys`].
-    async fn fetch_jwks(clients: &OryClients) -> Result<ory_client::models::JsonWebKeySet> {
-        ory_client::apis::wellknown_api::discover_json_web_keys(&clients.hydra_public)
-            .await
-            .map_err(|e| anyhow::anyhow!("hydra discover_json_web_keys failed: {e}"))
+    /// Map an RFC 6749 / RFC 8628 token-endpoint `error` code to an outcome.
+    /// Unknown codes surface as an `Err` from the caller; the four spec codes
+    /// are the only non-terminal/terminal device states.
+    pub(super) fn map_device_token_error(error: &str) -> DeviceTokenOutcome {
+        match error {
+            "authorization_pending" => DeviceTokenOutcome::Pending,
+            "slow_down" => DeviceTokenOutcome::SlowDown,
+            "expired_token" => DeviceTokenOutcome::Expired,
+            "access_denied" => DeviceTokenOutcome::Denied,
+            // Treat any other error (e.g. invalid_grant once consumed) as a
+            // dead flow rather than retrying forever.
+            _ => DeviceTokenOutcome::Expired,
+        }
     }
 
     /// Pure validation core, split out so it's unit-testable with a crafted
     /// JWKS + minted tokens (no network). See the test module.
     pub(super) fn verify_id_token_with_jwks(
         id_token: &str,
-        jwks: &ory_client::models::JsonWebKeySet,
+        jwks: &JsonWebKeySet,
         issuer: &str,
         client_id: &str,
         iat_window_secs: u64,
@@ -494,75 +771,13 @@ mod device_grant {
     }
 } // mod device_grant
 
-pub use device_grant::{
-    accept_user_code_request, device_authorization, poll_device_token, verify_id_token,
-};
 #[cfg(test)]
 use device_grant::{map_device_token_error, verify_id_token_with_jwks};
 
 // --- Admin surface ---------------------------------------------------
 
-/// Paginated client list. `page_token` comes from the previous page's `Link: rel="next"` header.
-pub async fn list_clients(
-    clients: &OryClients,
-    page_size: i64,
-    page_token: Option<&str>,
-    client_name: Option<&str>,
-) -> Result<Vec<OAuthClient>> {
-    o_auth2_api::list_o_auth2_clients(
-        &clients.hydra_admin,
-        Some(page_size),
-        page_token,
-        client_name,
-        None,
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("hydra list_clients failed: {e}"))?
-    .into_iter()
-    .map(client_from_sdk)
-    .collect()
-}
-
-pub async fn get_client(clients: &OryClients, id: &str) -> Result<OAuthClient> {
-    o_auth2_api::get_o_auth2_client(&clients.hydra_admin, id)
-        .await
-        .map_err(|e| anyhow::anyhow!("hydra get_client failed: {e}"))
-        .and_then(client_from_sdk)
-}
-
-/// [`get_client`] with Hydra's 404 mapped to `None`, so upsert callers can branch on existence.
-pub async fn get_client_opt(clients: &OryClients, id: &str) -> Result<Option<OAuthClient>> {
-    match o_auth2_api::get_o_auth2_client(&clients.hydra_admin, id).await {
-        Ok(c) => client_from_sdk(c).map(Some),
-        Err(ory_client::apis::Error::ResponseError(rc)) if rc.status.as_u16() == 404 => Ok(None),
-        Err(e) => Err(anyhow::anyhow!("hydra get_client failed: {e}")),
-    }
-}
-
-pub async fn create_client(clients: &OryClients, client: OAuthClient) -> Result<OAuthClient> {
-    o_auth2_api::create_o_auth2_client(&clients.hydra_admin, client_to_sdk(client)?)
-        .await
-        .map_err(|e| anyhow::anyhow!("hydra create_client failed: {e}"))
-        .and_then(client_from_sdk)
-}
-
-/// Replace a client. Hydra's `set_o_auth2_client` is PUT-shaped (the body fully overrides the stored client),
-/// so callers should round-trip via `get_client` first to preserve unrelated fields.
-pub async fn update_client(
-    clients: &OryClients,
-    id: &str,
-    client: OAuthClient,
-) -> Result<OAuthClient> {
-    o_auth2_api::set_o_auth2_client(&clients.hydra_admin, id, client_to_sdk(client)?)
-        .await
-        .map_err(|e| anyhow::anyhow!("hydra update_client failed: {e}"))
-        .and_then(client_from_sdk)
-}
-
-pub async fn delete_client(clients: &OryClients, id: &str) -> Result<()> {
-    o_auth2_api::delete_o_auth2_client(&clients.hydra_admin, id)
-        .await
-        .map_err(|e| anyhow::anyhow!("hydra delete_client failed: {e}"))
+fn client_path(id: &str) -> String {
+    format!("/admin/clients/{}", urlencode(id))
 }
 
 /// Ceiling on how many audiences consent may accumulate on one client record.
@@ -575,11 +790,7 @@ const CLIENT_AUDIENCE_CAP: usize = 20;
 /// source-filtered view (say, only what an operator wrote) makes every entry
 /// look new, so the same resource is re-appended on every consent and the cap
 /// never binds.
-fn audience_patch(
-    client_id: &str,
-    on_record: &[String],
-    granted: &[String],
-) -> Vec<ory_client::models::JsonPatch> {
+fn audience_patch(client_id: &str, on_record: &[String], granted: &[String]) -> Vec<JsonPatchOp> {
     let mut have: Vec<&str> = on_record.iter().map(String::as_str).collect();
     let mut patch = Vec::new();
     for resource in granted {
@@ -595,115 +806,21 @@ fn audience_patch(
             break;
         }
         have.push(resource);
-        patch.push(ory_client::models::JsonPatch {
-            from: None,
-            op: ory_client::models::json_patch::OpEnum::Add,
-            path: "/audience/-".to_string(),
-            value: Some(Some(serde_json::Value::String(resource.clone()))),
+        patch.push(JsonPatchOp {
+            op: "add",
+            path: "/audience/-",
+            value: Value::String(resource.clone()),
         });
     }
     patch
 }
 
-/// Add `granted` to the client's registered `audience` allow-list, skipping
-/// whatever `on_record` (the record as the caller just read it) already
-/// covers. fosite re-validates the granted audience against the client record
-/// on the refresh grant (`handler/oauth2/flow_refresh.go`) but not on the code
-/// exchange, so a granted resource that never lands here buys the client one
-/// working access token and then permanent refresh failures. Idempotent, and
-/// capped so a client can't grow the record without bound.
-pub async fn add_client_audiences(
-    clients: &OryClients,
-    client_id: &str,
-    on_record: &[String],
-    granted: &[String],
-) -> Result<()> {
-    let patch = audience_patch(client_id, on_record, granted);
-    if patch.is_empty() {
-        return Ok(());
-    }
-    o_auth2_api::patch_o_auth2_client(&clients.hydra_admin, client_id, patch)
-        .await
-        .map(|_| ())
-        .map_err(|e| anyhow::anyhow!("hydra add_client_audiences failed: {e}"))
-}
-
-/// Rotate a client's secret. Hydra has no dedicated rotate endpoint, so we POST a JSON Patch asking it to
-/// regenerate `client_secret`. The response carries the new plaintext secret (the admin UI shows it once).
-pub async fn rotate_client_secret(clients: &OryClients, id: &str) -> Result<OAuthClient> {
-    let patch = vec![ory_client::models::JsonPatch {
-        from: None,
-        op: ory_client::models::json_patch::OpEnum::Replace,
-        path: "/client_secret".to_string(),
-        value: Some(Some(serde_json::Value::String(generate_client_secret()))),
-    }];
-    o_auth2_api::patch_o_auth2_client(&clients.hydra_admin, id, patch)
-        .await
-        .map_err(|e| anyhow::anyhow!("hydra rotate_client_secret failed: {e}"))
-        .and_then(client_from_sdk)
-}
-
-/// Enumerate Hydra consent sessions with an active grant for `subject`, paging the `Link: rel="next"` header
-/// until exhausted (drives the account-deletion webhook fan-out, so the list must not be silently capped).
-/// Driven via the raw client because the SDK helper drops the Link header; bounded by [`CONSENT_LIST_MAX_PAGES`].
 const CONSENT_LIST_PAGE_SIZE: i64 = 250;
 const CONSENT_LIST_MAX_PAGES: usize = 50; // 12,500 grants per subject, well past any realistic case.
 
-pub async fn list_consent_sessions_by_subject(
-    clients: &OryClients,
-    subject: &str,
-) -> Result<Vec<ConsentSession>> {
-    let cfg = &clients.hydra_admin;
-    let base = format!(
-        "{}/admin/oauth2/auth/sessions/consent",
-        cfg.base_path.trim_end_matches('/')
-    );
-
-    let mut out: Vec<OAuth2ConsentSession> = Vec::new();
-    let mut page_token: Option<String> = None;
-    for page in 0..CONSENT_LIST_MAX_PAGES {
-        let mut req = cfg.client.get(&base).query(&[
-            ("subject", subject.to_string()),
-            ("page_size", CONSENT_LIST_PAGE_SIZE.to_string()),
-        ]);
-        if let Some(tok) = page_token.as_deref() {
-            req = req.query(&[("page_token", tok)]);
-        }
-        if let Some(token) = cfg.bearer_access_token.as_ref() {
-            req = req.bearer_auth(token);
-        }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| anyhow::anyhow!("hydra list_consent_sessions transport: {e}"))?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!(
-                "hydra list_consent_sessions returned {status}: {body}"
-            ));
-        }
-
-        let next = next_link(resp.headers());
-        let batch: Vec<OAuth2ConsentSession> = resp
-            .json()
-            .await
-            .map_err(|e| anyhow::anyhow!("hydra list_consent_sessions decode: {e}"))?;
-        let batch_empty = batch.is_empty();
-        out.extend(batch);
-        match next {
-            Some(tok) if !batch_empty => page_token = Some(tok),
-            _ => return out.into_iter().map(consent_session_from_sdk).collect(),
-        }
-        if page + 1 == CONSENT_LIST_MAX_PAGES {
-            tracing::error!(
-                subject,
-                pages = CONSENT_LIST_MAX_PAGES,
-                "hydra consent-session pagination hit safety cap — webhook fanout may be incomplete",
-            );
-        }
-    }
-    out.into_iter().map(consent_session_from_sdk).collect()
+fn consent_sessions_from_wire(sessions: Vec<Value>) -> Result<Vec<ConsentSession>> {
+    with_nested_clients(Value::Array(sessions))
+        .map_err(|e| anyhow::anyhow!("hydra list_consent_sessions decode: {e}"))
 }
 
 /// Parse `Link: <…?page_token=XYZ&…>; rel="next"` and return the
@@ -733,148 +850,6 @@ pub(crate) fn next_link(headers: &reqwest::header::HeaderMap) -> Option<String> 
     None
 }
 
-/// Revoke every consent grant for `subject` and invalidate associated
-/// OAuth2 access tokens. Best-effort during account deletion: failures log and the flow proceeds (the
-/// source-of-truth Kratos identity determines whether the user can sign back in).
-pub async fn revoke_consent_sessions_for_subject(
-    clients: &OryClients,
-    subject: &str,
-) -> Result<()> {
-    o_auth2_api::revoke_o_auth2_consent_sessions(
-        &clients.hydra_admin,
-        Some(subject),
-        None,
-        None,
-        Some(true),
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("hydra revoke_consent_sessions failed: {e}"))
-}
-
-/// Revoke one consent grant by its consent request id, which Hydra documents
-/// as revoking the token chains derived from it. Hydra takes the id alone;
-/// adding `subject` is a 400. A grant Hydra no longer knows counts as revoked.
-pub async fn revoke_consent_sessions_by_request_id(
-    clients: &OryClients,
-    consent_request_id: &str,
-) -> Result<()> {
-    match o_auth2_api::revoke_o_auth2_consent_sessions(
-        &clients.hydra_admin,
-        None,
-        None,
-        Some(consent_request_id),
-        None,
-    )
-    .await
-    {
-        Ok(()) => Ok(()),
-        Err(ory_client::apis::Error::ResponseError(rc)) if rc.status.as_u16() == 404 => Ok(()),
-        Err(e) => Err(anyhow::anyhow!(
-            "hydra revoke_consent_sessions by request id failed: {e}"
-        )),
-    }
-}
-
-/// One page of a subject's consent sessions granted under one Hydra login
-/// session. Lists only consents Hydra remembered, never skipped ones.
-pub async fn list_consent_sessions_by_login_session(
-    clients: &OryClients,
-    subject: &str,
-    sid: &str,
-) -> Result<Vec<ConsentSession>> {
-    o_auth2_api::list_o_auth2_consent_sessions(
-        &clients.hydra_admin,
-        subject,
-        Some(CONSENT_LIST_PAGE_SIZE),
-        None,
-        Some(sid),
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("hydra list_consent_sessions by login session failed: {e}"))?
-    .into_iter()
-    .map(consent_session_from_sdk)
-    .collect()
-}
-
-/// Revoke all consent grants for a single (subject, client) pair.
-/// Powers the per-app "Revoke access" action on `/settings/authorized-apps`.
-/// Hydra has no per-scope revocation; reducing a grant needs the user to re-consent with a narrower scope set.
-pub async fn revoke_consent_sessions_for_client(
-    clients: &OryClients,
-    subject: &str,
-    client_id: &str,
-) -> Result<()> {
-    // `client` and `all` are mutually exclusive in Hydra v2 (passing both is a 400); with a client named, leave `all` unset.
-    o_auth2_api::revoke_o_auth2_consent_sessions(
-        &clients.hydra_admin,
-        Some(subject),
-        Some(client_id),
-        None,
-        None,
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("hydra revoke_consent_sessions_for_client failed: {e}"))
-}
-
-/// Revoke every Hydra login session (the OP skip/remember state) for a subject.
-/// Subject-keyed revocation fires no front/back-channel logout; pair it with
-/// `revoke_consent_sessions_for_subject` to invalidate the RPs' grants.
-pub async fn revoke_login_sessions_for_subject(clients: &OryClients, subject: &str) -> Result<()> {
-    o_auth2_api::revoke_o_auth2_login_sessions(&clients.hydra_admin, Some(subject), None)
-        .await
-        .map_err(|e| anyhow::anyhow!("hydra revoke_login_sessions failed: {e}"))
-}
-
-/// Revoke one Hydra login session by `sid`. Unlike the subject-keyed revoke,
-/// this sends back-channel logout to every client the session signed in to.
-/// A session Hydra no longer knows counts as revoked.
-pub async fn revoke_login_session_by_sid(clients: &OryClients, sid: &str) -> Result<()> {
-    match o_auth2_api::revoke_o_auth2_login_sessions(&clients.hydra_admin, None, Some(sid)).await {
-        Ok(()) => Ok(()),
-        Err(ory_client::apis::Error::ResponseError(rc)) if rc.status.as_u16() == 404 => Ok(()),
-        Err(e) => Err(anyhow::anyhow!(
-            "hydra revoke_login_session_by_sid failed: {e}"
-        )),
-    }
-}
-
-/// Health probes, same shape as Kratos.
-pub async fn health_alive(clients: &OryClients) -> Result<()> {
-    super::probe_health(&clients.hydra_admin, "/health/alive").await
-}
-
-pub async fn health_ready(clients: &OryClients) -> Result<()> {
-    super::probe_health(&clients.hydra_admin, "/health/ready").await
-}
-
-/// Fetch the Hydra build version.
-pub async fn version(clients: &OryClients) -> Result<String> {
-    let v = ory_client::apis::metadata_api::get_version(&clients.hydra_admin)
-        .await
-        .map_err(|e| anyhow::anyhow!("hydra get_version failed: {e}"))?;
-    Ok(v.version)
-}
-
-/// Fetch Hydra's public signing keys (the `jwks_uri` contents) and project
-/// each down to the fields the admin UI shows. Order is whatever Hydra
-/// returns.
-pub async fn signing_keys(clients: &OryClients) -> Result<Vec<JwkSummary>> {
-    let set = ory_client::apis::wellknown_api::discover_json_web_keys(&clients.hydra_public)
-        .await
-        .map_err(|e| anyhow::anyhow!("hydra discover_json_web_keys failed: {e}"))?;
-    Ok(set
-        .keys
-        .unwrap_or_default()
-        .into_iter()
-        .map(|k| JwkSummary {
-            kid: k.kid,
-            alg: k.alg,
-            kty: k.kty,
-            use_: k.r#use,
-        })
-        .collect())
-}
-
 /// Generate a random client secret. 40 alphanumerics is about 238 bits of entropy, well above the OAuth2 spec's recommendation.
 fn generate_client_secret() -> String {
     use rand::RngExt;
@@ -886,388 +861,349 @@ fn generate_client_secret() -> String {
         .collect()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::backend::oauth::{DeviceTokenOutcome, IdTokenClaims};
-    use reqwest::header::{HeaderMap, HeaderValue};
-
-    // --- device-token error mapping --------------------------------------
-
-    #[test]
-    fn maps_device_token_errors() {
-        assert!(matches!(
-            map_device_token_error("authorization_pending"),
-            DeviceTokenOutcome::Pending
-        ));
-        assert!(matches!(
-            map_device_token_error("slow_down"),
-            DeviceTokenOutcome::SlowDown
-        ));
-        assert!(matches!(
-            map_device_token_error("expired_token"),
-            DeviceTokenOutcome::Expired
-        ));
-        assert!(matches!(
-            map_device_token_error("access_denied"),
-            DeviceTokenOutcome::Denied
-        ));
-        // Unknown / consumed-grant codes collapse to a dead flow.
-        assert!(matches!(
-            map_device_token_error("invalid_grant"),
-            DeviceTokenOutcome::Expired
-        ));
+impl HydraBackend {
+    /// Paginated client list. `page_token` comes from the previous page's `Link: rel="next"` header.
+    pub async fn list_clients(
+        &self,
+        page_size: i64,
+        page_token: Option<&str>,
+        client_name: Option<&str>,
+    ) -> Result<Vec<OAuthClient>> {
+        let mut req = self
+            .clients
+            .hydra_admin
+            .request(Method::GET, "/admin/clients")
+            .query(&[("page_size", page_size.to_string())]);
+        if let Some(tok) = page_token {
+            req = req.query(&[("page_token", tok)]);
+        }
+        if let Some(name) = client_name {
+            req = req.query(&[("client_name", name)]);
+        }
+        send_json::<Vec<Value>>(req)
+            .await
+            .and_then(|list| list.into_iter().map(client_from_wire).collect())
+            .map_err(|e| anyhow::anyhow!("hydra list_clients failed: {e}"))
     }
 
-    // --- id_token validation ---------------------------------------------
+    async fn fetch_client(&self, id: &str) -> Result<OAuthClient, CallError> {
+        let req = self
+            .clients
+            .hydra_admin
+            .request(Method::GET, &client_path(id));
+        client_from_wire(send_json(req).await?)
+    }
 
-    const TEST_ISS: &str = "http://hydra.test:4444";
-    const TEST_CLIENT: &str = "forseti-linux-pam";
+    pub async fn get_client(&self, id: &str) -> Result<OAuthClient> {
+        self.fetch_client(id)
+            .await
+            .map_err(|e| anyhow::anyhow!("hydra get_client failed: {e}"))
+    }
 
-    // PKCS#8 RSA-2048 private key used only to mint test id_tokens.
-    const TEST_PRIV_PEM: &str = "-----BEGIN PRIVATE KEY-----\n\
-MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQCwVqAC9L0r0uJ2\n\
-JDPk9e2axX7YSYYfc7SxW85iWv9XpBDHuzZ9vMsl532kQY5PT7f4FpdZSrPL1QLm\n\
-+9EFh2VYBm17qbFwFAbEvvymBZ8f4NNQI/xXpCRX/X4E7Di0U3IdZsyJlAqLQD8a\n\
-hUWRdG1gAOhwe1OyersaRE6QoH4Arce4oY9pAtduKbio6VZSsItNZJWJ7yISGlnS\n\
-xK0kU7M01lvnXWAFfNhDo6E9QBtHuprfiAUqiqfMHd0tDvy01t4+ytSY6l/INHW/\n\
-Td4JsjWSc+10AJxFGYU/GrYGF9NENmZIPxIYH5kxsVUEOI3gjGfp+x9eDjRjtJ/+\n\
-vAmlXx2XAgMBAAECggEAH0Zl39BXYtfmuWxnVdL2Xs5rVmIH6zki0ZgGTTR1eC5N\n\
-mZcPLZLX9vONOZ405sUtTE95bWlN5Td06dG8uz3N0CRns5ifs1Ch+LAk8C8sD0PZ\n\
-RqvzO/oNRhvcB3R8BCOOqD9MxJPgoNz2tDXx5j/fjDjtANImwI968sgtpQIKBwV/\n\
-qrhBEJ4vVLqDiSTNtdFsS73evgFYylVUfigFTd4xDqPc6LBMd1DscLL1jTSjiX03\n\
-VmWMUVt4LWhuE89GzuXVZehx1nO6HRqLNpSPjoxX+3d+1+aw/QkFhj5R4qBXd2XV\n\
-gjFD4bMslO6tLKXqicBCg9eGf3ixKpNHZdFCYMHHYQKBgQDoqPoyA+LKjhVuacSY\n\
-8/vXKH4XLfvpIUZs74VRgqnvp7854F1MxudPsXoy/GxmUzyTCMQpR4E2hoUPsTT2\n\
-q8pEcNZoh9jEhmKOwuoEV6Yfm2OmPucqBp+SK5/l/wrPuJC/Ao/UCxb3YaeXqdLt\n\
-qEF5SJ6Th+L28tEXYsdMloWl4QKBgQDCBzsvm/XXfX2dmvdwWR6pCk1kRiqCDr7J\n\
-KhxLyZUVrDDEp2vK+BNaWaN5G4vslfJ8+RINOTY6bETvLP8nbnI5wxQFi61IvFDd\n\
-nJ9E3+Sg5hr20iHZ2kPu+UYxkES+kiuyFehfNZcfl2K/q2aJKB7KHJkM9yVsK7Yn\n\
-LrCUcdtCdwKBgQDAdnhyQ3Cq6xqjee9eMAcXF7Im7q1DT3l4yDNbGGIHlJbGA+pq\n\
-huf2rvRNlS7+/sBPSaMsGrCzMFiGgKs1myr5rvZPBoG1IQ4K1wbLjM4pu1uVvNdx\n\
-loUOX/QoSPDioOVsfWwJlxrqjegbuCp62wM+l2pG1NRWQMvjMp13p9TrQQKBgQCB\n\
-D6BN3dbcXOvWjwLyJ0WeuWybO5UA59/+HVWvD8psHRpfZOHto6/z1FZJs4oSd/dR\n\
-K7fXNewdVnFQCsU6LFwskddajPtZu3Gqx4ilnqwMXqMm9MVxjJ7NceBADa+8d6w7\n\
-DBmCYzo/2EnmJpPQvfAlDnq7xhWNa1IBpCvuwgFPpwKBgBeqbZPSX+H7OQZwK9uo\n\
-tMT4rTN4iCzBd3OQryd+UVF5dlGZSM/ahPo0sVEoIc5Do6qKB+hs92alKJsr97b+\n\
-SRZ/w8gQ2ALLGaApskC1zn5ojdqqjTvXWmW9bccCeGYJ8yOu4oWP/QLkNzM4WVKA\n\
-3SmfuVDc+5r3d6JFhgQeOMb1\n\
------END PRIVATE KEY-----\n";
-
-    // base64url RSA modulus/exponent for the key above (the JWKS Hydra would publish for it).
-    const TEST_N: &str = "sFagAvS9K9LidiQz5PXtmsV-2EmGH3O0sVvOYlr_V6QQx7s2fbzLJed9pEGOT0-3-BaXWUqzy9UC5vvRBYdlWAZte6mxcBQGxL78pgWfH-DTUCP8V6QkV_1-BOw4tFNyHWbMiZQKi0A_GoVFkXRtYADocHtTsnq7GkROkKB-AK3HuKGPaQLXbim4qOlWUrCLTWSVie8iEhpZ0sStJFOzNNZb511gBXzYQ6OhPUAbR7qa34gFKoqnzB3dLQ78tNbePsrUmOpfyDR1v03eCbI1knPtdACcRRmFPxq2BhfTRDZmSD8SGB-ZMbFVBDiN4Ixn6fsfXg40Y7Sf_rwJpV8dlw";
-    const TEST_E: &str = "AQAB";
-    const TEST_KID: &str = "test-kid";
-
-    fn test_jwks() -> ory_client::models::JsonWebKeySet {
-        let mut k = ory_client::models::JsonWebKey::new(
-            "RS256".into(),
-            TEST_KID.into(),
-            "RSA".into(),
-            "sig".into(),
-        );
-        k.n = Some(TEST_N.into());
-        k.e = Some(TEST_E.into());
-        ory_client::models::JsonWebKeySet {
-            keys: Some(vec![k]),
+    /// [`get_client`] with Hydra's 404 mapped to `None`, so upsert callers can branch on existence.
+    pub async fn get_client_opt(&self, id: &str) -> Result<Option<OAuthClient>> {
+        match self.fetch_client(id).await {
+            Ok(c) => Ok(Some(c)),
+            Err(e) if e.is_not_found() => Ok(None),
+            Err(e) => Err(anyhow::anyhow!("hydra get_client failed: {e}")),
         }
     }
 
-    #[derive(serde::Serialize)]
-    struct TestClaims {
-        sub: String,
-        iss: String,
-        aud: String,
-        azp: String,
-        exp: i64,
-        iat: i64,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        acr: Option<String>,
-        #[serde(skip_serializing_if = "Vec::is_empty")]
-        amr: Vec<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        auth_time: Option<i64>,
+    pub async fn create_client(&self, client: OAuthClient) -> Result<OAuthClient> {
+        let req = self
+            .clients
+            .hydra_admin
+            .request(Method::POST, "/admin/clients")
+            .json(&client_to_wire(client)?);
+        send_json(req)
+            .await
+            .and_then(client_from_wire)
+            .map_err(|e| anyhow::anyhow!("hydra create_client failed: {e}"))
     }
 
-    impl Default for TestClaims {
-        fn default() -> Self {
-            let now = chrono::Utc::now().timestamp();
-            Self {
-                sub: "ident-123".into(),
-                iss: TEST_ISS.into(),
-                aud: TEST_CLIENT.into(),
-                azp: TEST_CLIENT.into(),
-                exp: now + 300,
-                iat: now,
-                acr: Some("aal2".into()),
-                amr: vec!["pwd".into(), "totp".into()],
-                auth_time: Some(now),
+    /// Replace a client. Hydra's `PUT /admin/clients/{id}` fully overrides the stored client,
+    /// so callers should round-trip via `get_client` first to preserve unrelated fields.
+    pub async fn update_client(&self, id: &str, client: OAuthClient) -> Result<OAuthClient> {
+        let req = self
+            .clients
+            .hydra_admin
+            .request(Method::PUT, &client_path(id))
+            .json(&client_to_wire(client)?);
+        send_json(req)
+            .await
+            .and_then(client_from_wire)
+            .map_err(|e| anyhow::anyhow!("hydra update_client failed: {e}"))
+    }
+
+    pub async fn delete_client(&self, id: &str) -> Result<()> {
+        let req = self
+            .clients
+            .hydra_admin
+            .request(Method::DELETE, &client_path(id));
+        send(req)
+            .await
+            .map(|_| ())
+            .map_err(|e| anyhow::anyhow!("hydra delete_client failed: {e}"))
+    }
+
+    async fn patch_client(
+        &self,
+        id: &str,
+        patch: &[JsonPatchOp],
+    ) -> Result<OAuthClient, CallError> {
+        let req = self
+            .clients
+            .hydra_admin
+            .request(Method::PATCH, &client_path(id))
+            .json(patch);
+        client_from_wire(send_json(req).await?)
+    }
+
+    /// Add `granted` to the client's registered `audience` allow-list, skipping
+    /// whatever `on_record` (the record as the caller just read it) already
+    /// covers. fosite re-validates the granted audience against the client record
+    /// on the refresh grant (`handler/oauth2/flow_refresh.go`) but not on the code
+    /// exchange, so a granted resource that never lands here buys the client one
+    /// working access token and then permanent refresh failures. Idempotent, and
+    /// capped so a client can't grow the record without bound.
+    pub async fn add_client_audiences(
+        &self,
+        client_id: &str,
+        on_record: &[String],
+        granted: &[String],
+    ) -> Result<()> {
+        let patch = audience_patch(client_id, on_record, granted);
+        if patch.is_empty() {
+            return Ok(());
+        }
+        self.patch_client(client_id, &patch)
+            .await
+            .map(|_| ())
+            .map_err(|e| anyhow::anyhow!("hydra add_client_audiences failed: {e}"))
+    }
+
+    /// Rotate a client's secret. Hydra has no dedicated rotate endpoint, so we PATCH a JSON Patch asking it to
+    /// replace `client_secret`. The response carries the new plaintext secret (the admin UI shows it once).
+    pub async fn rotate_client_secret(&self, id: &str) -> Result<OAuthClient> {
+        let patch = [JsonPatchOp {
+            op: "replace",
+            path: "/client_secret",
+            value: Value::String(generate_client_secret()),
+        }];
+        self.patch_client(id, &patch)
+            .await
+            .map_err(|e| anyhow::anyhow!("hydra rotate_client_secret failed: {e}"))
+    }
+
+    /// Enumerate Hydra consent sessions with an active grant for `subject`, paging the `Link: rel="next"` header
+    /// until exhausted (drives the account-deletion webhook fan-out, so the list must not be silently capped).
+    /// Bounded by [`CONSENT_LIST_MAX_PAGES`].
+    pub async fn list_consent_sessions_by_subject(
+        &self,
+        subject: &str,
+    ) -> Result<Vec<ConsentSession>> {
+        let ep = &self.clients.hydra_admin;
+        let base = format!(
+            "{}/admin/oauth2/auth/sessions/consent",
+            ep.base.trim_end_matches('/')
+        );
+
+        let mut out: Vec<Value> = Vec::new();
+        let mut page_token: Option<String> = None;
+        for page in 0..CONSENT_LIST_MAX_PAGES {
+            let mut req = ep.http.get(&base).query(&[
+                ("subject", subject.to_string()),
+                ("page_size", CONSENT_LIST_PAGE_SIZE.to_string()),
+            ]);
+            if let Some(tok) = page_token.as_deref() {
+                req = req.query(&[("page_token", tok)]);
+            }
+            let resp = req
+                .send()
+                .await
+                .map_err(|e| anyhow::anyhow!("hydra list_consent_sessions transport: {e}"))?;
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                return Err(anyhow::anyhow!(
+                    "hydra list_consent_sessions returned {status}: {body}"
+                ));
+            }
+
+            let next = next_link(resp.headers());
+            let batch: Vec<Value> = resp
+                .json()
+                .await
+                .map_err(|e| anyhow::anyhow!("hydra list_consent_sessions decode: {e}"))?;
+            let batch_empty = batch.is_empty();
+            out.extend(batch);
+            match next {
+                Some(tok) if !batch_empty => page_token = Some(tok),
+                _ => return consent_sessions_from_wire(out),
+            }
+            if page + 1 == CONSENT_LIST_MAX_PAGES {
+                tracing::error!(
+                    subject,
+                    pages = CONSENT_LIST_MAX_PAGES,
+                    "hydra consent-session pagination hit safety cap — webhook fanout may be incomplete",
+                );
             }
         }
+        consent_sessions_from_wire(out)
     }
 
-    fn mint(claims: &TestClaims, alg: jsonwebtoken::Algorithm) -> String {
-        use jsonwebtoken::{EncodingKey, Header, encode};
-        let mut header = Header::new(alg);
-        header.kid = Some(TEST_KID.into());
-        let key = EncodingKey::from_rsa_pem(TEST_PRIV_PEM.as_bytes()).unwrap();
-        encode(&header, claims, &key).unwrap()
+    /// `DELETE /admin/oauth2/auth/sessions/consent` with the given query.
+    async fn revoke_consent_sessions(&self, query: &[(&str, &str)]) -> Result<(), CallError> {
+        let req = self
+            .clients
+            .hydra_admin
+            .request(Method::DELETE, "/admin/oauth2/auth/sessions/consent")
+            .query(query);
+        send(req).await.map(|_| ())
     }
 
-    fn verify(token: &str) -> Result<IdTokenClaims> {
-        verify_id_token_with_jwks(token, &test_jwks(), TEST_ISS, TEST_CLIENT, 120)
+    /// Revoke every consent grant for `subject` and invalidate associated
+    /// OAuth2 access tokens. Best-effort during account deletion: failures log and the flow proceeds (the
+    /// source-of-truth Kratos identity determines whether the user can sign back in).
+    pub async fn revoke_consent_sessions_for_subject(&self, subject: &str) -> Result<()> {
+        self.revoke_consent_sessions(&[("subject", subject), ("all", "true")])
+            .await
+            .map_err(|e| anyhow::anyhow!("hydra revoke_consent_sessions failed: {e}"))
     }
 
-    #[test]
-    fn id_token_valid_passes() {
-        let claims = TestClaims::default();
-        let tok = mint(&claims, jsonwebtoken::Algorithm::RS256);
-        let out = verify(&tok).expect("valid token");
-        assert_eq!(out.sub, "ident-123");
-        assert_eq!(out.acr.as_deref(), Some("aal2"));
-        assert_eq!(out.amr, vec!["pwd".to_string(), "totp".to_string()]);
-        assert!(out.auth_time.is_some());
-    }
-
-    #[test]
-    fn id_token_alg_none_rejected() {
-        // A `none`-alg token (unsigned). jsonwebtoken won't mint `none`, so
-        // hand-build the compact form.
-        use base64::Engine;
-        let b64 = |b: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b);
-        let header = b64(br#"{"alg":"none","kid":"test-kid","typ":"JWT"}"#);
-        let claims = TestClaims::default();
-        let payload = b64(serde_json::to_vec(&claims).unwrap().as_slice());
-        let tok = format!("{header}.{payload}.");
-        let err = verify(&tok).unwrap_err().to_string();
-        assert!(err.contains("alg") || err.contains("RS256"), "got: {err}");
-    }
-
-    #[test]
-    fn id_token_wrong_aud_rejected() {
-        let claims = TestClaims {
-            aud: "some-other-client".into(),
-            ..TestClaims::default()
-        };
-        let tok = mint(&claims, jsonwebtoken::Algorithm::RS256);
-        assert!(verify(&tok).is_err());
-    }
-
-    #[test]
-    fn id_token_extra_aud_rejected() {
-        // aud contains our client plus another party. jsonwebtoken accepts the
-        // membership, but the exact-aud pin must reject the multi-audience token.
-        #[derive(serde::Serialize)]
-        struct MultiAud {
-            sub: String,
-            iss: String,
-            aud: Vec<String>,
-            azp: String,
-            exp: i64,
-            iat: i64,
+    /// Revoke one consent grant by its consent request id, which Hydra documents
+    /// as revoking the token chains derived from it. Hydra takes the id alone;
+    /// adding `subject` is a 400. A grant Hydra no longer knows counts as revoked.
+    pub async fn revoke_consent_sessions_by_request_id(
+        &self,
+        consent_request_id: &str,
+    ) -> Result<()> {
+        match self
+            .revoke_consent_sessions(&[("consent_request_id", consent_request_id)])
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(e) if e.is_not_found() => Ok(()),
+            Err(e) => Err(anyhow::anyhow!(
+                "hydra revoke_consent_sessions by request id failed: {e}"
+            )),
         }
-        use jsonwebtoken::{EncodingKey, Header, encode};
-        let now = chrono::Utc::now().timestamp();
-        let claims = MultiAud {
-            sub: "ident-123".into(),
-            iss: TEST_ISS.into(),
-            aud: vec![TEST_CLIENT.into(), "other-rp".into()],
-            azp: TEST_CLIENT.into(),
-            exp: now + 300,
-            iat: now,
-        };
-        let mut header = Header::new(jsonwebtoken::Algorithm::RS256);
-        header.kid = Some(TEST_KID.into());
-        let key = EncodingKey::from_rsa_pem(TEST_PRIV_PEM.as_bytes()).unwrap();
-        let tok = encode(&header, &claims, &key).unwrap();
-        let err = verify(&tok).unwrap_err().to_string();
-        assert!(err.contains("aud"), "got: {err}");
     }
 
-    #[test]
-    fn id_token_wrong_azp_rejected() {
-        // aud correct (our client) but azp points elsewhere; the authorized-party pin must still reject.
-        let claims = TestClaims {
-            azp: "evil-client".into(),
-            ..TestClaims::default()
-        };
-        let tok = mint(&claims, jsonwebtoken::Algorithm::RS256);
-        let err = verify(&tok).unwrap_err().to_string();
-        assert!(err.contains("azp"), "got: {err}");
-    }
-
-    #[test]
-    fn id_token_wrong_iss_rejected() {
-        let claims = TestClaims {
-            iss: "http://evil.test".into(),
-            ..TestClaims::default()
-        };
-        let tok = mint(&claims, jsonwebtoken::Algorithm::RS256);
-        assert!(verify(&tok).is_err());
-    }
-
-    #[test]
-    fn id_token_expired_rejected() {
-        let now = chrono::Utc::now().timestamp();
-        // Past exp, beyond jsonwebtoken's 60s leeway.
-        let claims = TestClaims {
-            exp: now - 600,
-            iat: now - 900,
-            ..TestClaims::default()
-        };
-        let tok = mint(&claims, jsonwebtoken::Algorithm::RS256);
-        assert!(verify(&tok).is_err());
-    }
-
-    #[test]
-    fn id_token_stale_iat_rejected() {
-        let now = chrono::Utc::now().timestamp();
-        // Still inside exp, but iat is older than the 120s window.
-        let claims = TestClaims {
-            iat: now - 300,
-            exp: now + 300,
-            ..TestClaims::default()
-        };
-        let tok = mint(&claims, jsonwebtoken::Algorithm::RS256);
-        let err = verify(&tok).unwrap_err().to_string();
-        assert!(err.contains("stale") || err.contains("iat"), "got: {err}");
-    }
-
-    #[test]
-    fn id_token_unknown_kid_rejected() {
-        use jsonwebtoken::{EncodingKey, Header, encode};
-        let mut header = Header::new(jsonwebtoken::Algorithm::RS256);
-        header.kid = Some("not-in-jwks".into());
-        let key = EncodingKey::from_rsa_pem(TEST_PRIV_PEM.as_bytes()).unwrap();
-        let tok = encode(&header, &TestClaims::default(), &key).unwrap();
-        let err = verify(&tok).unwrap_err().to_string();
-        assert!(err.contains("kid"), "got: {err}");
-    }
-
-    #[test]
-    fn next_link_extracts_page_token() {
-        let mut h = HeaderMap::new();
-        h.insert(
-            "link",
-            HeaderValue::from_static(
-                "<https://hydra/admin/oauth2/auth/sessions/consent?page_token=abc123&page_size=250>; rel=\"next\"",
-            ),
-        );
-        assert_eq!(next_link(&h).as_deref(), Some("abc123"));
-    }
-
-    #[test]
-    fn next_link_handles_multiple_relations() {
-        let mut h = HeaderMap::new();
-        h.insert(
-            "link",
-            HeaderValue::from_static(
-                "<https://hydra/prev?page_token=xyz>; rel=\"prev\", <https://hydra/next?page_token=def>; rel=\"next\"",
-            ),
-        );
-        assert_eq!(next_link(&h).as_deref(), Some("def"));
-    }
-
-    #[test]
-    fn next_link_skips_bare_part_before_next() {
-        let mut h = HeaderMap::new();
-        h.insert(
-            "link",
-            HeaderValue::from_static(
-                "<https://hydra/first?page_token=xyz>, <https://hydra/next?page_token=def>; rel=\"next\"",
-            ),
-        );
-        assert_eq!(next_link(&h).as_deref(), Some("def"));
-    }
-
-    #[test]
-    fn next_link_returns_none_when_only_prev() {
-        let mut h = HeaderMap::new();
-        h.insert(
-            "link",
-            HeaderValue::from_static("<https://hydra/prev?page_token=xyz>; rel=\"prev\""),
-        );
-        assert_eq!(next_link(&h), None);
-    }
-
-    #[test]
-    fn next_link_missing_header() {
-        let h = HeaderMap::new();
-        assert_eq!(next_link(&h), None);
-    }
-
-    // --- client audience patch --------------------------------------------
-
-    const MCP: &str = "https://stackpit.gofranz.com/mcp";
-
-    fn owned(xs: &[&str]) -> Vec<String> {
-        xs.iter().map(|s| (*s).to_string()).collect()
-    }
-
-    /// The audience values a patch would append, in order.
-    fn appended(patch: &[ory_client::models::JsonPatch]) -> Vec<String> {
-        patch
-            .iter()
-            .map(|p| {
-                assert_eq!(p.path, "/audience/-");
-                p.value
-                    .clone()
-                    .flatten()
-                    .and_then(|v| v.as_str().map(str::to_string))
-                    .expect("patch value")
+    /// One page of a subject's consent sessions granted under one Hydra login
+    /// session. Lists only consents Hydra remembered, never skipped ones.
+    pub async fn list_consent_sessions_by_login_session(
+        &self,
+        subject: &str,
+        sid: &str,
+    ) -> Result<Vec<ConsentSession>> {
+        let req = self
+            .clients
+            .hydra_admin
+            .request(Method::GET, "/admin/oauth2/auth/sessions/consent")
+            .query(&[("page_size", CONSENT_LIST_PAGE_SIZE.to_string())])
+            .query(&[("subject", subject), ("login_session_id", sid)]);
+        send_json(req)
+            .await
+            .and_then(with_nested_clients)
+            .map_err(|e| {
+                anyhow::anyhow!("hydra list_consent_sessions by login session failed: {e}")
             })
-            .collect()
     }
 
-    #[test]
-    fn audience_patch_appends_a_resource_the_record_lacks() {
-        let patch = audience_patch("c", &[], &owned(&[MCP]));
-        assert_eq!(appended(&patch), vec![MCP.to_string()]);
+    /// Revoke all consent grants for a single (subject, client) pair.
+    /// Powers the per-app "Revoke access" action on `/settings/authorized-apps`.
+    /// Hydra has no per-scope revocation; reducing a grant needs the user to re-consent with a narrower scope set.
+    pub async fn revoke_consent_sessions_for_client(
+        &self,
+        subject: &str,
+        client_id: &str,
+    ) -> Result<()> {
+        // `client` and `all` are mutually exclusive in Hydra v2 (passing both is a 400); with a client named, leave `all` unset.
+        self.revoke_consent_sessions(&[("subject", subject), ("client", client_id)])
+            .await
+            .map_err(|e| anyhow::anyhow!("hydra revoke_consent_sessions_for_client failed: {e}"))
     }
 
-    #[test]
-    fn second_consent_for_the_same_resource_emits_no_patch() {
-        // The bug: an empty `on_record` made every consent re-append, so one
-        // client's record grew an identical entry per grant, unbounded.
-        assert!(audience_patch("c", &owned(&[MCP]), &owned(&[MCP])).is_empty());
+    /// `DELETE /admin/oauth2/auth/sessions/login` with the given query.
+    async fn revoke_login_sessions(&self, query: &[(&str, &str)]) -> Result<(), CallError> {
+        let req = self
+            .clients
+            .hydra_admin
+            .request(Method::DELETE, "/admin/oauth2/auth/sessions/login")
+            .query(query);
+        send(req).await.map(|_| ())
     }
 
-    #[test]
-    fn audience_patch_dedups_against_a_self_written_record() {
-        // Whoever wrote the entry, it is already there — a CIMD client's own
-        // `audience` still suppresses the write.
-        let self_written = "http://127.0.0.1:3333/mcp";
-        assert!(audience_patch("c", &owned(&[self_written]), &owned(&[self_written])).is_empty());
+    /// Revoke every Hydra login session (the OP skip/remember state) for a subject.
+    /// Subject-keyed revocation fires no front/back-channel logout; pair it with
+    /// `revoke_consent_sessions_for_subject` to invalidate the RPs' grants.
+    pub async fn revoke_login_sessions_for_subject(&self, subject: &str) -> Result<()> {
+        self.revoke_login_sessions(&[("subject", subject)])
+            .await
+            .map_err(|e| anyhow::anyhow!("hydra revoke_login_sessions failed: {e}"))
     }
 
-    #[test]
-    fn audience_patch_dedups_a_record_that_already_repeats() {
-        // The bloated records the bug left behind must not keep growing.
-        assert!(audience_patch("c", &owned(&[MCP, MCP, MCP]), &owned(&[MCP])).is_empty());
+    /// Revoke one Hydra login session by `sid`. Unlike the subject-keyed revoke,
+    /// this sends back-channel logout to every client the session signed in to.
+    /// A session Hydra no longer knows counts as revoked.
+    pub async fn revoke_login_session_by_sid(&self, sid: &str) -> Result<()> {
+        match self.revoke_login_sessions(&[("sid", sid)]).await {
+            Ok(()) => Ok(()),
+            Err(e) if e.is_not_found() => Ok(()),
+            Err(e) => Err(anyhow::anyhow!(
+                "hydra revoke_login_session_by_sid failed: {e}"
+            )),
+        }
     }
 
-    #[test]
-    fn audience_patch_appends_each_resource_once() {
-        let patch = audience_patch(
-            "c",
-            &owned(&[MCP]),
-            &owned(&[MCP, "https://a.test", "https://a.test"]),
-        );
-        assert_eq!(appended(&patch), vec!["https://a.test".to_string()]);
+    /// Health probes, same shape as Kratos.
+    pub async fn health_alive(&self) -> Result<()> {
+        self.clients.hydra_admin.probe_health("/health/alive").await
     }
 
-    #[test]
-    fn audience_patch_stops_at_the_cap() {
-        let full: Vec<String> = (0..CLIENT_AUDIENCE_CAP)
-            .map(|i| format!("https://r{i}.test"))
-            .collect();
-        assert!(audience_patch("c", &full, &owned(&["https://new.test"])).is_empty());
-        // One slot left: the first granted resource lands, the rest don't.
-        let patch = audience_patch(
-            "c",
-            &full[..CLIENT_AUDIENCE_CAP - 1],
-            &owned(&["https://a.test", "https://b.test"]),
-        );
-        assert_eq!(appended(&patch), vec!["https://a.test".to_string()]);
+    pub async fn health_ready(&self) -> Result<()> {
+        self.clients.hydra_admin.probe_health("/health/ready").await
+    }
+
+    /// Fetch the Hydra build version.
+    pub async fn version(&self) -> Result<String> {
+        let req = self.clients.hydra_admin.request(Method::GET, "/version");
+        let v: VersionBody = send_json(req)
+            .await
+            .map_err(|e| anyhow::anyhow!("hydra get_version failed: {e}"))?;
+        Ok(v.version)
+    }
+
+    /// Hydra's JWKS, fetched fresh from the public `/.well-known/jwks.json`.
+    async fn fetch_jwks(&self) -> Result<JsonWebKeySet> {
+        let req = self
+            .clients
+            .hydra_public
+            .request(Method::GET, "/.well-known/jwks.json");
+        send_json(req)
+            .await
+            .map_err(|e| anyhow::anyhow!("hydra discover_json_web_keys failed: {e}"))
+    }
+
+    /// Fetch Hydra's public signing keys (the `jwks_uri` contents) and project
+    /// each down to the fields the admin UI shows. Order is whatever Hydra
+    /// returns.
+    pub async fn signing_keys(&self) -> Result<Vec<JwkSummary>> {
+        let set = self.fetch_jwks().await?;
+        Ok(set
+            .keys
+            .unwrap_or_default()
+            .into_iter()
+            .map(|k| JwkSummary {
+                kid: k.kid,
+                alg: k.alg,
+                kty: k.kty,
+                use_: k.use_,
+            })
+            .collect())
     }
 }
+
+#[cfg(test)]
+mod tests;

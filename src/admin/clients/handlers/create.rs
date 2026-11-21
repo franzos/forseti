@@ -11,7 +11,6 @@ use crate::admin::AdminSection;
 use crate::admin::with_org;
 use crate::audit::{self, AuditCtx, action, target_kind};
 use crate::audit_metadata;
-use crate::backend::OAuthBackend;
 use crate::csrf::CsrfForm;
 use crate::extractors::Csrf;
 use crate::flash::{self, SecretReveal};

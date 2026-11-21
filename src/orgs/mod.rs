@@ -354,6 +354,15 @@ pub async fn ensure_default_floor(
     }
 }
 
+/// A membership lookup for chrome, nav, and claims: a failed query logs and
+/// degrades to no memberships instead of failing the page.
+pub fn memberships_or_empty(result: anyhow::Result<Vec<Membership>>) -> Vec<Membership> {
+    result.unwrap_or_else(|e| {
+        tracing::warn!(error = ?e, "membership lookup failed; continuing without memberships");
+        Vec::new()
+    })
+}
+
 /// Outcome of [`resolve_admin_scope`]. Not a `Result<_, Response>` so the
 /// caller can render the rejection in the admin layout itself.
 #[derive(Debug, Clone)]
@@ -412,6 +421,25 @@ mod tests {
             validate_org_name("Ac\tme"),
             Err("name has invalid characters")
         );
+    }
+
+    #[test]
+    fn memberships_or_empty_passes_ok_through() {
+        let m = Membership {
+            org_id: "acme".into(),
+            slug: "acme".into(),
+            name: "Acme".into(),
+            role: "owner".into(),
+            theme_preset: None,
+            brand_primary: None,
+            brand_on_primary: None,
+            brand_secondary: None,
+            has_logo: 0,
+        };
+        let ok = memberships_or_empty(Ok(vec![m]));
+        assert_eq!(ok.len(), 1);
+        assert_eq!(ok[0].org_id, "acme");
+        assert!(memberships_or_empty(Err(anyhow::anyhow!("db down"))).is_empty());
     }
 
     fn admin_cfg(emails: &[&str]) -> AdminConfig {

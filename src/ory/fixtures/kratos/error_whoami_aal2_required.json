@@ -1,0 +1,13 @@
+{
+  "error": {
+    "id": "session_aal2_required",
+    "code": 403,
+    "status": "Forbidden",
+    "reason": "An active session was found but it does not fulfill the requested Authenticator Assurance Level. Please verify yourself with a second factor to resolve this issue.",
+    "details": {
+      "redirect_browser_to": "http://localhost:4433/self-service/login/browser?aal=aal2"
+    },
+    "message": "Session does not fulfill the requested Authenticator Assurance Level"
+  },
+  "redirect_browser_to": "http://localhost:4433/self-service/login/browser?aal=aal2"
+}

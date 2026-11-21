@@ -306,7 +306,7 @@ The playground's `playground` provider signs in at the mock on `:8092` (any user
 ### 6.5 Enterprise SAML SSO (license-gated; needs `make stack-up-saml` + `[saml]` in config)
 
 - [ ] Without a `saml`-featured license: `/sso/<slug>` → neutral "SSO unavailable" page; `/admin/saml` → upsell
-- [ ] `/admin/saml/new` → create a connection for Default against mock-saml: fetch `http://127.0.0.1:4480/api/saml/metadata` and paste the XML (Jackson 26.x rejects plain-HTTP non-localhost metadata URLs, so the URL field won't take `http://mock-saml:4000/…`) → row appears with SP values card (ACS URL + entity id) + `/sso/<slug>` URL
+- [ ] `/admin/saml/new` → create a connection for Default against mock-saml: fetch `http://127.0.0.1:4480/api/saml/metadata` and paste the XML (Forseti fetches the URL field itself and refuses plain-HTTP and private hosts unless `[oauth.cimd].allow_private_targets` is on) → row appears with SP values card (ACS URL + entity id) + `/sso/<slug>` URL
 - [ ] **Happy path:** logged-out browser → `/sso/default` → mock-saml login (any email + ACS pre-filled) → lands on the dashboard with a native `ory_kratos_session`, NOT on `/settings/password`
 - [ ] JIT identity created in Kratos with the asserted email pre-verified; member row added to the org
 - [ ] Second login with the same email reuses the linked identity (no duplicate)

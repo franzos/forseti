@@ -39,14 +39,14 @@ pub(crate) async fn create_unverified_test_identity(
     identity: &KratosBackend,
     email: &str,
 ) -> Result<String> {
-    let body = ory_client::models::CreateIdentityBody::new(
-        "default".to_string(),
-        serde_json::json!({ "email": email, "name": { "first": "Prune", "last": "Test" } }),
-    );
-    let created =
-        ory_client::apis::identity_api::create_identity(&identity.clients.kratos_admin, Some(body))
-            .await
-            .map_err(|e| anyhow::anyhow!("kratos admin create_identity failed: {e}"))?;
+    let body = super::kratos_wire::CreateIdentityBody {
+        schema_id: "default",
+        traits: serde_json::json!({ "email": email, "name": { "first": "Prune", "last": "Test" } }),
+        verifiable_addresses: None,
+    };
+    let created = kratos::create_identity(&identity.clients, &body)
+        .await
+        .map_err(|e| anyhow::anyhow!("kratos admin create_identity failed: {e}"))?;
     Ok(created.id)
 }
 
@@ -81,7 +81,7 @@ impl IdentityBackend for KratosBackend {
     }
 
     fn flow_init_url(&self, kind: FlowKind, init: FlowInit<'_>) -> String {
-        browser_init_url(&self.clients.kratos_public.base_path, kind, init)
+        browser_init_url(&self.clients.kratos_public.base, kind, init)
     }
 
     async fn get_flow(&self, kind: FlowKind, flow_id: &str, cookie: &str) -> Result<FlowFetch> {

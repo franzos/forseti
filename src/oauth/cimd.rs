@@ -19,7 +19,6 @@ use axum::routing::get;
 use super::cimd_fetch::{self, CimdDocument};
 use crate::audit::{self, AuditCtx, AuditEvent, action};
 use crate::audit_metadata;
-use crate::backend::OAuthBackend;
 use crate::backend::oauth::OAuthClient;
 use crate::config::{HydraConfig, OAuthConfig, ProxyConfig};
 use crate::oauth_client_metadata::{self, source};

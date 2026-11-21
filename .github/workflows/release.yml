@@ -103,14 +103,15 @@ jobs:
           chmod +x .bin/tailwindcss
           make css
 
-      - name: Build release binary
-        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Build release binaries
+        run: cargo build --release --locked --target ${{ matrix.target }} -p forseti -p forseti-config
 
       - name: Package tarball
         run: |
           name="forseti-${{ matrix.target }}"
           mkdir -p "$name"
           cp "target/${{ matrix.target }}/release/forseti" "$name/"
+          cp "target/${{ matrix.target }}/release/forseti-config" "$name/"
           cp config.example.toml "$name/"
           tar -czf "$name.tar.gz" "$name"
           sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
@@ -131,7 +132,7 @@ jobs:
           path: forseti-${{ matrix.target }}.tar.gz.sha256
           if-no-files-found: error
 
-  # Debian and RPM packages for x86_64. One binary build feeds both: cargo-deb
+  # Debian and RPM packages for x86_64. One build feeds both: cargo-deb
   # runs with --no-build and cargo-generate-rpm reads target/release directly.
   packages:
     name: deb + rpm
@@ -167,8 +168,8 @@ jobs:
         with:
           tool: cargo-deb@3.8.0,cargo-generate-rpm@0.21.0
 
-      - name: Build release binary
-        run: cargo build --release --locked
+      - name: Build release binaries
+        run: cargo build --release --locked -p forseti -p forseti-config
 
       - name: Build packages
         run: |

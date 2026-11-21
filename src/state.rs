@@ -9,7 +9,7 @@ use axum::response::Response;
 use tokio::sync::Mutex;
 
 use crate::backend::oauth::OidcDiscovery;
-use crate::backend::{IdentityBackend, IdentityImpl, OAuthBackend, OAuthImpl};
+use crate::backend::{IdentityBackend, IdentityImpl, OAuthImpl};
 use crate::commercial::LicenseHandle;
 use crate::config::AppConfig;
 use crate::db::DbPool;
@@ -75,7 +75,7 @@ pub struct AppState {
 
 impl AppState {
     /// State for router tests: no background workers, an in-memory signing key, no license.
-    #[cfg(all(test, feature = "identity-native"))]
+    #[cfg(test)]
     pub(crate) fn for_test(
         cfg: AppConfig,
         db: DbPool,

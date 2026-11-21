@@ -382,6 +382,20 @@ pub(crate) async fn test_pool() -> DbPool {
     DbPool::Sqlite(pool)
 }
 
+/// Migrated pool on the Postgres at `FORSETI_TEST_POSTGRES_URL`, for `#[ignore]` tests.
+#[cfg(test)]
+pub(crate) async fn test_postgres_pool() -> DbPool {
+    let url = std::env::var("FORSETI_TEST_POSTGRES_URL").expect("FORSETI_TEST_POSTGRES_URL is set");
+    let manager = PgManager::new(url, PgRuntime::Tokio1);
+    let pool = PgPool::builder(manager)
+        .max_size(1)
+        .build()
+        .expect("build test postgres pool");
+    let db = DbPool::Postgres(pool);
+    db.run_migrations().await.expect("run test migrations");
+    db
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

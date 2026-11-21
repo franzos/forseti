@@ -59,11 +59,11 @@ pub async fn send_text(
         .map_err(|e| anyhow::anyhow!("email send failed: {e}"))
 }
 
-/// Pragmatic addr-spec check for user-submitted addresses (replaces lettre's
-/// parser, which no longer sits in the tree). Requires exactly one `@`, a
-/// non-empty local part, a dotted domain with non-empty labels, and no
-/// whitespace or control characters. Not full RFC 5321, but enough to reject
-/// the obvious garbage a form can submit; the real bounce check is delivery.
+/// Pragmatic addr-spec check for user-submitted addresses. Requires exactly
+/// one `@`, a non-empty local part, a dotted domain with non-empty labels, no
+/// whitespace or control characters, and none of the RFC 5322 specials that
+/// let an address carry a display name, a comment, a quoted local part or a
+/// second recipient. Stricter than RFC 5321; the real bounce check is delivery.
 pub fn is_valid_email(addr: &str) -> bool {
     let Some((local, domain)) = addr.split_once('@') else {
         return false;
@@ -71,7 +71,14 @@ pub fn is_valid_email(addr: &str) -> bool {
     if local.is_empty() || domain.is_empty() || domain.contains('@') {
         return false;
     }
-    if addr.chars().any(|c| c.is_whitespace() || c.is_control()) {
+    if addr.chars().any(|c| {
+        c.is_whitespace()
+            || c.is_control()
+            || matches!(
+                c,
+                '<' | '>' | '(' | ')' | '[' | ']' | ',' | ';' | ':' | '"' | '\\'
+            )
+    }) {
         return false;
     }
     let mut labels = domain.split('.').peekable();
@@ -116,6 +123,9 @@ mod tests {
             "user@exa mple.com",
             "user @example.com",
             "user@example..com",
+            "\"x\"@example.com",
+            "a,b@example.com",
+            "a:b@example.com",
         ] {
             assert!(!is_valid_email(bad), "should reject {bad:?}");
         }

@@ -7,7 +7,7 @@ use crate::oauth_client_metadata;
 use super::presets::Preset;
 
 /// Compact list-row projection of a Hydra client. Templates iterate over
-/// these rather than the full SDK model to keep the column set predictable.
+/// these rather than the full `OAuthClient` to keep the column set predictable.
 pub(super) struct ClientRow {
     pub id: String,
     pub name: String,

@@ -58,6 +58,18 @@ struct NewConnection<'a> {
     updated_at: String,
 }
 
+/// The org already has a row in `saml_connections` (keyed by `org_id`).
+#[derive(Debug)]
+pub struct ConnectionExists;
+
+impl std::fmt::Display for ConnectionExists {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("organization already has a SAML connection")
+    }
+}
+
+impl std::error::Error for ConnectionExists {}
+
 pub async fn insert_connection(
     db: &DbPool,
     org_id: &str,
@@ -68,7 +80,7 @@ pub async fn insert_connection(
     let d = display_name.to_string();
     let c = created_by.to_string();
     let now = crate::db::now_rfc3339();
-    db_interact!(db, |conn| {
+    let result = db_interact!(db, |conn| {
         diesel::insert_into(saml_connections::table)
             .values(NewConnection {
                 org_id: &o,
@@ -79,9 +91,15 @@ pub async fn insert_connection(
                 updated_at: now.clone(),
             })
             .execute(conn)
-            .map(|_| ())
-    })?;
-    Ok(())
+    });
+    match result {
+        Ok(_) => Ok(()),
+        Err(diesel::result::Error::DatabaseError(
+            diesel::result::DatabaseErrorKind::UniqueViolation,
+            _,
+        )) => Err(ConnectionExists.into()),
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// Returns true when a row was flipped (false = no connection for org).
@@ -115,18 +133,47 @@ pub async fn delete_connection(db: &DbPool, org_id: &str) -> anyhow::Result<()> 
 
 // --- links ---------------------------------------------------------------
 
-pub async fn link_for(db: &DbPool, org_id: &str, email: &str) -> anyhow::Result<Option<String>> {
+/// Email-keyed lookup, org-scoped. Returns `(identity_id, idp_subject)`.
+pub async fn link_for(
+    db: &DbPool,
+    org_id: &str,
+    email: &str,
+) -> anyhow::Result<Option<(String, Option<String>)>> {
     let o = org_id.to_string();
     let e = email.to_lowercase();
-    let row: Option<String> = db_interact!(db, |conn| {
+    let row: Option<(String, Option<String>)> = db_interact!(db, |conn| {
         saml_links::table
             .filter(saml_links::org_id.eq(&o))
             .filter(saml_links::email.eq(&e))
-            .select(saml_links::identity_id)
+            .select((saml_links::identity_id, saml_links::idp_subject))
             .first(conn)
             .optional()
     })?;
     Ok(row)
+}
+
+/// Records the subject on an email-keyed link that has none. Returns true
+/// when a row was filled; a stored subject is never overwritten.
+pub async fn backfill_subject(
+    db: &DbPool,
+    org_id: &str,
+    email: &str,
+    idp_subject: &str,
+) -> anyhow::Result<bool> {
+    let o = org_id.to_string();
+    let e = email.to_lowercase();
+    let s = idp_subject.to_string();
+    let affected = db_interact!(db, |conn| {
+        diesel::update(
+            saml_links::table
+                .filter(saml_links::org_id.eq(&o))
+                .filter(saml_links::email.eq(&e))
+                .filter(saml_links::idp_subject.is_null()),
+        )
+        .set(saml_links::idp_subject.eq(&s))
+        .execute(conn)
+    })?;
+    Ok(affected > 0)
 }
 
 /// Durable lookup by the stable IdP subject (NameID), org-scoped. Returns
@@ -163,10 +210,9 @@ struct NewLink<'a> {
     idp_subject: Option<&'a str>,
 }
 
-/// Idempotent: a concurrent duplicate insert is swallowed; on conflict the
-/// existing row is always repointed at the new identity, and the subject is
-/// refreshed only when this login carries one — backfilling legacy email-only
-/// rows without letting a subjectless relink NULL out a stored durable key.
+/// Insert, or repoint the existing (org, email) row at `identity_id`. The
+/// subject is written only when one is given, so a subjectless relink never
+/// clears a stored durable key.
 pub async fn upsert_link(
     db: &DbPool,
     org_id: &str,
@@ -180,42 +226,25 @@ pub async fn upsert_link(
     let s = idp_subject.map(str::to_string);
     let now = crate::db::now_rfc3339();
     db_interact!(db, |conn| {
-        conn.transaction::<_, diesel::result::Error, _>(|c| {
-            match diesel::insert_into(saml_links::table)
-                .values(NewLink {
-                    org_id: &o,
-                    email: &e,
-                    identity_id: &i,
-                    created_at: now.clone(),
-                    idp_subject: s.as_deref(),
-                })
-                .execute(c)
-            {
-                Ok(_) => Ok(()),
-                Err(diesel::result::Error::DatabaseError(
-                    diesel::result::DatabaseErrorKind::UniqueViolation,
-                    _,
-                )) => {
-                    let target = saml_links::table
-                        .filter(saml_links::org_id.eq(&o))
-                        .filter(saml_links::email.eq(&e));
-                    match s.as_deref() {
-                        Some(subject) => diesel::update(target)
-                            .set((
-                                saml_links::identity_id.eq(&i),
-                                saml_links::idp_subject.eq(subject),
-                            ))
-                            .execute(c)
-                            .map(|_| ()),
-                        None => diesel::update(target)
-                            .set(saml_links::identity_id.eq(&i))
-                            .execute(c)
-                            .map(|_| ()),
-                    }
-                }
-                Err(e) => Err(e),
-            }
-        })
+        let insert = diesel::insert_into(saml_links::table)
+            .values(NewLink {
+                org_id: &o,
+                email: &e,
+                identity_id: &i,
+                created_at: now.clone(),
+                idp_subject: s.as_deref(),
+            })
+            .on_conflict((saml_links::org_id, saml_links::email))
+            .do_update();
+        match s.as_deref() {
+            Some(subject) => insert
+                .set((
+                    saml_links::identity_id.eq(&i),
+                    saml_links::idp_subject.eq(subject),
+                ))
+                .execute(conn),
+            None => insert.set(saml_links::identity_id.eq(&i)).execute(conn),
+        }
     })?;
     Ok(())
 }
@@ -290,5 +319,131 @@ mod tests {
         let row = get_connection(&db, "org-s").await.unwrap().unwrap();
         assert_eq!(row.created_by, None);
         assert!(row.is_enabled());
+    }
+
+    #[tokio::test]
+    async fn insert_connection_twice_is_connection_exists() {
+        let db = test_pool().await;
+        crate::orgs::db::create_org(&db, "org-s", "org-s", "Org S", None)
+            .await
+            .unwrap();
+        insert_connection(&db, "org-s", "idp", "admin")
+            .await
+            .unwrap();
+        let err = insert_connection(&db, "org-s", "idp", "admin")
+            .await
+            .expect_err("duplicate insert must fail");
+        assert!(
+            err.downcast_ref::<ConnectionExists>().is_some(),
+            "expected ConnectionExists, got: {err}"
+        );
+    }
+
+    fn link(identity: &str, subject: Option<&str>) -> Option<(String, Option<String>)> {
+        Some((identity.to_string(), subject.map(str::to_string)))
+    }
+
+    #[tokio::test]
+    async fn link_for_returns_the_subject() {
+        let db = test_pool().await;
+        upsert_link(&db, "o1", "A@x.test", Some("sub-1"), "id1")
+            .await
+            .unwrap();
+        upsert_link(&db, "o1", "b@x.test", None, "id2")
+            .await
+            .unwrap();
+        assert_eq!(
+            link_for(&db, "o1", "a@x.test").await.unwrap(),
+            link("id1", Some("sub-1"))
+        );
+        assert_eq!(
+            link_for(&db, "o1", "b@x.test").await.unwrap(),
+            link("id2", None)
+        );
+    }
+
+    #[tokio::test]
+    async fn upsert_repoints_identity_and_subject() {
+        let db = test_pool().await;
+        upsert_link(&db, "o1", "a@x.test", Some("sub-1"), "id1")
+            .await
+            .unwrap();
+        upsert_link(&db, "o1", "a@x.test", Some("sub-2"), "id2")
+            .await
+            .unwrap();
+        assert_eq!(
+            link_for(&db, "o1", "a@x.test").await.unwrap(),
+            link("id2", Some("sub-2"))
+        );
+    }
+
+    #[tokio::test]
+    async fn upsert_without_subject_keeps_the_stored_subject() {
+        let db = test_pool().await;
+        upsert_link(&db, "o1", "a@x.test", Some("sub-1"), "id1")
+            .await
+            .unwrap();
+        upsert_link(&db, "o1", "a@x.test", None, "id2")
+            .await
+            .unwrap();
+        assert_eq!(
+            link_for(&db, "o1", "a@x.test").await.unwrap(),
+            link("id2", Some("sub-1"))
+        );
+    }
+
+    #[tokio::test]
+    async fn backfill_only_fills_a_null_subject() {
+        let db = test_pool().await;
+        upsert_link(&db, "o1", "a@x.test", None, "id1")
+            .await
+            .unwrap();
+        upsert_link(&db, "o1", "b@x.test", Some("sub-b"), "id2")
+            .await
+            .unwrap();
+        assert!(
+            backfill_subject(&db, "o1", "A@x.test", "sub-a")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !backfill_subject(&db, "o1", "a@x.test", "sub-z")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !backfill_subject(&db, "o1", "b@x.test", "sub-z")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !backfill_subject(&db, "o1", "c@x.test", "sub-z")
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            link_for(&db, "o1", "a@x.test").await.unwrap(),
+            link("id1", Some("sub-a"))
+        );
+        assert_eq!(
+            link_for(&db, "o1", "b@x.test").await.unwrap(),
+            link("id2", Some("sub-b"))
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "needs FORSETI_TEST_POSTGRES_URL"]
+    async fn upsert_link_conflict_succeeds_on_postgres() {
+        let db = crate::db::test_postgres_pool().await;
+        let org = format!("test-{}", uuid::Uuid::new_v4());
+        let email = "pg@x.test";
+        upsert_link(&db, &org, email, Some("sub-1"), "id1")
+            .await
+            .unwrap();
+        let second = upsert_link(&db, &org, email, Some("sub-2"), "id2").await;
+        let row = link_subject(&db, &org, "sub-2").await;
+        delete_link(&db, &org, email).await.unwrap();
+        second.unwrap();
+        assert_eq!(row.unwrap(), Some(("id2".to_string(), email.to_string())));
     }
 }

@@ -1,0 +1,82 @@
+{
+  "challenge": "fixture-login-challenge",
+  "requested_scope": [
+    "openid",
+    "offline_access",
+    "email"
+  ],
+  "requested_access_token_audience": [
+    "https://api.fixture.test"
+  ],
+  "skip": false,
+  "subject": "",
+  "oidc_context": {
+    "acr_values": [
+      "aal2"
+    ],
+    "ui_locales": [
+      "de",
+      "en"
+    ],
+    "login_hint": "alice@example.com"
+  },
+  "client": {
+    "client_id": "forseti-fixture-client",
+    "client_name": "Fixture App",
+    "redirect_uris": [
+      "http://127.0.0.1:9999/cb"
+    ],
+    "grant_types": [
+      "authorization_code",
+      "refresh_token",
+      "urn:ietf:params:oauth:grant-type:device_code"
+    ],
+    "response_types": [
+      "code"
+    ],
+    "scope": "openid offline_access email",
+    "audience": [
+      "https://api.fixture.test"
+    ],
+    "owner": "",
+    "policy_uri": "",
+    "allowed_cors_origins": [],
+    "tos_uri": "",
+    "client_uri": "",
+    "logo_uri": "",
+    "contacts": [],
+    "client_secret_expires_at": 0,
+    "subject_type": "public",
+    "jwks": {},
+    "token_endpoint_auth_method": "client_secret_basic",
+    "userinfo_signed_response_alg": "none",
+    "created_at": "2026-11-20T19:44:40Z",
+    "updated_at": "2026-11-20T19:44:39.838666Z",
+    "post_logout_redirect_uris": [
+      "http://127.0.0.1:9999/bye"
+    ],
+    "backchannel_logout_uri": "http://127.0.0.1:9999/bcl",
+    "metadata": {
+      "forseti": {
+        "client_type": "web_app"
+      }
+    },
+    "skip_consent": false,
+    "skip_logout_consent": null,
+    "authorization_code_grant_access_token_lifespan": null,
+    "authorization_code_grant_id_token_lifespan": "1h0m0s",
+    "authorization_code_grant_refresh_token_lifespan": null,
+    "client_credentials_grant_access_token_lifespan": null,
+    "implicit_grant_access_token_lifespan": null,
+    "implicit_grant_id_token_lifespan": null,
+    "jwt_bearer_grant_access_token_lifespan": null,
+    "refresh_token_grant_id_token_lifespan": null,
+    "refresh_token_grant_access_token_lifespan": null,
+    "refresh_token_grant_refresh_token_lifespan": null,
+    "device_authorization_grant_id_token_lifespan": null,
+    "device_authorization_grant_access_token_lifespan": null,
+    "device_authorization_grant_refresh_token_lifespan": null
+  },
+  "request_url": "http://host.containers.internal:3000/hydra/oauth2/auth?client_id=forseti-fixture-client&response_type=code&scope=openid+offline_access+email&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb&state=fixturestate123&nonce=fixturenonce123&ui_locales=de+en&login_hint=alice%40example.com&acr_values=aal2&audience=https%3A%2F%2Fapi.fixture.test",
+  "session_id": "0c555428-144b-4e2a-950d-b28f1e9f2184"
+}

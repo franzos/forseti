@@ -24,7 +24,7 @@ Not available on the native build:
 
 - Apple sign-in and any other provider that is neither OpenID Connect nor GitHub.
 - WebAuthn security keys and passkeys. Second factors are TOTP and backup codes.
-- The `forseti config` verbs, including `config check` and `config init`.
+- `forseti-config`: there are no Kratos or Hydra files to lint or edit.
 - Moving existing Kratos identities over. The native build is for fresh installs.
 
 ## Configuration
@@ -98,7 +98,7 @@ The session token is 32 random bytes; the database keeps its SHA-256 hash. Each 
 
 ## Throttles
 
-Per-IP limits answer with a plain `429` and `Retry-After`; per-address and per-account limits answer on the form with "Too many sign-in attempts right now" (message `9000001`). All counters live in the Forseti process, so several instances each allow their own share.
+Per-IP limits answer with a plain `429` and `Retry-After`; per-address and per-account limits answer on the form with "Too many sign-in attempts right now" (message `9000001`), except the code-guess limit, which answers like a wrong code. All counters live in the Forseti process, so several instances each allow their own share.
 
 | What | Limit |
 |---|---|
@@ -111,10 +111,13 @@ Per-IP limits answer with a plain `429` and `Retry-After`; per-address and per-a
 | Verification and recovery submits per client IP, shared | 5 per minute, 30 per hour |
 | Codes mailed per address, verification and recovery together | 5 per hour |
 | Guesses per code | 5; a code lives 15 minutes |
+| Code guesses per address, across every code mailed to it (verification, recovery, address change, provider sign-up) | 15 per hour; a refused guess gets the wrong-code answer |
 | Settings submits per client IP | 30 per minute, 300 per hour |
 | Email address and password changes per account | 10 per 15 minutes, shared |
 
 The per-address password limit is the lockout trade-off: anyone who knows an address can spend its attempts and keep its owner out of password sign-in for 15 minutes, whether or not they know the password. Raising `login_identifier_rate_per_15m` loosens that and gives a password guesser more room; `0` turns it off and leaves only the per-IP buckets.
+
+The per-address code-guess limit has the same property: anyone who can start a verification, recovery or provider sign-up flow for an address can spend its guesses, and the owner's mailed codes for that address fail until guesses fall out of the one-hour window. Someone who keeps spending them keeps the address locked; an admin recovery code is not counted against this limit and still works.
 
 ## Background workers and `/readyz`
 
@@ -131,7 +134,7 @@ The native backend owns seven tables in Forseti's database: `identities`, `ident
 
 ## Admin recovery codes
 
-On `/admin/identities/{id}`, an admin can mint a recovery code (`POST /admin/identities/{id}/recovery`). On the native build this creates a recovery flow that no browser holds yet and a 6-digit code for it; nothing is mailed, and the identity's earlier recovery codes stop working. A disabled identity gets no code: enable it first. The admin hands over the link (`<self>/self-service/recovery?flow=<id>`) and the code out of band. Opening the link takes nothing, so a chat preview or mail scanner that fetches it leaves it usable, and the page shows no account data. The first browser to submit on the page takes the flow; any other browser gets the expired-flow page. Entering the code (5 guesses, 15 minutes) signs the user in at AAL1 and opens the password page within the privileged window. An identity with TOTP still steps up before settings open, with TOTP or a backup code, so a recovery code does not get a user past a lost authenticator without backup codes.
+On `/admin/identities/{id}`, an admin can mint a recovery code (`POST /admin/identities/{id}/recovery`). On the native build this creates a recovery flow that no browser holds yet and a 6-digit code for it; nothing is mailed, and the identity's earlier recovery codes stop working. A disabled identity gets no code: enable it first. The admin hands over the link (`<self>/self-service/recovery?flow=<id>`) and the code out of band. Opening the link takes nothing, so a chat preview or mail scanner that fetches it leaves it usable, and the page shows no account data. The first browser to submit on the page takes the flow; any other browser gets the expired-flow page. Entering the code (5 guesses, 15 minutes; the per-address code-guess limit does not apply) signs the user in at AAL1 and opens the password page within the privileged window. An identity with TOTP still steps up before settings open, with TOTP or a backup code, so a recovery code does not get a user past a lost authenticator without backup codes.
 
 ## Upstream sign-in providers
 

@@ -1,0 +1,10 @@
+[package]
+name = "forseti-common"
+version.workspace = true
+edition = "2024"
+description = "Values and checks shared by the Forseti server and forseti-config"
+license = "AGPL-3.0-or-later"
+publish = false
+
+[dependencies]
+url = "2"

@@ -1293,8 +1293,8 @@ mod tests {
         remove_member(&db, "oa", "id1").await.unwrap();
         assert_eq!(link_for(&db, "oa", "u@x.test").await.unwrap(), None);
         assert_eq!(
-            link_for(&db, "ob", "u@x.test").await.unwrap().as_deref(),
-            Some("id1")
+            link_for(&db, "ob", "u@x.test").await.unwrap(),
+            Some(("id1".to_string(), Some("sub".to_string())))
         );
 
         remove_member_everywhere(&db, "id1").await.unwrap();

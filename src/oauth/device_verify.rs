@@ -16,7 +16,6 @@ use axum::extract::{Query, State};
 use axum::response::{IntoResponse, Redirect, Response};
 use serde::Deserialize;
 
-use crate::backend::OAuthBackend;
 use crate::csrf::CsrfForm;
 use crate::extractors::RequireSession;
 use crate::page_chrome::{Chrome, PageChrome, ReqLocale};

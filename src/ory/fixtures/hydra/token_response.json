@@ -1,0 +1,8 @@
+{
+  "access_token": "fixture-access-token",
+  "expires_in": 299,
+  "id_token": "fixture-id-token",
+  "refresh_token": "fixture-refresh-token",
+  "scope": "openid offline_access email",
+  "token_type": "bearer"
+}

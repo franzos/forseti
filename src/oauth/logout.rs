@@ -8,8 +8,8 @@ use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Redirect, Response};
 use serde::Deserialize;
 
+use crate::backend::IdentityBackend;
 use crate::backend::oauth::LogoutRequest;
-use crate::backend::{IdentityBackend, OAuthBackend};
 use crate::csrf::CsrfForm;
 
 use crate::cookies;

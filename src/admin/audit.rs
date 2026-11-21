@@ -15,7 +15,7 @@ use serde::Deserialize;
 
 use crate::admin::{AdminSection, render_admin_error};
 use crate::audit;
-use crate::backend::{IdentityBackend, OAuthBackend};
+use crate::backend::IdentityBackend;
 use crate::extractors::{Csrf, RequireAdminScoped};
 use crate::format::humanise_timestamp;
 use crate::page_chrome::PageChrome;

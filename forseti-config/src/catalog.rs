@@ -8,13 +8,13 @@ use std::path::Path;
 use serde_json::Value;
 use toml_edit::DocumentMut;
 
+use super::check::redact_uri;
 use super::check::{
     Finding, PLACEHOLDER_TOKENS, Severity, check_oidc_providers, extract_hook_token,
     webhook_token_entries,
 };
 use super::init::is_dev_smtp;
 use super::io::fingerprint;
-use super::redact_uri;
 use super::yamlutil::{dig, dig_str, is_placeholder, secret_entries};
 
 pub(crate) struct Setting {
@@ -374,7 +374,7 @@ mod tests {
             .unwrap_or_else(|| panic!("no status for {key}"))
     }
 
-    // A pair shaped like `config-init`'s output: real URLs/DSN/SMTP, fresh
+    // A pair shaped like `forseti-config init`'s output: real URLs/DSN/SMTP, fresh
     // 32-char secrets, no OIDC providers (init never writes any).
     const INIT_LIKE_KRATOS: &str = r#"
 selfservice:
@@ -407,8 +407,8 @@ oidc:
 
     #[test]
     fn init_like_pair_has_no_oidc_providers_configured() {
-        let kratos_v: Value = crate::config_cli::yamlutil::parse_yaml(INIT_LIKE_KRATOS).unwrap();
-        let hydra_v: Value = crate::config_cli::yamlutil::parse_yaml(INIT_LIKE_HYDRA).unwrap();
+        let kratos_v: Value = crate::yamlutil::parse_yaml(INIT_LIKE_KRATOS).unwrap();
+        let hydra_v: Value = crate::yamlutil::parse_yaml(INIT_LIKE_HYDRA).unwrap();
 
         let doc: DocumentMut = "[audit]\nwebhook_token = \"a-real-token\"\n"
             .parse()
@@ -431,16 +431,16 @@ oidc:
 
     #[test]
     fn status_of_without_forseti_toml_is_missing() {
-        let kratos: Value = crate::config_cli::yamlutil::parse_yaml("selfservice: {}").unwrap();
-        let hydra: Value = crate::config_cli::yamlutil::parse_yaml("secrets: {}").unwrap();
+        let kratos: Value = crate::yamlutil::parse_yaml("selfservice: {}").unwrap();
+        let hydra: Value = crate::yamlutil::parse_yaml("secrets: {}").unwrap();
         let statuses = status_of(&kratos, &hydra, None, Path::new("/nonexistent"));
         assert_eq!(find(&statuses, "audit.webhook-token").state, "missing");
     }
 
     #[test]
     fn json_output_round_trips_through_serde() {
-        let kratos: Value = crate::config_cli::yamlutil::parse_yaml("selfservice: {}").unwrap();
-        let hydra: Value = crate::config_cli::yamlutil::parse_yaml("secrets: {}").unwrap();
+        let kratos: Value = crate::yamlutil::parse_yaml("selfservice: {}").unwrap();
+        let hydra: Value = crate::yamlutil::parse_yaml("secrets: {}").unwrap();
         let statuses = status_of(&kratos, &hydra, None, Path::new("/nonexistent"));
 
         let json = serde_json::to_string(&statuses).expect("serializes");
@@ -460,7 +460,7 @@ oidc:
 
     #[test]
     fn provider_status_is_not_ok_when_microsoft_tenant_is_common() {
-        let kratos: Value = crate::config_cli::yamlutil::parse_yaml(
+        let kratos: Value = crate::yamlutil::parse_yaml(
             r#"
 selfservice:
   methods:
@@ -476,7 +476,7 @@ selfservice:
 "#,
         )
         .unwrap();
-        let hydra: Value = crate::config_cli::yamlutil::parse_yaml("secrets: {}").unwrap();
+        let hydra: Value = crate::yamlutil::parse_yaml("secrets: {}").unwrap();
 
         // Credentials look fine and the mapper path parses; only
         // `microsoft_tenant: common` is bad. A narrow, hand-rolled probe
@@ -505,7 +505,7 @@ selfservice:
         )
         .unwrap();
 
-        let kratos: Value = crate::config_cli::yamlutil::parse_yaml(
+        let kratos: Value = crate::yamlutil::parse_yaml(
             r#"
 selfservice:
   methods:
@@ -523,7 +523,7 @@ selfservice:
 "#,
         )
         .unwrap();
-        let hydra: Value = crate::config_cli::yamlutil::parse_yaml("secrets: {}").unwrap();
+        let hydra: Value = crate::yamlutil::parse_yaml("secrets: {}").unwrap();
 
         let statuses = status_of(&kratos, &hydra, None, &dir);
         let apple = find(&statuses, "oidc.apple");
@@ -542,7 +542,7 @@ selfservice:
 
     #[test]
     fn provider_status_is_not_ok_when_apple_key_trio_is_incomplete() {
-        let kratos: Value = crate::config_cli::yamlutil::parse_yaml(
+        let kratos: Value = crate::yamlutil::parse_yaml(
             r#"
 selfservice:
   methods:
@@ -557,7 +557,7 @@ selfservice:
 "#,
         )
         .unwrap();
-        let hydra: Value = crate::config_cli::yamlutil::parse_yaml("secrets: {}").unwrap();
+        let hydra: Value = crate::yamlutil::parse_yaml("secrets: {}").unwrap();
 
         let statuses = status_of(&kratos, &hydra, None, Path::new("/nonexistent-config-dir"));
         let apple = find(&statuses, "oidc.apple");
@@ -570,7 +570,7 @@ selfservice:
 
     #[test]
     fn provider_status_is_not_ok_when_mapper_file_is_missing_from_disk() {
-        let kratos: Value = crate::config_cli::yamlutil::parse_yaml(
+        let kratos: Value = crate::yamlutil::parse_yaml(
             r#"
 selfservice:
   methods:
@@ -585,7 +585,7 @@ selfservice:
 "#,
         )
         .unwrap();
-        let hydra: Value = crate::config_cli::yamlutil::parse_yaml("secrets: {}").unwrap();
+        let hydra: Value = crate::yamlutil::parse_yaml("secrets: {}").unwrap();
 
         let statuses = status_of(&kratos, &hydra, None, Path::new("/nonexistent-config-dir"));
         let google = find(&statuses, "oidc.google");

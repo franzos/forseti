@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use axum::http::HeaderMap;
-use serde_json::{Map, Value};
 
 use crate::config::AppConfig;
 use crate::db::DbPool;
@@ -14,10 +13,6 @@ use crate::flow_view::Flow;
 use identity::{
     BrowserSession, CourierStatus, FlowFetch, FlowInit, FlowKind, FlowOutcome, Identity,
     IdentityState, RecoveryCode, SelfServiceError, Session, SessionOrigin, WhoamiOutcome,
-};
-use oauth::{
-    ConsentRequest, ConsentSession, DeviceAuthorization, DeviceTokenOutcome, IdTokenClaims,
-    JwkSummary, LoginRequest, LogoutRequest, OAuthClient, OidcDiscovery, RedirectTo,
 };
 
 pub mod identity;
@@ -125,112 +120,6 @@ pub trait IdentityBackend: Send + Sync + 'static {
     async fn list_identity_schemas(&self) -> Result<Vec<String>>;
 
     async fn courier_backlog(&self, status: CourierStatus, page_size: i64) -> Result<u64>;
-    async fn health_alive(&self) -> Result<()>;
-    async fn health_ready(&self) -> Result<()>;
-    async fn version(&self) -> Result<String>;
-}
-
-/// OAuth 2.0 / OIDC provider: login, consent and logout challenges, clients, grants.
-#[allow(async_fn_in_trait)]
-pub trait OAuthBackend: Send + Sync + 'static {
-    async fn get_login_request(&self, challenge: &str) -> Result<LoginRequest>;
-    async fn accept_login_request(
-        &self,
-        challenge: &str,
-        subject: &str,
-        remember: bool,
-        remember_for: i64,
-        amr: Vec<String>,
-        acr: Option<String>,
-    ) -> Result<RedirectTo>;
-    async fn reject_login_request(
-        &self,
-        challenge: &str,
-        error: &str,
-        error_description: &str,
-    ) -> Result<RedirectTo>;
-    async fn get_consent_request(&self, challenge: &str) -> Result<ConsentRequest>;
-    async fn accept_consent_request(
-        &self,
-        challenge: &str,
-        grant_scope: Vec<String>,
-        grant_audience: Vec<String>,
-        remember: bool,
-        id_token_session: Value,
-        access_token_session: Map<String, Value>,
-    ) -> Result<RedirectTo>;
-    async fn reject_consent_request(
-        &self,
-        challenge: &str,
-        error: &str,
-        error_description: &str,
-    ) -> Result<RedirectTo>;
-    async fn get_logout_request(&self, challenge: &str) -> Result<LogoutRequest>;
-    async fn accept_logout_request(&self, challenge: &str) -> Result<RedirectTo>;
-
-    async fn device_authorization(
-        &self,
-        client_id: &str,
-        client_secret: &str,
-        scope: &str,
-    ) -> Result<DeviceAuthorization>;
-    async fn poll_device_token(
-        &self,
-        client_id: &str,
-        client_secret: &str,
-        device_code: &str,
-    ) -> Result<DeviceTokenOutcome>;
-    async fn accept_user_code_request(
-        &self,
-        device_challenge: &str,
-        user_code: &str,
-    ) -> Result<RedirectTo>;
-    async fn verify_id_token(
-        &self,
-        id_token: &str,
-        issuer: &str,
-        client_id: &str,
-        iat_window_secs: u64,
-    ) -> Result<IdTokenClaims>;
-
-    async fn list_clients(
-        &self,
-        page_size: i64,
-        page_token: Option<&str>,
-        client_name: Option<&str>,
-    ) -> Result<Vec<OAuthClient>>;
-    async fn get_client(&self, id: &str) -> Result<OAuthClient>;
-    async fn get_client_opt(&self, id: &str) -> Result<Option<OAuthClient>>;
-    async fn create_client(&self, client: OAuthClient) -> Result<OAuthClient>;
-    async fn update_client(&self, id: &str, client: OAuthClient) -> Result<OAuthClient>;
-    async fn delete_client(&self, id: &str) -> Result<()>;
-    async fn add_client_audiences(
-        &self,
-        client_id: &str,
-        on_record: &[String],
-        granted: &[String],
-    ) -> Result<()>;
-    async fn rotate_client_secret(&self, id: &str) -> Result<OAuthClient>;
-
-    async fn list_consent_sessions_by_subject(&self, subject: &str) -> Result<Vec<ConsentSession>>;
-    async fn list_consent_sessions_by_login_session(
-        &self,
-        subject: &str,
-        sid: &str,
-    ) -> Result<Vec<ConsentSession>>;
-    async fn revoke_consent_sessions_for_subject(&self, subject: &str) -> Result<()>;
-    async fn revoke_consent_sessions_by_request_id(&self, consent_request_id: &str) -> Result<()>;
-    async fn revoke_consent_sessions_for_client(
-        &self,
-        subject: &str,
-        client_id: &str,
-    ) -> Result<()>;
-    async fn revoke_login_sessions_for_subject(&self, subject: &str) -> Result<()>;
-    async fn revoke_login_session_by_sid(&self, sid: &str) -> Result<()>;
-
-    /// The OIDC discovery document, typed and as served.
-    async fn fetch_discovery(&self) -> Result<(OidcDiscovery, Value)>;
-    async fn signing_keys(&self) -> Result<Vec<JwkSummary>>;
     async fn health_alive(&self) -> Result<()>;
     async fn health_ready(&self) -> Result<()>;
     async fn version(&self) -> Result<String>;

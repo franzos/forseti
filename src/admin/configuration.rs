@@ -8,8 +8,8 @@
 use axum::{extract::State, response::Response};
 
 use crate::admin::{AdminSection, FORSETI_VERSION};
+use crate::backend::IdentityBackend;
 use crate::backend::oauth::{JwkSummary, OidcDiscovery};
-use crate::backend::{IdentityBackend, OAuthBackend};
 use crate::extractors::RequireAdmin;
 use crate::page_chrome::PageChrome;
 use crate::render::render;

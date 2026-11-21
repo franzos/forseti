@@ -1,0 +1,36 @@
+[package]
+name = "forseti-config"
+version.workspace = true
+edition = "2024"
+description = "Inspect and edit the Kratos, Hydra and Forseti config files"
+license = "AGPL-3.0-or-later"
+publish = false
+
+[[bin]]
+name = "forseti-config"
+path = "src/main.rs"
+
+[dependencies]
+forseti-common = { path = "../forseti-common" }
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
+# `rt-multi-thread`: the menu nests async calls with `block_in_place`.
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+serde = { version = "1", features = ["derive"] }
+# `preserve_order`: Kratos/Hydra YAML is edited as a `serde_json::Value`, and
+# rewritten files must keep their key order.
+serde_json = { version = "1", features = ["preserve_order"] }
+# YAML parsing in safe Rust.
+serde-saphyr = "2"
+# Format-preserving reads of Forseti's config.toml.
+toml_edit = "0.25"
+# Best-effort Kratos/Hydra admin API counts; no cookie jar.
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+url = "2"
+rand = "0.10"
+sha2 = "0.11"
+hex = "0.4"
+# Masked TTY prompts for secrets that come from no flag.
+rpassword = "7"
+# Unified diffs for the redacted modify preview.
+similar = "3"

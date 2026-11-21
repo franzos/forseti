@@ -1,5 +1,4 @@
-//! Kratos self-service flow JSON to [`Flow`]. Reads raw JSON rather than the SDK
-//! models because the SDK's `ui.nodes` deserializer rejects the real wire shape.
+//! Kratos self-service flow JSON to [`Flow`].
 
 use serde_json::Value;
 

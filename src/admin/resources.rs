@@ -367,13 +367,9 @@ pub async fn create(
     )
     .await;
     if let Err(e) = insert_result {
-        if matches!(
-            e.downcast_ref::<diesel::result::Error>(),
-            Some(diesel::result::Error::DatabaseError(
-                diesel::result::DatabaseErrorKind::UniqueViolation,
-                _
-            ))
-        ) {
+        if e.downcast_ref::<resource_registry::ResourceTaken>()
+            .is_some()
+        {
             rerender!("That resource is already registered.");
         }
         tracing::error!(error = ?e, resource = %stored, "admin/resources: insert failed");

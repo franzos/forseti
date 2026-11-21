@@ -51,12 +51,15 @@ dev: ## Run cargo + tailwind --watch in parallel
 _dev-run:
 	cargo run
 
-build: css ## Release build (CSS first, then cargo)
-	cargo build --release --locked
+# The workspace has no default-members, so a bare `cargo build` builds only forseti.
+build: css ## Release build of forseti and forseti-config (CSS first, then cargo)
+	cargo build --release --locked -p forseti -p forseti-config
 
-check: ## cargo check + clippy
-	cargo check
-	cargo clippy --all-targets -- -D warnings
+CONFIG_CRATES := -p forseti-config -p forseti-common
+
+check: ## cargo check + clippy (forseti, forseti-config, forseti-common)
+	cargo check -p forseti $(CONFIG_CRATES)
+	cargo clippy --all-targets -p forseti $(CONFIG_CRATES) -- -D warnings
 
 NATIVE_FEATURES := --no-default-features --features identity-native
 

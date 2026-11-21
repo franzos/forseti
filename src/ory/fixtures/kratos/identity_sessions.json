@@ -1,0 +1,192 @@
+[
+  {
+    "id": "682ef623-7845-4e74-a777-5e971b6d1cf1",
+    "active": true,
+    "expires_at": "2026-11-21T21:09:17.221754Z",
+    "authenticated_at": "2026-11-20T21:09:17.221754Z",
+    "authenticator_assurance_level": "aal1",
+    "authentication_methods": [
+      {
+        "method": "password",
+        "aal": "aal1",
+        "completed_at": "2026-11-20T21:09:17.221693098Z"
+      }
+    ],
+    "issued_at": "2026-11-20T21:09:17.221754Z",
+    "identity": {
+      "id": "79a2099c-af9b-4cd9-941b-2aeca5187330",
+      "external_id": "fixture-external-1",
+      "schema_id": "default",
+      "schema_url": "",
+      "state": "active",
+      "state_changed_at": "2026-11-20T21:08:30.655997Z",
+      "traits": {
+        "name": {
+          "last": "Person",
+          "first": "Fixture"
+        },
+        "email": "fixture-full@example.test",
+        "preferred_language": "de"
+      },
+      "metadata_public": {
+        "plan": "pro"
+      },
+      "created_at": "2026-11-20T21:08:30.657411Z",
+      "updated_at": "2026-11-20T21:09:11.859719Z",
+      "organization_id": null
+    },
+    "devices": [
+      {
+        "id": "17af46e7-e50d-4b62-9b64-a2435f5029f0",
+        "ip_address": "10.89.12.11:54566",
+        "user_agent": "Python-urllib/3.12",
+        "location": ""
+      }
+    ]
+  },
+  {
+    "id": "9f32043a-c310-42e2-83de-6cc7ba9485e8",
+    "active": true,
+    "expires_at": "2026-11-21T21:09:17.170056Z",
+    "authenticated_at": "2026-11-20T21:09:17.170056Z",
+    "authenticator_assurance_level": "aal2",
+    "authentication_methods": [
+      {
+        "method": "password",
+        "aal": "aal1",
+        "completed_at": "2026-11-20T21:09:17.142136078Z"
+      },
+      {
+        "method": "totp",
+        "aal": "aal2",
+        "completed_at": "2026-11-20T21:09:17.170049358Z"
+      }
+    ],
+    "issued_at": "2026-11-20T21:09:17.142195Z",
+    "identity": {
+      "id": "79a2099c-af9b-4cd9-941b-2aeca5187330",
+      "external_id": "fixture-external-1",
+      "schema_id": "default",
+      "schema_url": "",
+      "state": "active",
+      "state_changed_at": "2026-11-20T21:08:30.655997Z",
+      "traits": {
+        "name": {
+          "last": "Person",
+          "first": "Fixture"
+        },
+        "email": "fixture-full@example.test",
+        "preferred_language": "de"
+      },
+      "metadata_public": {
+        "plan": "pro"
+      },
+      "created_at": "2026-11-20T21:08:30.657411Z",
+      "updated_at": "2026-11-20T21:09:11.859719Z",
+      "organization_id": null
+    },
+    "devices": [
+      {
+        "id": "85564369-7045-4556-911b-78ac2c6a44e7",
+        "ip_address": "10.89.12.11:54496",
+        "user_agent": "Python-urllib/3.12",
+        "location": ""
+      }
+    ]
+  },
+  {
+    "id": "126ccd9f-0822-4572-8d08-ed40c487954c",
+    "active": true,
+    "expires_at": "2026-11-21T21:09:11.940991Z",
+    "authenticated_at": "2026-11-20T21:09:11.940991Z",
+    "authenticator_assurance_level": "aal1",
+    "authentication_methods": [
+      {
+        "method": "password",
+        "aal": "aal1",
+        "completed_at": "2026-11-20T21:09:11.940913061Z"
+      }
+    ],
+    "issued_at": "2026-11-20T21:09:11.940991Z",
+    "identity": {
+      "id": "79a2099c-af9b-4cd9-941b-2aeca5187330",
+      "external_id": "fixture-external-1",
+      "schema_id": "default",
+      "schema_url": "",
+      "state": "active",
+      "state_changed_at": "2026-11-20T21:08:30.655997Z",
+      "traits": {
+        "name": {
+          "last": "Person",
+          "first": "Fixture"
+        },
+        "email": "fixture-full@example.test",
+        "preferred_language": "de"
+      },
+      "metadata_public": {
+        "plan": "pro"
+      },
+      "created_at": "2026-11-20T21:08:30.657411Z",
+      "updated_at": "2026-11-20T21:09:11.859719Z",
+      "organization_id": null
+    },
+    "devices": [
+      {
+        "id": "c4019cfa-b3a7-4d4c-bc18-67dcb7ef115b",
+        "ip_address": "10.89.12.11:42070",
+        "user_agent": "Python-urllib/3.12",
+        "location": ""
+      }
+    ]
+  },
+  {
+    "id": "bfc45c96-ce3c-4180-bd75-e5b6544f4622",
+    "active": true,
+    "expires_at": "2026-11-21T21:09:11.889541Z",
+    "authenticated_at": "2026-11-20T21:09:11.889541Z",
+    "authenticator_assurance_level": "aal2",
+    "authentication_methods": [
+      {
+        "method": "password",
+        "aal": "aal1",
+        "completed_at": "2026-11-20T21:09:11.848671154Z"
+      },
+      {
+        "method": "totp",
+        "aal": "aal2",
+        "completed_at": "2026-11-20T21:09:11.889530543Z"
+      }
+    ],
+    "issued_at": "2026-11-20T21:09:11.848856Z",
+    "identity": {
+      "id": "79a2099c-af9b-4cd9-941b-2aeca5187330",
+      "external_id": "fixture-external-1",
+      "schema_id": "default",
+      "schema_url": "",
+      "state": "active",
+      "state_changed_at": "2026-11-20T21:08:30.655997Z",
+      "traits": {
+        "name": {
+          "last": "Person",
+          "first": "Fixture"
+        },
+        "email": "fixture-full@example.test",
+        "preferred_language": "de"
+      },
+      "metadata_public": {
+        "plan": "pro"
+      },
+      "created_at": "2026-11-20T21:08:30.657411Z",
+      "updated_at": "2026-11-20T21:09:11.859719Z",
+      "organization_id": null
+    },
+    "devices": [
+      {
+        "id": "e220509b-ce64-4384-a688-cb83c14b3023",
+        "ip_address": "10.89.12.11:41992",
+        "user_agent": "Python-urllib/3.12",
+        "location": ""
+      }
+    ]
+  }
+]

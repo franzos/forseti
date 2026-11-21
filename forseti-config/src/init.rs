@@ -6,7 +6,7 @@ use crate::cli::InitArgs;
 use super::yamlutil::{random_secret, reject_control_chars, yaml_scalar};
 
 // ---------------------------------------------------------------------------
-// config-init: generate a recommended Kratos + Hydra config.
+// `forseti-config init`: generate a recommended Kratos + Hydra config.
 // ---------------------------------------------------------------------------
 
 #[derive(Default)]
@@ -24,7 +24,7 @@ pub(crate) struct InitInputs {
 }
 
 /// A required connection value: either the operator's flag, or a loud
-/// `CHANGEME_*` placeholder that `config-check` will FAIL on.
+/// `CHANGEME_*` placeholder that `forseti-config check` will FAIL on.
 pub(crate) fn or_placeholder(opt: &Option<String>, thing: &str) -> (String, bool) {
     match opt {
         Some(v) => (v.clone(), false),
@@ -339,8 +339,8 @@ fn render_hydra(t: HydraTemplate) -> String {
     let forseti_error = yaml_scalar(&format!("{f}/error"));
     let forseti_signed_out = yaml_scalar(&format!("{f}/signed-out"));
     let forseti_register = yaml_scalar(&format!("{f}/oauth/register"));
-    let scopes = crate::oauth::consent::SUPPORTED_SCOPES.join(", ");
-    let claims = crate::oauth::consent::SUPPORTED_CLAIMS.join(", ");
+    let scopes = forseti_common::SUPPORTED_SCOPES.join(", ");
+    let claims = crate::SUPPORTED_CLAIMS.join(", ");
     let system_secret = yaml_scalar(t.system_secret);
     let cookie_secret = yaml_scalar(t.cookie_secret);
     let pairwise_salt = yaml_scalar(t.pairwise_salt);
@@ -481,7 +481,7 @@ pub(crate) fn init(args: &InitArgs) -> i32 {
     }
 
     println!();
-    println!("Verify with: forseti config-check --kratos {kratos_out} --hydra {hydra_out}");
+    println!("Verify with: forseti-config check --kratos {kratos_out} --hydra {hydra_out}");
     0
 }
 
@@ -490,8 +490,8 @@ mod tests {
     use super::*;
     use serde_json::Value;
 
-    use crate::config_cli::check::{Severity, check_hydra, check_kratos};
-    use crate::config_cli::yamlutil::dig_str;
+    use crate::check::{Severity, check_hydra, check_kratos};
+    use crate::yamlutil::dig_str;
 
     #[test]
     fn generated_config_passes_own_linter() {
@@ -515,9 +515,8 @@ mod tests {
         );
 
         let kratos_v: Value =
-            crate::config_cli::yamlutil::parse_yaml(&kratos_yaml).expect("kratos yaml parses");
-        let hydra_v: Value =
-            crate::config_cli::yamlutil::parse_yaml(&hydra_yaml).expect("hydra yaml parses");
+            crate::yamlutil::parse_yaml(&kratos_yaml).expect("kratos yaml parses");
+        let hydra_v: Value = crate::yamlutil::parse_yaml(&hydra_yaml).expect("hydra yaml parses");
 
         let bad_k: Vec<_> = check_kratos(&kratos_v)
             .into_iter()
@@ -570,7 +569,7 @@ mod tests {
             from_address: None,
             from_name: None,
         });
-        let v: Value = crate::config_cli::yamlutil::parse_yaml(&kratos).expect("yaml parses");
+        let v: Value = crate::yamlutil::parse_yaml(&kratos).expect("yaml parses");
         assert_eq!(
             dig_str(&v, &["selfservice", "flows", "settings", "required_aal"]),
             Some("highest_available"),
@@ -639,7 +638,7 @@ mod tests {
             ..Default::default()
         };
         let (k, _, _) = render_configs(&inputs);
-        let root: Value = crate::config_cli::yamlutil::parse_yaml(&k).unwrap();
+        let root: Value = crate::yamlutil::parse_yaml(&k).unwrap();
         assert_eq!(
             dig_str(&root, &["courier", "smtp", "from_address"]),
             Some("no-reply@example.com")
@@ -653,8 +652,7 @@ mod tests {
             ..Default::default()
         };
         let (kratos_yaml, _hydra, _missing) = render_configs(&inputs);
-        let v: Value =
-            crate::config_cli::yamlutil::parse_yaml(&kratos_yaml).expect("kratos yaml parses");
+        let v: Value = crate::yamlutil::parse_yaml(&kratos_yaml).expect("kratos yaml parses");
         assert_eq!(
             dig_str(
                 &v,

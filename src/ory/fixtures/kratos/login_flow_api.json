@@ -1,0 +1,166 @@
+{
+  "id": "2ccf97f7-9c86-4349-bb57-c7b380bcca84",
+  "organization_id": null,
+  "type": "api",
+  "expires_at": "2026-11-20T21:19:17.027373508Z",
+  "issued_at": "2026-11-20T21:09:17.027373508Z",
+  "request_url": "http://localhost:4433/self-service/login/api",
+  "ui": {
+    "action": "http://localhost:4433/self-service/login?flow=2ccf97f7-9c86-4349-bb57-c7b380bcca84",
+    "method": "POST",
+    "nodes": [
+      {
+        "type": "input",
+        "group": "oidc",
+        "attributes": {
+          "name": "provider",
+          "type": "submit",
+          "value": "playground",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1010002,
+            "text": "Sign in with Playground",
+            "type": "info",
+            "context": {
+              "provider": "Playground",
+              "provider_id": "playground"
+            }
+          }
+        }
+      },
+      {
+        "type": "input",
+        "group": "default",
+        "attributes": {
+          "name": "csrf_token",
+          "type": "hidden",
+          "value": "",
+          "required": true,
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {}
+      },
+      {
+        "type": "input",
+        "group": "default",
+        "attributes": {
+          "name": "identifier",
+          "type": "text",
+          "value": "",
+          "required": true,
+          "autocomplete": "username webauthn",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1070002,
+            "text": "E-Mail",
+            "type": "info",
+            "context": {
+              "name": "traits.email",
+              "title": "E-Mail"
+            }
+          }
+        }
+      },
+      {
+        "type": "input",
+        "group": "passkey",
+        "attributes": {
+          "name": "passkey_login_trigger",
+          "type": "button",
+          "value": "",
+          "disabled": false,
+          "onclickTrigger": "oryPasskeyLogin",
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1010021,
+            "text": "Sign in with passkey",
+            "type": "info"
+          }
+        }
+      },
+      {
+        "type": "input",
+        "group": "passkey",
+        "attributes": {
+          "name": "passkey_login",
+          "type": "hidden",
+          "disabled": false,
+          "onloadTrigger": "oryPasskeyLoginAutocompleteInit",
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {}
+      },
+      {
+        "type": "input",
+        "group": "passkey",
+        "attributes": {
+          "name": "passkey_challenge",
+          "type": "hidden",
+          "value": "{\"publicKey\":{\"challenge\":\"hNsGiY1q7nnTs8koFzT31uYh0m4jAWN7JYSmmV9T-UQ\",\"timeout\":300000,\"rpId\":\"localhost\",\"userVerification\":\"preferred\"}}",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {}
+      },
+      {
+        "type": "input",
+        "group": "password",
+        "attributes": {
+          "name": "password",
+          "type": "password",
+          "required": true,
+          "autocomplete": "current-password",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1070001,
+            "text": "Password",
+            "type": "info"
+          }
+        }
+      },
+      {
+        "type": "input",
+        "group": "password",
+        "attributes": {
+          "name": "method",
+          "type": "submit",
+          "value": "password",
+          "disabled": false,
+          "node_type": "input"
+        },
+        "messages": [],
+        "meta": {
+          "label": {
+            "id": 1010022,
+            "text": "Sign in with password",
+            "type": "info"
+          }
+        }
+      }
+    ]
+  },
+  "created_at": "2026-11-20T21:09:17.029991Z",
+  "updated_at": "2026-11-20T21:09:17.029991Z",
+  "refresh": false,
+  "requested_aal": "aal1",
+  "state": "choose_method"
+}

@@ -718,7 +718,7 @@ pub(crate) fn write_yaml(
     new_root: &Value,
     secrets: &[&str],
 ) -> anyhow::Result<WriteOutcome> {
-    let new_text = crate::config_cli::yamlutil::to_yaml(new_root)?;
+    let new_text = crate::yamlutil::to_yaml(new_root)?;
     let label = target.path.display().to_string();
 
     // The diff must never leak a provider's client_secret, including ones the
@@ -726,7 +726,7 @@ pub(crate) fn write_yaml(
     // one being replaced on re-enable): harvest every client_secret from both
     // documents and union it with whatever the caller already knows about.
     let mut harvested: Vec<String> = secrets.iter().map(|s| (*s).to_string()).collect();
-    if let Ok(old_root) = crate::config_cli::yamlutil::parse_yaml(old_text) {
+    if let Ok(old_root) = crate::yamlutil::parse_yaml(old_text) {
         harvested.extend(harvest_client_secrets(&old_root));
     }
     harvested.extend(harvest_client_secrets(new_root));
@@ -1008,7 +1008,7 @@ pub(crate) fn oidc_enable(ctx: &mut ModifyCtx, input: OidcEnableInput) -> anyhow
 
     let old_text = std::fs::read_to_string(&ctx.kratos.path)
         .map_err(|e| anyhow::anyhow!("{}: {e}", ctx.kratos.path.display()))?;
-    let mut root: Value = crate::config_cli::yamlutil::parse_yaml(&old_text)
+    let mut root: Value = crate::yamlutil::parse_yaml(&old_text)
         .map_err(|e| anyhow::anyhow!("{}: invalid YAML: {e}", ctx.kratos.path.display()))?;
 
     let config_dir = ctx
@@ -1107,8 +1107,8 @@ pub(crate) fn oidc_enable(ctx: &mut ModifyCtx, input: OidcEnableInput) -> anyhow
                     writeln!(ctx.out, "fix the FAIL above before restarting Kratos.")?;
                     Ok(1)
                 } else {
-                    let l1 = "Kratos reloads its config file automatically; verify with: forseti \
-                              config check";
+                    let l1 = "Kratos reloads its config file automatically; verify with: forseti-config \
+                              check";
                     let l2 = format!("changed: {}", target.path.display());
                     let l3 = format!("changed: {}", mapper_file.display());
                     print_runbook(&mut *ctx.out, &["Kratos"], &[l1, &l2, &l3]);
@@ -1142,7 +1142,7 @@ pub(crate) async fn oidc_disable(
 ) -> anyhow::Result<i32> {
     let old_text = std::fs::read_to_string(&ctx.kratos.path)
         .map_err(|e| anyhow::anyhow!("{}: {e}", ctx.kratos.path.display()))?;
-    let mut root: Value = crate::config_cli::yamlutil::parse_yaml(&old_text)
+    let mut root: Value = crate::yamlutil::parse_yaml(&old_text)
         .map_err(|e| anyhow::anyhow!("{}: invalid YAML: {e}", ctx.kratos.path.display()))?;
 
     match count_identities(kratos_admin_url, id).await {
@@ -1178,7 +1178,7 @@ pub(crate) async fn oidc_disable(
                 writeln!(ctx.out, "fix the FAIL above before restarting Kratos.")?;
                 Ok(1)
             } else {
-                let l1 = "Kratos reloads its config file automatically; verify with: forseti config check";
+                let l1 = "Kratos reloads its config file automatically; verify with: forseti-config check";
                 let l2 = format!("changed: {}", target.path.display());
                 print_runbook(&mut *ctx.out, &["Kratos"], &[l1, &l2]);
                 Ok(0)
@@ -1291,7 +1291,7 @@ fn bootstrap_config_toml(
 
 /// `config rotate webhook-token`. New token = `random_secret(48)`; the
 /// "current" token comes from kratos.yml's first `web_hook` when one exists,
-/// else (a kratos.yml with no audit hooks at all — every `config-init`
+/// else (a kratos.yml with no audit hooks at all — every `forseti-config init`
 /// output) from config.toml's own accept list, so the command still has
 /// something to rotate.
 ///
@@ -1305,7 +1305,7 @@ fn bootstrap_config_toml(
 pub(crate) fn rotate_webhook_token(ctx: &mut ModifyCtx, interactive: bool) -> anyhow::Result<i32> {
     let kratos_old_text = std::fs::read_to_string(&ctx.kratos.path)
         .map_err(|e| anyhow::anyhow!("{}: {e}", ctx.kratos.path.display()))?;
-    let mut kratos_root: Value = crate::config_cli::yamlutil::parse_yaml(&kratos_old_text)
+    let mut kratos_root: Value = crate::yamlutil::parse_yaml(&kratos_old_text)
         .map_err(|e| anyhow::anyhow!("{}: invalid YAML: {e}", ctx.kratos.path.display()))?;
 
     let toml_target = forseti_toml_target(ctx)?;
@@ -1426,19 +1426,19 @@ pub(crate) fn rotate_webhook_token(ctx: &mut ModifyCtx, interactive: bool) -> an
     if kratos_written {
         extra.push(format!("changed: {}", ctx.kratos.path.display()));
         extra.push(
-            "Kratos reloads its config file automatically; verify with: forseti config check"
+            "Kratos reloads its config file automatically; verify with: forseti-config check"
                 .to_string(),
         );
     }
     if !placeholder_or_unset {
         extra.push(
-            "once every service has reloaded, run `forseti config prune webhook-token` to drop \
+            "once every service has reloaded, run `forseti-config prune webhook-token` to drop \
              the old token from config.toml's accept list."
                 .to_string(),
         );
     }
     extra.push(
-        "`forseti config check`/`config status` report rotation-pending while the accept list \
+        "`forseti-config check`/`status` report rotation-pending while the accept list \
          has more than one entry."
             .to_string(),
     );
@@ -1463,7 +1463,7 @@ pub(crate) fn rotate_webhook_token(ctx: &mut ModifyCtx, interactive: bool) -> an
 pub(crate) fn prune_webhook_token(ctx: &mut ModifyCtx) -> anyhow::Result<i32> {
     let kratos_text = std::fs::read_to_string(&ctx.kratos.path)
         .map_err(|e| anyhow::anyhow!("{}: {e}", ctx.kratos.path.display()))?;
-    let kratos_root: Value = crate::config_cli::yamlutil::parse_yaml(&kratos_text)
+    let kratos_root: Value = crate::yamlutil::parse_yaml(&kratos_text)
         .map_err(|e| anyhow::anyhow!("{}: invalid YAML: {e}", ctx.kratos.path.display()))?;
 
     let toml_target = forseti_toml_target(ctx)?;
@@ -1529,7 +1529,7 @@ pub(crate) fn prune_webhook_token(ctx: &mut ModifyCtx) -> anyhow::Result<i32> {
                 &[],
                 &[
                     "config.toml's accept list is now a single entry.",
-                    "`forseti config check` should no longer report rotation-pending.",
+                    "`forseti-config check` should no longer report rotation-pending.",
                 ],
             );
             Ok(0)
@@ -1597,7 +1597,7 @@ pub(crate) fn rotate_kratos_secrets(
 
     let old_text = std::fs::read_to_string(&ctx.kratos.path)
         .map_err(|e| anyhow::anyhow!("{}: {e}", ctx.kratos.path.display()))?;
-    let mut root: Value = crate::config_cli::yamlutil::parse_yaml(&old_text)
+    let mut root: Value = crate::yamlutil::parse_yaml(&old_text)
         .map_err(|e| anyhow::anyhow!("{}: invalid YAML: {e}", ctx.kratos.path.display()))?;
 
     let mut secret_pool: Vec<String> = secret_entries(&root, &["secrets", "cookie"])
@@ -1648,7 +1648,7 @@ pub(crate) fn rotate_kratos_secrets(
                 writeln!(ctx.out, "fix the FAIL above before restarting Kratos.")?;
                 Ok(1)
             } else {
-                let l1 = "Kratos reloads its config file automatically; verify with: forseti config check";
+                let l1 = "Kratos reloads its config file automatically; verify with: forseti-config check";
                 let l2 = format!("changed: {}", target.path.display());
                 print_runbook(&mut *ctx.out, &["Kratos"], &[l1, &l2]);
                 Ok(0)
@@ -1674,7 +1674,7 @@ pub(crate) fn prune_kratos_secrets(
 
     let old_text = std::fs::read_to_string(&ctx.kratos.path)
         .map_err(|e| anyhow::anyhow!("{}: {e}", ctx.kratos.path.display()))?;
-    let mut root: Value = crate::config_cli::yamlutil::parse_yaml(&old_text)
+    let mut root: Value = crate::yamlutil::parse_yaml(&old_text)
         .map_err(|e| anyhow::anyhow!("{}: invalid YAML: {e}", ctx.kratos.path.display()))?;
 
     let secret_pool: Vec<String> = secret_entries(&root, &["secrets", "cookie"])
@@ -1739,7 +1739,7 @@ pub(crate) fn prune_kratos_secrets(
                 writeln!(ctx.out, "fix the FAIL above before restarting Kratos.")?;
                 Ok(1)
             } else {
-                let l1 = "Kratos reloads its config file automatically; verify with: forseti config check";
+                let l1 = "Kratos reloads its config file automatically; verify with: forseti-config check";
                 let l2 = format!("changed: {}", target.path.display());
                 print_runbook(&mut *ctx.out, &["Kratos"], &[l1, &l2]);
                 Ok(0)
@@ -1753,7 +1753,7 @@ pub(crate) fn prune_kratos_secrets(
 pub(crate) fn rotate_hydra_system(ctx: &mut ModifyCtx) -> anyhow::Result<i32> {
     let old_text = std::fs::read_to_string(&ctx.hydra.path)
         .map_err(|e| anyhow::anyhow!("{}: {e}", ctx.hydra.path.display()))?;
-    let mut root: Value = crate::config_cli::yamlutil::parse_yaml(&old_text)
+    let mut root: Value = crate::yamlutil::parse_yaml(&old_text)
         .map_err(|e| anyhow::anyhow!("{}: invalid YAML: {e}", ctx.hydra.path.display()))?;
 
     let mut secret_pool: Vec<String> = secret_entries(&root, &["secrets", "system"])
@@ -1805,7 +1805,7 @@ pub(crate) fn rotate_hydra_system(ctx: &mut ModifyCtx) -> anyhow::Result<i32> {
 pub(crate) fn prune_hydra_system(ctx: &mut ModifyCtx) -> anyhow::Result<i32> {
     let old_text = std::fs::read_to_string(&ctx.hydra.path)
         .map_err(|e| anyhow::anyhow!("{}: {e}", ctx.hydra.path.display()))?;
-    let mut root: Value = crate::config_cli::yamlutil::parse_yaml(&old_text)
+    let mut root: Value = crate::yamlutil::parse_yaml(&old_text)
         .map_err(|e| anyhow::anyhow!("{}: invalid YAML: {e}", ctx.hydra.path.display()))?;
 
     let secret_pool: Vec<String> = secret_entries(&root, &["secrets", "system"])
@@ -1852,7 +1852,7 @@ pub(crate) fn prune_hydra_system(ctx: &mut ModifyCtx) -> anyhow::Result<i32> {
 pub(crate) const SALT_CONFIRM_PHRASE: &str = "change every pairwise subject";
 
 /// Hydra's admin base URL, if hydra.yml carries one. The reference templates
-/// (`config-init`, the playground `infra/hydra/hydra.yml`) don't write one:
+/// (`forseti-config init`, the playground `infra/hydra/hydra.yml`) don't write one:
 /// Hydra's admin port is normally supplied out-of-band (CLI flag/env), so
 /// this is a best-effort probe that's expected to miss most of the time; the
 /// pairwise-client count degrades silently when it does.
@@ -1900,7 +1900,7 @@ pub(crate) async fn rotate_pairwise_salt(
 ) -> anyhow::Result<i32> {
     let old_text = std::fs::read_to_string(&ctx.hydra.path)
         .map_err(|e| anyhow::anyhow!("{}: {e}", ctx.hydra.path.display()))?;
-    let mut root: Value = crate::config_cli::yamlutil::parse_yaml(&old_text)
+    let mut root: Value = crate::yamlutil::parse_yaml(&old_text)
         .map_err(|e| anyhow::anyhow!("{}: invalid YAML: {e}", ctx.hydra.path.display()))?;
 
     let old_salt =
@@ -2019,7 +2019,7 @@ pub(crate) fn smtp_set(
 
     let old_text = std::fs::read_to_string(&ctx.kratos.path)
         .map_err(|e| anyhow::anyhow!("{}: {e}", ctx.kratos.path.display()))?;
-    let mut root: Value = crate::config_cli::yamlutil::parse_yaml(&old_text)
+    let mut root: Value = crate::yamlutil::parse_yaml(&old_text)
         .map_err(|e| anyhow::anyhow!("{}: invalid YAML: {e}", ctx.kratos.path.display()))?;
 
     if let Some(u) = &uri {
@@ -2052,7 +2052,7 @@ pub(crate) fn smtp_set(
                 writeln!(ctx.out, "fix the FAIL above before restarting Kratos.")?;
                 Ok(1)
             } else {
-                let l1 = "Kratos reloads its config file automatically; verify with: forseti config check";
+                let l1 = "Kratos reloads its config file automatically; verify with: forseti-config check";
                 let l2 = format!("changed: {}", target.path.display());
                 print_runbook(&mut *ctx.out, &["Kratos"], &[l1, &l2]);
                 Ok(0)
@@ -2080,7 +2080,7 @@ fn backup_timestamp(path: &Path) -> Option<u64> {
 /// actions already treat as sensitive, so a restore diff redacts them the same
 /// way a normal write would.
 fn harvest_yaml_secrets(text: &str) -> Vec<String> {
-    let Ok(root) = crate::config_cli::yamlutil::parse_yaml(text) else {
+    let Ok(root) = crate::yamlutil::parse_yaml(text) else {
         return Vec::new();
     };
     let mut out = harvest_client_secrets(&root);
@@ -2335,7 +2335,7 @@ pub(crate) fn restore(ctx: &mut ModifyCtx, from: Option<&str>) -> anyhow::Result
         return Ok(0);
     }
 
-    changed.push("run `forseti config check` to verify the restored state.".to_string());
+    changed.push("run `forseti-config check` to verify the restored state.".to_string());
     let extra: Vec<&str> = changed.iter().map(String::as_str).collect();
     print_runbook(&mut *ctx.out, &[], &extra);
 
@@ -2518,7 +2518,7 @@ pub(crate) async fn run_oidc(cmd: OidcCmd, paths: &PathArgs) -> i32 {
             };
             let admin_url = std::fs::read_to_string(&ctx.kratos.path)
                 .ok()
-                .and_then(|t| crate::config_cli::yamlutil::parse_yaml(&t).ok())
+                .and_then(|t| crate::yamlutil::parse_yaml(&t).ok())
                 .and_then(|r| dig_str(&r, &["serve", "admin", "base_url"]).map(str::to_string));
             match oidc_disable(&mut ctx, &id, admin_url.as_deref()).await {
                 Ok(code) => code,
@@ -2731,19 +2731,20 @@ pub(crate) fn run_restore(paths: &PathArgs, from: Option<String>) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config_cli::check::check_secret_lists;
-    use crate::config_cli::init::{InitInputs, render_configs};
-    use crate::config_cli::yamlutil::{dig, dig_bool};
+    use crate::check::check_secret_lists;
+    use crate::init::{InitInputs, render_configs};
+    use crate::yamlutil::{dig, dig_bool};
     use std::path::PathBuf;
 
     fn render_default_kratos() -> Value {
         let (k, _, _) = render_configs(&InitInputs::default());
-        crate::config_cli::yamlutil::parse_yaml(&k).expect("kratos yaml parses")
+        crate::yamlutil::parse_yaml(&k).expect("kratos yaml parses")
     }
 
     fn playground_kratos() -> Value {
-        let text = std::fs::read_to_string("infra/kratos/kratos.yml").expect("playground kratos");
-        crate::config_cli::yamlutil::parse_yaml(&text).expect("kratos yaml parses")
+        let text = std::fs::read_to_string(crate::repo_file("infra/kratos/kratos.yml"))
+            .expect("playground kratos");
+        crate::yamlutil::parse_yaml(&text).expect("kratos yaml parses")
     }
 
     fn enable_input(provider: &str, tenant: Option<&str>) -> OidcEnableInput {
@@ -2958,7 +2959,7 @@ mod tests {
             "file:///etc/config/kratos/oidc.apple.jsonnet",
         )
         .unwrap();
-        let new_text = crate::config_cli::yamlutil::to_yaml(&root).unwrap();
+        let new_text = crate::yamlutil::to_yaml(&root).unwrap();
 
         let input = apple_input(TEST_P8);
         let targets = oidc_redaction_targets(&input);
@@ -3324,7 +3325,7 @@ mod tests {
         let dir = unique_tmp_dir("dry-run");
         std::fs::create_dir_all(&dir).unwrap();
         let kratos = dir.join("kratos.yml");
-        std::fs::copy("infra/kratos/kratos.yml", &kratos).unwrap();
+        std::fs::copy(crate::repo_file("infra/kratos/kratos.yml"), &kratos).unwrap();
         let before = std::fs::read_to_string(&kratos).unwrap();
 
         let mut ctx = ModifyCtx {
@@ -3554,7 +3555,7 @@ mod tests {
         .unwrap();
         std::fs::write(
             dir.join("kratos.yml"),
-            crate::config_cli::yamlutil::to_yaml(&root).unwrap(),
+            crate::yamlutil::to_yaml(&root).unwrap(),
         )
         .unwrap();
 
@@ -3592,7 +3593,7 @@ mod tests {
         .unwrap();
         std::fs::write(
             dir.join("kratos.yml"),
-            crate::config_cli::yamlutil::to_yaml(&root).unwrap(),
+            crate::yamlutil::to_yaml(&root).unwrap(),
         )
         .unwrap();
 
@@ -3649,7 +3650,7 @@ mod tests {
         assert!(out.contains("docs/operator-guide-kratos.md"), "out: {out}");
 
         let written = std::fs::read_to_string(&kratos_path).unwrap();
-        let root: Value = crate::config_cli::yamlutil::parse_yaml(&written).unwrap();
+        let root: Value = crate::yamlutil::parse_yaml(&written).unwrap();
         let reg_hooks = dig(
             &root,
             &[
@@ -3722,7 +3723,7 @@ mod tests {
         let dir = unique_tmp_dir("abort-removes-mapper");
         std::fs::create_dir_all(&dir).unwrap();
         let kratos_path = dir.join("kratos.yml");
-        std::fs::copy("infra/kratos/kratos.yml", &kratos_path).unwrap();
+        std::fs::copy(crate::repo_file("infra/kratos/kratos.yml"), &kratos_path).unwrap();
         let mapper_path = dir.join("oidc.github.jsonnet");
 
         let mut ctx = ModifyCtx {
@@ -3851,7 +3852,8 @@ courier:
 
     #[test]
     fn rewrite_hook_tokens_matches_structurally_only() {
-        let raw = std::fs::read_to_string("infra/kratos/kratos.yml").expect("playground kratos");
+        let raw = std::fs::read_to_string(crate::repo_file("infra/kratos/kratos.yml"))
+            .expect("playground kratos");
         let hook_count = raw.matches("hook: web_hook").count();
 
         let mut text = raw.clone();
@@ -3872,8 +3874,7 @@ extra:
           value: "Bearer dev-playground-token-change-me"
 "#,
         );
-        let mut root: Value =
-            crate::config_cli::yamlutil::parse_yaml(&text).expect("fixture yaml parses");
+        let mut root: Value = crate::yamlutil::parse_yaml(&text).expect("fixture yaml parses");
 
         let n = rewrite_hook_tokens(&mut root, "brand-new-token-value");
         assert_eq!(
@@ -3881,7 +3882,7 @@ extra:
             "must rewrite exactly the real web_hook nodes"
         );
 
-        let rendered = crate::config_cli::yamlutil::to_yaml(&root).unwrap();
+        let rendered = crate::yamlutil::to_yaml(&root).unwrap();
         assert_eq!(
             rendered.matches("brand-new-token-value").count(),
             hook_count,
@@ -4398,8 +4399,7 @@ oidc:
 
     #[test]
     fn rotate_secret_list_turns_scalar_cookie_into_two_entry_list_new_first() {
-        let mut root: Value =
-            crate::config_cli::yamlutil::parse_yaml(&kratos_scalar_secrets()).unwrap();
+        let mut root: Value = crate::yamlutil::parse_yaml(&kratos_scalar_secrets()).unwrap();
         rotate_secret_list(
             &mut root,
             &["secrets", "cookie"],
@@ -4412,8 +4412,7 @@ oidc:
 
     #[test]
     fn rotate_secret_list_accumulates_and_check_warns_past_three_entries() {
-        let mut root: Value =
-            crate::config_cli::yamlutil::parse_yaml(&kratos_scalar_secrets()).unwrap();
+        let mut root: Value = crate::yamlutil::parse_yaml(&kratos_scalar_secrets()).unwrap();
         rotate_secret_list(&mut root, &["secrets", "cookie"], random_secret(32)).unwrap();
         assert_eq!(secret_entries(&root, &["secrets", "cookie"]).len(), 2);
 
@@ -4438,8 +4437,7 @@ oidc:
 
     #[test]
     fn cipher_rotation_entries_all_pass_check_secret_lists() {
-        let mut root: Value =
-            crate::config_cli::yamlutil::parse_yaml(&kratos_scalar_secrets()).unwrap();
+        let mut root: Value = crate::yamlutil::parse_yaml(&kratos_scalar_secrets()).unwrap();
         rotate_secret_list(&mut root, &["secrets", "cipher"], random_secret(32)).unwrap();
         let findings = check_secret_lists(&root, false);
         let cipher_bad: Vec<_> = findings
@@ -4452,8 +4450,7 @@ oidc:
     #[test]
     fn prune_secret_list_keeps_only_first_entry() {
         let mut root: Value =
-            crate::config_cli::yamlutil::parse_yaml("secrets:\n  cookie:\n    - new\n    - old\n")
-                .unwrap();
+            crate::yamlutil::parse_yaml("secrets:\n  cookie:\n    - new\n    - old\n").unwrap();
         prune_secret_list(&mut root, &["secrets", "cookie"]).unwrap();
         assert_eq!(secret_entries(&root, &["secrets", "cookie"]), vec!["new"]);
     }
@@ -4461,15 +4458,14 @@ oidc:
     #[test]
     fn prune_secret_list_errors_on_single_entry_list() {
         let mut root: Value =
-            crate::config_cli::yamlutil::parse_yaml("secrets:\n  cookie:\n    - only\n").unwrap();
+            crate::yamlutil::parse_yaml("secrets:\n  cookie:\n    - only\n").unwrap();
         let err = prune_secret_list(&mut root, &["secrets", "cookie"]).unwrap_err();
         assert!(err.contains("nothing to prune"), "err: {err}");
     }
 
     #[test]
     fn prune_secret_list_errors_on_bare_scalar() {
-        let mut root: Value =
-            crate::config_cli::yamlutil::parse_yaml(&kratos_scalar_secrets()).unwrap();
+        let mut root: Value = crate::yamlutil::parse_yaml(&kratos_scalar_secrets()).unwrap();
         let err = prune_secret_list(&mut root, &["secrets", "cookie"]).unwrap_err();
         assert!(err.contains("nothing to prune"), "err: {err}");
     }
@@ -4481,20 +4477,16 @@ oidc:
         let dir = unique_tmp_dir("rotate-kratos-cookie-only");
         std::fs::create_dir_all(&dir).unwrap();
         let (kratos_path, hydra_path) = kratos_hydra_fixture(&dir);
-        let before: Value = crate::config_cli::yamlutil::parse_yaml(
-            &std::fs::read_to_string(&kratos_path).unwrap(),
-        )
-        .unwrap();
+        let before: Value =
+            crate::yamlutil::parse_yaml(&std::fs::read_to_string(&kratos_path).unwrap()).unwrap();
         let cipher_before = secret_entries(&before, &["secrets", "cipher"])[0].to_string();
 
         let (mut ctx, buf) = captured_ctx(kratos_path.clone(), hydra_path, false, true);
         let code = rotate_kratos_secrets(&mut ctx, true, false).expect("rotate succeeds");
         assert_eq!(code, 0);
 
-        let root: Value = crate::config_cli::yamlutil::parse_yaml(
-            &std::fs::read_to_string(&kratos_path).unwrap(),
-        )
-        .unwrap();
+        let root: Value =
+            crate::yamlutil::parse_yaml(&std::fs::read_to_string(&kratos_path).unwrap()).unwrap();
         let cookie = secret_entries(&root, &["secrets", "cookie"]);
         assert_eq!(cookie.len(), 2, "cookie must grow to 2 entries");
         assert_eq!(
@@ -4521,10 +4513,8 @@ oidc:
         let code = rotate_kratos_secrets(&mut ctx, false, false).expect("rotate succeeds");
         assert_eq!(code, 0);
 
-        let root: Value = crate::config_cli::yamlutil::parse_yaml(
-            &std::fs::read_to_string(&kratos_path).unwrap(),
-        )
-        .unwrap();
+        let root: Value =
+            crate::yamlutil::parse_yaml(&std::fs::read_to_string(&kratos_path).unwrap()).unwrap();
         assert_eq!(secret_entries(&root, &["secrets", "cookie"]).len(), 2);
         assert_eq!(secret_entries(&root, &["secrets", "cipher"]).len(), 2);
 
@@ -4583,10 +4573,8 @@ oidc:
         let code = prune_kratos_secrets(&mut ctx, false, false).expect("prune succeeds");
         assert_eq!(code, 0);
 
-        let after_prune: Value = crate::config_cli::yamlutil::parse_yaml(
-            &std::fs::read_to_string(&kratos_path).unwrap(),
-        )
-        .unwrap();
+        let after_prune: Value =
+            crate::yamlutil::parse_yaml(&std::fs::read_to_string(&kratos_path).unwrap()).unwrap();
         assert_eq!(
             secret_entries(&after_prune, &["secrets", "cookie"]),
             vec!["new-cookie-2222222222222222222"]
@@ -4611,8 +4599,7 @@ oidc:
         std::fs::create_dir_all(&dir).unwrap();
         let (kratos_path, hydra_path) = kratos_hydra_fixture(&dir);
         let before: Value =
-            crate::config_cli::yamlutil::parse_yaml(&std::fs::read_to_string(&hydra_path).unwrap())
-                .unwrap();
+            crate::yamlutil::parse_yaml(&std::fs::read_to_string(&hydra_path).unwrap()).unwrap();
         let system_before = secret_entries(&before, &["secrets", "system"])[0].to_string();
 
         let (mut ctx, buf) = captured_ctx(kratos_path, hydra_path.clone(), false, true);
@@ -4620,8 +4607,7 @@ oidc:
         assert_eq!(code, 0);
 
         let root: Value =
-            crate::config_cli::yamlutil::parse_yaml(&std::fs::read_to_string(&hydra_path).unwrap())
-                .unwrap();
+            crate::yamlutil::parse_yaml(&std::fs::read_to_string(&hydra_path).unwrap()).unwrap();
         let system = secret_entries(&root, &["secrets", "system"]);
         assert_eq!(system.len(), 2);
         assert_eq!(system[1], system_before);
@@ -4669,8 +4655,7 @@ oidc:
         assert_eq!(code, 0);
 
         let after_prune: Value =
-            crate::config_cli::yamlutil::parse_yaml(&std::fs::read_to_string(&hydra_path).unwrap())
-                .unwrap();
+            crate::yamlutil::parse_yaml(&std::fs::read_to_string(&hydra_path).unwrap()).unwrap();
         assert_eq!(
             secret_entries(&after_prune, &["secrets", "system"]),
             vec!["new-system-3333333333333333333"]
@@ -4730,8 +4715,7 @@ oidc:
         std::fs::create_dir_all(&dir).unwrap();
         let (kratos_path, hydra_path) = kratos_hydra_fixture(&dir);
         let before: Value =
-            crate::config_cli::yamlutil::parse_yaml(&std::fs::read_to_string(&hydra_path).unwrap())
-                .unwrap();
+            crate::yamlutil::parse_yaml(&std::fs::read_to_string(&hydra_path).unwrap()).unwrap();
         let salt_before = dig_str(
             &before,
             &["oidc", "subject_identifiers", "pairwise", "salt"],
@@ -4746,8 +4730,7 @@ oidc:
         assert_eq!(code, 0);
 
         let root: Value =
-            crate::config_cli::yamlutil::parse_yaml(&std::fs::read_to_string(&hydra_path).unwrap())
-                .unwrap();
+            crate::yamlutil::parse_yaml(&std::fs::read_to_string(&hydra_path).unwrap()).unwrap();
         let salt_node = dig(&root, &["oidc", "subject_identifiers", "pairwise", "salt"]).unwrap();
         assert!(
             salt_node.is_string(),
@@ -4829,10 +4812,8 @@ oidc:
         .unwrap();
         assert_eq!(code, 0);
 
-        let root: Value = crate::config_cli::yamlutil::parse_yaml(
-            &std::fs::read_to_string(&kratos_path).unwrap(),
-        )
-        .unwrap();
+        let root: Value =
+            crate::yamlutil::parse_yaml(&std::fs::read_to_string(&kratos_path).unwrap()).unwrap();
         assert_eq!(
             dig_str(&root, &["courier", "smtp", "connection_uri"]),
             Some("smtps://newuser:newpass@smtp.new.example.com:465")
@@ -4882,10 +4863,8 @@ oidc:
         let dir = unique_tmp_dir("smtp-set-from-only");
         std::fs::create_dir_all(&dir).unwrap();
         let (kratos_path, hydra_path) = kratos_hydra_fixture(&dir);
-        let before: Value = crate::config_cli::yamlutil::parse_yaml(
-            &std::fs::read_to_string(&kratos_path).unwrap(),
-        )
-        .unwrap();
+        let before: Value =
+            crate::yamlutil::parse_yaml(&std::fs::read_to_string(&kratos_path).unwrap()).unwrap();
 
         let (mut ctx, _buf) = captured_ctx(kratos_path.clone(), hydra_path, false, true);
         let code = smtp_set(
@@ -4897,10 +4876,8 @@ oidc:
         .unwrap();
         assert_eq!(code, 0);
 
-        let root: Value = crate::config_cli::yamlutil::parse_yaml(
-            &std::fs::read_to_string(&kratos_path).unwrap(),
-        )
-        .unwrap();
+        let root: Value =
+            crate::yamlutil::parse_yaml(&std::fs::read_to_string(&kratos_path).unwrap()).unwrap();
         assert_eq!(
             dig_str(&root, &["courier", "smtp", "connection_uri"]),
             dig_str(&before, &["courier", "smtp", "connection_uri"]),

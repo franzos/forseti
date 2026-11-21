@@ -30,6 +30,8 @@ RUN apt-get update \
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+COPY forseti-common ./forseti-common
+COPY forseti-config ./forseti-config
 COPY templates ./templates
 COPY migrations ./migrations
 # i18n-embed loads locales/ at compile time.
@@ -47,7 +49,7 @@ COPY --from=css /styles.css ./static/styles.css
 COPY forseti-unix/proto ./forseti-unix/proto
 # The manifest names an example, so cargo needs the file to parse it.
 COPY examples ./examples
-RUN cargo build --release --locked
+RUN cargo build --release --locked -p forseti -p forseti-config
 
 # --- Runtime image.
 FROM debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2 AS runtime
@@ -57,6 +59,7 @@ RUN apt-get update \
     && useradd --system --uid 10001 forseti
 WORKDIR /app
 COPY --from=build /src/target/release/forseti /usr/local/bin/forseti
+COPY --from=build /src/target/release/forseti-config /usr/local/bin/forseti-config
 USER forseti
 # Forseti reads ./config.toml (override with FORSETI_CONFIG_PATH); static
 # assets are compiled into the binary.

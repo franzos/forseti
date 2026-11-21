@@ -464,9 +464,9 @@ where
             .expect("Csrf extractor is infallible");
         let locale = resolve_locale(parts, &session);
         let memberships = match session.identity_id() {
-            Some(id) => crate::orgs::list_memberships(&app_state.db, id)
-                .await
-                .unwrap_or_default(),
+            Some(id) => crate::orgs::memberships_or_empty(
+                crate::orgs::list_memberships(&app_state.db, id).await,
+            ),
             None => Vec::new(),
         };
         let mut chrome = PageChrome::from_parts_themed(

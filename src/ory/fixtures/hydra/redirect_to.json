@@ -1,0 +1,3 @@
+{
+  "redirect_to": "http://host.containers.internal:3000/hydra/oauth2/auth?acr_values=aal2&audience=https%3A%2F%2Fapi.fixture.test&client_id=forseti-fixture-client&login_hint=alice%40example.com&login_verifier=fixture-login-verifier&nonce=fixturenonce123&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcb&response_type=code&scope=openid+offline_access+email&state=fixturestate123&ui_locales=de+en"
+}

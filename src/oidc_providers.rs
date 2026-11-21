@@ -19,7 +19,7 @@ pub(crate) fn display_name(provider_id: &str) -> String {
 
 /// Origin the browser lands on when a provider button is submitted. Kratos
 /// owns the upstream endpoints and never surfaces them in the flow, so the
-/// four providers `forseti config oidc enable` supports are pinned here.
+/// four providers `forseti-config oidc enable` supports are pinned here.
 ///
 /// Needed because the button is a submit inside the Kratos form: the POST 303s
 /// on to the provider, and `form-action` is enforced across that redirect. An

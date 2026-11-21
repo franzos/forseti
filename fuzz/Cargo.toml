@@ -12,6 +12,7 @@ libfuzzer-sys = "0.4"
 axum = { version = "0.8", default-features = false }
 url = "2"
 forseti = { path = ".." }
+forseti-config = { path = "../forseti-config" }
 
 [[bin]]
 name = "return_to"

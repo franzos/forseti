@@ -84,7 +84,7 @@ impl SigningKey {
     }
 
     /// A key that lives only in memory.
-    #[cfg(all(test, feature = "identity-native"))]
+    #[cfg(test)]
     pub(crate) fn ephemeral() -> Self {
         Self::from_key(&EdSigningKey::from_bytes(&[7; 32])).expect("fixed test key encodes")
     }

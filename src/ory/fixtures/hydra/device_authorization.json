@@ -1,0 +1,9 @@
+{
+  "Header": null,
+  "device_code": "fixture-device-code",
+  "user_code": "fixtureUC",
+  "verification_uri": "http://host.containers.internal:3000/hydra/oauth2/device/verify",
+  "verification_uri_complete": "http://host.containers.internal:3000/hydra/oauth2/device/verify?user_code=fixtureUC",
+  "expires_in": 599,
+  "interval": 5
+}

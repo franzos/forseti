@@ -4,9 +4,6 @@
 //! so an org-scoped view of it would hand an org owner control over the
 //! member's whole account. Org owners get their member view from
 //! `/settings/organization/members` instead.
-//!
-//! The typed `Identity` model doesn't suffer from the `ui.nodes` bug, so the
-//! SDK types are usable directly here (unlike the raw-JSON Kratos flows).
 
 use axum::{
     extract::{Path, Query, State},
@@ -181,8 +178,8 @@ pub(crate) async fn search_identities(
         .iter()
         .map(|id| project_row(locale, id))
         .collect();
-    // Next-page heuristic: a full page implies more. The typed SDK doesn't
-    // surface the Link header, so the last row's ID doubles as the opaque
+    // Next-page heuristic: a full page implies more. `list_identities` doesn't
+    // return the Link header, so the last row's ID doubles as the opaque
     // token Kratos expects back.
     let next_page_token = if looks_like_uuid(filter_q) {
         String::new()

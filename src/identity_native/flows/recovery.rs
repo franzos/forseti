@@ -43,9 +43,15 @@ async fn check_code(
     code: &str,
     device: Device<'_>,
 ) -> Result<Submitted> {
-    let used = backend
-        .use_code(&flow.row.id, Purpose::Recovery, code)
-        .await?;
+    let used = if flow.ctx.admin_code {
+        backend
+            .use_admin_code(&flow.row.id, Purpose::Recovery, code)
+            .await?
+    } else {
+        backend
+            .use_code(&flow.row.id, Purpose::Recovery, code)
+            .await?
+    };
     let recovered = match used {
         Some(used) => recovered_identity(backend, &flow, &used).await?,
         None => None,
@@ -1151,6 +1157,18 @@ mod tests {
         assert_eq!(left(&backend, &identity).await, [true; 6]);
         let row = store::row_by_id(&db, &identity).await.unwrap().unwrap();
         assert!(row.email_verified_at.is_none() && row.first_verified_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn an_admin_code_works_with_the_address_guess_budget_spent() {
+        let (db, backend) = setup().await;
+        let identity = identity_with_password(&db, "locked@x.test", true).await;
+        let key = store::address_key("locked@x.test");
+        while backend.limiters.code_guesses.admit(&key) {}
+        let minted = backend.admin_create_recovery_code(&identity).await.unwrap();
+        let id = minted.recovery_link.rsplit("flow=").next().unwrap();
+        let done = enter(&backend, &Browser::new(), id, &minted.recovery_code).await;
+        handoff_id(&done);
     }
 
     #[tokio::test]

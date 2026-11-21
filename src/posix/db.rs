@@ -468,37 +468,51 @@ pub async fn accounts_in_org(db: &DbPool, org_id: &str) -> anyhow::Result<Vec<Po
     })?)
 }
 
-/// UNCAPPED [`accounts_in_team`] for the offline-verifier projection ONLY:
-/// the host wholesale-replaces its keystore, so a capped read would silently
-/// drop offline credentials for members past the cap.
-pub async fn all_accounts_in_team(
+/// Enabled provisioned members of any of `team_ids` (asserted to belong to
+/// `org_id`), intersected with org membership, deduped, ordered by username.
+/// `capped` allows `MAX_ROWS_PER_LIST` rows per team for enumeration. Uncapped
+/// is for the offline-verifier projection ONLY: the host replaces its keystore
+/// wholesale, so a capped read would drop offline credentials past the cap.
+pub async fn accounts_in_teams(
     db: &DbPool,
     org_id: &str,
-    team_id: &str,
+    team_ids: &[String],
+    capped: bool,
 ) -> anyhow::Result<Vec<PosixAccount>> {
     use crate::schema::{org_team_members, org_teams, organization_members};
-    let (org, tid) = (org_id.to_string(), team_id.to_string());
+    if team_ids.is_empty() {
+        return Ok(vec![]);
+    }
+    let (org, ids) = (org_id.to_string(), team_ids.to_vec());
+    let cap = if capped {
+        MAX_ROWS_PER_LIST.saturating_mul(ids.len() as i64)
+    } else {
+        i64::MAX
+    };
     Ok(db_interact!(db, |conn| {
         posix_accounts::table
-            .inner_join(
-                org_team_members::table
-                    .on(org_team_members::identity_id.eq(posix_accounts::identity_id)),
-            )
             .inner_join(
                 organization_members::table
                     .on(organization_members::identity_id.eq(posix_accounts::identity_id)),
             )
-            .filter(org_team_members::team_id.eq(&tid))
             .filter(
-                org_team_members::team_id.eq_any(
-                    org_teams::table
-                        .filter(org_teams::org_id.eq(&org))
-                        .select(org_teams::id),
+                posix_accounts::identity_id.eq_any(
+                    org_team_members::table
+                        .filter(org_team_members::team_id.eq_any(&ids))
+                        .filter(
+                            org_team_members::team_id.eq_any(
+                                org_teams::table
+                                    .filter(org_teams::org_id.eq(&org))
+                                    .select(org_teams::id),
+                            ),
+                        )
+                        .select(org_team_members::identity_id),
                 ),
             )
             .filter(organization_members::org_id.eq(&org))
             .filter(posix_accounts::enabled.eq(1))
             .order(posix_accounts::username.asc())
+            .limit(cap)
             .select(PosixAccount::as_select())
             .load(conn)
     })?)
@@ -1721,6 +1735,101 @@ mod tests {
         assert!(get_offline_secret(&db, "bob").await.unwrap().is_some());
         assert!(device_session_by_code(&db, "dc-b").await.unwrap().is_some());
         delete_account_rows(&db, "alice").await.unwrap();
+    }
+
+    fn usernames(rows: Vec<PosixAccount>) -> Vec<String> {
+        rows.into_iter().map(|a| a.username).collect()
+    }
+
+    #[tokio::test]
+    async fn accounts_in_teams_dedupes_across_teams_and_orders_by_username() {
+        let db = temp_pool().await;
+        let t1 = teams::create_team(&db, "orgA", "Platform", None)
+            .await
+            .unwrap();
+        let t2 = teams::create_team(&db, "orgA", "Security", None)
+            .await
+            .unwrap();
+        for (id, team) in [
+            ("carol", &t1),
+            ("alice", &t1),
+            ("alice", &t2),
+            ("bob", &t2),
+            ("dave", &t1),
+            ("erin", &t2),
+        ] {
+            if account_by_identity(&db, id).await.unwrap().is_none() {
+                provision(&db, id, id).await;
+                orgs::db::add_member_race_safe(&db, id, "orgA", Role::Member)
+                    .await
+                    .unwrap();
+            }
+            teams::add_member(&db, "orgA", &team.id, id).await.unwrap();
+        }
+        set_account_enabled(&db, "dave", false).await.unwrap();
+        // erin left the org but is still a team row.
+        orgs::db::remove_member(&db, "orgA", "erin").await.unwrap();
+
+        let ids = [t1.id.clone(), t2.id.clone()];
+        for capped in [true, false] {
+            let got = usernames(accounts_in_teams(&db, "orgA", &ids, capped).await.unwrap());
+            assert_eq!(got, vec!["alice", "bob", "carol"], "capped={capped}");
+        }
+        assert!(
+            accounts_in_teams(&db, "orgA", &[], true)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn accounts_in_teams_capped_vs_uncapped() {
+        let db = temp_pool().await;
+        let t = teams::create_team(&db, "orgA", "Platform", None)
+            .await
+            .unwrap();
+        let n = MAX_ROWS_PER_LIST as usize + 1;
+        for i in 0..n {
+            let id = format!("u{i:04}");
+            provision(&db, &id, &id).await;
+            orgs::db::add_member_race_safe(&db, &id, "orgA", Role::Member)
+                .await
+                .unwrap();
+            teams::add_member(&db, "orgA", &t.id, &id).await.unwrap();
+        }
+        let ids = std::slice::from_ref(&t.id);
+        let capped = accounts_in_teams(&db, "orgA", ids, true).await.unwrap();
+        assert_eq!(capped.len(), MAX_ROWS_PER_LIST as usize);
+        assert_eq!(capped.last().unwrap().username, "u0499");
+        let all = accounts_in_teams(&db, "orgA", ids, false).await.unwrap();
+        assert_eq!(all.len(), n);
+    }
+
+    #[tokio::test]
+    async fn accounts_in_teams_excludes_other_org_teams() {
+        let db = temp_pool().await;
+        let own = teams::create_team(&db, "orgA", "Platform", None)
+            .await
+            .unwrap();
+        let foreign = teams::create_team(&db, "orgB", "Platform", None)
+            .await
+            .unwrap();
+        for (id, org, team) in [("alice", "orgA", &own), ("bob", "orgB", &foreign)] {
+            provision(&db, id, id).await;
+            orgs::db::add_member_race_safe(&db, id, org, Role::Member)
+                .await
+                .unwrap();
+            teams::add_member(&db, org, &team.id, id).await.unwrap();
+        }
+        // bob is also an orgA member, but only through his orgB team.
+        orgs::db::add_member_race_safe(&db, "bob", "orgA", Role::Member)
+            .await
+            .unwrap();
+
+        let ids = [own.id.clone(), foreign.id.clone()];
+        let got = usernames(accounts_in_teams(&db, "orgA", &ids, false).await.unwrap());
+        assert_eq!(got, vec!["alice"]);
     }
 
     #[tokio::test]

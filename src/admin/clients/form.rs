@@ -120,7 +120,7 @@ impl ClientForm {
                 raw.trim().to_string()
             }
         };
-        // Variant of parse_string for SDK `Option<String>` fields where the
+        // Variant of parse_string for `Option<String>` client fields where the
         // canonical "unset" representation is `None` (not `Some("")`).
         // Matches the URI fields that Hydra omits from its payload when
         // unset (`backchannel_logout_uri`, `frontchannel_logout_uri`).

@@ -1,0 +1,5 @@
+{
+  "recovery_link": "http://localhost:3000/recovery?flow=8b22a405-995d-4bb1-83a7-540f8c55baa0",
+  "recovery_code": "fixture-recovery-code",
+  "expires_at": "2026-11-20T21:24:17.259041931Z"
+}

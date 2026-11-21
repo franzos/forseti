@@ -26,10 +26,12 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      # Mirrors `make check` (cargo check + clippy -D warnings). No fmt gate —
-      # the repo doesn't enforce rustfmt and the tree isn't fmt-clean; add a
-      # `cargo fmt --check` step once a one-time `cargo fmt` pass has landed.
+      # Mirrors `make check` (cargo check + clippy -D warnings) over forseti,
+      # forseti-config and forseti-common. No fmt gate — the repo doesn't
+      # enforce rustfmt and the tree isn't fmt-clean; add a `cargo fmt --check`
+      # step once a one-time `cargo fmt` pass has landed.
       - run: make check
+      - run: cargo test -p forseti-config -p forseti-common
 
   check-native:
     name: check + clippy + unit tests (identity-native)

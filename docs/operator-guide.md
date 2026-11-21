@@ -24,7 +24,7 @@ Forseti builds with one of two identity backends, chosen at compile time with a 
 | Enterprise SAML SSO | yes | yes |
 | Mail | Kratos courier for flow mail, Forseti mailer for invites and claims | Forseti mailer for everything |
 | Audit of flow events | Kratos webhooks to the internal listener | written directly |
-| Config tooling | `forseti config` verbs | none |
+| Config tooling | `forseti-config` verbs | none |
 | Existing Kratos identities | in place | no import; fresh installs |
 | How to get it | release tarballs, packages and the container image | build from source with `--no-default-features --features identity-native` |
 
@@ -260,7 +260,7 @@ Settings for the CIMD authorization shim at `GET /oauth2/authorize` (see [CIMD](
 
 | Key                        | Type     | Default          | Description                                                                                                                                                |
 |----------------------------|----------|------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `allow_private_targets`    | bool     | `false`          | Stand down the SSRF guard on outbound document fetches: allows `http://` and loopback/private-IP client_id and metadata URLs, so local fixture servers work in development and CI. **Never enable in production.** Forseti refuses to boot with it on when `[self].url` is production-shaped (`https` with any host except `localhost`, a loopback or private IPv4, or a loopback, unique-local or link-local IPv6), and `forseti config check` reports it as FAIL. |
+| `allow_private_targets`    | bool     | `false`          | Stand down the SSRF guard on outbound document fetches: allows `http://` and loopback/private-IP client_id and metadata URLs, so local fixture servers work in development and CI. **Never enable in production.** Forseti refuses to boot with it on when `[self].url` is production-shaped (`https` with any host except `localhost`, a loopback or private IPv4, or a loopback, unique-local or link-local IPv6), and `forseti-config check` reports it as FAIL. |
 | `client_scope_extra`       | string[] | `[]`             | Scope entries every CIMD client's Hydra `scope` ceiling carries, after the built-in `openid offline offline_access` and before the document's `scope` and the request's allowlisted scopes. Each entry (whitespace-separated values count as separate scopes) is also on the [scope allowlist](#cimd-zero-config-client-onboarding) and applies to every resource; registry scopes are the per-resource source. Entries containing `*` are ignored. |
 | `allowed_client_hosts`     | string[] | `[]`             | When non-empty, only client_id URLs whose host matches an entry exactly (case-insensitive; subdomains do NOT match) may use the shim. Empty = open: any HTTPS client_id host is accepted, consent-gated, per the MCP open-client model. A client-vendor list (`["claude.ai"]`), not a per-resource list. |
 | `ip_rate_per_minute`       | u32      | `10`             | Per-IP rate limit on `GET /oauth2/authorize` — max requests per minute. In-memory, per-process. `0` disables this bucket.                                  |
@@ -489,7 +489,7 @@ The order matters: a non-allowlisted user with a valid AAL2 session still gets a
 
 The practical consequence: **putting an address on the allowlist does nothing until somebody registers it and verifies it.** That is the intended behaviour. Adding a placeholder or a not-yet-hired colleague to `[admin].allowed_emails` is harmless.
 
-Two Kratos hooks back this up (both written by `forseti config init`, both linted by `forseti config check`):
+Two Kratos hooks back this up (both written by `forseti-config init`, both linted by `forseti-config check`):
 
 - `require_verified_address` on `selfservice.flows.login.after.password` and `.passkey` — refuses to re-authenticate an identity whose address is unverified. It is deliberately **not** on the AAL2 step-up methods, which elevate an existing session rather than authenticate; the hook there would strand a user mid-step-up.
 - `show_verification_ui` on the registration flow — puts the verification screen in front of a new user immediately.
@@ -700,7 +700,7 @@ The subcommand reads the same `config.toml` as the running server, runs migratio
 - **Tier-1 allowlist is global.** A single `[admin].allowed_emails` controls operator access for the whole deployment; there's no per-realm partition. For per-customer scoping, use Tier 2 (org-scoped admin) instead (see [Admin access model](#admin-access-model)).
 - **No CSV / JSON export.** Audit and identity lists render only in the UI for now.
 - **No tamper-evidence (hash chain).** Append-only is enforced by the trigger; for stronger guarantees ship the row stream to an S3 archive with object-lock externally.
-- **OIDC sign-ins are unaudited by default.** A `config init`-generated `kratos.yml` carries no audit `web_hook` nodes, so `forseti config oidc enable` has no existing hook to clone onto the new provider's login/registration flows and warns rather than silently leaving a gap (see [Enabling and disabling OIDC providers](./operator-guide-kratos.md#enabling-and-disabling-oidc-providers)). Wiring one up is a manual step today.
+- **OIDC sign-ins are unaudited by default.** A `forseti-config init`-generated `kratos.yml` carries no audit `web_hook` nodes, so `forseti-config oidc enable` has no existing hook to clone onto the new provider's login/registration flows and warns rather than silently leaving a gap (see [Enabling and disabling OIDC providers](./operator-guide-kratos.md#enabling-and-disabling-oidc-providers)). Wiring one up is a manual step today.
 
 ## Linux authentication
 
@@ -939,7 +939,7 @@ webfinger:
 - `login`, `consent`, `logout` redirect the user to Forseti carrying a challenge query parameter. Forseti exchanges the challenge with Hydra's admin API and accepts or rejects it.
 - `error` is where Hydra sends OAuth errors it can't return to the client (unknown client, unregistered redirect URI). `post_logout_redirect` is the landing after a logout that names no registered `post_logout_redirect_uri`. `registration` serves `prompt=create`: Forseti's authorize endpoint rewrites it to Hydra's `prompt=registration`, and Hydra hands the challenge to this URL. Unset, users see Hydra's unbranded fallback pages.
 - `webfinger.oidc_discovery` fills discovery's `scopes_supported` and `claims_supported`. Hydra adds `openid`, `offline` and `offline_access` itself.
-- `forseti config check` warns when any of these are unset or the three landings aren't on the same origin as `urls.login`.
+- `forseti-config check` warns when any of these are unset or the three landings aren't on the same origin as `urls.login`.
 
 ### Secrets
 

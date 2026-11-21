@@ -7,8 +7,8 @@
 use axum::{extract::State, response::Response};
 
 use crate::admin::{AdminSection, FORSETI_VERSION};
+use crate::backend::IdentityBackend;
 use crate::backend::identity::CourierStatus;
-use crate::backend::{IdentityBackend, OAuthBackend};
 use crate::config::{DatabaseBackend, DatabaseConfig};
 use crate::extractors::RequireAdmin;
 #[cfg(feature = "identity-ory")]

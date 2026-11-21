@@ -1,4 +1,5 @@
-//! OAuth client, request, session and discovery types.
+//! OAuth client, request, session and discovery types. Field names follow
+//! the Hydra admin API, so responses deserialize into them directly.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -54,7 +55,7 @@ pub struct OAuthClient {
 }
 
 /// The OIDC parameters of an authorization request.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 pub struct OidcContext {
     pub acr_values: Option<Vec<String>>,
     pub login_hint: Option<String>,
@@ -62,7 +63,7 @@ pub struct OidcContext {
 }
 
 /// A pending login challenge.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 pub struct LoginRequest {
     pub client: OAuthClient,
     pub oidc_context: Option<OidcContext>,
@@ -77,7 +78,7 @@ pub struct LoginRequest {
 }
 
 /// A pending consent challenge, or the request a consent session was granted on.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 pub struct ConsentRequest {
     pub client: Option<OAuthClient>,
     pub consent_request_id: Option<String>,
@@ -92,7 +93,7 @@ pub struct ConsentRequest {
 }
 
 /// A pending logout challenge.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 pub struct LogoutRequest {
     pub client: Option<OAuthClient>,
     pub rp_initiated: Option<bool>,
@@ -101,7 +102,7 @@ pub struct LogoutRequest {
 }
 
 /// A granted consent.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 pub struct ConsentSession {
     pub consent_request: Option<ConsentRequest>,
     pub consent_request_id: Option<String>,
@@ -113,7 +114,7 @@ pub struct ConsentSession {
 }
 
 /// Where to send the browser after a challenge is accepted or rejected.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 pub struct RedirectTo {
     pub redirect_to: String,
 }

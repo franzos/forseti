@@ -430,3 +430,369 @@ async fn sso_confirm_without_a_pending_link_is_neutral() {
         "a bare /sso/confirm must not report a link"
     );
 }
+
+/// Whether a SAML-shaped Kratos session (admin recovery link, no local
+/// credential) can set a first local password, through Kratos directly and
+/// past Forseti's SSO-arrival bounce, plus the TOTP and stale-session controls.
+#[tokio::test]
+async fn sso_recovery_session_can_set_a_first_local_password() {
+    skip_on_native!(
+        "drives Kratos settings flows from a recovery-link session; the native build has no Kratos"
+    );
+    #[cfg(feature = "identity-ory")]
+    first_password::run().await;
+}
+
+#[cfg(feature = "identity-ory")]
+mod first_password {
+    use super::mint_recovery_link;
+    use crate::common;
+    use reqwest::{Client, StatusCode};
+    use serde_json::Value;
+
+    const NEW_PASSWORD: &str = "Sso-First-Local-Pw-7731!";
+
+    struct Outcome {
+        status: StatusCode,
+        body: Value,
+    }
+
+    impl Outcome {
+        fn state(&self) -> Option<&str> {
+            self.body["state"].as_str()
+        }
+        fn error_id(&self) -> Option<&str> {
+            self.body["error"]["id"].as_str()
+        }
+        fn message_ids(&self) -> Vec<i64> {
+            self.body["ui"]["messages"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|m| m["id"].as_i64())
+                .collect()
+        }
+    }
+
+    impl std::fmt::Debug for Outcome {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(
+                f,
+                "status={} state={:?} error={:?} messages={:?} redirect={:?}",
+                self.status,
+                self.state(),
+                self.error_id(),
+                self.message_ids(),
+                self.body["redirect_browser_to"].as_str()
+            )
+        }
+    }
+
+    async fn create_sso_identity(prefix: &str) -> (String, String) {
+        let email = common::unique_email(prefix);
+        let resp = common::browser_client()
+            .post(format!("{}/admin/identities", common::KRATOS_ADMIN))
+            .json(&serde_json::json!({
+                "schema_id": "default",
+                "traits": { "email": email, "name": { "first": "Sso", "last": "Only" } },
+                "verifiable_addresses": [{
+                    "value": email, "verified": true, "via": "email", "status": "completed"
+                }]
+            }))
+            .send()
+            .await
+            .expect("create identity");
+        let status = resp.status();
+        let body: Value = resp.json().await.expect("create identity json");
+        assert_eq!(status, 201, "create identity: {body}");
+        (body["id"].as_str().expect("identity id").to_string(), email)
+    }
+
+    /// Redeem a freshly minted link (same `return_to` as the SSO callback)
+    /// and return where Kratos sends the browser.
+    async fn redeem(manual: &Client, identity_id: &str) -> String {
+        let link = mint_recovery_link(identity_id, Some(&format!("{}/", common::PORTAL))).await;
+        let resp = manual.get(&link).send().await.expect("redeem link");
+        location(&resp)
+    }
+
+    fn location(resp: &reqwest::Response) -> String {
+        resp.headers()
+            .get("location")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string()
+    }
+
+    async fn get_json(client: &Client, url: &str) -> Outcome {
+        let resp = client
+            .get(url)
+            .header("Accept", "application/json")
+            .send()
+            .await
+            .expect("GET json");
+        Outcome {
+            status: resp.status(),
+            body: resp.json().await.unwrap_or(Value::Null),
+        }
+    }
+
+    async fn fetch_settings_flow(client: &Client, flow_id: &str) -> Outcome {
+        get_json(
+            client,
+            &format!(
+                "{}/self-service/settings/flows?id={flow_id}",
+                common::KRATOS_PUBLIC
+            ),
+        )
+        .await
+    }
+
+    async fn init_settings_flow(client: &Client) -> Outcome {
+        get_json(
+            client,
+            &format!("{}/self-service/settings/browser", common::KRATOS_PUBLIC),
+        )
+        .await
+    }
+
+    async fn post_password(client: &Client, flow_id: &str, csrf: &str) -> Outcome {
+        let url = format!(
+            "{}/self-service/settings?flow={flow_id}",
+            common::KRATOS_PUBLIC
+        );
+        // Kratos's breached-password lookup can time out with a 500 ("Unable to
+        // initialize string scanner"); the flow stays open, so retrying is safe.
+        for _ in 0..3 {
+            let resp = client
+                .post(&url)
+                .header("Accept", "application/json")
+                .form(&[
+                    ("method", "password"),
+                    ("password", NEW_PASSWORD),
+                    ("csrf_token", csrf),
+                ])
+                .send()
+                .await
+                .expect("submit settings password");
+            let outcome = Outcome {
+                status: resp.status(),
+                body: resp.json().await.unwrap_or(Value::Null),
+            };
+            if outcome.status != StatusCode::INTERNAL_SERVER_ERROR {
+                return outcome;
+            }
+            eprintln!("settings submit retried after {outcome:?}");
+        }
+        panic!("settings submit kept answering 500");
+    }
+
+    async fn submit_password(client: &Client, flow: &Value) -> Outcome {
+        let flow_id = flow["id"].as_str().expect("settings flow id");
+        let csrf = common::flow_csrf_token(flow).expect("settings flow csrf_token");
+        post_password(client, flow_id, &csrf).await
+    }
+
+    async fn has_password(identity_id: &str) -> bool {
+        let body: Value = common::browser_client()
+            .get(format!(
+                "{}/admin/identities/{identity_id}?include_credential=password",
+                common::KRATOS_ADMIN
+            ))
+            .send()
+            .await
+            .expect("fetch identity")
+            .json()
+            .await
+            .expect("identity json");
+        body["credentials"]["password"]["config"]["hashed_password"]
+            .as_str()
+            .is_some_and(|h| !h.is_empty())
+    }
+
+    async fn password_login(email: &str) -> Outcome {
+        let client = common::browser_client();
+        let flow: Value = client
+            .get(format!(
+                "{}/self-service/login/browser",
+                common::KRATOS_PUBLIC
+            ))
+            .header("Accept", "application/json")
+            .send()
+            .await
+            .expect("init login flow")
+            .json()
+            .await
+            .expect("login flow json");
+        let csrf = common::flow_csrf_token(&flow).expect("login flow csrf_token");
+        let resp = client
+            .post(flow["ui"]["action"].as_str().expect("login flow action"))
+            .header("Accept", "application/json")
+            .form(&[
+                ("identifier", email),
+                ("password", NEW_PASSWORD),
+                ("method", "password"),
+                ("csrf_token", csrf.as_str()),
+            ])
+            .send()
+            .await
+            .expect("submit login");
+        Outcome {
+            status: resp.status(),
+            body: resp.json().await.unwrap_or(Value::Null),
+        }
+    }
+
+    fn delete_saml_link(identity_id: &str) -> usize {
+        rusqlite::Connection::open(common::forseti_db_path())
+            .expect("open portal db")
+            .execute(
+                "DELETE FROM saml_links WHERE identity_id = ?1",
+                [identity_id],
+            )
+            .expect("delete saml_links row")
+    }
+
+    /// Mint and redeem a link for `identity_id` on a fresh jar; returns the
+    /// manual client, the jar and the settings flow id Kratos lands on.
+    async fn sso_session(
+        identity_id: &str,
+    ) -> (Client, std::sync::Arc<reqwest::cookie::Jar>, String) {
+        let (_auto, manual, jar) = common::paired_clients();
+        let landing = redeem(&manual, identity_id).await;
+        let prefix = format!("{}/settings?flow=", common::PORTAL);
+        assert!(
+            landing.starts_with(&prefix),
+            "redemption must land on the settings UI, got {landing:?}"
+        );
+        let flow_id = common::extract_flow_id_from_url(&landing).expect("settings flow id");
+        (manual, jar, flow_id)
+    }
+
+    fn assert_saved(case: &str, outcome: &Outcome) {
+        assert_eq!(outcome.status, StatusCode::OK, "{case}: {outcome:?}");
+        assert_eq!(outcome.state(), Some("success"), "{case}: {outcome:?}");
+        assert!(
+            outcome.message_ids().contains(&1_050_001),
+            "{case}: {outcome:?}"
+        );
+    }
+
+    fn assert_refused(case: &str, outcome: &Outcome, error_id: &str) {
+        assert_eq!(outcome.status, StatusCode::FORBIDDEN, "{case}: {outcome:?}");
+        assert_eq!(outcome.error_id(), Some(error_id), "{case}: {outcome:?}");
+    }
+
+    pub async fn run() {
+        let portal: reqwest::Url = common::PORTAL.parse().expect("portal url");
+        let mut created = Vec::new();
+
+        // Pins: the recovery session's own settings flow is privileged (1060001) and accepts a first password (200, 1050001).
+        let (a_id, a_email) = create_sso_identity("ssofirstpwa").await;
+        created.push(a_id.clone());
+        common::seed_saml_link("default", &a_email, &a_id, &format!("idp-{a_id}"));
+        let (manual, _jar, flow_id) = sso_session(&a_id).await;
+        let flow = fetch_settings_flow(&manual, &flow_id).await;
+        assert_eq!(flow.status, StatusCode::OK, "A flow: {flow:?}");
+        assert!(flow.message_ids().contains(&1_060_001), "A flow: {flow:?}");
+        assert!(!has_password(&a_id).await, "A starts without a password");
+        assert_saved("A", &submit_password(&manual, &flow.body).await);
+        assert!(has_password(&a_id).await, "A password credential");
+
+        // Pins: the password keeps signing in (200, session) after the saml_links row is deleted.
+        assert_eq!(delete_saml_link(&a_id), 1, "seeded saml_links row");
+        let login = password_login(&a_email).await;
+        assert_eq!(login.status, StatusCode::OK, "persistence: {login:?}");
+        assert_eq!(
+            login.body["session"]["identity"]["id"].as_str(),
+            Some(a_id.as_str()),
+            "persistence: {login:?}"
+        );
+
+        // Pins: the arrival cookie bounces /settings/password to / but the landing flow still accepts a first password.
+        let (b_id, _) = create_sso_identity("ssofirstpwb").await;
+        created.push(b_id.clone());
+        let (manual, jar, flow_id) = sso_session(&b_id).await;
+        jar.add_cookie_str("forseti_sso_arrival=1; Path=/settings", &portal);
+        let resp = manual
+            .get(format!("{}/settings?flow={flow_id}", common::PORTAL))
+            .send()
+            .await
+            .expect("GET /settings");
+        let hop = location(&resp);
+        assert_eq!(
+            hop,
+            format!("/settings/password?flow={flow_id}"),
+            "B /settings"
+        );
+        let resp = manual
+            .get(format!("{}{hop}", common::PORTAL))
+            .send()
+            .await
+            .expect("GET /settings/password");
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER, "B bounce status");
+        assert_eq!(location(&resp), "/", "B bounce target");
+        let flow = fetch_settings_flow(&manual, &flow_id).await;
+        assert_eq!(flow.status, StatusCode::OK, "B flow: {flow:?}");
+        assert_saved("B same flow", &submit_password(&manual, &flow.body).await);
+        assert!(has_password(&b_id).await, "B password credential");
+
+        // Pins: after the bounce a freshly initialised settings flow also accepts a first password.
+        let (c_id, _) = create_sso_identity("ssofirstpwc").await;
+        created.push(c_id.clone());
+        let (manual, jar, _landing_flow) = sso_session(&c_id).await;
+        jar.add_cookie_str("forseti_sso_arrival=1; Path=/settings", &portal);
+        let resp = manual
+            .get(format!("{}/settings/password", common::PORTAL))
+            .send()
+            .await
+            .expect("GET /settings/password");
+        assert_eq!(location(&resp), "/", "C bounce target");
+        let fresh = init_settings_flow(&manual).await;
+        assert_eq!(fresh.status, StatusCode::OK, "C init: {fresh:?}");
+        assert_saved("B fresh flow", &submit_password(&manual, &fresh.body).await);
+        assert!(has_password(&c_id).await, "C password credential");
+
+        // Pins: with TOTP on the identity the AAL1 recovery session gets 403 session_aal2_required on fetch, init and submit.
+        let (d_id, _) = create_sso_identity("ssofirstpwd").await;
+        created.push(d_id.clone());
+        common::plant_totp(&d_id, common::TEST_TOTP_SECRET);
+        let (manual, _jar, flow_id) = sso_session(&d_id).await;
+        let fetched = fetch_settings_flow(&manual, &flow_id).await;
+        assert_refused("D fetch", &fetched, "session_aal2_required");
+        assert_refused(
+            "D init",
+            &init_settings_flow(&manual).await,
+            "session_aal2_required",
+        );
+        // The flow is unreadable at AAL1, so there is no csrf token to send.
+        assert_refused(
+            "D submit",
+            &post_password(&manual, &flow_id, "").await,
+            "session_aal2_required",
+        );
+        assert!(!has_password(&d_id).await, "D must stay passwordless");
+
+        // Pins: a session whose authenticated_at is an hour old gets 403 session_refresh_required on submit.
+        let (e_id, _) = create_sso_identity("ssofirstpwe").await;
+        created.push(e_id.clone());
+        let (manual, _jar, flow_id) = sso_session(&e_id).await;
+        let rows = common::kratos_psql(&format!(
+            "UPDATE sessions SET authenticated_at = authenticated_at - interval '1 hour' \
+             WHERE identity_id = '{e_id}'::uuid"
+        ));
+        assert_eq!(rows, 1, "backdated session rows");
+        let flow = fetch_settings_flow(&manual, &flow_id).await;
+        assert_eq!(flow.status, StatusCode::OK, "E flow: {flow:?}");
+        assert_refused(
+            "E submit",
+            &submit_password(&manual, &flow.body).await,
+            "session_refresh_required",
+        );
+        assert!(!has_password(&e_id).await, "E must stay passwordless");
+
+        for id in &created {
+            let _ = common::delete_test_identity(id).await;
+        }
+    }
+}

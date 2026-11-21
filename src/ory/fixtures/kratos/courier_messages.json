@@ -1,0 +1,15 @@
+[
+  {
+    "id": "36c15e81-3f59-4d47-92f2-1c3c6bd4722d",
+    "status": "sent",
+    "type": "email",
+    "recipient": "fixture-other@example.test",
+    "body": "fixture-body",
+    "subject": "fixture-subject",
+    "template_type": "verification_code_valid",
+    "channel": "email",
+    "send_count": 1,
+    "created_at": "2026-11-20T21:09:17.286135Z",
+    "updated_at": "2026-11-20T21:09:17.286135Z"
+  }
+]

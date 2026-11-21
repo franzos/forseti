@@ -222,15 +222,37 @@ impl NativeBackend {
     }
 
     /// Spend one guess on the flow's code for `purpose`. The identity and address the code was
-    /// sent for when `code` is it and the code is unused, unexpired and within [`CODE_ATTEMPTS`];
-    /// a match uses the code up.
+    /// sent for when `code` is it, the code is unused, unexpired and within [`CODE_ATTEMPTS`], and
+    /// its address has guesses left in the `code_guesses` limiter; a match uses the code up.
     pub(super) async fn use_code(
         &self,
         flow_id: &str,
         purpose: Purpose,
         code: &str,
     ) -> Result<Option<UsedCode>> {
+        self.spend_code(flow_id, purpose, code, true).await
+    }
+
+    /// [`Self::use_code`] for a code an admin minted: it is not mailed and cannot be re-requested,
+    /// so [`CODE_ATTEMPTS`] alone bounds it and guesses on mailed codes cannot lock it out.
+    pub(super) async fn use_admin_code(
+        &self,
+        flow_id: &str,
+        purpose: Purpose,
+        code: &str,
+    ) -> Result<Option<UsedCode>> {
+        self.spend_code(flow_id, purpose, code, false).await
+    }
+
+    async fn spend_code(
+        &self,
+        flow_id: &str,
+        purpose: Purpose,
+        code: &str,
+        charge_address: bool,
+    ) -> Result<Option<UsedCode>> {
         let (flow, kind) = (flow_id.to_string(), purpose.as_str());
+        let mut admitted = !charge_address;
         // Each lost round means another guess was counted, so the code runs out within these.
         for _ in 0..CODE_ATTEMPTS {
             let (flow, now) = (flow.clone(), crate::db::now_rfc3339());
@@ -249,6 +271,16 @@ impl NativeBackend {
             if row.attempts >= CODE_ATTEMPTS || row.expires_at <= now {
                 return Ok(None);
             }
+            // Charged once per call; a lost round below retries without charging again.
+            if !admitted
+                && !self
+                    .limiters
+                    .code_guesses
+                    .admit(&super::store::address_key(&row.address))
+            {
+                return Ok(None);
+            }
+            admitted = true;
             let (id, seen) = (row.id.clone(), row.attempts);
             let counted = db_interact!(self.db, |c| {
                 diesel::update(
@@ -454,6 +486,115 @@ mod tests {
         assert_eq!(
             session_token_hash("abc"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[tokio::test]
+    async fn resends_do_not_reset_the_address_guess_budget() {
+        use crate::backend::identity::FlowKind;
+        use crate::identity_native::flows::InitParams;
+        use crate::identity_native::test_support::{Browser, sql, start};
+
+        let db = crate::db::test_pool().await;
+        let backend = NativeBackend::for_test(&db);
+        let flow = start(
+            &backend,
+            &Browser::new(),
+            FlowKind::Verification,
+            InitParams::default(),
+        )
+        .await;
+        let purpose = Purpose::Verification;
+        let wrong = |code: &str| format!("{:06}", (code.parse::<u32>().unwrap() + 1) % 1_000_000);
+
+        for _ in 0..3 {
+            let code = backend
+                .store_code(&flow, purpose, None, "Ann@x.test", false)
+                .await
+                .unwrap();
+            for _ in 0..CODE_ATTEMPTS {
+                let guess = wrong(&code);
+                assert_eq!(
+                    backend.use_code(&flow, purpose, &guess).await.unwrap(),
+                    None
+                );
+            }
+        }
+
+        let code = backend
+            .store_code(&flow, purpose, None, "ann@x.test", false)
+            .await
+            .unwrap();
+        assert_eq!(backend.use_code(&flow, purpose, &code).await.unwrap(), None);
+        let id = flow.clone();
+        let attempts: i32 = sql(&db, move |c| {
+            identity_codes::table
+                .filter(identity_codes::flow_id.eq(&id))
+                .select(identity_codes::attempts)
+                .first(c)
+        })
+        .await;
+        assert_eq!(attempts, 0, "a refused guess does not touch the code");
+
+        let other = start(
+            &backend,
+            &Browser::new(),
+            FlowKind::Verification,
+            InitParams::default(),
+        )
+        .await;
+        let code = backend
+            .store_code(&other, purpose, None, "bob@x.test", false)
+            .await
+            .unwrap();
+        assert_eq!(
+            backend.use_code(&other, purpose, &code).await.unwrap(),
+            Some(UsedCode {
+                identity_id: None,
+                address: "bob@x.test".into(),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn guesses_on_a_dead_code_spend_no_address_budget() {
+        use crate::backend::identity::FlowKind;
+        use crate::identity_native::flows::InitParams;
+        use crate::identity_native::test_support::{Browser, start};
+
+        let db = crate::db::test_pool().await;
+        let backend = NativeBackend::for_test(&db);
+        let flow = start(
+            &backend,
+            &Browser::new(),
+            FlowKind::Verification,
+            InitParams::default(),
+        )
+        .await;
+        let purpose = Purpose::Verification;
+
+        let code = backend
+            .store_code(&flow, purpose, None, "cy@x.test", false)
+            .await
+            .unwrap();
+        let wrong = format!("{:06}", (code.parse::<u32>().unwrap() + 1) % 1_000_000);
+        for _ in 0..CODE_ATTEMPTS + 20 {
+            assert_eq!(
+                backend.use_code(&flow, purpose, &wrong).await.unwrap(),
+                None
+            );
+        }
+
+        let code = backend
+            .store_code(&flow, purpose, None, "cy@x.test", false)
+            .await
+            .unwrap();
+        assert!(
+            backend
+                .use_code(&flow, purpose, &code)
+                .await
+                .unwrap()
+                .is_some()
         );
     }
 }

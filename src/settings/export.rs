@@ -15,9 +15,9 @@ use serde_json::{Value, json};
 use crate::FlowQuery;
 use crate::audit::{self, AuditCtx, AuditEvent, AuditFilter, AuditRow, action, target_kind};
 use crate::audit_metadata;
+use crate::backend::IdentityBackend;
 use crate::backend::identity::{Identity, Session};
 use crate::backend::oauth::ConsentSession;
-use crate::backend::{IdentityBackend, OAuthBackend};
 use crate::db::DbPool;
 use crate::state::AppState;
 
