@@ -29,6 +29,9 @@ const RETENTION_DAYS: i64 = 30;
 /// Read-modify-write rounds before a contended method append gives up.
 const APPEND_ATTEMPTS: usize = 5;
 
+/// `identities.state` of an identity whose sessions count.
+const ACTIVE: &str = "active";
+
 #[derive(Queryable, Selectable, Insertable, Debug, Clone)]
 #[diesel(table_name = identity_sessions)]
 pub(super) struct SessionRow {
@@ -138,7 +141,7 @@ fn to_session(
     creds: Vec<CredentialSummary>,
     now: &str,
 ) -> Result<Session> {
-    let active = is_live(&row, now);
+    let active = is_live(&row, now) && identity.as_ref().is_none_or(store::is_active);
     let methods = parse_methods(&row.methods)?
         .into_iter()
         .map(|m| {
@@ -352,17 +355,19 @@ pub(super) async fn find_live(db: &DbPool, id: &str) -> Result<Option<SessionRow
     Ok(row.filter(|r| is_live(r, &now)))
 }
 
-/// Whether `id` is a live session of `identity_id`.
+/// Whether `id` is a live session of `identity_id` and the identity is active.
 pub(super) async fn is_live_for(db: &DbPool, identity_id: &str, id: &str) -> Result<bool> {
     let (identity_id, id) = (identity_id.to_string(), id.to_string());
     let now = crate::db::now_rfc3339();
     Ok(db_interact!(db, |c| {
         diesel::select(diesel::dsl::exists(
             identity_sessions::table
+                .inner_join(identities::table)
                 .filter(identity_sessions::id.eq(&id))
                 .filter(identity_sessions::identity_id.eq(&identity_id))
                 .filter(identity_sessions::revoked_at.is_null())
-                .filter(identity_sessions::expires_at.gt(&now)),
+                .filter(identity_sessions::expires_at.gt(&now))
+                .filter(identities::state.eq(ACTIVE)),
         ))
         .get_result::<bool>(c)
     })?)
@@ -417,14 +422,15 @@ async fn load_with_identity(
     })?)
 }
 
-/// Kratos's whoami under `highest_available`: a session of an identity with TOTP needs AAL2.
+/// Kratos's whoami under `highest_available`: a session of an identity with TOTP or a security
+/// key needs AAL2.
 pub(super) async fn whoami(db: &DbPool, token: &str) -> Result<WhoamiOutcome> {
     let found = load_with_identity(db, By::TokenHash(codes::session_token_hash(token))).await?;
     let now = crate::db::now_rfc3339();
     let Some((session, identity, creds)) = found else {
         return Ok(WhoamiOutcome::None);
     };
-    if !is_live(&session, &now) || identity.state != "active" {
+    if !is_live(&session, &now) || !store::is_active(&identity) {
         return Ok(WhoamiOutcome::None);
     }
     let aal = match parse_aal(&session.aal) {
@@ -434,7 +440,9 @@ pub(super) async fn whoami(db: &DbPool, token: &str) -> Result<WhoamiOutcome> {
             return Ok(WhoamiOutcome::None);
         }
     };
-    let aal2_available = creds.iter().any(|c| c.kind == "totp");
+    let aal2_available = creds
+        .iter()
+        .any(|c| matches!(c.kind.as_str(), "totp" | "webauthn"));
     if aal2_available && aal < Aal::Aal2 {
         return Ok(WhoamiOutcome::InsufficientAal);
     }
@@ -504,7 +512,8 @@ pub(super) async fn list_page_for_identity(db: &DbPool, identity_id: &str) -> Re
     list_for_identity(db, identity_id, Some(IDENTITY_PAGE_SIZE)).await
 }
 
-/// The identity's live sessions, newest first, without `except`.
+/// The identity's live sessions, newest first, without `except`; none while the identity is
+/// inactive.
 pub(super) async fn live_for_identity(
     db: &DbPool,
     identity_id: &str,
@@ -515,9 +524,11 @@ pub(super) async fn live_for_identity(
     let cutoff = now.clone();
     let rows: Vec<SessionRow> = db_interact!(db, |c| {
         let mut query = identity_sessions::table
+            .inner_join(identities::table)
             .filter(identity_sessions::identity_id.eq(identity_id))
             .filter(identity_sessions::revoked_at.is_null())
             .filter(identity_sessions::expires_at.gt(cutoff))
+            .filter(identities::state.eq(ACTIVE))
             .select(SessionRow::as_select())
             .order((
                 identity_sessions::issued_at.desc(),
@@ -536,7 +547,7 @@ pub(super) async fn live_for_identity(
 
 /// One page of every session, ordered `issued_at DESC, id DESC`, each with its identity. `after`
 /// is the id of the last row of the previous page; an unknown id gives an empty page. `active`
-/// keeps only live (`Some(true)`) or only revoked and expired (`Some(false)`) sessions.
+/// keeps only live sessions of active identities (`Some(true)`) or only the rest (`Some(false)`).
 pub(super) async fn list_all(
     db: &DbPool,
     page_size: i64,
@@ -585,14 +596,16 @@ pub(super) async fn list_all(
                 query = query.filter(
                     identity_sessions::revoked_at
                         .is_null()
-                        .and(identity_sessions::expires_at.gt(cutoff)),
+                        .and(identity_sessions::expires_at.gt(cutoff))
+                        .and(identities::state.eq(ACTIVE)),
                 );
             }
             Some(false) => {
                 query = query.filter(
                     identity_sessions::revoked_at
                         .is_not_null()
-                        .or(identity_sessions::expires_at.le(cutoff)),
+                        .or(identity_sessions::expires_at.le(cutoff))
+                        .or(identities::state.ne(ACTIVE)),
                 );
             }
             None => {}
@@ -1168,6 +1181,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_security_key_requires_aal2_and_a_passkey_does_not() {
+        let (db, backend) = setup().await;
+        let id = identity(&db, "k@x.test").await;
+        store::keys::plant(&db, &id, store::keys::KeyKind::Passkey).await;
+        let issued = sign_in(&backend, &id).await;
+        assert!(matches!(
+            whoami(&backend, &issued.token).await,
+            WhoamiOutcome::Ok(_)
+        ));
+        store::keys::plant(&db, &id, store::keys::KeyKind::Webauthn).await;
+        assert!(matches!(
+            whoami(&backend, &issued.token).await,
+            WhoamiOutcome::InsufficientAal
+        ));
+    }
+
+    #[tokio::test]
     async fn refresh_advances_authenticated_at_and_keeps_the_aal() {
         let (db, backend) = setup().await;
         let id = identity(&db, "r@x.test").await;
@@ -1412,6 +1442,72 @@ mod tests {
         assert!(!flags[&expired.id]);
         assert!(all.iter().all(|s| s.identity.is_none()));
         assert_eq!(backend.list_identity_sessions_all(&id).await.unwrap(), all);
+    }
+
+    #[tokio::test]
+    async fn sessions_of_a_disabled_identity_are_not_live_anywhere() {
+        let (db, backend) = setup().await;
+        let id = identity(&db, "d@x.test").await;
+        let other = identity(&db, "o@x.test").await;
+        let held = sign_in(&backend, &id).await;
+        let current = sign_in(&backend, &id).await;
+        let elsewhere = sign_in(&backend, &other).await;
+        let ids = |list: Vec<Session>| list.into_iter().map(|s| s.id).collect::<Vec<_>>();
+
+        // A row left live by a sign-in racing the disable.
+        sql(&db, {
+            let id = id.clone();
+            move |c| {
+                diesel::update(identities::table.find(id))
+                    .set(identities::state.eq("inactive"))
+                    .execute(c)
+            }
+        })
+        .await;
+        assert!(!backend.is_session_active(&id, &held.id).await.unwrap());
+        assert!(backend.active_session_ids(&id).await.unwrap().is_empty());
+        assert!(
+            backend
+                .list_my_sessions(Some(&cookie(&current.token)))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let live = ids(list_all(&db, 10, None, Some(true)).await.unwrap());
+        assert_eq!(live, std::slice::from_ref(&elsewhere.id));
+        let rest = list_all(&db, 10, None, Some(false)).await.unwrap();
+        assert_eq!(rest.len(), 2);
+        assert!(rest.iter().all(|s| s.active == Some(false)));
+        assert_eq!(
+            backend.admin_get_session(&held.id).await.unwrap().active,
+            Some(false)
+        );
+
+        sql(&db, {
+            let id = id.clone();
+            move |c| {
+                diesel::update(identities::table.find(id))
+                    .set(identities::state.eq("active"))
+                    .execute(c)
+            }
+        })
+        .await;
+        store::set_state(&db, &id, IdentityState::Inactive)
+            .await
+            .unwrap();
+        store::set_state(&db, &id, IdentityState::Active)
+            .await
+            .unwrap();
+        assert!(!backend.is_session_active(&id, &held.id).await.unwrap());
+        assert!(backend.active_session_ids(&id).await.unwrap().is_empty());
+        assert!(matches!(
+            whoami(&backend, &held.token).await,
+            WhoamiOutcome::None
+        ));
+        assert_eq!(
+            ids(list_all(&db, 10, None, Some(true)).await.unwrap()),
+            [elsewhere.id]
+        );
     }
 
     #[tokio::test]

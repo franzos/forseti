@@ -31,7 +31,7 @@ result_large_err = "allow"
 [features]
 default = ["identity-ory"]
 identity-ory = []
-identity-native = ["dep:aws-lc-rs", "dep:qrcode", "dep:base32"]
+identity-native = ["dep:aws-lc-rs", "dep:qrcode", "dep:base32", "dep:webauthn-rs"]
 
 [dependencies]
 axum = { version = "0.8", features = ["macros", "multipart"] }
@@ -171,6 +171,8 @@ comrak = { version = "0.54", default-features = false }
 aws-lc-rs = { version = "1.18", optional = true }
 qrcode = { version = "0.14", default-features = false, features = ["svg"], optional = true }
 base32 = { version = "0.5", optional = true }
+# `conditional-ui` gates `start_discoverable_authentication`.
+webauthn-rs = { version = "0.6", optional = true, default-features = false, features = ["conditional-ui", "danger-allow-state-serialisation"] }
 
 [profile.release]
 strip = true

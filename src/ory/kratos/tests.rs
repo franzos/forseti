@@ -415,6 +415,7 @@ fn fixture_identity(configs: bool) -> Identity {
             ),
         ])),
         sole_sign_in_is_oidc: None,
+        has_second_factor: None,
     }
 }
 
@@ -1136,6 +1137,64 @@ async fn list_identities_sends_paging_and_filters() {
         "/adm/admin/identities",
         Some("per_page=2&ids=a&ids=b+c%2Fd"),
     );
+}
+
+/// A page of `count` old identities with unverified addresses, ids numbered from `first`.
+fn unverified_page(first: usize, count: usize) -> String {
+    let template = decode::<Vec<Value>>(IDENTITIES_PAGE).remove(0);
+    let page: Vec<Value> = (first..first + count)
+        .map(|n| {
+            let mut ident = template.clone();
+            ident["id"] = json!(format!("00000000-0000-0000-0000-{n:012}"));
+            ident["created_at"] = json!("2025-01-01T00:00:00Z");
+            ident
+        })
+        .collect();
+    serde_json::to_string(&page).unwrap()
+}
+
+async fn prune_walk(stub: &Stub) -> crate::identity::PruneCandidates {
+    let backend = crate::ory::KratosBackend {
+        clients: Arc::new(KratosClients::new(
+            &stub.clients.kratos_public.base,
+            &stub.clients.kratos_admin.base,
+        )),
+        https: false,
+    };
+    let cutoff = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    crate::identity::prune_candidates(&backend, cutoff)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn prune_walk_sends_the_last_id_as_page_token() {
+    let stub = Stub::new(vec![
+        ok(&unverified_page(0, 250)),
+        ok(&unverified_page(250, 10)),
+    ])
+    .await;
+    let found = prune_walk(&stub).await;
+    assert_eq!((found.ids.len(), found.scanned, found.pages), (260, 260, 2));
+    let seen = stub.seen();
+    assert_eq!(seen.len(), 2);
+    seen[0].assert("GET", "/adm/admin/identities", Some("page_size=250"));
+    seen[1].assert(
+        "GET",
+        "/adm/admin/identities",
+        Some("page_size=250&page_token=00000000-0000-0000-0000-000000000249"),
+    );
+}
+
+#[tokio::test]
+async fn prune_walk_stops_when_a_page_repeats() {
+    let page = unverified_page(0, 250);
+    let stub = Stub::new(vec![ok(&page), ok(&page)]).await;
+    let found = prune_walk(&stub).await;
+    assert_eq!((found.ids.len(), found.scanned, found.pages), (250, 250, 1));
+    assert_eq!(stub.seen().len(), 2);
 }
 
 /// The `PUT` body that writes `identity.json` back with `state` and `traits`.

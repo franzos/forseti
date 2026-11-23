@@ -1,6 +1,6 @@
 # Native identity backend
 
-For operators running the native build (`identity-native`), which needs Hydra but no Kratos. It covers what differs from the Kratos build: building it, its required settings, sessions, throttles, mail, upstream providers and SAML. Everything both builds share is in the [operator guide](./operator-guide.md); the Kratos build has its own guide, [Kratos identity backend](./operator-guide-kratos.md).
+For operators running the native build (`identity-native`), which needs Hydra but no Kratos. It covers what differs from the Kratos build: building it, its required settings, sessions, WebAuthn, throttles, mail, upstream providers and SAML. Everything both builds share is in the [operator guide](./operator-guide.md); the Kratos build has its own guide, [Kratos identity backend](./operator-guide-kratos.md).
 
 The native build keeps identities, credentials, sessions and the self-service flows (login, registration, verification, recovery, settings, logout) in Forseti's own database. Hydra stays: OAuth2 and OIDC work the same on both builds. The choice is made at compile time with a cargo feature, and a binary carries exactly one identity backend.
 
@@ -23,7 +23,7 @@ Upstream sign-in runs against the providers listed in `[[identity.oidc_providers
 Not available on the native build:
 
 - Apple sign-in and any other provider that is neither OpenID Connect nor GitHub.
-- WebAuthn security keys and passkeys. Second factors are TOTP and backup codes.
+- Passwordless sign-in by emailed code. Passwordless sign-in is by passkey (see [Passkeys and security keys](#passkeys-and-security-keys)).
 - `forseti-config`: there are no Kratos or Hydra files to lint or edit.
 - Moving existing Kratos identities over. The native build is for fresh installs.
 
@@ -62,7 +62,7 @@ client_secret_env = "FORSETI_GOOGLE_CLIENT_SECRET"
 - `password_min_length`: native build only. Shortest accepted password, in characters. Default `8`; Forseti refuses to boot with a value below `8` or above `256`, the maximum password length.
 - `password_breach_check`: native build only. When `true`, a new password is checked against the HaveIBeenPwned range API: Forseti sends the first five hex characters of the password's SHA-1 (with the `Add-Padding` header) and rejects the password if the rest of the hash is in the answer. The lookup times out after 2 s and a failed lookup lets the password through. Default `false`.
 - `login_ip_rate_per_minute`, `login_ip_rate_per_hour`: native build only. Sign-in form submits per client IP (resolved through `[proxy]`); past either bucket the answer is a plain `429` with `Retry-After`. Defaults `20` and `200`, clamped to `1000` and `10000`; `0` turns a bucket off.
-- `login_identifier_rate_per_15m`: native build only. Password attempts per email address in 15 minutes, counted before the account is looked up, so unknown and known addresses throttle alike; past the limit the sign-in form says to try again later. Default `10`, clamped to `1000`; `0` turns it off. Someone who knows an address can use up its attempts and block password sign-in for that address for 15 minutes. TOTP and backup-code attempts are capped at 10 per account in 15 minutes. The counters live in each Forseti process, so several instances each allow their own share.
+- `login_identifier_rate_per_15m`: native build only. Password attempts per email address in 15 minutes, counted before the account is looked up, so unknown and known addresses throttle alike; past the limit the sign-in form says to try again later. Default `10`, clamped to `1000`; `0` turns it off. Someone who knows an address can use up its attempts and block password sign-in for that address for 15 minutes. TOTP, backup-code and security-key attempts are capped at 10 per account in 15 minutes, and passkey attempts at another 10. The counters live in each Forseti process, so several instances each allow their own share.
 - `oidc_providers`: native build only. Upstream sign-in providers, one `[[identity.oidc_providers]]` table each, at most 16; none by default. Forseti checks them at boot without contacting the providers and refuses to start on an invalid entry. What they do, the redirect URI to register and the email rules are under [Upstream sign-in providers](#upstream-sign-in-providers).
   - `id`: 1 to 64 characters of `A-Z`, `a-z`, `0-9`, `.`, `_`, `-`, unique ignoring case. It is the last segment of the redirect URI `<[self].url>/self-service/methods/oidc/callback/<id>` and the value of `idp_hint`.
   - `kind`: `"oidc"` (OpenID Connect, discovery from `issuer`) or `"github"`.
@@ -73,17 +73,17 @@ client_secret_env = "FORSETI_GOOGLE_CLIENT_SECRET"
 
 ## `cookie_secret` is key material
 
-On the native build every identity key is derived from `[security].cookie_secret`: the AES-256-GCM key that encrypts stored TOTP secrets, pending enrolment secrets and queued mail payloads, and the HMAC keys for verification and recovery codes, backup codes and logout links. Changing the secret means:
+On the native build every identity key is derived from `[security].cookie_secret`: the AES-256-GCM key that encrypts stored TOTP secrets, pending enrolment secrets, pending WebAuthn challenges and queued mail payloads, and the HMAC keys for verification and recovery codes, backup codes and logout links. Changing the secret means:
 
 - every enrolled authenticator stops working (the stored TOTP secrets no longer decrypt), so every TOTP user needs an admin recovery code and a fresh enrolment;
 - outstanding verification and recovery codes, backup codes and logout links stop matching;
 - queued mail no longer decrypts and is abandoned unsent.
 
-Passwords and sessions survive: password hashes are Argon2id PHC strings and session tokens are stored as plain SHA-256 hashes. There is no rotation tooling. Back the secret up with the database, and treat losing it like losing the database.
+Passwords, sessions, passkeys and security keys survive: password hashes are Argon2id PHC strings, session tokens are stored as plain SHA-256 hashes, and a WebAuthn key is stored as its public key. There is no rotation tooling. Back the secret up with the database, and treat losing it like losing the database.
 
 ## Mail and the first admin
 
-Mail is a hard requirement, and it shapes the bootstrap. There is no admin seeding verb on the native build: the first admin registers through `/registration` like anyone else, with an address listed in `[admin].allowed_emails`. Registration signs the new account in and shows the verification screen, but the admin surface requires a verified address and AAL2, and a later password sign-in with an unverified address is refused. So the first admin must receive the verification mail, verify, then enrol TOTP at `/settings/2fa` before `/admin` opens. Check that `[email]` delivers before handing out the URL.
+Mail is a hard requirement, and it shapes the bootstrap. There is no admin seeding verb on the native build: the first admin registers through `/registration` like anyone else, with an address listed in `[admin].allowed_emails`. Registration signs the new account in and shows the verification screen, but the admin surface requires a verified address and AAL2, and a later password sign-in with an unverified address is refused. So the first admin must receive the verification mail, verify, then enrol TOTP or a security key at `/settings/2fa` before `/admin` opens. Check that `[email]` delivers before handing out the URL.
 
 ## Sessions
 
@@ -91,10 +91,41 @@ Mail is a hard requirement, and it shapes the bootstrap. There is no admin seedi
 |---|---|
 | Cookie | `forseti_session`, or `__Host-forseti_session` when `[self].url` is https; `HttpOnly`, `SameSite=Lax`, `Path=/`, `Secure` on https, no `Domain` |
 | Lifespan | `[identity].session_lifespan_hours` (default 24), absolute: counted from sign-in, not extended by use |
-| Privileged window | `[identity].privileged_session_minutes` (default 15). Changing the email address, password, TOTP or backup codes, or linking or unlinking a provider, after it lapses sends the browser to a re-authentication first, with the password or a linked `oidc` provider; a name change does not need it |
-| Second factor | An identity with TOTP gets AAL2 only after a TOTP or backup code; until then pages that need a session send it to the step-up. Stepping up moves the session to a new token |
+| Privileged window | `[identity].privileged_session_minutes` (default 15). Changing the email address, password, TOTP or backup codes, adding or removing a passkey or security key, or linking or unlinking a provider, after it lapses sends the browser to a re-authentication first, with the password, a passkey or a linked `oidc` provider; a name change does not need it |
+| Second factor | An identity with TOTP or a security key gets AAL2 only after a TOTP code, a security key or a backup code; until then pages that need a session send it to the step-up. A passkey sign-in is AAL1 and does not replace it. Stepping up moves the session to a new token |
 
-The session token is 32 random bytes; the database keeps its SHA-256 hash. Each session records its AAL, the methods used with their times, and the client IP (resolved through `[proxy]`) and user agent seen at sign-in. Revoking a session at `/settings/sessions` or `/admin/sessions` takes effect on the next request.
+The session token is 32 random bytes; the database keeps its SHA-256 hash. Each session records its AAL, the methods used with their times, and the client IP (resolved through `[proxy]`) and user agent seen at sign-in. Revoking a session at `/settings/sessions` or `/admin/sessions` takes effect on the next request. Disabling an identity at `/admin/identities/{id}` revokes its sessions in the same step, and enabling it again restores none of them.
+
+## Passkeys and security keys
+
+The native build verifies WebAuthn itself (with the `webauthn-rs` library) and serves the browser script from `/static/webauthn.js`. There are two kinds of key, with Kratos's semantics:
+
+| | Passkey | Security key |
+|---|---|---|
+| Role | first factor: signs in without a password or an address | second factor, next to TOTP |
+| Session | AAL1, method `passkey` | raises the session to AAL2, method `webauthn` |
+| Credential | discoverable, user verification required | not discoverable, user verification not required |
+| Where | sign-in page, registration step 2 (instead of a password), re-authentication, `/settings/2fa` | step-up page, `/settings/2fa` |
+
+A passkey sign-in does not satisfy AAL2: an account with TOTP or a security key is still asked for it. Backup codes are offered with either second factor, and removing the last one deletes them. The last way to sign in (password, passkey or a link to a configured provider) cannot be removed.
+
+**No settings.** The relying party comes from `[self].url`: its host is the RP ID, the URL is the only allowed origin, and `[brand].name` ("Forseti" when empty) is the name the authenticator shows. Browsers only offer WebAuthn in a secure context, so Forseti shows the passkey and security-key controls only when `[self].url` is `https`, or `http` on host `localhost`. With an IP address as host or plain `http` elsewhere, the controls are absent and `/settings/2fa` says the method is not enabled.
+
+**Moving to another host invalidates every key.** A key is bound to the RP ID it was created for. After `[self].url` changes host, no passkey or security key works: passkey-only users recover by mailed code and set a password, and users whose second factor was a security key need backup codes or a [second-factor reset](#second-factor-reset). A change of scheme or port alone keeps the RP ID and the keys.
+
+**Adding and removing** happens at `/settings/2fa`, inside the privileged window, for accounts whose address was verified once. A security key gets the name typed next to it (up to 256 characters); a passkey is listed as "Passkey" with its date. Adding the first second factor raises the current session to AAL2. A credential id registers once per install, whichever account holds it.
+
+**Passkey sign-up.** Registration step 2 offers "Sign up with passkey" next to the password field. The account is created without a password; the registering browser gets its session straight away, and every later sign-in needs the verified address, as with a password sign-up. Such an account can add a password later through recovery.
+
+**Limits.**
+
+- Attestation is not checked (`none`), and there is no allow-list of authenticator models.
+- Forseti asks for a discoverable credential when a passkey is created but cannot check that the authenticator made one. A passkey that is not discoverable works for re-authentication, not for sign-in.
+- The passkey buttons are disabled in a browser that reports no platform authenticator, on both builds.
+- There is no cap on the number of keys per account; changes are limited to 10 per 15 minutes.
+- A signature counter that does not advance is refused as a replay or a cloned key (`auth.login_failed`, reason `counter`). Authenticators that keep no counter (most synced passkeys) always report 0 and are accepted.
+
+**Audit.** `mfa.webauthn.added` and `mfa.webauthn.removed` carry `kind` (`passkey` or `webauthn`). A passkey sign-in writes `auth.login` with method `passkey`; a refused one writes `auth.login_failed` with method `passkey` or `webauthn` and a reason (`invalid_credentials`, `throttled`, `counter`, `address_not_verified`). No row carries key material.
 
 ## Throttles
 
@@ -104,7 +135,8 @@ Per-IP limits answer with a plain `429` and `Retry-After`; per-address and per-a
 |---|---|
 | Sign-in submits per client IP | `login_ip_rate_per_minute` / `login_ip_rate_per_hour` (20 / 200) |
 | Password attempts per email address | `login_identifier_rate_per_15m` (10 per 15 minutes), counted before the account is looked up |
-| TOTP and backup-code attempts per account | 10 per 15 minutes |
+| TOTP, backup-code and security-key attempts per account | 10 per 15 minutes, shared |
+| Passkey attempts per account, sign-in and re-authentication together | 10 per 15 minutes; a throttled sign-in answers like a wrong credential |
 | Registration init and submits per client IP, and globally | the `[auth].registration_*` values; a provider sign-up with a provider-verified address spends the submit buckets |
 | Flow starts (`/self-service/{login,recovery,verification,settings}/browser`) per client IP | 60 per minute, 600 per hour |
 | Provider callbacks (`/self-service/methods/oidc/callback/<id>`) per client IP | 60 per minute, 600 per hour, a bucket of its own |
@@ -113,7 +145,7 @@ Per-IP limits answer with a plain `429` and `Retry-After`; per-address and per-a
 | Guesses per code | 5; a code lives 15 minutes |
 | Code guesses per address, across every code mailed to it (verification, recovery, address change, provider sign-up) | 15 per hour; a refused guess gets the wrong-code answer |
 | Settings submits per client IP | 30 per minute, 300 per hour |
-| Email address and password changes per account | 10 per 15 minutes, shared |
+| Email address, password, passkey and security-key changes per account | 10 per 15 minutes, shared |
 
 The per-address password limit is the lockout trade-off: anyone who knows an address can spend its attempts and keep its owner out of password sign-in for 15 minutes, whether or not they know the password. Raising `login_identifier_rate_per_15m` loosens that and gives a password guesser more room; `0` turns it off and leaves only the per-IP buckets.
 
@@ -130,11 +162,17 @@ Two workers run next to the webhook worker and stop with it on shutdown:
 
 ## Tables
 
-The native backend owns seven tables in Forseti's database: `identities`, `identity_credentials` (password, TOTP and backup codes per identity), `identity_oidc_links` (provider links: provider id, provider subject and link date; no upstream tokens), `identity_sessions`, `identity_flows`, `identity_codes` and `identity_mail_outbox`. The migrations create them on both builds, so the schema does not depend on the build; they stay empty on the Ory build. Deleting an identity removes its credentials, provider links, sessions, codes, mail rows and the flows tied to it. Back them up with the rest of Forseti's database (see [Backups](./operator-guide.md#backups)).
+The native backend owns eight tables in Forseti's database: `identities`, `identity_credentials` (password, TOTP and backup codes per identity), `identity_webauthn_keys` (passkeys and security keys: credential id, public key, signature counter, name and date), `identity_oidc_links` (provider links: provider id, provider subject and link date; no upstream tokens), `identity_sessions`, `identity_flows`, `identity_codes` and `identity_mail_outbox`. The migrations create them on both builds, so the schema does not depend on the build; they stay empty on the Ory build. Deleting an identity removes its credentials, WebAuthn keys, provider links, sessions, codes, mail rows and the flows tied to it. Back them up with the rest of Forseti's database (see [Backups](./operator-guide.md#backups)).
 
 ## Admin recovery codes
 
-On `/admin/identities/{id}`, an admin can mint a recovery code (`POST /admin/identities/{id}/recovery`). On the native build this creates a recovery flow that no browser holds yet and a 6-digit code for it; nothing is mailed, and the identity's earlier recovery codes stop working. A disabled identity gets no code: enable it first. The admin hands over the link (`<self>/self-service/recovery?flow=<id>`) and the code out of band. Opening the link takes nothing, so a chat preview or mail scanner that fetches it leaves it usable, and the page shows no account data. The first browser to submit on the page takes the flow; any other browser gets the expired-flow page. Entering the code (5 guesses, 15 minutes; the per-address code-guess limit does not apply) signs the user in at AAL1 and opens the password page within the privileged window. An identity with TOTP still steps up before settings open, with TOTP or a backup code, so a recovery code does not get a user past a lost authenticator without backup codes.
+On `/admin/identities/{id}`, an admin can mint a recovery code (`POST /admin/identities/{id}/recovery`). On the native build this creates a recovery flow that no browser holds yet and a 6-digit code for it; nothing is mailed, and the identity's earlier recovery codes stop working. A disabled identity gets no code: enable it first. The admin hands over the link (`<self>/self-service/recovery?flow=<id>`) and the code out of band. Opening the link takes nothing, so a chat preview or mail scanner that fetches it leaves it usable, and the page shows no account data. The first browser to submit on the page takes the flow; any other browser gets the expired-flow page. Entering the code (5 guesses, 15 minutes; the per-address code-guess limit does not apply) signs the user in at AAL1 and opens the password page within the privileged window. An identity with a second factor still steps up before settings open, with TOTP, a security key or a backup code, so a recovery code does not get a user past a lost authenticator without backup codes. That case needs a second-factor reset (below).
+
+## Second-factor reset
+
+A user who lost their authenticator and their backup codes cannot pass the step-up, and a recovery code does not help. On `/admin/identities/{id}`, "Reset 2FA" shows for an identity with TOTP or a security key. After a confirm page it deletes the identity's TOTP secret, security keys and backup codes; passkeys, the password and sessions stay. The audit row is `admin.identity.second_factors_reset` (critical) with the kinds removed and the number of security keys.
+
+Sessions are not revoked: a session that was waiting at the step-up becomes a full session once no second factor is left. Whoever knows the password can then sign in and enrol a factor of their own, so check who is asking before you reset. An admin can reset their own second factors; `/admin` stays open for that session and needs a newly enrolled factor after the next sign-in.
 
 ## Upstream sign-in providers
 
@@ -157,11 +195,11 @@ It is the path Kratos uses, so an install moving from the Ory build re-registers
 
 **No automatic linking.** A provider sign-in whose address belongs to an existing account does not sign in to that account: the user sees the registration page with the "account exists" message, signs in with what they have, and links the provider under Settings, Linked providers. A provider sign-up never creates an account for an address on `[admin].allowed_emails`; an admin registers with a password and links the provider afterwards. A provider account links to one Forseti account at most, and an account links to each provider once.
 
-**Linking and unlinking.** Both need the privileged window; past it the browser goes to the re-authentication page first. An account whose address was never verified cannot link a provider (see below). Unlink is offered, and accepted, only while the account keeps another way to sign in: a password, or a link to another configured provider.
+**Linking and unlinking.** Both need the privileged window; past it the browser goes to the re-authentication page first. An account whose address was never verified cannot link a provider (see below). Unlink is offered, and accepted, only while the account keeps another way to sign in: a password, a passkey, or a link to another configured provider.
 
 **A provider `id` is permanent for its issuer.** Links are stored by `(id, subject)`. Pointing an existing `id` at another issuer or switching its `kind` hands every existing link to whichever account of the new provider carries the same subject. Add a new entry with a new `id` instead. Removing an entry leaves its links in the database: nobody can sign in through them, they show on the linked-providers page without an Unlink button, and they no longer count as a way to sign in when another provider is unlinked.
 
-**Sessions and re-authentication.** A provider sign-in issues an AAL1 session (method `oidc`, with the provider id); an account with TOTP still steps up with its second factor. The re-authentication page (`/login?refresh=true`) offers the password and every configured `oidc` provider linked to the account. Those providers are sent `max_age=0` and must return an `auth_time` claim no earlier than the moment the user was sent to the provider and no later than the callback, each with 60 seconds of clock skew, or the attempt is refused. GitHub is not accepted for re-authentication: it has no way to ask for a fresh login and reports no login time. A GitHub-only account signs out and in again to reopen the privileged window, and should set a password to pass an OAuth client's `prompt=login`.
+**Sessions and re-authentication.** A provider sign-in issues an AAL1 session (method `oidc`, with the provider id); an account with TOTP or a security key still steps up with its second factor. The re-authentication page (`/login?refresh=true`) offers the password, a passkey of the account and every configured `oidc` provider linked to the account. Those providers are sent `max_age=0` and must return an `auth_time` claim no earlier than the moment the user was sent to the provider and no later than the callback, each with 60 seconds of clock skew, or the attempt is refused. GitHub is not accepted for re-authentication: it has no way to ask for a fresh login and reports no login time. A GitHub-only account signs out and in again to reopen the privileged window, and should set a password to pass an OAuth client's `prompt=login`.
 
 **CSP.** `form-action` carries each configured provider's issuer origin (`https://github.com` for `github`) on the pages that show its button, so no `[security].extra_form_action` entry is needed. A provider whose authorization endpoint is on another host than its `issuer` does need one, with that endpoint's origin.
 
@@ -173,10 +211,10 @@ It is the path Kratos uses, so an install moving from the Ory build re-registers
 
 An account counts as never verified until a code mailed to its address has been entered once (verification, recovery or an address change), unless it was created verified (a provider sign-up with a provider-verified address, a SAML just-in-time account). An address change does not reset that state. Three rules hang off it, so that someone who registered an address they do not own keeps nothing once the owner proves it:
 
-- **Recovery by mailed code resets the account.** Before the recovering user gets a session, Forseti revokes the account's sessions, deletes its password, TOTP, backup codes, provider links and offline passphrase, drops its outstanding codes and pending address changes, and ends its OAuth sessions and grants at Hydra. The user then sets a new password on the recovery handoff page. The `password.recovered` audit row carries `unverified_reset: true` and the counts of what went. Organization memberships, profile fields and resource claims stay. A recovery code an admin minted proves no mailbox and resets nothing.
-- **No second factor or provider link before verification.** Enrolling TOTP, generating backup codes and linking a provider are refused with "Account not active yet. Did you forget to verify your email address?" (message `4000010`).
-- **An email change stays pending until proven.** The account keeps its current address, verified mark and sign-in until the code mailed to the new address is entered, from a browser signed in to that account: a signed-out browser is sent to sign in first, an account with TOTP to its second factor, then back to the code page. A newer change request replaces the pending one. The audit rows are `profile.updated` with `address_change: requested`, then `verification.completed` with `address_change: applied`.
+- **Recovery by mailed code resets the account.** Before the recovering user gets a session, Forseti revokes the account's sessions, deletes its password, TOTP, backup codes, passkeys, security keys, provider links and offline passphrase, drops its outstanding codes and pending address changes, and ends its OAuth sessions and grants at Hydra. The user then sets a new password on the recovery handoff page. The `password.recovered` audit row carries `unverified_reset: true` and the counts of what went. Organization memberships, profile fields and resource claims stay. A recovery code an admin minted proves no mailbox and resets nothing.
+- **No second factor, WebAuthn key or provider link before verification.** Enrolling TOTP, generating backup codes, adding a passkey or security key and linking a provider are refused with "Account not active yet. Did you forget to verify your email address?" (message `4000010`).
+- **An email change stays pending until proven.** The account keeps its current address, verified mark and sign-in until the code mailed to the new address is entered, from a browser signed in to that account: a signed-out browser is sent to sign in first, an account with TOTP or a security key to its second factor, then back to the code page. A newer change request replaces the pending one. The audit rows are `profile.updated` with `address_change: requested`, then `verification.completed` with `address_change: applied`.
 
 ## SAML SSO
 
-With `[saml]` configured and a license with the `saml` feature, `/sso/*` and `/admin/saml` work as on the Ory build; see [Enterprise SAML SSO](./commercial/saml.md). The session is issued directly: an AAL1 session with method `saml` and no `amr` claim in ID tokens, with no Kratos recovery link involved, so none of the Kratos `link` method setup applies. A disabled account, or one whose address was never verified, gets no session. `[saml].identity_schema_id` is not read. When the assertion names an existing account, the confirm step goes through the re-authentication page, with the account's password or a linked `oidc` provider.
+With `[saml]` configured and a license with the `saml` feature, `/sso/*` and `/admin/saml` work as on the Ory build; see [Enterprise SAML SSO](./commercial/saml.md). The session is issued directly: an AAL1 session with method `saml` and no `amr` claim in ID tokens, with no Kratos recovery link involved, so none of the Kratos `link` method setup applies. A disabled account, or one whose address was never verified, gets no session. `[saml].identity_schema_id` is not read. When the assertion names an existing account, the confirm step goes through the re-authentication page, with the account's password, a passkey or a linked `oidc` provider.

@@ -5,8 +5,9 @@
 // container) and session probes go through Forseti itself.
 //
 // Writes that need the server's keys (password hashes, TOTP secrets) never
-// happen here: specs drive the UI for those. The one native write is
-// `markEmailVerified`, the counterpart of the Kratos JSON Patch.
+// happen here: specs drive the UI for those. The native writes are
+// `markEmailVerified`, the counterpart of the Kratos JSON Patch, and
+// `backdateSignIn`.
 import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -147,6 +148,38 @@ export async function markEmailVerified(request: APIRequestContext, email: strin
     ],
   });
   expect(patch.ok(), `PATCH identity returned ${patch.status()}: ${await patch.text()}`).toBeTruthy();
+}
+
+/** AAL and method names of an identity's newest live session. Native only. */
+export async function liveSession(
+  email: string,
+): Promise<{ aal: string; methods: string[] } | undefined> {
+  const row = await withDb(true, (db) =>
+    db
+      .prepare(
+        'SELECT s.aal, s.methods FROM identity_sessions s JOIN identities i ON i.id = s.identity_id WHERE i.email_norm = ? AND s.revoked_at IS NULL ORDER BY s.issued_at DESC LIMIT 1',
+      )
+      .get(email.toLowerCase()),
+  );
+  if (!row) return undefined;
+  const methods = JSON.parse(row.methods as string) as Array<{ method: string }>;
+  return { aal: row.aal as string, methods: methods.map((m) => m.method) };
+}
+
+/**
+ * Move the sign-in time of an identity's live sessions `minutes` into the past,
+ * outside the privileged window. Native only.
+ */
+export async function backdateSignIn(email: string, minutes: number): Promise<void> {
+  const at = new Date(Date.now() - minutes * 60_000).toISOString();
+  const changes = await withDb(false, (db) =>
+    db
+      .prepare(
+        'UPDATE identity_sessions SET authenticated_at = ? WHERE revoked_at IS NULL AND identity_id = (SELECT id FROM identities WHERE email_norm = ?)',
+      )
+      .run(at, email.toLowerCase()).changes,
+  );
+  expect(Number(changes), `no live session for ${email}`).toBeGreaterThan(0);
 }
 
 /**

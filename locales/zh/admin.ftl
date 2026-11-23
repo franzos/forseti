@@ -47,6 +47,8 @@ admin-identity-action-generate-recovery = 生成恢复代码
 admin-identity-action-disable = 停用
 admin-identity-action-enable = 启用
 admin-identity-action-delete = 删除
+admin-identity-action-reset-second-factors = 重置两步验证
+dialog-reset-second-factors-failed-title = 重置两步验证失败
 admin-identity-section-traits = 属性
 admin-identity-section-addresses = 可验证地址
 admin-identity-addresses-empty = 该身份没有可验证地址。
@@ -638,6 +640,8 @@ admin-saml-not-configured-part4 = 。
 # Admin flash messages (shown as banner after a redirect)
 flash-identity-disabled = 身份已停用。
 flash-identity-enabled = 身份已启用。
+flash-identity-second-factors-reset = 两步验证已重置。
+flash-identity-second-factors-none = 此身份没有可重置的两步验证。
 flash-session-revoked = 会话已撤销。
 flash-client-create-failed = 创建客户端失败：{ $error }
 flash-client-account-deletion-url-rejected = 账号删除 URL 被拒绝：{ $error }

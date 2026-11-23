@@ -167,9 +167,8 @@ async fn build_account_health(state: &AppState, session: &Session, cookie: &str)
     let (two_factor_enabled, two_factor_without_recovery_codes, linked_providers) =
         match identity_res {
             Ok(identity) => {
+                let (two_factor, without_codes) = second_factor_badges(&identity);
                 let creds = identity.credentials.unwrap_or_default();
-                let two_factor = creds_indicate_second_factor(&creds);
-                let without_codes = two_factor_without_recovery_codes(&creds);
                 let oidc_count = creds
                     .get("oidc")
                     .and_then(|c| c.identifiers.as_ref().map(|ids| ids.len()))
@@ -210,12 +209,20 @@ fn creds_indicate_second_factor(
     })
 }
 
-/// A device second factor (TOTP/WebAuthn) with no `lookup_secret` is the
-/// self-lockout trap; `lookup_secret` present clears it, no factor clears it.
-fn two_factor_without_recovery_codes(
-    creds: &std::collections::HashMap<String, crate::backend::identity::Credential>,
-) -> bool {
-    creds_indicate_second_factor(creds) && !creds.contains_key("lookup_secret")
+/// Whether a second factor is enrolled, and whether it lacks recovery codes: a
+/// device second factor (TOTP/WebAuthn) with no `lookup_secret` is the
+/// self-lockout trap. The backend's `has_second_factor` wins over the
+/// credential config shape when it gives one.
+pub(crate) fn second_factor_badges(identity: &crate::backend::identity::Identity) -> (bool, bool) {
+    let empty = std::collections::HashMap::new();
+    let creds = identity.credentials.as_ref().unwrap_or(&empty);
+    let two_factor = identity
+        .has_second_factor
+        .unwrap_or_else(|| creds_indicate_second_factor(creds));
+    (
+        two_factor,
+        two_factor && !creds.contains_key("lookup_secret"),
+    )
 }
 
 #[cfg(test)]
@@ -224,12 +231,20 @@ mod tests {
     //! false-positive: Kratos seeds `credentials.webauthn.identifiers` with the
     //! user's email on every password identity, so an `identifiers.is_empty()`
     //! check flips the badge on for users who never enrolled.
-    use super::{creds_indicate_second_factor, two_factor_without_recovery_codes};
-    use crate::backend::identity::Credential;
+    use super::{creds_indicate_second_factor, second_factor_badges};
+    use crate::backend::identity::{Credential, Identity};
     use std::collections::HashMap;
 
     fn empty_cred() -> Credential {
         Credential::default()
+    }
+
+    fn identity(creds: HashMap<String, Credential>, has_second_factor: Option<bool>) -> Identity {
+        Identity {
+            credentials: Some(creds),
+            has_second_factor,
+            ..Default::default()
+        }
     }
 
     /// Pre-stub: `identifiers` seeded but `config` carries no `credentials`
@@ -299,7 +314,7 @@ mod tests {
     fn device_factor_without_lookup_needs_recovery_codes() {
         let mut creds = HashMap::new();
         creds.insert("totp".to_string(), empty_cred());
-        assert!(two_factor_without_recovery_codes(&creds));
+        assert_eq!(second_factor_badges(&identity(creds, None)), (true, true));
     }
 
     #[test]
@@ -307,13 +322,34 @@ mod tests {
         let mut creds = HashMap::new();
         creds.insert("totp".to_string(), empty_cred());
         creds.insert("lookup_secret".to_string(), empty_cred());
-        assert!(!two_factor_without_recovery_codes(&creds));
+        assert_eq!(second_factor_badges(&identity(creds, None)), (true, false));
     }
 
     #[test]
     fn no_second_factor_does_not_need_recovery_codes() {
         let mut creds = HashMap::new();
         creds.insert("password".to_string(), empty_cred());
-        assert!(!two_factor_without_recovery_codes(&creds));
+        assert_eq!(second_factor_badges(&identity(creds, None)), (false, false));
+    }
+
+    #[test]
+    fn the_backend_fact_wins_over_the_config_shape() {
+        let mut creds = HashMap::new();
+        creds.insert("password".to_string(), empty_cred());
+        creds.insert("webauthn".to_string(), empty_cred());
+        assert_eq!(
+            second_factor_badges(&identity(creds.clone(), Some(true))),
+            (true, true)
+        );
+        creds.insert("lookup_secret".to_string(), empty_cred());
+        assert_eq!(
+            second_factor_badges(&identity(creds.clone(), Some(true))),
+            (true, false)
+        );
+        creds.insert("passkey".to_string(), webauthn_enrolled());
+        assert_eq!(
+            second_factor_badges(&identity(creds, Some(false))),
+            (false, false)
+        );
     }
 }

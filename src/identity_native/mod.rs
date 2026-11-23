@@ -24,10 +24,15 @@ pub(crate) mod seed;
 mod session;
 mod store;
 #[cfg(test)]
+mod test_authenticator;
+#[cfg(test)]
 mod test_support;
 mod totp;
 mod ui;
 pub(crate) mod upstream;
+mod webauthn;
+
+pub(crate) use store::keys::SecondFactorsReset;
 
 pub struct NativeBackend {
     db: DbPool,
@@ -51,15 +56,17 @@ pub struct NativeBackend {
     upstream: upstream::Upstream,
     /// `[admin].allowed_emails`; a provider sign-up never creates an identity for one.
     admin: crate::config::AdminConfig,
+    /// `None` when `[self].url` is not a secure context; no WebAuthn is offered then.
+    webauthn: Option<webauthn_rs::Webauthn>,
 }
 
 /// Keys each in-process attempt counter tracks at most; see [`KeyedQuota::bounded`] for a full map.
 const LIMITER_MAX_KEYS: usize = 10_000;
 
-/// Per-identity cap on TOTP and lookup-code attempts in [`ATTEMPT_WINDOW`].
+/// Per-identity cap on second-factor attempts, and separately on passkey attempts, in [`ATTEMPT_WINDOW`].
 const SECOND_FACTOR_ATTEMPTS: usize = 10;
 
-/// Per-identity cap on email and password change attempts in [`ATTEMPT_WINDOW`].
+/// Per-identity cap on email, password and WebAuthn key change attempts in [`ATTEMPT_WINDOW`].
 const SETTINGS_CHANGES: usize = 10;
 
 const ATTEMPT_WINDOW: std::time::Duration = std::time::Duration::from_secs(15 * 60);
@@ -80,7 +87,7 @@ struct Limiters {
     password: KeyedQuota,
     /// TOTP and lookup-code attempts, keyed by identity id.
     second_factor: KeyedQuota,
-    /// Email and password changes in settings, keyed by identity id.
+    /// Email, password and WebAuthn key changes in settings, keyed by identity id.
     settings_changes: KeyedQuota,
     /// Code mail requests, keyed by [`store::address_key`] of the address typed.
     recipient: KeyedQuota,
@@ -146,12 +153,13 @@ impl NativeBackend {
     fn build(cfg: &AppConfig, db: &DbPool, cookie_secret: &[u8]) -> Self {
         let hash_concurrency = std::thread::available_parallelism().map_or(1, usize::from);
         let brand = cfg.brand.name.trim();
+        let site_name = if brand.is_empty() { "Forseti" } else { brand };
         Self {
             db: db.clone(),
             settings: cfg.identity.clone(),
             self_url: cfg.self_.url.trim_end_matches('/').to_string(),
             https: cfg.self_.is_https(),
-            totp_issuer: if brand.is_empty() { "Forseti" } else { brand }.to_string(),
+            totp_issuer: site_name.to_string(),
             keys: Keys::derive(cookie_secret),
             cookie_secret: cookie_secret.into(),
             limiters: Limiters::new(&cfg.identity),
@@ -170,6 +178,7 @@ impl NativeBackend {
             )
             .expect("[identity].oidc_providers is checked before the backend is built"),
             admin: cfg.admin.clone(),
+            webauthn: webauthn::relying_party(&cfg.self_.url, site_name),
         }
     }
 

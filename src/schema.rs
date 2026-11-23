@@ -4,7 +4,8 @@
 //! strings, except the `bytes` columns on `org_logos` / `client_logos`
 //! which are `Binary` (`BLOB`/`BYTEA`), and `resource_registry` whose DDL
 //! uses native `BIGSERIAL`/`BOOLEAN`/`TIMESTAMP` on postgres, so it maps
-//! `BigInt`/`Bool`/`Timestamp` (valid for both backends).
+//! `BigInt`/`Bool`/`Timestamp` (valid for both backends), and
+//! `identity_webauthn_keys.sign_count`, which is `BIGINT` on postgres and `BigInt`.
 //! See `migrations/{sqlite,postgres}/...` for the SQL.
 
 diesel::table! {
@@ -432,6 +433,21 @@ diesel::table! {
 }
 
 diesel::table! {
+    identity_webauthn_keys (id) {
+        id -> Text,
+        identity_id -> Text,
+        kind -> Text,
+        credential_id -> Text,
+        display_name -> Text,
+        credential -> Text,
+        sign_count -> BigInt,
+        version -> Integer,
+        created_at -> Text,
+        updated_at -> Text,
+    }
+}
+
+diesel::table! {
     identity_sessions (id) {
         id -> Text,
         identity_id -> Text,
@@ -506,11 +522,13 @@ diesel::allow_tables_to_appear_in_same_query!(organizations, org_allowed_domains
 diesel::joinable!(identity_credentials -> identities (identity_id));
 diesel::joinable!(identity_sessions -> identities (identity_id));
 diesel::joinable!(identity_oidc_links -> identities (identity_id));
+diesel::joinable!(identity_webauthn_keys -> identities (identity_id));
 diesel::allow_tables_to_appear_in_same_query!(
     identities,
     identity_credentials,
     identity_sessions,
-    identity_oidc_links
+    identity_oidc_links,
+    identity_webauthn_keys
 );
 diesel::allow_tables_to_appear_in_same_query!(posix_group_members, posix_accounts);
 diesel::allow_tables_to_appear_in_same_query!(

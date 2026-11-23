@@ -188,8 +188,12 @@ pub(crate) fn page_flags(flow: &Flow) -> PageFlags {
     let lookup_just_regenerated = !flow.lookup_codes.is_empty();
     // Enrolment (vs merely-enabled) is signalled by the per-credential remove
     // node Kratos emits for each registered authenticator.
+    #[cfg(feature = "identity-ory")]
     let webauthn_enrolled =
         flow.has_node("webauthn", "webauthn_remove") || flow.has_node("passkey", "passkey_remove");
+    // A native passkey is a way to sign in, not a second factor.
+    #[cfg(feature = "identity-native")]
+    let webauthn_enrolled = flow.has_node("webauthn", "webauthn_remove");
     PageFlags {
         totp_enrolled,
         lookup_enrolled,
@@ -223,5 +227,44 @@ fn promote_primary(nodes: &mut [InputView], primary_names: &[&str]) {
         {
             first.is_primary = true;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::page_flags;
+    use crate::flow_json::project;
+
+    fn remove_node(group: &str, name: &str) -> serde_json::Value {
+        json!({
+            "type": "input",
+            "group": group,
+            "attributes": { "name": name, "type": "submit", "value": "row" },
+            "messages": [],
+        })
+    }
+
+    fn needs_recovery_codes(nodes: &[serde_json::Value]) -> bool {
+        page_flags(&project(&json!({ "ui": { "nodes": nodes } }))).needs_recovery_codes
+    }
+
+    #[test]
+    fn a_security_key_without_lookup_codes_needs_recovery_codes() {
+        assert!(needs_recovery_codes(&[remove_node(
+            "webauthn",
+            "webauthn_remove"
+        )]));
+        assert!(!needs_recovery_codes(&[]));
+    }
+
+    #[test]
+    fn a_passkey_counts_as_a_second_factor_only_on_kratos() {
+        let passkey = [remove_node("passkey", "passkey_remove")];
+        assert_eq!(
+            needs_recovery_codes(&passkey),
+            cfg!(feature = "identity-ory")
+        );
     }
 }

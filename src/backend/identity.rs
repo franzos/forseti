@@ -140,6 +140,9 @@ pub struct Identity {
     /// Whether upstream links are the identity's only way in, as the backend counts them.
     /// `None` when the backend leaves that to the credential configs.
     pub sole_sign_in_is_oidc: Option<bool>,
+    /// Whether the identity has TOTP or a security key, as the backend counts them. `None` when
+    /// the backend leaves that to the credential configs.
+    pub has_second_factor: Option<bool>,
 }
 
 /// One-shot admin-minted recovery code and the link that redeems it.

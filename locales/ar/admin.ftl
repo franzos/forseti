@@ -47,6 +47,8 @@ admin-identity-action-generate-recovery = إنشاء رمز استرداد
 admin-identity-action-disable = تعطيل
 admin-identity-action-enable = تفعيل
 admin-identity-action-delete = حذف
+admin-identity-action-reset-second-factors = إعادة تعيين المصادقة الثنائية
+dialog-reset-second-factors-failed-title = فشل إعادة تعيين المصادقة الثنائية
 admin-identity-section-traits = السمات
 admin-identity-section-addresses = العناوين القابلة للتحقق
 admin-identity-addresses-empty = لا توجد عناوين قابلة للتحقق على هذه الهوية.
@@ -643,6 +645,8 @@ admin-saml-not-configured-part4 = .
 # رسائل تنبيه الإدارة (تُعرَض كشريط بعد إعادة التوجيه)
 flash-identity-disabled = تم تعطيل الهوية.
 flash-identity-enabled = تم تفعيل الهوية.
+flash-identity-second-factors-reset = تمت إعادة تعيين المصادقة الثنائية.
+flash-identity-second-factors-none = لا توجد مصادقة ثنائية لهذه الهوية لإعادة تعيينها.
 flash-session-revoked = تم إلغاء الجلسة.
 flash-client-create-failed = فشل إنشاء العميل: { $error }
 flash-client-account-deletion-url-rejected = رُفض رابط حذف الحساب: { $error }

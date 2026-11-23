@@ -102,19 +102,29 @@ pub(super) enum Screen<'a> {
 
 pub(super) enum Login<'a> {
     /// Sign-in with identifier and password; `identifier` echoes a failed attempt. `providers` are
-    /// the configured upstream providers.
+    /// the configured upstream providers, `passkey` the options of a discoverable sign-in.
     Password {
         identifier: &'a str,
         providers: &'a [&'a str],
+        passkey: Option<&'a str>,
     },
     /// Re-authentication of the signed-in identity; `providers` are the configured `oidc` ones it
-    /// is linked to.
+    /// is linked to, `passkey` the options for one of its passkeys, `password` shows the password
+    /// inputs.
     Refresh {
         identifier: &'a str,
         providers: &'a [&'a str],
+        passkey: Option<&'a str>,
+        password: bool,
     },
-    /// Second factor; with neither factor enrolled only the CSRF token and message 1010004 remain.
-    SecondFactor { totp: bool, lookup: bool },
+    /// Second factor; `lookup` only alongside TOTP or a security key, `key` the options for one of
+    /// the identity's security keys. With none of them only the CSRF token and message 1010004
+    /// remain.
+    SecondFactor {
+        totp: bool,
+        lookup: bool,
+        key: Option<&'a str>,
+    },
 }
 
 pub(super) enum Registration<'a> {
@@ -123,10 +133,12 @@ pub(super) enum Registration<'a> {
         traits: Traits<'a>,
         providers: &'a [&'a str],
     },
-    /// Step 2: the traits ride along hidden while a password is chosen.
+    /// Step 2: the traits ride along hidden while a password or, with `passkey` options, a
+    /// passkey is chosen.
     Password {
         traits: Traits<'a>,
         providers: &'a [&'a str],
+        passkey: Option<&'a str>,
     },
     /// A provider sign-up without a verified address: the address to use and the provider
     /// whose submit continues the sign-up.
@@ -157,8 +169,29 @@ pub(super) struct Settings<'a> {
     pub(super) handoff: Option<Handoff>,
     /// Configured upstream providers, each with whether the identity is linked to it.
     pub(super) providers: &'a [(&'a str, bool)],
-    /// With a password any link may be removed; without one, all but the last.
-    pub(super) has_password: bool,
+    /// A password or a passkey: then any link may be removed; without, all but the last.
+    pub(super) other_sign_in: bool,
+    /// Passkeys and security keys; `None` without a relying party.
+    pub(super) keys: Option<Keys<'a>>,
+}
+
+pub(super) struct Keys<'a> {
+    /// Security-key registration options, `{"publicKey":{…}}`.
+    pub(super) key_options: &'a str,
+    /// Passkey registration options, `{"publicKey":{…}}`.
+    pub(super) passkey_options: &'a str,
+    pub(super) enrolled: &'a [Enrolled<'a>],
+    /// Removing a passkey leaves a way to sign in.
+    pub(super) passkey_removable: bool,
+}
+
+/// A stored key, offered for removal.
+pub(super) struct Enrolled<'a> {
+    /// Row id, the value of the remove submit.
+    pub(super) id: &'a str,
+    pub(super) name: &'a str,
+    pub(super) added_at: chrono::DateTime<chrono::Utc>,
+    pub(super) passkey: bool,
 }
 
 pub(super) enum Totp<'a> {
@@ -173,9 +206,9 @@ pub(super) enum Totp<'a> {
 /// Lookup states. Stored codes are MACs and are shown only at generation, so unlike Kratos there
 /// is no reveal and no revealed state.
 pub(super) enum Lookup<'a> {
-    /// No TOTP, so no lookup group at all.
+    /// No TOTP and no security key, so no lookup group at all.
     Unavailable,
-    /// TOTP enrolled, no codes yet.
+    /// A second factor enrolled, no codes yet.
     Offer,
     /// Fresh codes waiting for confirmation.
     Generated(&'a [String]),
@@ -273,6 +306,18 @@ fn login_nodes(login: &Login<'_>, csrf: Node, nodes: &mut Vec<Node>, messages: &
         Login::Password { providers, .. } | Login::Refresh { providers, .. } => providers,
         Login::SecondFactor { .. } => &[][..],
     };
+    match login {
+        Login::Password { passkey, .. } | Login::Refresh { passkey, .. } => {
+            if let Some(options) = passkey {
+                passkey_login(options, nodes);
+            }
+        }
+        Login::SecondFactor { key, .. } => {
+            if let Some(options) = key {
+                key_login(options, nodes);
+            }
+        }
+    }
     nodes.extend(providers.iter().map(|id| sign_in(id)));
     nodes.push(csrf);
     match login {
@@ -287,7 +332,11 @@ fn login_nodes(login: &Login<'_>, csrf: Node, nodes: &mut Vec<Node>, messages: &
             nodes.push(password("current-password"));
             nodes.push(method("password", 1_010_022, "Sign in with password"));
         }
-        Login::Refresh { identifier, .. } => {
+        Login::Refresh {
+            identifier,
+            password: with_password,
+            ..
+        } => {
             messages.push(
                 Message::info(
                     1_010_003,
@@ -296,10 +345,12 @@ fn login_nodes(login: &Login<'_>, csrf: Node, nodes: &mut Vec<Node>, messages: &
                 .to_json(),
             );
             nodes.push(input("default", "identifier", "hidden").value(identifier));
-            nodes.push(password("current-password"));
-            nodes.push(method("password", 1_010_001, "Sign in"));
+            if *with_password {
+                nodes.push(password("current-password"));
+                nodes.push(method("password", 1_010_001, "Sign in"));
+            }
         }
-        Login::SecondFactor { totp, lookup } => {
+        Login::SecondFactor { totp, lookup, .. } => {
             messages.push(
                 Message::info(
                     1_010_004,
@@ -314,18 +365,18 @@ fn login_nodes(login: &Login<'_>, csrf: Node, nodes: &mut Vec<Node>, messages: &
                         .label(label(1_010_006, "Authentication code")),
                 );
                 nodes.push(method("totp", 1_010_009, "Use Authenticator"));
-                if *lookup {
-                    nodes.push(
-                        input("lookup_secret", "lookup_secret", "text")
-                            .required()
-                            .label(label(1_010_007, "Backup recovery code")),
-                    );
-                    nodes.push(method(
-                        "lookup_secret",
-                        1_010_010,
-                        "Use backup recovery code",
-                    ));
-                }
+            }
+            if *lookup {
+                nodes.push(
+                    input("lookup_secret", "lookup_secret", "text")
+                        .required()
+                        .label(label(1_010_007, "Backup recovery code")),
+                );
+                nodes.push(method(
+                    "lookup_secret",
+                    1_010_010,
+                    "Use backup recovery code",
+                ));
             }
         }
     }
@@ -356,7 +407,12 @@ fn registration_nodes(
                 .attr("autocomplete", "email")
                 .label(email_label()),
         ),
-        Registration::Password { traits, .. } => {
+        Registration::Password {
+            traits, passkey, ..
+        } => {
+            if let Some(options) = passkey {
+                passkey_signup(options, nodes);
+            }
             messages.push(
                 Message::info(
                     1_040_009,
@@ -495,7 +551,7 @@ fn settings_nodes(settings: &Settings<'_>, nodes: &mut Vec<Node>, messages: &mut
         if !linked {
             let text = format!("Link {}", display(id));
             nodes.push(provider_submit("link", id, 1_050_002, &text, false));
-        } else if settings.has_password || another_link() {
+        } else if settings.other_sign_in || another_link() {
             let text = format!("Unlink {}", display(id));
             nodes.push(provider_submit("unlink", id, 1_050_003, &text, false));
         }
@@ -576,6 +632,127 @@ fn settings_nodes(settings: &Settings<'_>, nodes: &mut Vec<Node>, messages: &mut
             nodes.push(disable());
         }
     }
+
+    if let Some(keys) = &settings.keys {
+        settings_key_nodes(keys, nodes);
+    }
+}
+
+/// The script that runs the ceremonies the trigger buttons name.
+fn webauthn_script() -> Node {
+    Node::Raw(json!({
+        "type": "script",
+        "group": "webauthn",
+        "attributes": {
+            "src": "/static/webauthn.js",
+            "async": true,
+            "type": "text/javascript",
+            "id": "webauthn_script",
+            "node_type": "script",
+        },
+        "messages": [],
+        "meta": {},
+    }))
+}
+
+/// A `button` calling `window.<trigger>()`; `value` is empty or the ceremony options.
+fn trigger(group: &str, name: &str, trigger: &str, value: &str, label: Value) -> Node {
+    input(group, name, "button")
+        .value(value)
+        .attr("onclick", format!("window.{trigger}()"))
+        .attr("onclickTrigger", trigger)
+        .label(label)
+}
+
+fn passkey_login(options: &str, nodes: &mut Vec<Node>) {
+    nodes.push(webauthn_script());
+    nodes.push(trigger(
+        "passkey",
+        "passkey_login_trigger",
+        "oryPasskeyLogin",
+        "",
+        label(1_010_021, "Sign in with passkey"),
+    ));
+    nodes.push(input("passkey", "passkey_login", "hidden"));
+    nodes.push(input("passkey", "passkey_challenge", "hidden").value(options));
+}
+
+fn key_login(options: &str, nodes: &mut Vec<Node>) {
+    nodes.push(webauthn_script());
+    nodes.push(trigger(
+        "webauthn",
+        "webauthn_login_trigger",
+        "oryWebAuthnLogin",
+        options,
+        label(1_010_008, "Sign in with hardware key"),
+    ));
+    nodes.push(input("webauthn", "webauthn_login", "hidden"));
+}
+
+fn passkey_signup(options: &str, nodes: &mut Vec<Node>) {
+    nodes.push(webauthn_script());
+    nodes.push(trigger(
+        "passkey",
+        "passkey_register_trigger",
+        "oryPasskeyRegistration",
+        "",
+        label(1_040_007, "Sign up with passkey"),
+    ));
+    nodes.push(input("passkey", "passkey_register", "hidden"));
+    nodes.push(input("passkey", "passkey_create_data", "hidden").value(options));
+}
+
+fn settings_key_nodes(keys: &Keys<'_>, nodes: &mut Vec<Node>) {
+    let remove = |key: &Enrolled<'_>| {
+        let (group, label_id, noun) = if key.passkey {
+            ("passkey", 1_050_020, "passkey")
+        } else {
+            ("webauthn", 1_050_018, "security key")
+        };
+        let added_at = crate::db::rfc3339(key.added_at);
+        input(group, &format!("{group}_remove"), "submit")
+            .value(key.id)
+            .label(json!({
+                "id": label_id,
+                "text": format!("Remove {noun} \"{}\"", key.name),
+                "type": "info",
+                "context": {
+                    "display_name": key.name,
+                    "added_at": added_at,
+                    "added_at_unix": key.added_at.timestamp(),
+                },
+            }))
+    };
+    let security_keys = keys.enrolled.iter().filter(|k| !k.passkey);
+    let passkeys = keys.enrolled.iter().filter(|k| k.passkey);
+
+    nodes.extend(security_keys.map(remove));
+    nodes.push(
+        input("webauthn", "webauthn_register_displayname", "text")
+            .label(label(1_050_013, "Name of the security key")),
+    );
+    nodes.push(input("webauthn", "webauthn_register", "hidden"));
+    nodes.push(trigger(
+        "webauthn",
+        "webauthn_register_trigger",
+        "oryWebAuthnRegistration",
+        keys.key_options,
+        label(1_050_012, "Add security key"),
+    ));
+    nodes.push(webauthn_script());
+
+    if keys.passkey_removable {
+        nodes.extend(passkeys.map(remove));
+    }
+    nodes.push(trigger(
+        "passkey",
+        "passkey_register_trigger",
+        "oryPasskeySettingsRegistration",
+        "",
+        label(1_050_019, "Add passkey"),
+    ));
+    nodes.push(input("passkey", "passkey_settings_register", "hidden"));
+    nodes.push(input("passkey", "passkey_create_data", "hidden").value(keys.passkey_options));
 }
 
 fn lookup_codes(codes: &[String]) -> Node {
@@ -777,8 +954,8 @@ mod tests {
     /// (group, node type, name or id, input type, label id, required)
     type Tuple = (String, String, String, String, u64, bool);
 
-    /// Groups the native backend does not offer: WebAuthn and passkeys.
-    const OUT_OF_SCOPE: &[&str] = &["webauthn", "passkey"];
+    /// Placeholder ceremony options; the comparison does not read values.
+    const OPTIONS: &str = r#"{"publicKey":{}}"#;
 
     /// The upstream provider configured on the stack the fixtures were captured from.
     const PROVIDERS: &[&str] = &["playground"];
@@ -802,8 +979,7 @@ mod tests {
                     s("/attributes/name")
                 };
                 // The projector drops this node; language is set at /settings/language.
-                let skip = OUT_OF_SCOPE.contains(&group.as_str())
-                    || key == "traits.preferred_language"
+                let skip = key == "traits.preferred_language"
                     || (without_lookup && group == "lookup_secret");
                 (!skip).then(|| {
                     (
@@ -932,6 +1108,15 @@ mod tests {
         }]
     });
 
+    fn keys() -> Keys<'static> {
+        Keys {
+            key_options: OPTIONS,
+            passkey_options: OPTIONS,
+            enrolled: &[],
+            passkey_removable: true,
+        }
+    }
+
     fn handoff() -> Handoff {
         Handoff {
             until: chrono::DateTime::parse_from_rfc3339("2026-11-13T17:41:21Z")
@@ -956,7 +1141,8 @@ mod tests {
                 saved,
                 handoff,
                 providers: &[("playground", false)],
-                has_password: true,
+                other_sign_in: true,
+                keys: Some(keys()),
             })
         };
         let aal2 = |file| Case {
@@ -974,6 +1160,7 @@ mod tests {
                 Screen::Login(Login::Password {
                     identifier: "",
                     providers: PROVIDERS,
+                    passkey: Some(OPTIONS),
                 }),
             ),
             (
@@ -987,6 +1174,7 @@ mod tests {
                 Screen::Login(Login::Password {
                     identifier: "ann@example.com",
                     providers: PROVIDERS,
+                    passkey: Some(OPTIONS),
                 }),
             ),
             (
@@ -994,6 +1182,7 @@ mod tests {
                 Screen::Login(Login::SecondFactor {
                     totp: false,
                     lookup: false,
+                    key: None,
                 }),
             ),
             (
@@ -1001,6 +1190,7 @@ mod tests {
                 Screen::Login(Login::SecondFactor {
                     totp: true,
                     lookup: false,
+                    key: None,
                 }),
             ),
             (
@@ -1008,6 +1198,7 @@ mod tests {
                 Screen::Login(Login::SecondFactor {
                     totp: true,
                     lookup: true,
+                    key: None,
                 }),
             ),
             (
@@ -1015,6 +1206,8 @@ mod tests {
                 Screen::Login(Login::Refresh {
                     identifier: "ann@example.com",
                     providers: &[],
+                    passkey: None,
+                    password: true,
                 }),
             ),
             (
@@ -1022,6 +1215,8 @@ mod tests {
                 Screen::Login(Login::Refresh {
                     identifier: "ann@example.com",
                     providers: &[],
+                    passkey: None,
+                    password: true,
                 }),
             ),
             (
@@ -1036,6 +1231,7 @@ mod tests {
                 Screen::Registration(super::Registration::Password {
                     traits: TRAITS,
                     providers: PROVIDERS,
+                    passkey: Some(OPTIONS),
                 }),
             ),
             (
@@ -1275,7 +1471,8 @@ mod tests {
                 saved: false,
                 handoff: Some(handoff()),
                 providers: &[],
-                has_password: true,
+                other_sign_in: true,
+                keys: None,
             }),
         );
         let msg = &project(&doc).messages[0];
@@ -1344,6 +1541,8 @@ mod tests {
             &Screen::Login(Login::Refresh {
                 identifier: "ann@example.com",
                 providers: &["github"],
+                passkey: None,
+                password: true,
             }),
         );
         assert_eq!(oidc_names(&doc), [pair("provider", "github")]);
@@ -1360,6 +1559,7 @@ mod tests {
             &Screen::Login(Login::SecondFactor {
                 totp: true,
                 lookup: false,
+                key: None,
             }),
         );
         assert!(oidc_nodes(&doc).is_empty());
@@ -1394,7 +1594,7 @@ mod tests {
 
     #[test]
     fn settings_unlink_needs_a_password_or_another_link() {
-        let settings = |providers, has_password| {
+        let settings = |providers, other_sign_in| {
             native(
                 &case("settings_fresh", FlowKind::Settings),
                 &Screen::Settings(super::Settings {
@@ -1404,7 +1604,8 @@ mod tests {
                     saved: false,
                     handoff: None,
                     providers,
-                    has_password,
+                    other_sign_in,
+                    keys: None,
                 }),
             )
         };
@@ -1426,5 +1627,262 @@ mod tests {
         );
         assert_eq!(oidc_nodes(&doc)[0].1["id"], 1_050_003);
         assert_eq!(oidc_nodes(&doc)[0].1["text"], "Unlink GitHub");
+    }
+
+    fn node<'a>(doc: &'a Value, key: &str) -> Vec<&'a Value> {
+        doc.pointer("/ui/nodes")
+            .and_then(Value::as_array)
+            .unwrap()
+            .iter()
+            .filter(|n| n["attributes"]["id"] == key || n["attributes"]["name"] == key)
+            .collect()
+    }
+
+    #[test]
+    fn the_script_node_points_at_forsetis_own_script() {
+        let doc = native(
+            &case("login", FlowKind::Login),
+            &Screen::Login(Login::Password {
+                identifier: "",
+                providers: &[],
+                passkey: Some(OPTIONS),
+            }),
+        );
+        let scripts = node(&doc, "webauthn_script");
+        assert_eq!(scripts.len(), 1);
+        assert_eq!(
+            *scripts[0],
+            json!({
+                "type": "script",
+                "group": "webauthn",
+                "attributes": {
+                    "src": "/static/webauthn.js",
+                    "async": true,
+                    "type": "text/javascript",
+                    "id": "webauthn_script",
+                    "node_type": "script",
+                },
+                "messages": [],
+                "meta": {},
+            })
+        );
+        let flow = project(&doc);
+        assert_eq!(
+            flow.webauthn_scripts()
+                .iter()
+                .map(|s| (s.src.as_str(), s.is_async))
+                .collect::<Vec<_>>(),
+            [("/static/webauthn.js", true)]
+        );
+        let trigger = flow
+            .inputs("passkey")
+            .find(|i| i.name == "passkey_login_trigger")
+            .unwrap();
+        assert_eq!(trigger.onclick.as_deref(), Some("window.oryPasskeyLogin()"));
+        let challenge = flow
+            .inputs("passkey")
+            .find(|i| i.name == "passkey_challenge")
+            .unwrap();
+        assert_eq!(challenge.value, OPTIONS);
+    }
+
+    #[test]
+    fn no_webauthn_node_without_a_ceremony() {
+        let screens = [
+            Screen::Login(Login::Password {
+                identifier: "",
+                providers: &[],
+                passkey: None,
+            }),
+            Screen::Login(Login::SecondFactor {
+                totp: true,
+                lookup: false,
+                key: None,
+            }),
+            Screen::Registration(super::Registration::Password {
+                traits: TRAITS,
+                providers: &[],
+                passkey: None,
+            }),
+            Screen::Settings(super::Settings {
+                traits: TRAITS,
+                totp: Totp::Enrolled,
+                lookup: Lookup::Offer,
+                saved: false,
+                handoff: None,
+                providers: &[],
+                other_sign_in: true,
+                keys: None,
+            }),
+        ];
+        for screen in &screens {
+            let doc = native(&case("login", FlowKind::Login), screen);
+            let groups: Vec<_> = doc["ui"]["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|n| n["group"] == "webauthn" || n["group"] == "passkey")
+                .collect();
+            assert!(groups.is_empty(), "{groups:?}");
+        }
+    }
+
+    #[test]
+    fn the_second_factor_offers_a_security_key() {
+        let aal2 = Case {
+            requested_aal: Some("aal2"),
+            ..case("login_aal2_totp", FlowKind::Login)
+        };
+        let doc = native(
+            &aal2,
+            &Screen::Login(Login::SecondFactor {
+                totp: false,
+                lookup: true,
+                key: Some(OPTIONS),
+            }),
+        );
+        let trigger = node(&doc, "webauthn_login_trigger");
+        assert_eq!(
+            *trigger[0],
+            json!({
+                "type": "input",
+                "group": "webauthn",
+                "attributes": {
+                    "name": "webauthn_login_trigger",
+                    "type": "button",
+                    "value": OPTIONS,
+                    "disabled": false,
+                    "onclick": "window.oryWebAuthnLogin()",
+                    "onclickTrigger": "oryWebAuthnLogin",
+                    "node_type": "input",
+                },
+                "messages": [],
+                "meta": { "label": { "id": 1_010_008, "text": "Sign in with hardware key", "type": "info" } },
+            })
+        );
+        let hidden = node(&doc, "webauthn_login");
+        assert_eq!(hidden[0]["group"], "webauthn");
+        assert_eq!(hidden[0]["attributes"]["type"], "hidden");
+        assert_eq!(node(&doc, "webauthn_script").len(), 1);
+        assert!(project(&doc).has_node("lookup_secret", "lookup_secret"));
+        assert_eq!(message_ids(&doc), [1_010_004]);
+    }
+
+    #[test]
+    fn refresh_offers_a_passkey_of_the_identity() {
+        let refresh = Case {
+            requested_aal: Some("aal1"),
+            refresh: true,
+            ..case("login_refresh", FlowKind::Login)
+        };
+        for with_password in [true, false] {
+            let doc = native(
+                &refresh,
+                &Screen::Login(Login::Refresh {
+                    identifier: "ann@example.com",
+                    providers: &[],
+                    passkey: Some(OPTIONS),
+                    password: with_password,
+                }),
+            );
+            let flow = project(&doc);
+            for name in [
+                "passkey_login_trigger",
+                "passkey_login",
+                "passkey_challenge",
+            ] {
+                assert!(flow.has_node("passkey", name), "{name}");
+            }
+            assert!(flow.has_node("webauthn", "webauthn_script"));
+            assert_eq!(flow.has_node("password", "password"), with_password);
+            assert_eq!(flow.has_node("password", "method"), with_password);
+            assert!(flow.has_node("default", "identifier"));
+            assert_eq!(message_ids(&doc), [1_010_003]);
+        }
+    }
+
+    #[test]
+    fn settings_offer_each_key_for_removal_with_its_name_and_date() {
+        let added_at = chrono::DateTime::parse_from_rfc3339("2026-11-20T08:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let enrolled = [
+            Enrolled {
+                id: "row-key",
+                name: "YubiKey",
+                added_at,
+                passkey: false,
+            },
+            Enrolled {
+                id: "row-passkey",
+                name: "Laptop",
+                added_at,
+                passkey: true,
+            },
+        ];
+        let settings = |passkey_removable| {
+            native(
+                &case("settings_fresh", FlowKind::Settings),
+                &Screen::Settings(super::Settings {
+                    traits: TRAITS,
+                    totp: Totp::Enrolled,
+                    lookup: Lookup::Offer,
+                    saved: false,
+                    handoff: None,
+                    providers: &[],
+                    other_sign_in: true,
+                    keys: Some(Keys {
+                        enrolled: &enrolled,
+                        passkey_removable,
+                        ..keys()
+                    }),
+                }),
+            )
+        };
+        let doc = settings(true);
+        let remove = node(&doc, "webauthn_remove");
+        assert_eq!(
+            *remove[0],
+            json!({
+                "type": "input",
+                "group": "webauthn",
+                "attributes": {
+                    "name": "webauthn_remove",
+                    "type": "submit",
+                    "value": "row-key",
+                    "disabled": false,
+                    "node_type": "input",
+                },
+                "messages": [],
+                "meta": { "label": {
+                    "id": 1_050_018,
+                    "text": "Remove security key \"YubiKey\"",
+                    "type": "info",
+                    "context": {
+                        "display_name": "YubiKey",
+                        "added_at": "2026-11-20T08:00:00.000000+00:00",
+                        "added_at_unix": 1_795_161_600,
+                    },
+                } },
+            })
+        );
+        let remove = node(&doc, "passkey_remove");
+        assert_eq!(remove.len(), 1);
+        assert_eq!(remove[0]["group"], "passkey");
+        assert_eq!(remove[0]["attributes"]["value"], "row-passkey");
+        assert_eq!(remove[0]["meta"]["label"]["id"], 1_050_020);
+        assert_eq!(
+            remove[0]["meta"]["label"]["text"],
+            "Remove passkey \"Laptop\""
+        );
+        assert_eq!(node(&doc, "webauthn_script").len(), 1);
+        assert!(page_flags(&project(&doc)).needs_recovery_codes);
+
+        let doc = settings(false);
+        assert!(
+            node(&doc, "passkey_remove").is_empty(),
+            "the last way in is not offered for removal"
+        );
+        assert_eq!(node(&doc, "webauthn_remove").len(), 1);
     }
 }

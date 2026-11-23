@@ -2,14 +2,19 @@
 //! shows, init, and the submit dispatcher. Per-kind submit logic lives in the submodules.
 
 use anyhow::{Result, anyhow};
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use diesel::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
+use webauthn_rs::prelude::{CredentialID, Passkey, SecurityKey, Uuid};
 
 use super::session::{Device, SessionRow};
+use super::store::keys::{Key, KeyKind, KeyRow};
 use super::ui::{self, Message, NodeMessage};
+use super::webauthn::{self, Slot};
 use super::{NativeBackend, store, totp};
 use crate::audit::AuditEvent;
 use crate::backend::identity::{FlowInit, FlowKind, Identity, IdentityState, browser_init_url};
@@ -33,7 +38,7 @@ const SEAL_PREFILL_CODE: &str = "flow-prefill-code";
 const SEAL_UPSTREAM: &str = "flow-upstream";
 
 /// Load-change-save rounds before a write that must land on a contended flow gives up.
-const SAVE_ATTEMPTS: usize = 3;
+pub(super) const SAVE_ATTEMPTS: usize = 3;
 
 /// State of a completed flow; a login, registration or recovery flow in it is spent.
 const FINISHED: &str = "passed_challenge";
@@ -162,6 +167,12 @@ pub(super) struct Context {
     /// flow row's `identity_id` the identity it is for.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(super) address_change: bool,
+    /// Sealed passkey ceremony: sign-in, re-authentication or registration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) passkey_ceremony: Option<String>,
+    /// Sealed security-key ceremony: second factor or registration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) key_ceremony: Option<String>,
 }
 
 /// A flow row with its parsed context. Submit functions change `state` and `ctx`, then [`save`].
@@ -444,12 +455,23 @@ pub(super) enum Logout {
     BadToken,
 }
 
+/// Ceremony options a document shows, one per slot.
+#[derive(Default)]
+struct Offered {
+    passkey: Option<String>,
+    key: Option<String>,
+}
+
 /// The identity data a document shows.
 struct Person {
     email: String,
     first: String,
     last: String,
     totp: bool,
+    /// A security key: a second factor.
+    key: bool,
+    /// A passkey: a way to sign in.
+    passkey: bool,
     lookup: bool,
     password: bool,
     /// Providers the identity is linked to, configured or not.
@@ -477,10 +499,16 @@ impl Person {
             first: text("/name/first"),
             last: text("/name/last"),
             totp: has("totp"),
+            key: has("webauthn"),
+            passkey: has("passkey"),
             lookup: has("lookup_secret"),
             password: has("password"),
             links: crate::settings::linked_providers::linked_provider_ids(identity),
         }
+    }
+
+    fn second_factor(&self) -> bool {
+        self.totp || self.key
     }
 }
 
@@ -568,11 +596,16 @@ impl NativeBackend {
             .filter(|t| !t.is_empty())
     }
 
-    fn seal_for_flow(&self, purpose: &str, flow_id: &str, plain: &[u8]) -> String {
+    pub(super) fn seal_for_flow(&self, purpose: &str, flow_id: &str, plain: &[u8]) -> String {
         self.keys.seal.seal(purpose, flow_id, plain)
     }
 
-    fn open_for_flow(&self, purpose: &str, flow_id: &str, sealed: &str) -> Option<Vec<u8>> {
+    pub(super) fn open_for_flow(
+        &self,
+        purpose: &str,
+        flow_id: &str,
+        sealed: &str,
+    ) -> Option<Vec<u8>> {
         self.keys.seal.open(purpose, flow_id, sealed)
     }
 
@@ -704,8 +737,8 @@ impl NativeBackend {
     }
 
     /// Where a mail link to an address change's flow sends the browser first: to sign in when it
-    /// holds no live session, to the second factor when its identity has TOTP and the session is
-    /// at AAL1. `None` for every other flow and browser.
+    /// holds no live session, to the second factor when its identity has a second factor and the
+    /// session is at AAL1. `None` for every other flow and browser.
     pub(super) async fn address_change_detour(
         &self,
         id: &str,
@@ -721,7 +754,7 @@ impl NativeBackend {
             None => Some(sign_in_for(FlowKind::Verification, id)),
             Some((session, identity))
                 if rec.row.identity_id.as_deref() == Some(identity.id.as_str())
-                    && Person::of(&identity).totp
+                    && Person::of(&identity).second_factor()
                     && session.aal != "aal2" =>
             {
                 Some(step_up_for(FlowKind::Verification, id))
@@ -861,7 +894,7 @@ impl NativeBackend {
                         crate::web::urlencode(target)
                     )));
                 };
-                if Person::of(identity).totp && s.aal != "aal2" {
+                if Person::of(identity).second_factor() && s.aal != "aal2" {
                     return Ok(InitOutcome::Redirect(crate::auth::aal2_step_up_url(target)));
                 }
                 created(
@@ -894,7 +927,7 @@ impl NativeBackend {
                 {
                     return Ok(Checked::Foreign);
                 }
-                if Person::of(&identity).totp && session.aal != "aal2" {
+                if Person::of(&identity).second_factor() && session.aal != "aal2" {
                     return Ok(Checked::Aal2Required);
                 }
                 Ok(Checked::Ok(Box::new((rec, Some(session)))))
@@ -908,7 +941,7 @@ impl NativeBackend {
                 if rec.row.identity_id.as_deref() != Some(identity.id.as_str()) {
                     return Ok(Checked::Foreign);
                 }
-                if Person::of(&identity).totp && session.aal != "aal2" {
+                if Person::of(&identity).second_factor() && session.aal != "aal2" {
                     return Ok(Checked::Aal2Required);
                 }
                 Ok(Checked::Ok(Box::new((rec, Some(session)))))
@@ -1029,6 +1062,8 @@ impl NativeBackend {
             first: String::new(),
             last: String::new(),
             totp: false,
+            key: false,
+            passkey: false,
             lookup: false,
             password: false,
             links: std::collections::BTreeSet::new(),
@@ -1051,6 +1086,26 @@ impl NativeBackend {
             let qr = totp::qr_data_uri(&totp::key_uri(&self.totp_issuer, &person.email, &b32))?;
             pending = Some((qr, b32));
         }
+        let key_rows = match (&self.webauthn, &rec.row.identity_id) {
+            (Some(_), Some(id)) => store::keys::of_identity(&self.db, id).await?,
+            _ => Vec::new(),
+        };
+        let offered = self
+            .offer_ceremonies(kind, rec, &person.email, &key_rows)
+            .await?;
+        let enrolled = key_rows
+            .iter()
+            .map(|row| {
+                let added_at = chrono::DateTime::parse_from_rfc3339(&row.created_at)
+                    .map_err(|e| anyhow!("identity_webauthn_keys.created_at of {}: {e}", row.id))?;
+                Ok(ui::Enrolled {
+                    id: &row.id,
+                    name: &row.display_name,
+                    added_at: added_at.with_timezone(&chrono::Utc),
+                    passkey: row.kind == KeyKind::Passkey.as_str(),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
         let shown_codes = self.generated_codes(rec).unwrap_or_default();
         let link_browser = rec.ctx.prefill_binding.as_deref().is_some_and(|b| {
             let mine = binding_of(&csrf);
@@ -1095,16 +1150,21 @@ impl NativeBackend {
             FlowKind::Login if row.refresh != 0 => ui::Screen::Login(ui::Login::Refresh {
                 identifier: &person.email,
                 providers: &refreshable,
+                passkey: offered.passkey.as_deref(),
+                // Without a passkey to offer, the password form stays as the fallback.
+                password: person.password || offered.passkey.is_none(),
             }),
             FlowKind::Login if row.requested_aal.as_deref() == Some("aal2") => {
                 ui::Screen::Login(ui::Login::SecondFactor {
                     totp: person.totp,
-                    lookup: person.lookup,
+                    lookup: person.lookup && person.second_factor(),
+                    key: offered.key.as_deref(),
                 })
             }
             FlowKind::Login => ui::Screen::Login(ui::Login::Password {
                 identifier: ctx.identifier.as_deref().unwrap_or_default(),
                 providers: &configured,
+                passkey: offered.passkey.as_deref(),
             }),
             FlowKind::Registration if ctx.email_needed.is_some() => {
                 ui::Screen::Registration(ui::Registration::EmailNeeded {
@@ -1116,6 +1176,7 @@ impl NativeBackend {
                 ui::Screen::Registration(ui::Registration::Password {
                     traits,
                     providers: &configured,
+                    passkey: offered.passkey.as_deref(),
                 })
             }
             FlowKind::Registration => ui::Screen::Registration(ui::Registration::Profile {
@@ -1130,7 +1191,7 @@ impl NativeBackend {
                     None => ui::Totp::Enrolled,
                 };
                 let lookup = match &ctx.lookup_codes {
-                    _ if !person.totp => ui::Lookup::Unavailable,
+                    _ if !person.second_factor() => ui::Lookup::Unavailable,
                     Some(_) => ui::Lookup::Generated(&shown_codes),
                     None if person.lookup => ui::Lookup::Confirmed,
                     None => ui::Lookup::Offer,
@@ -1143,6 +1204,17 @@ impl NativeBackend {
                         window_minutes: self.settings.privileged_session_minutes,
                     }
                 });
+                let keys = match (&offered.passkey, &offered.key) {
+                    (Some(passkey_options), Some(key_options)) => Some(ui::Keys {
+                        key_options,
+                        passkey_options,
+                        enrolled: &enrolled,
+                        passkey_removable: person.password
+                            || enrolled.iter().filter(|k| k.passkey).count() > 1
+                            || link_states.iter().any(|&(_, linked)| linked),
+                    }),
+                    _ => None,
+                };
                 ui::Screen::Settings(ui::Settings {
                     traits: ui::Traits {
                         email: &person.email,
@@ -1154,7 +1226,8 @@ impl NativeBackend {
                     saved: row.state == "success",
                     handoff,
                     providers: &link_states,
-                    has_password: person.password,
+                    other_sign_in: person.password || person.passkey,
+                    keys,
                 })
             }
         };
@@ -1174,6 +1247,105 @@ impl NativeBackend {
             nodes: &ctx.node_messages,
         };
         Ok(ui::document(&meta, &screen, notes))
+    }
+
+    /// Options of the ceremonies the document of `rec` offers, as `{"publicKey":{…}}` JSON. `email`
+    /// and `rows` are the flow identity's address and keys.
+    async fn offer_ceremonies(
+        &self,
+        kind: FlowKind,
+        rec: &mut FlowRecord,
+        email: &str,
+        rows: &[KeyRow],
+    ) -> Result<Offered> {
+        let Some(rp) = self.webauthn.as_ref() else {
+            return Ok(Offered::default());
+        };
+        let of_kind = |kind: KeyKind| rows.iter().filter(move |r| r.kind == kind.as_str());
+        let usable = |kind: KeyKind| {
+            of_kind(kind).filter_map(|row| match row.key() {
+                Ok(key) => Some(key),
+                // The parse error can quote the credential, so only the row id is logged.
+                Err(_) => {
+                    tracing::warn!(key = %row.id, "webauthn: stored key unreadable");
+                    None
+                }
+            })
+        };
+        let excluded = |kind: KeyKind| -> Vec<CredentialID> {
+            of_kind(kind)
+                .filter_map(|r| URL_SAFE_NO_PAD.decode(&r.credential_id).ok())
+                .collect()
+        };
+        let user = || {
+            let id = rec.row.identity_id.as_deref().unwrap_or_default();
+            Uuid::parse_str(id)
+                .map_err(|e| anyhow!("identity id {id:?} of flow {}: {e}", rec.row.id))
+        };
+        let mut offered = Offered::default();
+        match kind {
+            FlowKind::Login if rec.row.refresh != 0 => {
+                let passkeys: Vec<Passkey> = usable(KeyKind::Passkey)
+                    .filter_map(|k| match k {
+                        Key::Passkey(p) => Some(p),
+                        Key::SecurityKey(_) => None,
+                    })
+                    .collect();
+                if !passkeys.is_empty() {
+                    offered.passkey = self
+                        .offer(rec, &[Slot::Passkey], |_, _| {
+                            webauthn::passkey_refresh(rp, &passkeys)
+                        })
+                        .await?
+                        .pop();
+                }
+            }
+            FlowKind::Login if rec.row.requested_aal.as_deref() == Some("aal2") => {
+                let keys: Vec<SecurityKey> = usable(KeyKind::Webauthn)
+                    .filter_map(|k| match k {
+                        Key::SecurityKey(k) => Some(k),
+                        Key::Passkey(_) => None,
+                    })
+                    .collect();
+                if !keys.is_empty() {
+                    offered.key = self
+                        .offer(rec, &[Slot::Key], |_, _| webauthn::key_login(rp, &keys))
+                        .await?
+                        .pop();
+                }
+            }
+            FlowKind::Login => {
+                offered.passkey = self
+                    .offer(rec, &[Slot::Passkey], |_, _| webauthn::passkey_login(rp))
+                    .await?
+                    .pop();
+            }
+            FlowKind::Registration if rec.ctx.email_needed.is_none() && rec.ctx.credential_step => {
+                offered.passkey = self
+                    .offer(rec, &[Slot::Passkey], |_, rec| {
+                        let email = rec.ctx.traits.as_ref().map_or("", |t| t.email.as_str());
+                        webauthn::passkey_register(rp, Uuid::new_v4(), email, Vec::new())
+                    })
+                    .await?
+                    .pop();
+            }
+            FlowKind::Settings => {
+                let user = user()?;
+                let (passkeys, keys) = (excluded(KeyKind::Passkey), excluded(KeyKind::Webauthn));
+                let mut options = self
+                    .offer(rec, &[Slot::Passkey, Slot::Key], |slot, _| match slot {
+                        Slot::Passkey => {
+                            webauthn::passkey_register(rp, user, email, passkeys.clone())
+                        }
+                        Slot::Key => webauthn::key_register(rp, user, email, keys.clone()),
+                    })
+                    .await?;
+                offered.key = options.pop();
+                offered.passkey = options.pop();
+            }
+            FlowKind::Registration | FlowKind::Verification | FlowKind::Recovery => {}
+        }
+        Ok(offered)
     }
 
     /// Check a submit to `/self-service/{kind}?flow=<id>` and hand it to the per-kind function.
@@ -1373,6 +1545,8 @@ mod tests {
             .unwrap();
         assert_eq!(password.messages[0].id, 4_000_005);
 
+        // The render stored a passkey challenge.
+        let mut rec = backend.load_flow(&rec.row.id).await.unwrap().unwrap();
         rec.clear_messages();
         assert_eq!(rec.save(&db).await.unwrap(), Saved::Done);
         let FlowFetch::Ok(flow) = backend

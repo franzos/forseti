@@ -16,9 +16,11 @@ use crate::backend::identity::{
 use crate::db::DbPool;
 use crate::schema::{
     identities, identity_codes, identity_credentials, identity_flows, identity_mail_outbox,
-    identity_oidc_links, identity_sessions, offline_secrets, oidc_links,
+    identity_oidc_links, identity_sessions, identity_webauthn_keys, offline_secrets, oidc_links,
 };
 use crate::{db_interact, serialized_txn};
+
+pub(super) mod keys;
 
 /// Most characters in a first or last name.
 pub(super) const NAME_MAX_CHARS: usize = 256;
@@ -47,15 +49,15 @@ pub(super) struct IdentityRow {
 }
 
 /// One credential kind of an identity, without its config. Provider links appear as one `oidc`
-/// summary.
+/// summary, WebAuthn keys as one `passkey` and one `webauthn` summary.
 #[derive(Debug, Clone)]
 pub(super) struct CredentialSummary {
     pub kind: String,
     pub version: i32,
     pub created_at: String,
     pub updated_at: String,
-    /// `provider:subject` per link on the `oidc` summary; empty on stored credentials.
-    pub links: Vec<String>,
+    /// `provider:subject` per link on the `oidc` summary; empty on the others.
+    pub identifiers: Vec<String>,
 }
 
 /// One upstream provider account linked to an identity.
@@ -70,6 +72,7 @@ pub(super) struct LinkRow {
 
 type CredentialCols = (String, String, i32, String, String);
 type LinkCols = (String, String, String, String);
+type KeyCols = (String, String, String, String);
 
 #[diesel::dsl::auto_type]
 fn credentials_of(ids: Vec<String>) -> _ {
@@ -97,6 +100,45 @@ fn links_of_identities(ids: Vec<String>) -> _ {
         ))
 }
 
+#[diesel::dsl::auto_type]
+fn keys_of_identities(ids: Vec<String>) -> _ {
+    identity_webauthn_keys::table
+        .filter(identity_webauthn_keys::identity_id.eq_any(ids))
+        .select((
+            identity_webauthn_keys::identity_id,
+            identity_webauthn_keys::kind,
+            identity_webauthn_keys::created_at,
+            identity_webauthn_keys::updated_at,
+        ))
+}
+
+/// Folds one link or key into the synthetic summary of its identity and kind: first created,
+/// last updated.
+fn fold_synthetic(
+    synthetic: &mut HashMap<(String, String), CredentialSummary>,
+    identity_id: String,
+    kind: String,
+    created_at: String,
+    updated_at: String,
+) -> &mut CredentialSummary {
+    let summary = synthetic
+        .entry((identity_id, kind.clone()))
+        .or_insert_with(|| CredentialSummary {
+            kind,
+            version: 0,
+            created_at: created_at.clone(),
+            updated_at: updated_at.clone(),
+            identifiers: Vec::new(),
+        });
+    if created_at < summary.created_at {
+        summary.created_at = created_at;
+    }
+    if updated_at > summary.updated_at {
+        summary.updated_at = updated_at;
+    }
+    summary
+}
+
 /// The credential summaries of each of `ids`, keyed by identity id; identities without any are
 /// absent. Runs on the caller's connection so it can share a checkout with the rows it decorates.
 pub(super) fn credential_summaries<C>(
@@ -106,6 +148,7 @@ pub(super) fn credential_summaries<C>(
 where
     for<'a> credentials_of: LoadQuery<'a, C, CredentialCols>,
     for<'a> links_of_identities: LoadQuery<'a, C, LinkCols>,
+    for<'a> keys_of_identities: LoadQuery<'a, C, KeyCols>,
 {
     let mut by_identity: HashMap<String, Vec<CredentialSummary>> = HashMap::new();
     if ids.is_empty() {
@@ -121,30 +164,27 @@ where
                 version,
                 created_at,
                 updated_at,
-                links: Vec::new(),
+                identifiers: Vec::new(),
             });
     }
+    let mut synthetic: HashMap<(String, String), CredentialSummary> = HashMap::new();
     let links: Vec<LinkCols> = links_of_identities(ids.to_vec()).load(conn)?;
-    let mut oidc: HashMap<String, CredentialSummary> = HashMap::new();
     for (identity_id, provider, subject, created_at) in links {
-        let summary = oidc
-            .entry(identity_id)
-            .or_insert_with(|| CredentialSummary {
-                kind: "oidc".to_string(),
-                version: 0,
-                created_at: created_at.clone(),
-                updated_at: created_at.clone(),
-                links: Vec::new(),
-            });
-        if created_at < summary.created_at {
-            summary.created_at.clone_from(&created_at);
-        }
-        if created_at > summary.updated_at {
-            summary.updated_at = created_at;
-        }
-        summary.links.push(format!("{provider}:{subject}"));
+        fold_synthetic(
+            &mut synthetic,
+            identity_id,
+            "oidc".to_string(),
+            created_at.clone(),
+            created_at,
+        )
+        .identifiers
+        .push(format!("{provider}:{subject}"));
     }
-    for (identity_id, summary) in oidc {
+    let keys: Vec<KeyCols> = keys_of_identities(ids.to_vec()).load(conn)?;
+    for (identity_id, kind, created_at, updated_at) in keys {
+        fold_synthetic(&mut synthetic, identity_id, kind, created_at, updated_at);
+    }
+    for ((identity_id, _), summary) in synthetic {
         by_identity.entry(identity_id).or_default().push(summary);
     }
     Ok(by_identity)
@@ -226,13 +266,16 @@ pub(super) fn to_identity(row: IdentityRow, creds: Vec<CredentialSummary>) -> Re
         traits.insert("preferred_language".into(), json!(lang));
     }
 
+    let has_second_factor = creds
+        .iter()
+        .any(|c| matches!(c.kind.as_str(), "totp" | "webauthn"));
     // Kratos identifies password credentials by the lowercased email, second factors by the
     // identity id, oidc by `provider:subject`.
     let credentials: HashMap<String, Credential> = creds
         .into_iter()
         .map(|c| {
             let identifiers = match c.kind.as_str() {
-                "oidc" => c.links,
+                "oidc" => c.identifiers,
                 "password" => vec![row.email_norm.clone()],
                 _ => vec![row.id.clone()],
             };
@@ -277,6 +320,7 @@ pub(super) fn to_identity(row: IdentityRow, creds: Vec<CredentialSummary>) -> Re
         credentials: (!credentials.is_empty()).then_some(credentials),
         // Needs the configured providers; the backend sets it.
         sole_sign_in_is_oidc: None,
+        has_second_factor: Some(has_second_factor),
         id: row.id,
         created_at: Some(row.created_at),
         updated_at: Some(row.updated_at),
@@ -393,19 +437,56 @@ pub(super) async fn mark_verified(
     })?)
 }
 
-/// Insert an active, unverified identity and its password credential in one transaction;
-/// `Ok(None)` when the address is already taken, and then nothing is written.
-pub(super) async fn create_with_password(
+/// The credential a self-service sign-up creates the identity with.
+pub(super) enum FirstCredential {
+    /// A password credential config.
+    Password(String),
+    /// A passkey whose user handle `user` becomes the identity id.
+    Passkey {
+        user: uuid::Uuid,
+        key: Box<keys::NewKey>,
+    },
+}
+
+/// How [`create_with_first_credential`] ended. Nothing is written unless `Created`.
+#[derive(Debug)]
+pub(super) enum CreateWithCredential {
+    Created(Box<IdentityRow>),
+    AddressTaken,
+    /// The passkey's credential id, or its user handle as an identity id, is registered already.
+    KeyTaken,
+}
+
+/// Why [`create_with_first_credential`]'s transaction rolled back.
+enum CredentialAbort {
+    Address,
+    Key,
+    Db(DieselError),
+}
+
+impl From<DieselError> for CredentialAbort {
+    fn from(e: DieselError) -> Self {
+        Self::Db(e)
+    }
+}
+
+/// Insert an active, unverified identity and its first credential in one transaction. A
+/// password identity gets a new id, a passkey identity the passkey's user handle.
+pub(super) async fn create_with_first_credential(
     db: &DbPool,
     email: &str,
     first_name: Option<&str>,
     last_name: Option<&str>,
-    password_config: &str,
-) -> Result<Option<IdentityRow>> {
+    credential: FirstCredential,
+) -> Result<CreateWithCredential> {
     ensure_mailable(email)?;
     let now = crate::db::now_rfc3339();
+    let id = match &credential {
+        FirstCredential::Password(_) => uuid::Uuid::new_v4(),
+        FirstCredential::Passkey { user, .. } => *user,
+    };
     let row = IdentityRow {
-        id: uuid::Uuid::new_v4().to_string(),
+        id: id.to_string(),
         email: email.to_string(),
         email_norm: email_norm(email),
         email_verified_at: None,
@@ -420,36 +501,61 @@ pub(super) async fn create_with_password(
         metadata_admin: None,
         first_verified_at: None,
     };
-    let (insert, config) = (row.clone(), password_config.to_string());
-    let outcome = db_interact!(db, |conn| {
-        Ok::<_, DieselError>(conn.transaction::<_, Taken, _>(|c| {
+    let (config, key) = match credential {
+        FirstCredential::Password(config) => (Some(config), None),
+        FirstCredential::Passkey { key, .. } => (None, Some(keys::new_row(&row.id, *key)?)),
+    };
+    let insert = row.clone();
+    let outcome = serialized_txn!(db, (), CredentialAbort, |c| {
+        {
+            if key.is_some() {
+                let held = diesel::select(diesel::dsl::exists(identities::table.find(&insert.id)))
+                    .get_result::<bool>(c)?;
+                if held {
+                    return Err(CredentialAbort::Key);
+                }
+            }
             diesel::insert_into(identities::table)
                 .values(&insert)
                 .execute(c)
                 .map_err(|e| match e {
                     DieselError::DatabaseError(DatabaseErrorKind::UniqueViolation, _) => {
-                        Taken::Address
+                        CredentialAbort::Address
                     }
-                    other => Taken::Db(other),
+                    other => CredentialAbort::Db(other),
                 })?;
-            diesel::insert_into(identity_credentials::table)
-                .values((
-                    identity_credentials::id.eq(uuid::Uuid::new_v4().to_string()),
-                    identity_credentials::identity_id.eq(&insert.id),
-                    identity_credentials::kind.eq("password"),
-                    identity_credentials::config.eq(&config),
-                    identity_credentials::version.eq(0),
-                    identity_credentials::created_at.eq(&now),
-                    identity_credentials::updated_at.eq(&now),
-                ))
-                .execute(c)?;
+            if let Some(config) = &config {
+                diesel::insert_into(identity_credentials::table)
+                    .values((
+                        identity_credentials::id.eq(uuid::Uuid::new_v4().to_string()),
+                        identity_credentials::identity_id.eq(&insert.id),
+                        identity_credentials::kind.eq("password"),
+                        identity_credentials::config.eq(config),
+                        identity_credentials::version.eq(0),
+                        identity_credentials::created_at.eq(&now),
+                        identity_credentials::updated_at.eq(&now),
+                    ))
+                    .execute(c)?;
+            }
+            if let Some(key) = &key {
+                diesel::insert_into(identity_webauthn_keys::table)
+                    .values(key)
+                    .execute(c)
+                    .map_err(|e| match e {
+                        DieselError::DatabaseError(DatabaseErrorKind::UniqueViolation, _) => {
+                            CredentialAbort::Key
+                        }
+                        other => CredentialAbort::Db(other),
+                    })?;
+            }
             Ok(())
-        }))
-    })?;
+        }
+    });
     match outcome {
-        Ok(()) => Ok(Some(row)),
-        Err(Taken::Address) => Ok(None),
-        Err(Taken::Db(e)) => Err(e.into()),
+        Ok(()) => Ok(CreateWithCredential::Created(Box::new(row))),
+        Err(CredentialAbort::Address) => Ok(CreateWithCredential::AddressTaken),
+        Err(CredentialAbort::Key) => Ok(CreateWithCredential::KeyTaken),
+        Err(CredentialAbort::Db(e)) => Err(e.into()),
     }
 }
 
@@ -650,6 +756,7 @@ impl From<Writer<'_>> for OwnedWriter {
 
 /// Store `config` as the writer's identity's credential of `kind`. `replace` overwrites one it
 /// has, bumping its version; without it an existing one is kept and the answer is `Ok(false)`.
+/// Lookup codes are refused the same way while the identity has no TOTP and no security key.
 pub(super) async fn write_credential(
     db: &DbPool,
     writer: Writer<'_>,
@@ -664,6 +771,10 @@ pub(super) async fn write_credential(
         serialized_txn!(db, Result<bool, Refused>, DieselError, |c| {
             if let Some(refused) = admit(c, &writer)? {
                 return Ok(Err(refused));
+            }
+            // Under the identity lock, so a concurrent removal of the last factor is seen.
+            if kind == "lookup_secret" && !keys::second_factor_on(c, &writer.identity_id)? {
+                return Ok(Ok(false));
             }
             let own = identity_credentials::table
                 .filter(identity_credentials::identity_id.eq(&writer.identity_id))
@@ -981,13 +1092,14 @@ pub(super) async fn set_language(db: &DbPool, id: &str, lang: &str) -> Result<bo
     Ok(updated > 0)
 }
 
-/// `state_changed_at` moves only when the state actually changes.
+/// `state_changed_at` moves only when the state actually changes, and each change revokes the
+/// identity's live sessions: a sign-in racing a disable does not come back on enable.
 pub(super) async fn set_state(db: &DbPool, id: &str, state: IdentityState) -> Result<()> {
     let id = id.to_string();
     let state = state_str(state);
     let now = crate::db::now_rfc3339();
-    db_interact!(db, |conn| {
-        diesel::update(
+    serialized_txn!(db, (), DieselError, |c| {
+        let changed = diesel::update(
             identities::table
                 .find(&id)
                 .filter(identities::state.ne(state)),
@@ -997,7 +1109,18 @@ pub(super) async fn set_state(db: &DbPool, id: &str, state: IdentityState) -> Re
             identities::state_changed_at.eq(&now),
             identities::updated_at.eq(&now),
         ))
-        .execute(conn)
+        .execute(c)?;
+        if changed > 0 {
+            diesel::update(
+                identity_sessions::table
+                    .filter(identity_sessions::identity_id.eq(&id))
+                    .filter(identity_sessions::revoked_at.is_null())
+                    .filter(identity_sessions::expires_at.gt(&now)),
+            )
+            .set(identity_sessions::revoked_at.eq(&now))
+            .execute(c)?;
+        }
+        Ok(())
     })?;
     Ok(())
 }
@@ -1278,14 +1401,14 @@ pub(super) async fn insert_link(
 #[derive(Debug, PartialEq)]
 pub(super) enum LinkDeleted {
     Deleted,
-    /// Without it the identity would have no password and no link to a configured provider;
-    /// nothing was written.
+    /// Without it the identity would have no password, no passkey and no link to a configured
+    /// provider; nothing was written.
     LastMethod,
     NotLinked,
 }
 
 /// Remove the identity's link to `provider` and its `oidc_links` first-seen row, unless the
-/// identity would be left with no password and no link to one of `configured`.
+/// identity would be left with no password, no passkey and no link to one of `configured`.
 pub(super) async fn delete_link(
     db: &DbPool,
     identity_id: &str,
@@ -1311,6 +1434,12 @@ pub(super) async fn delete_link(
                 .filter(identity_credentials::kind.eq("password")),
         ))
         .get_result::<bool>(c)?;
+        let has_passkey = diesel::select(diesel::dsl::exists(
+            identity_webauthn_keys::table
+                .filter(identity_webauthn_keys::identity_id.eq(&identity_id))
+                .filter(identity_webauthn_keys::kind.eq(keys::KeyKind::Passkey.as_str())),
+        ))
+        .get_result::<bool>(c)?;
         let other_usable = diesel::select(diesel::dsl::exists(
             identity_oidc_links::table
                 .filter(identity_oidc_links::identity_id.eq(&identity_id))
@@ -1318,7 +1447,7 @@ pub(super) async fn delete_link(
                 .filter(identity_oidc_links::provider.eq_any(&configured)),
         ))
         .get_result::<bool>(c)?;
-        if !has_password && !other_usable {
+        if !has_password && !has_passkey && !other_usable {
             return Ok(LinkDeleted::LastMethod);
         }
         diesel::delete(own).execute(c)?;
@@ -1361,16 +1490,17 @@ where
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Reset {
     pub(super) sessions: usize,
+    /// Credentials and WebAuthn keys.
     pub(super) credentials: usize,
     pub(super) links: usize,
     pub(super) offline_secrets: usize,
 }
 
 /// [`mark_verified`] for an address proven by a mailed recovery code. An identity whose address
-/// was never verified before first loses its live sessions, every credential, every provider
-/// link, its offline passphrase, its outstanding codes and its pending address changes, in the
-/// same transaction. The row afterwards and the reset, if one happened; `None` when
-/// the identity is gone or holds another address now.
+/// was never verified before first loses its live sessions, every credential and WebAuthn key,
+/// every provider link, its offline passphrase, its outstanding codes and its pending address
+/// changes, in the same transaction. The row afterwards and the reset, if one happened; `None`
+/// when the identity is gone or holds another address now.
 pub(super) async fn verify_recovered(
     db: &DbPool,
     id: &str,
@@ -1403,8 +1533,13 @@ pub(super) async fn verify_recovered(
                 )
                 .set(identity_sessions::revoked_at.eq(&now))
                 .execute(c)?;
-                let credentials = diesel::delete(
+                let stored = diesel::delete(
                     identity_credentials::table.filter(identity_credentials::identity_id.eq(&id)),
+                )
+                .execute(c)?;
+                let keys = diesel::delete(
+                    identity_webauthn_keys::table
+                        .filter(identity_webauthn_keys::identity_id.eq(&id)),
                 )
                 .execute(c)?;
                 let links = delete_links(c, &id)?;
@@ -1424,7 +1559,7 @@ pub(super) async fn verify_recovered(
                 .execute(c)?;
                 Some(Reset {
                     sessions,
-                    credentials,
+                    credentials: stored + keys,
                     links,
                     offline_secrets,
                 })
@@ -1564,6 +1699,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn keys_appear_as_one_summary_per_kind_and_count_as_a_second_factor() {
+        let db = test_pool().await;
+        let id = seed(&db, "k@x.test", "2026-01-01T00:00:00.000000+00:00").await;
+        let second_factor =
+            async |db: &DbPool, id: &str| get(db, id).await.unwrap().unwrap().has_second_factor;
+        assert_eq!(second_factor(&db, &id).await, Some(false));
+
+        keys::plant(&db, &id, keys::KeyKind::Passkey).await;
+        keys::plant(&db, &id, keys::KeyKind::Passkey).await;
+        assert_eq!(
+            second_factor(&db, &id).await,
+            Some(false),
+            "a passkey is a way in"
+        );
+        keys::plant(&db, &id, keys::KeyKind::Webauthn).await;
+        let identity = get(&db, &id).await.unwrap().unwrap();
+        assert_eq!(identity.has_second_factor, Some(true));
+        let creds = identity.credentials.unwrap();
+        assert_eq!(creds.len(), 2);
+        for kind in ["passkey", "webauthn"] {
+            assert_eq!(creds[kind].identifiers.as_deref(), Some(&[id.clone()][..]));
+            assert_eq!(creds[kind].version, Some(0));
+        }
+
+        let totp_only = seed(&db, "t@x.test", "2026-01-01T00:00:00.000000+00:00").await;
+        add_credential(&db, &totp_only, "totp").await;
+        assert_eq!(second_factor(&db, &totp_only).await, Some(true));
+    }
+
+    #[tokio::test]
     async fn email_filter_is_exact_and_case_insensitive() {
         let db = test_pool().await;
         let id = seed(&db, "Bob@Example.test", "2026-01-01T00:00:00.000000+00:00").await;
@@ -1678,6 +1843,56 @@ mod tests {
         let after = get(&db, &id).await.unwrap().unwrap();
         assert_eq!(after.state, Some(IdentityState::Inactive));
         assert_ne!(after.state_changed_at.as_deref(), Some(t0));
+    }
+
+    #[tokio::test]
+    async fn disabling_revokes_live_sessions_and_enabling_brings_none_back() {
+        use super::super::session;
+        let db = test_pool().await;
+        let t0 = "2026-01-01T00:00:00.000000+00:00";
+        let id = seed(&db, "d@x.test", t0).await;
+        let other = seed(&db, "o@x.test", t0).await;
+        let open = async |identity: &str| {
+            session::create(
+                &db,
+                identity,
+                "password",
+                None,
+                crate::backend::identity::Aal::Aal1,
+                chrono::Duration::hours(1),
+                session::Device::default(),
+            )
+            .await
+            .unwrap()
+            .id
+        };
+        let live = open(&id).await;
+        let revoked_earlier = open(&id).await;
+        let elsewhere = open(&other).await;
+        assert!(session::revoke(&db, &revoked_earlier, None).await.unwrap());
+        let revoked_at = |sid: String| {
+            sql(&db, move |c| {
+                identity_sessions::table
+                    .find(sid)
+                    .select(identity_sessions::revoked_at)
+                    .first::<Option<String>>(c)
+            })
+        };
+        let earlier_stamp = revoked_at(revoked_earlier.clone()).await;
+
+        set_state(&db, &id, IdentityState::Inactive).await.unwrap();
+        assert!(session::find_live(&db, &live).await.unwrap().is_none());
+        assert_eq!(revoked_at(revoked_earlier).await, earlier_stamp);
+        assert!(session::find_live(&db, &elsewhere).await.unwrap().is_some());
+
+        let raced = open(&id).await;
+        set_state(&db, &id, IdentityState::Active).await.unwrap();
+        assert!(session::find_live(&db, &live).await.unwrap().is_none());
+        assert!(session::find_live(&db, &raced).await.unwrap().is_none());
+
+        let kept = open(&id).await;
+        set_state(&db, &id, IdentityState::Active).await.unwrap();
+        assert!(session::find_live(&db, &kept).await.unwrap().is_some());
     }
 
     #[tokio::test]
@@ -2036,6 +2251,23 @@ mod tests {
             delete_link(&db, &id, "github", &["github"]).await.unwrap(),
             LinkDeleted::LastMethod
         );
+        keys::plant(&db, &id, keys::KeyKind::Webauthn).await;
+        assert_eq!(
+            delete_link(&db, &id, "github", &["github"]).await.unwrap(),
+            LinkDeleted::LastMethod,
+            "a security key is no way in"
+        );
+
+        let passkeyed = seed(&db, "pk@x.test", "2026-01-01T00:00:00.000000+00:00").await;
+        link(&db, &passkeyed, "github", "3").await;
+        keys::plant(&db, &passkeyed, keys::KeyKind::Passkey).await;
+        assert_eq!(
+            delete_link(&db, &passkeyed, "github", &["github"])
+                .await
+                .unwrap(),
+            LinkDeleted::Deleted,
+            "a passkey remains"
+        );
 
         add_credential(&db, &id, "password").await;
         assert_eq!(
@@ -2134,12 +2366,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recovering_a_never_verified_identity_drops_its_keys() {
+        let db = test_pool().await;
+        let squatted = seed(&db, "sq@x.test", "2026-01-01T00:00:00.000000+00:00").await;
+        let owned = seed(&db, "own@x.test", "2026-01-01T00:00:00.000000+00:00").await;
+        mark_verified(&db, &owned, "own@x.test").await.unwrap();
+        for id in [&squatted, &owned] {
+            add_credential(&db, id, "password").await;
+            keys::plant(&db, id, keys::KeyKind::Passkey).await;
+            keys::plant(&db, id, keys::KeyKind::Webauthn).await;
+        }
+
+        let (_, reset) = verify_recovered(&db, &squatted, "sq@x.test")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reset.map(|r| r.credentials), Some(3));
+        assert!(keys::of_identity(&db, &squatted).await.unwrap().is_empty());
+
+        let (_, reset) = verify_recovered(&db, &owned, "own@x.test")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(reset.is_none());
+        assert_eq!(keys::of_identity(&db, &owned).await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
     async fn delete_cascades_to_every_child_table() {
         let db = test_pool().await;
         let keep = seed(&db, "keep@x.test", "2026-01-01T00:00:00.000000+00:00").await;
         let gone = seed(&db, "gone@x.test", "2026-01-01T00:00:00.000000+00:00").await;
         for id in [&keep, &gone] {
             add_credential(&db, id, "password").await;
+            keys::plant(&db, id, keys::KeyKind::Passkey).await;
             let id = id.clone();
             let now = crate::db::now_rfc3339();
             sql(&db, move |conn| {
@@ -2209,12 +2469,13 @@ mod tests {
                 identity_flows::table.count().get_result(conn)?,
                 identity_codes::table.count().get_result(conn)?,
                 identity_mail_outbox::table.count().get_result(conn)?,
+                identity_webauthn_keys::table.count().get_result(conn)?,
             ])
         })
         .await;
         assert_eq!(
             counts,
-            [1, 1, 1, 1, 1],
+            [1, 1, 1, 1, 1, 1],
             "only the kept identity's rows remain"
         );
         assert!(

@@ -58,6 +58,10 @@ Run these first. If any of them fail, stop and triage before touching the browse
 - [ ] "Unverified email" banner shows on dashboard
 - [ ] Audit row: `identity.created` (fired from Kratos webhook → `/internal/audit/kratos`)
 - [ ] Passkey/WebAuthn buttons render and `webauthn_helper.html` disables them on environments without a platform authenticator
+- [ ] Native build, `[self].url` on `https` or `http://localhost`: registration step 2 → "Sign up with passkey" creates the account without a password, signs the browser in and shows the verification screen; audit row `identity.created` with `method: passkey`
+- [ ] Native build: after verifying, sign out → "Sign in with passkey" on `/login` signs in without typing an address; audit row `auth.login` with `method: passkey`; before verifying, the same sign-in is refused with "Account not active yet"
+- [ ] Native build: account with a security key → password sign-in lands on the step-up, "Sign in with a hardware key" completes it; the step-up also takes a backup code
+- [ ] Native build, `[self].url` with an IP host or plain `http` on another host: no passkey or security-key controls anywhere
 - [ ] Expired flow (>10m) → graceful restart redirect
 
 ### 3.2 Login
@@ -126,6 +130,10 @@ Run these first. If any of them fail, stop and triage before touching the browse
 - [ ] Reveal page renders the codes exactly once; reload shows empty state
 - [ ] Audit row: `mfa.lookup.regenerated`
 - [ ] WebAuthn / passkey enroll button renders; passkey method gated by browser support
+- [ ] Native build: "Add security key" with a name → key listed with its Remove button, session now AAL2, backup codes offered; audit row `mfa.webauthn.added` with `kind: webauthn`
+- [ ] Native build: "Add passkey" → listed as "Passkey"; audit row `mfa.webauthn.added` with `kind: passkey`
+- [ ] Native build: after the privileged window (15 min by default), adding or removing a key sends the browser to re-authentication; a passkey-only account sees the passkey button and no password field there
+- [ ] Native build: removing the last security key (no TOTP) removes the backup codes; the last way to sign in (only passkey, no password, no provider link) has no Remove button
 - [ ] TOTP form: confirm submission works (real users tab into `totp_code` and Enter; HTML5 `required` trap documented in e2e-review)
 
 ### 4.4 Sessions (`/settings/sessions`)
@@ -307,7 +315,7 @@ The playground's `playground` provider signs in at the mock on `:8092` (any user
 
 - [ ] Without a `saml`-featured license: `/sso/<slug>` → neutral "SSO unavailable" page; `/admin/saml` → upsell
 - [ ] `/admin/saml/new` → create a connection for Default against mock-saml: fetch `http://127.0.0.1:4480/api/saml/metadata` and paste the XML (Forseti fetches the URL field itself and refuses plain-HTTP and private hosts unless `[oauth.cimd].allow_private_targets` is on) → row appears with SP values card (ACS URL + entity id) + `/sso/<slug>` URL
-- [ ] **Happy path:** logged-out browser → `/sso/default` → mock-saml login (any email + ACS pre-filled) → lands on the dashboard with a native `ory_kratos_session`, NOT on `/settings/password`
+- [ ] **Happy path:** logged-out browser → `/sso/default` → mock-saml login (any email + ACS pre-filled) → lands on the dashboard with a session cookie of its own (`ory_kratos_session` on the Ory build, `forseti_session` on the native build), NOT on `/settings/password`
 - [ ] JIT identity created in Kratos with the asserted email pre-verified; member row added to the org
 - [ ] Second login with the same email reuses the linked identity (no duplicate)
 - [ ] **Blocked unverified:** register an identity, leave it unverified, SSO with that email → blocked page, no session
@@ -377,6 +385,8 @@ All admin pages require AAL2 + Forseti-admin allowlist or org ownership.
 - [ ] Delete identity (throwaway user, NOT admin): the confirm page spells out what is removed (credentials, sessions, 2FA and recovery codes, profile and username, linked providers, SSH keys, POSIX account, offline passphrase, org and team memberships, invites to its email), that apps holding a copy are told to delete it, and what stays (audit entries for the retention period; created organizations, teams, hosts and domains with the name removed)
 - [ ] Delete identity → cascaded out of Hydra grants + webhook outbox row(s); same row cleanup as the self-delete in §4.7; sole owner of an organization → refused with an error page, not deleted
 - [ ] Confirm pages render and reject without `confirm=yes`
+- [ ] Native build: disabling an identity revokes its sessions (`/admin/sessions` no longer lists them as active), and enabling it again brings none back
+- [ ] Native build: "Reset 2FA" shows only for an identity with TOTP or a security key → confirm → TOTP, security keys and backup codes are gone, passkeys and sessions stay, the user signs in with the password alone; audit row `admin.identity.second_factors_reset` (critical)
 - [ ] Audit rows: `identity.recovered`, `.disabled`, `.enabled`, `.deleted`
 
 ### 7.5 Sessions (`/admin/sessions`)

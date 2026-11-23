@@ -1,11 +1,13 @@
-//! Settings submits: profile, password, TOTP enrolment and unlink, lookup codes. Every method but
-//! a profile save that keeps the address needs a sign-in within the privileged window; the
-//! dispatcher has already checked the session and its AAL.
+//! Settings submits: profile, password, TOTP enrolment and unlink, lookup codes, passkeys and
+//! security keys. Every method but a profile save that keeps the address needs a sign-in within
+//! the privileged window; the dispatcher has already checked the session and its AAL.
 
 use anyhow::{Result, anyhow};
 
 use super::login::NOT_VERIFIED;
 use super::registration::{check_traits, traits_of};
+use super::upstream::LAST_METHOD;
+use super::verification::too_long;
 use super::{
     AfterEffect, Context, FlowRecord, Form, SAVE_ATTEMPTS, Saved, Submission, SubmitOutcome,
     Submitted,
@@ -15,9 +17,13 @@ use crate::backend::identity::Aal;
 use crate::identity_native::codes::Purpose;
 use crate::identity_native::password::{self, HashError, PasswordConfig, PolicyError};
 use crate::identity_native::session::{self, SessionRow, StepUp};
-use crate::identity_native::store::{self, IdentityRow, ProfileSaved, Refused, Writer};
+use crate::identity_native::store::keys::{self, Key, KeyAdded, KeyKind, KeyRemoved, NewKey};
+use crate::identity_native::store::{
+    self, IdentityRow, NAME_MAX_CHARS, ProfileSaved, Refused, Writer,
+};
 use crate::identity_native::totp::{self, TotpConfig};
 use crate::identity_native::ui::Message;
+use crate::identity_native::webauthn::{self, PASSKEY_NAME, Slot};
 use crate::identity_native::{NativeBackend, errors, lookup};
 
 const ACCOUNT_EXISTS: (u64, &str) = (
@@ -62,6 +68,7 @@ pub(super) async fn submit(backend: &NativeBackend, mut s: Submission<'_>) -> Re
         "password" => change_password(change).await,
         "totp" => totp_method(change).await,
         "lookup_secret" => lookup_method(change).await,
+        "webauthn" | "passkey" => keys_method(change).await,
         _ => change.reject(NO_STRATEGY).await,
     }
 }
@@ -186,7 +193,7 @@ impl Change<'_> {
         self.page().await
     }
 
-    /// Count an email or password change against the identity's quota.
+    /// Count an email, password or key change against the identity's quota.
     fn admit_change(&self) -> bool {
         self.backend.limiters.settings_changes.admit(&self.row.id)
     }
@@ -210,6 +217,17 @@ impl Change<'_> {
                 "source" => "native",
                 "flow_id" => self.flow.row.id,
                 "kratos_session_id" => self.session.id,
+            ))
+    }
+
+    /// [`Self::event`] with the key's kind.
+    fn key_event(&self, action: &'static str, kind: KeyKind) -> AuditEvent {
+        self.event(action, &self.row.email)
+            .metadata(crate::audit_metadata!(
+                "source" => "native",
+                "flow_id" => self.flow.row.id,
+                "kratos_session_id" => self.session.id,
+                "kind" => kind.as_str(),
             ))
     }
 
@@ -328,8 +346,9 @@ async fn change_password(mut c: Change<'_>) -> Result<Submitted> {
     c.saved(|_| {}, event, Vec::new(), Some(after)).await
 }
 
-/// `totp_unlink` removes TOTP and the lookup codes with it; otherwise `totp_code` confirms the
-/// pending secret, which becomes the credential and raises this session to AAL2.
+/// `totp_unlink` removes TOTP, and the lookup codes with it unless a security key remains;
+/// otherwise `totp_code` confirms the pending secret, which becomes the credential and raises this
+/// session to AAL2.
 async fn totp_method(mut c: Change<'_>) -> Result<Submitted> {
     if !c.privileged() {
         return Ok(c.refresh_required());
@@ -341,7 +360,7 @@ async fn totp_method(mut c: Change<'_>) -> Result<Submitted> {
         if !enrolled {
             return c.reject(NO_STRATEGY).await;
         }
-        store::delete_credentials(db, &c.row.id, &["totp", "lookup_secret"]).await?;
+        store::keys::remove_totp(db, &c.row.id).await?;
         let event = c.event(action::MFA_TOTP_DISABLED, &c.row.email);
         let clear = |ctx: &mut Context| {
             ctx.lookup_codes = None;
@@ -388,15 +407,15 @@ async fn totp_method(mut c: Change<'_>) -> Result<Submitted> {
     c.saved(clear, event, set_cookies, None).await
 }
 
-/// Lookup codes, offered only with TOTP: regenerate shows fresh codes on the flow, confirm stores
-/// them in place of any earlier set, disable deletes them.
+/// Lookup codes, offered only with TOTP or a security key: regenerate shows fresh codes on the
+/// flow, confirm stores them in place of any earlier set, disable deletes them.
 async fn lookup_method(mut c: Change<'_>) -> Result<Submitted> {
     if !c.privileged() {
         return Ok(c.refresh_required());
     }
     let backend = c.backend;
     let db = &backend.db;
-    if store::credential(db, &c.row.id, "totp").await?.is_none() {
+    if !store::keys::has_second_factor(db, &c.row.id).await? {
         return c.reject(NO_STRATEGY).await;
     }
     let generating = c.flag("lookup_secret_regenerate") || c.flag("lookup_secret_confirm");
@@ -422,7 +441,8 @@ async fn lookup_method(mut c: Change<'_>) -> Result<Submitted> {
         let config = lookup::config_for(&c.backend.keys.lookup_mac, &c.row.id, &codes);
         let config = serde_json::to_string(&config)?;
         match store::write_credential(db, c.writer(true), "lookup_secret", &config, true).await? {
-            Ok(_) => {}
+            Ok(true) => {}
+            Ok(false) => return c.reject(NO_STRATEGY).await,
             Err(Refused::NotVerified) => return c.reject(NOT_VERIFIED).await,
             Err(Refused::SignedOut) => return Ok(signed_out()),
         }
@@ -435,6 +455,150 @@ async fn lookup_method(mut c: Change<'_>) -> Result<Submitted> {
         return c.saved(clear, event, Vec::new(), None).await;
     }
     c.reject(NO_STRATEGY).await
+}
+
+/// Stored name of a security key added with an empty name field.
+const KEY_NAME: &str = "Security key";
+
+/// One WebAuthn settings action and the field value it came with.
+enum KeyAction<'f> {
+    /// The browser's registration response.
+    Add(KeyKind, &'f str),
+    /// The key's row id.
+    Remove(KeyKind, &'f str),
+}
+
+/// The one WebAuthn action field set; `None` when none or more than one is.
+fn key_action(form: &Form) -> Option<KeyAction<'_>> {
+    let set = |name| form.get(name).filter(|v| !v.is_empty());
+    let mut actions = [
+        set("webauthn_register").map(|v| KeyAction::Add(KeyKind::Webauthn, v)),
+        set("passkey_settings_register").map(|v| KeyAction::Add(KeyKind::Passkey, v)),
+        set("webauthn_remove").map(|v| KeyAction::Remove(KeyKind::Webauthn, v)),
+        set("passkey_remove").map(|v| KeyAction::Remove(KeyKind::Passkey, v)),
+    ]
+    .into_iter()
+    .flatten();
+    let action = actions.next()?;
+    actions.next().is_none().then_some(action)
+}
+
+/// Passkeys and security keys. The whole WebAuthn section posts `method=webauthn`, so the field
+/// set picks the action: add a security key or a passkey, or remove one by row id.
+async fn keys_method(c: Change<'_>) -> Result<Submitted> {
+    let Some(action) = key_action(c.form) else {
+        return c.reject(NO_STRATEGY).await;
+    };
+    if !c.privileged() {
+        return Ok(c.refresh_required());
+    }
+    if !c.admit_change() {
+        return c.reject(BUSY).await;
+    }
+    match action {
+        KeyAction::Add(kind, response) => add_key(c, kind, response).await,
+        KeyAction::Remove(kind, row_id) => remove_key(c, kind, row_id).await,
+    }
+}
+
+/// A new key from the flow's registration ceremony for `kind`. The first security key raises
+/// this session to AAL2.
+async fn add_key(mut c: Change<'_>, kind: KeyKind, response: &str) -> Result<Submitted> {
+    if c.row.first_verified_at.is_none() {
+        return c.reject(NOT_VERIFIED).await;
+    }
+    let display_name = match kind {
+        KeyKind::Passkey => PASSKEY_NAME.to_string(),
+        KeyKind::Webauthn => {
+            let typed = c
+                .form
+                .get("webauthn_register_displayname")
+                .unwrap_or_default()
+                .trim();
+            let len = typed.chars().count();
+            if len > NAME_MAX_CHARS {
+                c.flow.add_node_message(
+                    "webauthn_register_displayname",
+                    too_long(NAME_MAX_CHARS, len),
+                );
+                return c.page().await;
+            }
+            if typed.is_empty() { KEY_NAME } else { typed }.to_string()
+        }
+    };
+    let backend = c.backend;
+    let Some(rp) = backend.webauthn.as_ref() else {
+        return c.reject(NO_STRATEGY).await;
+    };
+    let slot = match kind {
+        KeyKind::Passkey => Slot::Passkey,
+        KeyKind::Webauthn => Slot::Key,
+    };
+    let Some(ceremony) = backend.take(&mut c.flow, slot).await? else {
+        return c.reject(NO_STRATEGY).await;
+    };
+    let key = match kind {
+        KeyKind::Passkey => webauthn::register_passkey(rp, ceremony, response)
+            .filter(|(user, _)| uuid::Uuid::parse_str(&c.row.id).ok() == Some(*user))
+            .map(|(_, passkey)| Key::Passkey(passkey)),
+        KeyKind::Webauthn => webauthn::register_key(rp, ceremony, response).map(Key::SecurityKey),
+    };
+    let Some(key) = key else {
+        return c.reject(NO_STRATEGY).await;
+    };
+    let db = &backend.db;
+    match keys::add(db, c.writer(true), NewKey { display_name, key }).await? {
+        KeyAdded::Added => {}
+        KeyAdded::Taken => return c.reject(ACCOUNT_EXISTS).await,
+        KeyAdded::Refused(Refused::NotVerified) => return c.reject(NOT_VERIFIED).await,
+        KeyAdded::Refused(Refused::SignedOut) => return Ok(signed_out()),
+    }
+    let event = c.key_event(action::MFA_WEBAUTHN_ADDED, kind);
+    let mut set_cookies = Vec::new();
+    // An AAL1 session here means the identity had no second factor before this key.
+    if kind == KeyKind::Webauthn && c.session.aal != "aal2" {
+        match session::step_up(db, &c.session, "webauthn", None, Aal::Aal2).await? {
+            StepUp::Rotated(token) => set_cookies.push(backend.session_set_cookie(&token)),
+            StepUp::Superseded => {}
+            StepUp::NotLive => {
+                return Ok(Submitted {
+                    audit: vec![event],
+                    ..expired()
+                });
+            }
+        }
+    }
+    c.saved(clear_ceremonies, event, set_cookies, None).await
+}
+
+/// Remove the identity's `kind` key `row_id`; the last way to sign in stays.
+async fn remove_key(c: Change<'_>, kind: KeyKind, row_id: &str) -> Result<Submitted> {
+    let backend = c.backend;
+    let configured: Vec<&str> = backend.upstream.ids().collect();
+    let removed = keys::remove(&backend.db, c.writer(false), kind, row_id, &configured).await?;
+    match removed {
+        KeyRemoved::Removed => {}
+        KeyRemoved::NotFound => return c.reject(NO_STRATEGY).await,
+        KeyRemoved::LastSignIn => return c.reject(LAST_METHOD).await,
+        KeyRemoved::Refused(Refused::NotVerified) => return c.reject(NOT_VERIFIED).await,
+        KeyRemoved::Refused(Refused::SignedOut) => return Ok(signed_out()),
+    }
+    let event = c.key_event(action::MFA_WEBAUTHN_REMOVED, kind);
+    let clear: fn(&mut Context) = match kind {
+        KeyKind::Passkey => clear_ceremonies,
+        // Codes held for confirmation may have just lost the second factor they need.
+        KeyKind::Webauthn => |ctx| {
+            clear_ceremonies(ctx);
+            ctx.lookup_codes = None;
+        },
+    };
+    c.saved(clear, event, Vec::new(), None).await
+}
+
+/// The next render mints ceremonies whose exclusion lists match the keys stored now.
+fn clear_ceremonies(ctx: &mut Context) {
+    ctx.passkey_ceremony = None;
+    ctx.key_ceremony = None;
 }
 
 #[cfg(test)]
@@ -1831,6 +1995,155 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_security_key_sends_an_aal1_session_to_step_up() {
+        use crate::identity_native::flows::InitOutcome;
+        use crate::identity_native::store::keys::{KeyKind, plant};
+        let (db, backend) = setup().await;
+        let identity = identity_with_password(&db, "key@x.test", true).await;
+        plant(&db, &identity, KeyKind::Passkey).await;
+        let browser = signed_in(&backend, &identity).await;
+        let id = open(&backend, &browser, PASSWORD_PAGE).await;
+
+        plant(&db, &identity, KeyKind::Webauthn).await;
+        let params = InitParams {
+            return_to: Some(TWO_FA),
+            ..InitParams::default()
+        };
+        let init = backend
+            .init_flow(FlowKind::Settings, params, &browser.csrf, &browser.cookie())
+            .await
+            .unwrap();
+        assert!(
+            matches!(&init, InitOutcome::Redirect(to) if *to == crate::auth::aal2_step_up_url(TWO_FA)),
+            "{init:?}"
+        );
+        assert!(matches!(
+            backend
+                .get_flow(FlowKind::Settings, &id, &browser.cookie())
+                .await
+                .unwrap(),
+            FlowFetch::PrivilegedRequired(_)
+        ));
+        let got = send(
+            &backend,
+            &browser,
+            &id,
+            &[("method", "password"), ("password", STRONG)],
+        )
+        .await;
+        assert!(
+            matches!(&got, Dispatch::SignIn(to) if *to == crate::auth::aal2_step_up_url("/settings")),
+            "{got:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn lookup_codes_are_offered_with_a_security_key_and_no_totp() {
+        use crate::identity_native::store::keys::{KeyKind, plant};
+        let (db, backend) = setup().await;
+        let identity = identity_with_password(&db, "lk@x.test", true).await;
+        plant(&db, &identity, KeyKind::Passkey).await;
+        let browser = stepped_up(&backend, signed_in(&backend, &identity).await).await;
+        let id = open(&backend, &browser, TWO_FA).await;
+        assert!(
+            !page(&backend, &browser, &id)
+                .await
+                .has_node("lookup_secret", "lookup_secret_regenerate"),
+            "a passkey is no second factor"
+        );
+
+        plant(&db, &identity, KeyKind::Webauthn).await;
+        let shown = page(&backend, &browser, &id).await;
+        assert!(shown.has_node("lookup_secret", "lookup_secret_regenerate"));
+        assert!(shown.totp_qr.is_some(), "TOTP stays on offer");
+        let lookup = |action| [("method", "lookup_secret"), (action, "true")];
+        change(&backend, &browser, &id, &lookup("lookup_secret_regenerate")).await;
+        let codes = page(&backend, &browser, &id).await.lookup_codes;
+        let done = change(&backend, &browser, &id, &lookup("lookup_secret_confirm")).await;
+        assert_eq!(location(&done), TWO_FA);
+        assert!(has(&backend, &identity, "lookup_secret").await);
+
+        let (aal1, _) = login(&backend, "lk@x.test", PASSWORD).await;
+        let other = Browser {
+            csrf: uuid::Uuid::new_v4().to_string(),
+            session: aal1,
+        };
+        let aal2 = InitParams {
+            aal2: true,
+            ..InitParams::default()
+        };
+        let step = start(&backend, &other, FlowKind::Login, aal2).await;
+        let flow = match backend
+            .get_flow(FlowKind::Login, &step, &other.cookie())
+            .await
+            .unwrap()
+        {
+            FlowFetch::Ok(flow) => *flow,
+            _ => panic!("second-factor flow is readable"),
+        };
+        assert!(flow.has_node("lookup_secret", "lookup_secret"));
+        assert!(!flow.has_node("totp", "totp_code"));
+        let done = submit(
+            &backend,
+            &other,
+            FlowKind::Login,
+            &step,
+            &[("method", "lookup_secret"), ("lookup_secret", &codes[0])],
+        )
+        .await;
+        assert!(session_cookie(&done).is_some(), "a lookup code steps up");
+    }
+
+    #[tokio::test]
+    async fn a_passkey_keeps_the_last_link_unlinkable() {
+        use crate::config::{AppConfig, OidcProviderConfig, OidcProviderKind};
+        use crate::identity_native::store::keys::{KeyKind, plant};
+        let db = crate::db::test_pool().await;
+        let mut cfg = AppConfig::test_fixture();
+        cfg.identity.oidc_providers = vec![OidcProviderConfig {
+            id: "gh".into(),
+            kind: OidcProviderKind::Github,
+            issuer: None,
+            client_id: "forseti".into(),
+            client_secret: Some("secret".into()),
+            client_secret_env: None,
+            scopes: None,
+        }];
+        let backend = NativeBackend::new(&cfg, &db, &[0x42; 32]);
+        let identity = store::create(&db, "link@x.test", None, None, true)
+            .await
+            .unwrap()
+            .expect("address is free")
+            .id;
+        store::insert_link(&db, &identity, "gh", "1").await.unwrap();
+        let sole = async || {
+            backend
+                .admin_get_identity_full(&identity)
+                .await
+                .unwrap()
+                .sole_sign_in_is_oidc
+        };
+        let browser = stepped_up(&backend, signed_in(&backend, &identity).await).await;
+        let id = open(&backend, &browser, PROFILE).await;
+        assert_eq!(sole().await, Some(true));
+        assert!(
+            !page(&backend, &browser, &id)
+                .await
+                .has_node("oidc", "unlink")
+        );
+
+        plant(&db, &identity, KeyKind::Webauthn).await;
+        assert_eq!(sole().await, Some(true), "a security key is no way in");
+        plant(&db, &identity, KeyKind::Passkey).await;
+        assert_eq!(sole().await, Some(false));
+        assert!(
+            page(&backend, &browser, &id)
+                .await
+                .has_node("oidc", "unlink")
+        );
+    }
+
+    #[tokio::test]
     async fn email_and_password_changes_share_a_per_identity_cap() {
         let (db, backend) = setup().await;
         let identity = identity_with_password(&db, "cap@x.test", true).await;
@@ -2124,5 +2437,413 @@ mod tests {
             login(&backend, "own@x.test", PASSWORD).await.1,
             Vec::<u64>::new()
         );
+    }
+
+    use base64::Engine as _;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+    use crate::identity_native::store::keys::{KeyRow, plant};
+    use crate::identity_native::test_authenticator::Authenticator;
+
+    const ORIGIN: &str = "http://localhost:3000";
+    const RP_ID: &str = "localhost";
+
+    fn node_value(flow: &Flow, name: &str) -> Option<String> {
+        flow.inputs
+            .iter()
+            .find(|(_, i)| i.name == name)
+            .map(|(_, i)| i.value.clone())
+    }
+
+    /// The registration options the settings page shows for `kind`.
+    async fn creation_options(
+        backend: &NativeBackend,
+        browser: &Browser,
+        id: &str,
+        kind: KeyKind,
+    ) -> serde_json::Value {
+        let node = match kind {
+            KeyKind::Passkey => "passkey_create_data",
+            KeyKind::Webauthn => "webauthn_register_trigger",
+        };
+        let flow = page(backend, browser, id).await;
+        let shown = node_value(&flow, node).unwrap_or_else(|| panic!("{node} shown"));
+        serde_json::from_str(&shown).unwrap()
+    }
+
+    /// Post `response` as `static/webauthn.js` does: the whole form, the other fields empty.
+    async fn add(
+        backend: &NativeBackend,
+        browser: &Browser,
+        id: &str,
+        kind: KeyKind,
+        response: &serde_json::Value,
+        name: &str,
+    ) -> Submitted {
+        let response = response.to_string();
+        let (key, passkey) = match kind {
+            KeyKind::Webauthn => (response.as_str(), ""),
+            KeyKind::Passkey => ("", response.as_str()),
+        };
+        change(
+            backend,
+            browser,
+            id,
+            &[
+                ("method", "webauthn"),
+                ("webauthn_register_displayname", name),
+                ("webauthn_register", key),
+                ("passkey_settings_register", passkey),
+            ],
+        )
+        .await
+    }
+
+    /// Register `authenticator` against the page's current options for `kind` and post it.
+    async fn enrol(
+        backend: &NativeBackend,
+        browser: &Browser,
+        id: &str,
+        kind: KeyKind,
+        authenticator: &mut Authenticator,
+    ) -> Submitted {
+        let options = creation_options(backend, browser, id, kind).await;
+        let response = authenticator.register(RP_ID, ORIGIN, &options);
+        add(backend, browser, id, kind, &response, "").await
+    }
+
+    async fn remove(
+        backend: &NativeBackend,
+        browser: &Browser,
+        id: &str,
+        field: &str,
+        row: &str,
+    ) -> Submitted {
+        change(
+            backend,
+            browser,
+            id,
+            &[
+                ("method", "webauthn"),
+                ("webauthn_register_displayname", ""),
+                (field, row),
+            ],
+        )
+        .await
+    }
+
+    async fn key_rows(backend: &NativeBackend, identity: &str) -> Vec<KeyRow> {
+        keys::of_identity(&backend.db, identity).await.unwrap()
+    }
+
+    /// The submit was refused with `message`: shown again, nothing audited, no new token.
+    async fn refused(backend: &NativeBackend, id: &str, done: &Submitted, message: u64) {
+        assert_eq!(done.outcome, SubmitOutcome::Page);
+        assert!(done.audit.is_empty() && session_cookie(done).is_none());
+        assert_eq!(messages(backend, id).await.0, [message]);
+    }
+
+    #[tokio::test]
+    async fn a_security_key_and_a_passkey_are_added_from_the_settings_document() {
+        let (db, backend) = setup().await;
+        let identity = identity_with_password(&db, "keys@x.test", true).await;
+        let browser = signed_in(&backend, &identity).await;
+        let session_id = held(&backend, &browser).await.id;
+        let id = open(&backend, &browser, TWO_FA).await;
+
+        let mut token = Authenticator::security_key();
+        let options = creation_options(&backend, &browser, &id, KeyKind::Webauthn).await;
+        let challenge = options["publicKey"]["challenge"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let response = token.register(RP_ID, ORIGIN, &options);
+        let done = add(
+            &backend,
+            &browser,
+            &id,
+            KeyKind::Webauthn,
+            &response,
+            "  YubiKey 5 ",
+        )
+        .await;
+        assert_eq!(location(&done), TWO_FA);
+        let rows = key_rows(&backend, &identity).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            (rows[0].kind.as_str(), rows[0].display_name.as_str()),
+            ("webauthn", "YubiKey 5")
+        );
+        assert_eq!(
+            rows[0].credential_id,
+            URL_SAFE_NO_PAD.encode(&token.credential_id)
+        );
+        let audit = audit_lines(&done);
+        assert_eq!(audit.len(), 1);
+        assert!(audit[0].contains("mfa.webauthn.added"), "{}", audit[0]);
+        assert!(
+            audit[0].contains(r#""kind": String("webauthn")"#),
+            "{}",
+            audit[0]
+        );
+        let attestation = response["response"]["attestationObject"].as_str().unwrap();
+        for material in [rows[0].credential_id.as_str(), &challenge, attestation] {
+            assert!(!audit[0].contains(material), "{}", audit[0]);
+        }
+
+        // The first second factor raises this session to AAL2 on a new token.
+        let token_cookie = session_cookie(&done).expect("the session moves to a new token");
+        assert!(matches!(
+            whoami(&backend, &browser).await,
+            WhoamiOutcome::None
+        ));
+        let mut raised = browser.clone();
+        raised.session = Some(token_cookie);
+        let WhoamiOutcome::Ok(session) = whoami(&backend, &raised).await else {
+            panic!("the new token is live");
+        };
+        assert_eq!(session.id, session_id);
+        assert_eq!(session.authenticator_assurance_level, Some(Aal::Aal2));
+
+        let mut phone = Authenticator::passkey();
+        let done = enrol(&backend, &raised, &id, KeyKind::Passkey, &mut phone).await;
+        assert_eq!(location(&done), TWO_FA);
+        assert!(
+            session_cookie(&done).is_none(),
+            "a passkey is no second factor"
+        );
+        assert_eq!(
+            phone.user_handle.as_deref(),
+            Some(&uuid::Uuid::parse_str(&identity).unwrap().as_bytes()[..]),
+            "the user handle is the identity id"
+        );
+        let audit = audit_lines(&done);
+        assert!(audit[0].contains("mfa.webauthn.added"), "{}", audit[0]);
+        assert!(
+            audit[0].contains(r#""kind": String("passkey")"#),
+            "{}",
+            audit[0]
+        );
+
+        let done = enrol(
+            &backend,
+            &raised,
+            &id,
+            KeyKind::Webauthn,
+            &mut Authenticator::security_key(),
+        )
+        .await;
+        assert_eq!(location(&done), TWO_FA);
+        assert!(
+            session_cookie(&done).is_none(),
+            "an AAL2 session keeps its token"
+        );
+
+        let rows = key_rows(&backend, &identity).await;
+        let names: Vec<(&str, &str)> = rows
+            .iter()
+            .map(|r| (r.kind.as_str(), r.display_name.as_str()))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                ("webauthn", "YubiKey 5"),
+                ("passkey", "Passkey"),
+                ("webauthn", "Security key")
+            ]
+        );
+        let shown = page(&backend, &raised, &id).await;
+        let removable = |group: &str, field: &str| -> Vec<String> {
+            shown
+                .inputs(group)
+                .filter(|i| i.name == field)
+                .map(|i| i.value.clone())
+                .collect()
+        };
+        assert_eq!(
+            removable("webauthn", "webauthn_remove"),
+            [rows[0].id.clone(), rows[2].id.clone()]
+        );
+        assert_eq!(removable("passkey", "passkey_remove"), [rows[1].id.clone()]);
+        assert!(shown.has_node("lookup_secret", "lookup_secret_regenerate"));
+    }
+
+    #[tokio::test]
+    async fn registrations_that_do_not_verify_or_are_taken_store_nothing() {
+        let (db, backend) = setup().await;
+        let identity = identity_with_password(&db, "refuse@x.test", true).await;
+        let browser = signed_in(&backend, &identity).await;
+        let id = open(&backend, &browser, TWO_FA).await;
+        let mut token = Authenticator::security_key();
+
+        for (rp_id, origin) in [(RP_ID, "http://localhost:4000"), ("evil.test", ORIGIN)] {
+            let options = creation_options(&backend, &browser, &id, KeyKind::Webauthn).await;
+            let response = token.register(rp_id, origin, &options);
+            let done = add(&backend, &browser, &id, KeyKind::Webauthn, &response, "").await;
+            refused(&backend, &id, &done, 4_000_001).await;
+            let rec = backend.load_flow(&id).await.unwrap().unwrap();
+            assert!(rec.ctx.key_ceremony.is_none(), "the challenge is spent");
+        }
+        let options = creation_options(&backend, &browser, &id, KeyKind::Passkey).await;
+        let response = Authenticator::passkey().register(RP_ID, "https://evil.test", &options);
+        let done = add(&backend, &browser, &id, KeyKind::Passkey, &response, "").await;
+        refused(&backend, &id, &done, 4_000_001).await;
+        assert!(key_rows(&backend, &identity).await.is_empty());
+
+        // A response answers its challenge once, and no later one.
+        let options = creation_options(&backend, &browser, &id, KeyKind::Webauthn).await;
+        let response = token.register(RP_ID, ORIGIN, &options);
+        let done = add(&backend, &browser, &id, KeyKind::Webauthn, &response, "").await;
+        assert_eq!(location(&done), TWO_FA);
+        let raised = Browser {
+            session: session_cookie(&done),
+            ..browser.clone()
+        };
+        let done = add(&backend, &raised, &id, KeyKind::Webauthn, &response, "").await;
+        refused(&backend, &id, &done, 4_000_001).await;
+        creation_options(&backend, &raised, &id, KeyKind::Webauthn).await;
+        let done = add(&backend, &raised, &id, KeyKind::Webauthn, &response, "").await;
+        refused(&backend, &id, &done, 4_000_001).await;
+        assert_eq!(key_rows(&backend, &identity).await.len(), 1);
+
+        // The same authenticator credential offered to another identity.
+        let other = identity_with_password(&db, "other@x.test", true).await;
+        let theirs = signed_in(&backend, &other).await;
+        let their_flow = open(&backend, &theirs, TWO_FA).await;
+        let done = enrol(
+            &backend,
+            &theirs,
+            &their_flow,
+            KeyKind::Webauthn,
+            &mut token,
+        )
+        .await;
+        refused(&backend, &their_flow, &done, 4_000_007).await;
+        assert!(key_rows(&backend, &other).await.is_empty());
+        assert_eq!(held(&backend, &theirs).await.aal, "aal1");
+        assert_eq!(key_rows(&backend, &identity).await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn key_changes_outside_the_privileged_window_redirect_to_a_refresh() {
+        let (db, backend) = setup().await;
+        let identity = identity_with_password(&db, "stale-keys@x.test", true).await;
+        let planted = plant(&db, &identity, KeyKind::Passkey).await;
+        let browser = signed_in(&backend, &identity).await;
+        let id = open(&backend, &browser, TWO_FA).await;
+        let options = creation_options(&backend, &browser, &id, KeyKind::Webauthn).await;
+        let response = Authenticator::security_key().register(RP_ID, ORIGIN, &options);
+        lapse(&backend, &browser).await;
+
+        let done = add(&backend, &browser, &id, KeyKind::Webauthn, &response, "").await;
+        assert_eq!(location(&done), refresh_login(TWO_FA));
+        assert!(done.audit.is_empty() && session_cookie(&done).is_none());
+        let done = remove(&backend, &browser, &id, "passkey_remove", &planted).await;
+        assert_eq!(location(&done), refresh_login(TWO_FA));
+        assert!(done.audit.is_empty());
+
+        let rows = key_rows(&backend, &identity).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, planted);
+        let rec = backend.load_flow(&id).await.unwrap().unwrap();
+        assert!(rec.ctx.key_ceremony.is_some(), "the challenge is not spent");
+    }
+
+    #[tokio::test]
+    async fn a_never_verified_identity_cannot_add_keys_but_can_remove_them() {
+        let (db, backend) = setup().await;
+        let identity = identity_with_password(&db, "nv-keys@x.test", false).await;
+        let browser = signed_in(&backend, &identity).await;
+        let id = open(&backend, &browser, TWO_FA).await;
+        for kind in [KeyKind::Webauthn, KeyKind::Passkey] {
+            let done = enrol(
+                &backend,
+                &browser,
+                &id,
+                kind,
+                &mut Authenticator::security_key(),
+            )
+            .await;
+            refused(&backend, &id, &done, 4_000_010).await;
+        }
+        assert!(key_rows(&backend, &identity).await.is_empty());
+        assert_eq!(held(&backend, &browser).await.aal, "aal1");
+
+        let planted = plant(&db, &identity, KeyKind::Webauthn).await;
+        let browser = stepped_up(&backend, browser).await;
+        let id = open(&backend, &browser, TWO_FA).await;
+        let done = remove(&backend, &browser, &id, "webauthn_remove", &planted).await;
+        assert_eq!(location(&done), TWO_FA);
+        assert!(key_rows(&backend, &identity).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn key_removal_is_guarded_and_scoped_to_the_identity() {
+        let (db, backend) = setup().await;
+        let identity = store::create(&db, "passkey-only@x.test", None, None, true)
+            .await
+            .unwrap()
+            .expect("address is free")
+            .id;
+        let passkey = plant(&db, &identity, KeyKind::Passkey).await;
+        let key = plant(&db, &identity, KeyKind::Webauthn).await;
+        plant_lookup_codes(&backend, &identity).await;
+        let other = identity_with_password(&db, "bystander-keys@x.test", true).await;
+        let theirs = plant(&db, &other, KeyKind::Webauthn).await;
+        let browser = stepped_up(&backend, signed_in(&backend, &identity).await).await;
+        let id = open(&backend, &browser, TWO_FA).await;
+
+        let done = remove(&backend, &browser, &id, "passkey_remove", &passkey).await;
+        refused(&backend, &id, &done, 4_000_001).await;
+        let rec = backend.load_flow(&id).await.unwrap().unwrap();
+        assert_eq!(rec.ctx.messages[0].text, LAST_METHOD.1);
+
+        for (field, row) in [
+            ("webauthn_remove", theirs.as_str()),
+            ("webauthn_remove", passkey.as_str()),
+            ("passkey_remove", key.as_str()),
+            ("webauthn_remove", "missing"),
+        ] {
+            let done = remove(&backend, &browser, &id, field, row).await;
+            refused(&backend, &id, &done, 4_000_001).await;
+        }
+        let done = change(
+            &backend,
+            &browser,
+            &id,
+            &[
+                ("method", "webauthn"),
+                ("webauthn_remove", &key),
+                ("passkey_remove", &passkey),
+            ],
+        )
+        .await;
+        refused(&backend, &id, &done, 4_000_001).await;
+        let done = change(&backend, &browser, &id, &[("method", "webauthn")]).await;
+        refused(&backend, &id, &done, 4_000_001).await;
+        assert_eq!(key_rows(&backend, &identity).await.len(), 2);
+        assert_eq!(key_rows(&backend, &other).await.len(), 1);
+
+        let done = remove(&backend, &browser, &id, "webauthn_remove", &key).await;
+        assert_eq!(location(&done), TWO_FA);
+        let audit = audit_lines(&done);
+        assert_eq!(audit.len(), 1);
+        assert!(audit[0].contains("mfa.webauthn.removed"), "{}", audit[0]);
+        assert!(
+            audit[0].contains(r#""kind": String("webauthn")"#),
+            "{}",
+            audit[0]
+        );
+        assert!(
+            !has(&backend, &identity, "lookup_secret").await,
+            "the codes go with the last second factor"
+        );
+        let rows = key_rows(&backend, &identity).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, passkey);
+
+        while backend.limiters.settings_changes.admit(&identity) {}
+        let done = remove(&backend, &browser, &id, "passkey_remove", &passkey).await;
+        refused(&backend, &id, &done, 9_000_001).await;
     }
 }

@@ -18,8 +18,8 @@ Forseti builds with one of two identity backends, chosen at compile time with a 
 |---|---|---|
 | Services to run | Forseti, Kratos, Hydra | Forseti, Hydra |
 | Self-service flows | login, registration, verification, recovery, settings, logout | the same |
-| Second factors | TOTP, backup codes, WebAuthn security keys | TOTP, backup codes |
-| Passwordless sign-in | passkeys, email codes | none |
+| Second factors | TOTP, backup codes, WebAuthn security keys | the same |
+| Passwordless sign-in | passkeys, email codes | passkeys (no email codes) |
 | Upstream sign-in | every provider Kratos supports | OpenID Connect providers and GitHub (no Apple) |
 | Enterprise SAML SSO | yes | yes |
 | Mail | Kratos courier for flow mail, Forseti mailer for invites and claims | Forseti mailer for everything |

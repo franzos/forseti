@@ -778,3 +778,57 @@ pub fn fresh_totp_step(secret_b32: &str) -> u64 {
         std::thread::sleep(next.saturating_sub(now) + Duration::from_millis(50));
     }
 }
+
+// --- WebAuthn pages --------------------------------------------------------
+
+#[tokio::test]
+async fn login_page_offers_passkey_sign_in_with_the_script() {
+    let client = browser_client();
+    let (at, html) = get_page(&client, &format!("{PORTAL}/self-service/login/browser")).await;
+    let form = html_forms(&html, &at)
+        .into_iter()
+        .find(|f| f.has("passkey_login_trigger"))
+        .unwrap_or_else(|| panic!("no passkey_login_trigger on {at}: {}", page_errors(&html)));
+    assert!(form.has("passkey_login"), "passkey_login missing on {at}");
+    assert!(
+        form.has("passkey_challenge"),
+        "passkey_challenge missing on {at}"
+    );
+    assert!(
+        html.contains(r#"src="/static/webauthn.js""#),
+        "no webauthn.js script node on {at}"
+    );
+}
+
+#[tokio::test]
+async fn webauthn_script_is_served_with_its_trigger_functions() {
+    let res = browser_client()
+        .get(format!("{PORTAL}/static/webauthn.js"))
+        .send()
+        .await
+        .expect("GET /static/webauthn.js");
+    assert_eq!(res.status(), reqwest::StatusCode::OK);
+    let content_type = res
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        content_type.contains("javascript"),
+        "content-type: {content_type}"
+    );
+    let body = res.text().await.expect("script body");
+    for name in [
+        "oryPasskeyLogin",
+        "oryPasskeyRegistration",
+        "oryPasskeySettingsRegistration",
+        "oryWebAuthnLogin",
+        "oryWebAuthnRegistration",
+    ] {
+        assert!(
+            body.contains(&format!("window.{name} =")),
+            "webauthn.js does not define window.{name}"
+        );
+    }
+}

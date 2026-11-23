@@ -47,6 +47,8 @@ admin-identity-action-generate-recovery = Genera codice di recupero
 admin-identity-action-disable = Disattiva
 admin-identity-action-enable = Attiva
 admin-identity-action-delete = Elimina
+admin-identity-action-reset-second-factors = Reimposta 2FA
+dialog-reset-second-factors-failed-title = Reimpostazione 2FA non riuscita
 admin-identity-section-traits = Trait
 admin-identity-section-addresses = Indirizzi verificabili
 admin-identity-addresses-empty = Nessun indirizzo verificabile su questa identità.
@@ -639,6 +641,8 @@ admin-saml-not-configured-part4 = .
 # Messaggi flash admin (mostrati come banner dopo un reindirizzamento)
 flash-identity-disabled = Identità disattivata.
 flash-identity-enabled = Identità attivata.
+flash-identity-second-factors-reset = 2FA reimpostato.
+flash-identity-second-factors-none = Questa identità non ha 2FA da reimpostare.
 flash-session-revoked = Sessione revocata.
 flash-client-create-failed = Creazione del client non riuscita: { $error }
 flash-client-account-deletion-url-rejected = URL di eliminazione account rifiutato: { $error }

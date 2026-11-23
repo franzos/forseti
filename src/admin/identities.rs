@@ -103,6 +103,8 @@ struct IdentityShowTemplate {
     credentials: Vec<CredentialView>,
     addresses: Vec<AddressView>,
     sessions: Vec<SessionRow>,
+    /// Native build only, and only while the identity has TOTP or a security key.
+    can_reset_second_factors: bool,
     /// One-time recovery code shown after a successful `POST /recovery`.
     recovery_code: Option<String>,
     recovery_link: Option<String>,
@@ -395,6 +397,8 @@ pub async fn show(
     };
 
     let row = project_row(&ctx.locale, &identity);
+    let can_reset_second_factors =
+        cfg!(feature = "identity-native") && identity.has_second_factor == Some(true);
     let traits_json = identity
         .traits
         .as_ref()
@@ -474,6 +478,7 @@ pub async fn show(
         credentials,
         addresses,
         sessions,
+        can_reset_second_factors,
         recovery_code,
         recovery_link,
         flash: flash_msg,
@@ -539,6 +544,11 @@ pub async fn recovery(
     }
 }
 
+#[cfg(feature = "identity-ory")]
+const DISABLE_BODY: &str = "The identity will no longer be able to sign in. Its OAuth sign-in and app grants are revoked; existing Forseti browser sessions are not — use the sessions admin to do that separately.";
+#[cfg(feature = "identity-native")]
+const DISABLE_BODY: &str = "The identity will no longer be able to sign in. Its OAuth sign-in, app grants and Forseti browser sessions are revoked. Enabling it again restores none of them.";
+
 pub async fn disable_confirm(Path(id): Path<String>, admin: RequireAdmin, csrf: Csrf) -> Response {
     let RequireAdmin { ctx } = admin;
     let action_url = format!("/admin/identities/{}/disable", crate::web::urlencode(&id));
@@ -548,7 +558,7 @@ pub async fn disable_confirm(Path(id): Path<String>, admin: RequireAdmin, csrf: 
         chrome,
         admin_active: AdminSection::Identities,
         title: format!("Disable identity {id}?"),
-        body: "The identity will no longer be able to sign in. Its OAuth sign-in and app grants are revoked; existing Forseti browser sessions are not — use the sessions admin to do that separately.".to_string(),
+        body: DISABLE_BODY.to_string(),
         action_url,
         cancel_url,
         submit_label: "Disable identity",
@@ -640,6 +650,81 @@ pub async fn enable(
     }
 }
 
+#[cfg(feature = "identity-native")]
+pub async fn reset_second_factors_confirm(
+    Path(id): Path<String>,
+    admin: RequireAdmin,
+    csrf: Csrf,
+) -> Response {
+    let RequireAdmin { ctx } = admin;
+    let action_url = format!("/admin/identities/{}/reset-2fa", crate::web::urlencode(&id));
+    let cancel_url = format!("/admin/identities/{}", crate::web::urlencode(&id));
+    let chrome = ctx.chrome(&csrf);
+    render(&ConfirmTemplate {
+        chrome,
+        admin_active: AdminSection::Identities,
+        title: format!("Reset 2FA for identity {id}?"),
+        body: "This removes the identity's authenticator app, security keys and recovery codes. Passkeys and existing browser sessions stay. The user signs in without a second factor until they set up 2FA again.".to_string(),
+        action_url,
+        cancel_url,
+        submit_label: "Reset 2FA",
+    })
+}
+
+#[cfg(feature = "identity-native")]
+pub async fn reset_second_factors(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    actx: AuditCtx,
+    admin: RequireAdmin,
+    CsrfForm(form): CsrfForm<ConfirmForm>,
+) -> Response {
+    let RequireAdmin { ctx } = admin;
+    let target = format!("/admin/identities/{}", crate::web::urlencode(&id));
+    if let Some(r) = form.bounce_unless_confirmed(&target) {
+        return r;
+    }
+    match state.identity.admin_reset_second_factors(&id).await {
+        Ok(reset) if reset.is_empty() => state.flash_redirect(
+            &target,
+            &crate::i18n::lookup(&ctx.locale, "flash-identity-second-factors-none"),
+        ),
+        Ok(reset) => {
+            let removed: Vec<&str> = [
+                ("totp", reset.totp),
+                ("lookup_secret", reset.lookup_secret),
+                ("webauthn", reset.security_keys),
+            ]
+            .into_iter()
+            .filter_map(|(kind, n)| (n > 0).then_some(kind))
+            .collect();
+            let _ = audit::log(
+                &state.db,
+                ctx.audit_event(action::ADMIN_IDENTITY_SECOND_FACTORS_RESET, &actx)
+                    .target(target_kind::IDENTITY, id.clone())
+                    .metadata(crate::audit_metadata!(
+                        "removed" => removed,
+                        "security_keys" => reset.security_keys,
+                    ))
+                    .critical(),
+            )
+            .await;
+            state.flash_redirect(
+                &target,
+                &crate::i18n::lookup(&ctx.locale, "flash-identity-second-factors-reset"),
+            )
+        }
+        Err(e) => {
+            tracing::error!(error = ?e, id, "admin: second-factor reset failed");
+            render_admin_error(
+                &state,
+                &crate::i18n::lookup(&ctx.locale, "dialog-reset-second-factors-failed-title"),
+                &format!("Could not reset 2FA: {e}"),
+            )
+        }
+    }
+}
+
 pub async fn delete_confirm(Path(id): Path<String>, admin: RequireAdmin, csrf: Csrf) -> Response {
     let RequireAdmin { ctx } = admin;
     let action_url = format!("/admin/identities/{}/delete", crate::web::urlencode(&id));
@@ -700,6 +785,34 @@ pub async fn delete(
                 &crate::i18n::lookup(&ctx.locale, "dialog-delete-failed-title"),
                 &format!("Could not delete identity: {e}"),
             )
+        }
+    }
+}
+
+#[cfg(all(test, feature = "identity-ory"))]
+mod tests {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt as _;
+
+    use crate::config::AppConfig;
+    use crate::state::AppState;
+
+    #[tokio::test]
+    async fn the_ory_build_has_no_second_factor_reset_route() {
+        let cfg = AppConfig::test_fixture();
+        let db = crate::db::test_pool().await;
+        let identity = crate::backend::build_identity(&cfg, &db, &[0x42; 32]);
+        let router =
+            crate::admin::router().with_state(AppState::for_test(cfg, db, identity, &[0x42; 32]));
+        for method in ["GET", "POST"] {
+            let req = Request::builder()
+                .method(method)
+                .uri("/admin/identities/00000000-0000-0000-0000-000000000000/reset-2fa")
+                .body(Body::empty())
+                .unwrap();
+            let resp = router.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{method}");
         }
     }
 }

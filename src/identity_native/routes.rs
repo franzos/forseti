@@ -461,7 +461,8 @@ mod tests {
         };
         let router = super::router(&cfg)
             .merge(crate::auth::router(&cfg.proxy, &cfg.auth))
-            .merge(crate::settings::router(&cfg));
+            .merge(crate::settings::router(&cfg))
+            .merge(crate::admin::router());
         let csp = crate::app::CspSources {
             frame_ancestors: cfg.security.frame_ancestors.clone(),
             form_action: "'self'".to_string(),
@@ -4657,5 +4658,183 @@ mod tests {
         let (_, cookie, _) = refresh_browser(&app, &gh_only, false).await;
         let flow = refresh_flow(&app, &cookie).await;
         assert!(oidc_inputs(&app.flow(FlowKind::Login, &flow, &cookie).await).is_empty());
+    }
+
+    /// An app with `root@x.test` allowlisted as admin and Hydra's admin API stubbed, and that
+    /// admin's AAL2 browser: (admin id, cookie header, CSRF token).
+    async fn admin_app() -> (App, String, String, String) {
+        let (hydra, _) = fake_hydra_admin().await;
+        let mut cfg = AppConfig::test_fixture();
+        cfg.hydra.admin_url = hydra;
+        cfg.admin.allowed_emails = vec!["root@x.test".into()];
+        let app = app_with(cfg).await;
+        let admin = app.user("root@x.test").await;
+        let (cookie, token) = browser_at(&app, &admin, Aal::Aal2).await;
+        (app, admin, cookie, token)
+    }
+
+    /// A browser holding a session of `identity_id` at `aal`: (cookie header, CSRF token).
+    async fn browser_at(app: &App, identity_id: &str, aal: Aal) -> (String, String) {
+        let issued = app
+            .backend
+            .issue_session(identity_id, "password", None, aal, Device::default())
+            .await
+            .unwrap();
+        let token = csrf_cookie(&app.get("/self-service/logout", "").await).unwrap();
+        let cookie = format!("forseti_session={}; forseti_csrf={token}", issued.token);
+        (cookie, token)
+    }
+
+    /// The identity page as `cookie` sees it right after `redirect`, with its flash cookie.
+    async fn page_after(app: &App, redirect: &Response, cookie: &str) -> String {
+        let flash = set_cookies(redirect)
+            .first()
+            .map(|c| c.split(';').next().unwrap().to_string())
+            .unwrap();
+        let page = app
+            .get(&location(redirect), &format!("{cookie}; {flash}"))
+            .await;
+        assert_eq!(page.status(), StatusCode::OK);
+        body(page).await
+    }
+
+    #[tokio::test]
+    async fn admin_second_factor_reset_keeps_passkeys_and_sessions_and_is_audited() {
+        use store::keys::{self, KeyKind};
+        let (app, admin, cookie, csrf) = admin_app().await;
+        let target = app.user("t@x.test").await;
+        crate::identity_native::test_support::plant_password(&app.db, &target).await;
+        app.add_totp(&target).await;
+        crate::identity_native::test_support::plant_lookup_codes(&app.backend, &target).await;
+        keys::plant(&app.db, &target, KeyKind::Webauthn).await;
+        keys::plant(&app.db, &target, KeyKind::Passkey).await;
+        let (aal1_session, _, _) = app.signed_in(&target).await;
+        let show = format!("/admin/identities/{target}");
+        let uri = format!("{show}/reset-2fa");
+
+        assert!(body(app.get(&show, &cookie).await).await.contains(&uri));
+        let confirm = app.get(&uri, &cookie).await;
+        assert_eq!(confirm.status(), StatusCode::OK);
+        assert!(body(confirm).await.contains(&format!("action=\"{uri}\"")));
+
+        let forged = app.post(&uri, &cookie, "confirm=yes").await;
+        assert_eq!(forged.status(), StatusCode::FORBIDDEN);
+        let unconfirmed = app.post(&uri, &cookie, &format!("_csrf={csrf}")).await;
+        assert_eq!(location(&unconfirmed), show);
+        assert!(keys::has_second_factor(&app.db, &target).await.unwrap());
+
+        let done = app
+            .post(&uri, &cookie, &format!("_csrf={csrf}&confirm=yes"))
+            .await;
+        assert_eq!(location(&done), show);
+        let page = page_after(&app, &done, &cookie).await;
+        assert!(page.contains("2FA reset."));
+        assert!(!page.contains(&uri));
+
+        let identity = store::get(&app.db, &target).await.unwrap().unwrap();
+        let mut kinds: Vec<String> = identity.credentials.unwrap().into_keys().collect();
+        kinds.sort();
+        assert_eq!(kinds, ["passkey", "password"]);
+        assert_eq!(identity.has_second_factor, Some(false));
+        assert!(
+            session::find_live(&app.db, &aal1_session)
+                .await
+                .unwrap()
+                .is_some()
+        );
+
+        let resets = |rows: Vec<crate::audit::AuditRow>| {
+            rows.into_iter()
+                .filter(|r| r.action == crate::audit::action::ADMIN_IDENTITY_SECOND_FACTORS_RESET)
+                .collect::<Vec<_>>()
+        };
+        let rows = resets(audit_rows(&app.db).await.unwrap());
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.severity, "critical");
+        assert_eq!(row.actor_kind, "admin");
+        assert_eq!(row.actor_id.as_deref(), Some(admin.as_str()));
+        assert_eq!(
+            (row.target_kind.as_deref(), row.target_id.as_deref()),
+            (Some("identity"), Some(target.as_str()))
+        );
+        let metadata: serde_json::Value = serde_json::from_str(&row.metadata).unwrap();
+        assert_eq!(
+            metadata,
+            serde_json::json!({"removed": ["totp", "lookup_secret", "webauthn"], "security_keys": 1})
+        );
+
+        let again = app
+            .post(&uri, &cookie, &format!("_csrf={csrf}&confirm=yes"))
+            .await;
+        assert_eq!(location(&again), show);
+        assert!(
+            page_after(&app, &again, &cookie)
+                .await
+                .contains("This identity has no 2FA to reset.")
+        );
+        assert_eq!(resets(audit_rows(&app.db).await.unwrap()).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn admin_second_factor_reset_needs_an_aal2_admin() {
+        let (app, admin, _, _) = admin_app().await;
+        let target = app.user("t@x.test").await;
+        app.add_totp(&target).await;
+        let uri = format!("/admin/identities/{target}/reset-2fa");
+
+        let (cookie, token) = browser_at(&app, &admin, Aal::Aal1).await;
+        let resp = app
+            .post(&uri, &cookie, &format!("_csrf={token}&confirm=yes"))
+            .await;
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+        assert!(location(&resp).contains("aal=aal2"), "{}", location(&resp));
+
+        let user = app.user("user@x.test").await;
+        let (cookie, token) = browser_at(&app, &user, Aal::Aal2).await;
+        let resp = app
+            .post(&uri, &cookie, &format!("_csrf={token}&confirm=yes"))
+            .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        assert!(
+            store::keys::has_second_factor(&app.db, &target)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_disable_revokes_sessions_and_enable_brings_none_back() {
+        let (app, _, cookie, csrf) = admin_app().await;
+        let target = app.user("t@x.test").await;
+        let (held, _, _) = app.signed_in(&target).await;
+        let show = format!("/admin/identities/{target}");
+
+        let confirm = body(app.get(&format!("{show}/disable"), &cookie).await).await;
+        assert!(confirm.contains("Forseti browser sessions are revoked"));
+        let done = app
+            .post(
+                &format!("{show}/disable"),
+                &cookie,
+                &format!("_csrf={csrf}&confirm=yes"),
+            )
+            .await;
+        assert_eq!(location(&done), show);
+        assert!(session::find_live(&app.db, &held).await.unwrap().is_none());
+        assert!(!app.backend.is_session_active(&target, &held).await.unwrap());
+
+        let enabled = app
+            .post(&format!("{show}/enable"), &cookie, &format!("_csrf={csrf}"))
+            .await;
+        assert_eq!(location(&enabled), show);
+        assert!(!app.backend.is_session_active(&target, &held).await.unwrap());
+        assert!(
+            app.backend
+                .active_session_ids(&target)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 }

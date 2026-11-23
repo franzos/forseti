@@ -47,6 +47,8 @@ admin-identity-action-generate-recovery = สร้างรหัสกู้�
 admin-identity-action-disable = ปิดใช้งาน
 admin-identity-action-enable = เปิดใช้งาน
 admin-identity-action-delete = ลบ
+admin-identity-action-reset-second-factors = รีเซ็ต 2FA
+dialog-reset-second-factors-failed-title = รีเซ็ต 2FA ล้มเหลว
 admin-identity-section-traits = คุณลักษณะ
 admin-identity-section-addresses = ที่อยู่ที่ยืนยันได้
 admin-identity-addresses-empty = ตัวตนนี้ไม่มีที่อยู่ที่ยืนยันได้
@@ -638,6 +640,8 @@ admin-saml-not-configured-part4 = .
 # ข้อความแฟลชของผู้ดูแลระบบ (แสดงเป็นแบนเนอร์หลังการเปลี่ยนเส้นทาง)
 flash-identity-disabled = ปิดใช้งานตัวตนแล้ว
 flash-identity-enabled = เปิดใช้งานตัวตนแล้ว
+flash-identity-second-factors-reset = รีเซ็ต 2FA แล้ว
+flash-identity-second-factors-none = ตัวตนนี้ไม่มี 2FA ให้รีเซ็ต
 flash-session-revoked = เพิกถอนเซสชันแล้ว
 flash-client-create-failed = สร้างไคลเอนต์ล้มเหลว: { $error }
 flash-client-account-deletion-url-rejected = URL การลบบัญชีถูกปฏิเสธ: { $error }

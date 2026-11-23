@@ -4,7 +4,7 @@ use anyhow::Result;
 use axum::http::HeaderMap;
 
 use super::flows::Found;
-use super::{NativeBackend, errors, mail, session, store};
+use super::{NativeBackend, SecondFactorsReset, errors, mail, session, store};
 use crate::backend::IdentityBackend;
 use crate::backend::identity::{
     Aal, BrowserSession, CourierStatus, FlowFetch, FlowInit, FlowKind, FlowOutcome, Identity,
@@ -22,17 +22,22 @@ fn no_session() -> anyhow::Error {
 }
 
 impl NativeBackend {
-    /// Sets [`Identity::sole_sign_in_is_oidc`]: linked, no password, and at most one link to a
-    /// configured provider. Links to providers removed from config are no way in.
+    /// Sets [`Identity::sole_sign_in_is_oidc`]: linked, no password, no passkey, and at most one
+    /// link to a configured provider. Links to providers removed from config are no way in.
     fn with_sign_in_fact(&self, mut identity: Identity) -> Identity {
         let links = crate::settings::linked_providers::linked_provider_ids(&identity);
-        let has_password = identity
+        let other_way_in = identity
             .credentials
             .as_ref()
-            .is_some_and(|c| c.contains_key("password"));
+            .is_some_and(|c| c.contains_key("password") || c.contains_key("passkey"));
         let usable = self.upstream.ids().filter(|p| links.contains(*p)).count();
-        identity.sole_sign_in_is_oidc = Some(!links.is_empty() && !has_password && usable <= 1);
+        identity.sole_sign_in_is_oidc = Some(!links.is_empty() && !other_way_in && usable <= 1);
         identity
+    }
+
+    /// Deletes the identity's TOTP, lookup codes and security keys; passkeys and sessions stay.
+    pub(crate) async fn admin_reset_second_factors(&self, id: &str) -> Result<SecondFactorsReset> {
+        store::keys::reset_second_factors(&self.db, id).await
     }
 }
 
@@ -369,6 +374,35 @@ mod tests {
 
     fn cookie_header(set_cookie: &str) -> String {
         set_cookie.split(';').next().unwrap().to_string()
+    }
+
+    #[tokio::test]
+    async fn the_dashboard_badges_read_the_second_factor_fact() {
+        use super::store::keys::{KeyKind, plant};
+        use crate::dashboard::second_factor_badges;
+        let db = crate::db::test_pool().await;
+        let backend = NativeBackend::for_test(&db);
+        let id = store::create(&db, "badge@x.test", None, None, true)
+            .await
+            .unwrap()
+            .unwrap()
+            .id;
+        let badges =
+            async || second_factor_badges(&backend.admin_get_identity_full(&id).await.unwrap());
+        plant(&db, &id, KeyKind::Passkey).await;
+        assert_eq!(
+            badges().await,
+            (false, false),
+            "a passkey is no second factor"
+        );
+        plant(&db, &id, KeyKind::Webauthn).await;
+        assert_eq!(badges().await, (true, true));
+        assert!(
+            store::insert_credential(&db, &id, "lookup_secret", "{}")
+                .await
+                .unwrap()
+        );
+        assert_eq!(badges().await, (true, false));
     }
 
     #[tokio::test]

@@ -39,7 +39,8 @@ const NO_STRATEGY: (u64, &str) = (
 );
 
 /// Kratos's id; its catalogue has no entry, so the text is shown as is.
-const LAST_METHOD: (u64, &str) = (4_000_001, "Unable to remove the last sign-in method.");
+pub(super) const LAST_METHOD: (u64, &str) =
+    (4_000_001, "Unable to remove the last sign-in method.");
 
 const STATE_COOKIE_TTL_SECS: u64 = 600;
 

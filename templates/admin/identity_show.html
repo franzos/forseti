@@ -64,6 +64,10 @@
         </button>
       </form>
     {% endif %}
+    {% if can_reset_second_factors %}
+      <a href="/admin/identities/{{ row.id }}/reset-2fa"
+         class="font-label-md text-label-md text-error border border-error rounded-lg px-4 py-2 hover:bg-error-container hover:text-on-error-container transition-colors">{{ chrome.t("admin-identity-action-reset-second-factors") }}</a>
+    {% endif %}
     <a href="/admin/identities/{{ row.id }}/delete"
        class="font-label-md text-label-md text-error border border-error rounded-lg px-4 py-2 hover:bg-error-container hover:text-on-error-container transition-colors">{{ chrome.t("admin-identity-action-delete") }}</a>
   </div>

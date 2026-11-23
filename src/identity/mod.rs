@@ -201,39 +201,112 @@ pub struct PruneOrphan {
     pub steps: Vec<&'static str>,
 }
 
-/// Walk every identity Kratos knows about and delete the unverified-and-old
-/// ones through [`delete_identity`]. `only` restricts the run to one identity
-/// id, fetched directly instead of listed.
+const PRUNE_PAGE_SIZE: i64 = 250;
+
+/// False reads only the first page of identities.
+const PRUNE_ALL_PAGES: bool = true;
+
+/// Ids passing [`should_prune`] and how many identities were read to find them.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct PruneCandidates {
+    pub ids: Vec<String>,
+    pub scanned: u64,
+    pub pages: u64,
+}
+
+/// Page through `list_identities`, the last id of each page as the next page
+/// token, and collect the ids passing [`should_prune`].
 ///
-/// Single-page bounded: `list_identities` doesn't return the `Link:
-/// <...>; rel="next"` header that carries the cursor for the next page,
-/// so we can't safely walk past one page without risking re-scanning the
-/// same rows. We log a `warn!` if a full page came back (caller should
-/// re-run the prune after deletes to drain the rest) and document the
-/// limitation in `docs/operator-guide.md`.
+/// Stops on a page shorter than the page size, and on a page whose last id
+/// was already seen (a backend that ignores or rewinds the token); that page
+/// is dropped.
+pub(crate) async fn prune_candidates(
+    identity: &IdentityImpl,
+    cutoff: DateTime<Utc>,
+) -> anyhow::Result<PruneCandidates> {
+    let mut found = PruneCandidates::default();
+    let mut seen = std::collections::HashSet::new();
+    let mut token: Option<String> = None;
+    loop {
+        let page = identity
+            .list_identities(PRUNE_PAGE_SIZE, token.as_deref(), None)
+            .await?;
+        let last = page.last().map(|i| i.id.clone());
+        if let Some(last) = &last
+            && !seen.insert(last.clone())
+        {
+            tracing::warn!(
+                pages = found.pages,
+                token = ?token,
+                "unverified-prune: the identity list repeated a page; stopped paging"
+            );
+            break;
+        }
+        found.pages += 1;
+        found.scanned += page.len() as u64;
+        found.ids.extend(
+            page.iter()
+                .filter(|i| should_prune(i, cutoff))
+                .map(|i| i.id.clone()),
+        );
+        let full = page.len() == PRUNE_PAGE_SIZE as usize;
+        if !PRUNE_ALL_PAGES {
+            if full {
+                tracing::warn!(
+                    page_size = PRUNE_PAGE_SIZE,
+                    "unverified-prune: full page returned; identities past the first page are \
+                     not checked"
+                );
+            }
+            break;
+        }
+        if !full {
+            break;
+        }
+        token = last;
+    }
+    tracing::info!(
+        pages = found.pages,
+        scanned = found.scanned,
+        candidates = found.ids.len(),
+        "unverified-prune: identity list read"
+    );
+    Ok(found)
+}
+
+/// Delete the unverified-and-old identities through [`delete_identity`],
+/// listed by [`prune_candidates`]. `only` restricts the run to one identity
+/// id, fetched directly instead of listed.
 pub async fn prune_unverified(
     env: &DeleteEnv<'_>,
     ttl_days: i64,
     only: Option<&str>,
 ) -> anyhow::Result<PruneOutcome> {
     let cutoff = Utc::now() - ChronoDuration::days(ttl_days.max(0));
-    let page_size: i64 = 250;
 
-    let batch = match only {
-        Some(id) => vec![env.identity.admin_get_identity(id).await?],
-        None => env.identity.list_identities(page_size, None, None).await?,
+    // Deleting while paging would remove the row the next page token points at.
+    let found = match only {
+        Some(id) => {
+            let ident = env.identity.admin_get_identity(id).await?;
+            PruneCandidates {
+                ids: should_prune(&ident, cutoff)
+                    .then_some(ident.id)
+                    .into_iter()
+                    .collect(),
+                scanned: 1,
+                pages: 0,
+            }
+        }
+        None => prune_candidates(env.identity, cutoff).await?,
     };
 
     let mut outcome = PruneOutcome {
-        scanned: batch.len() as u64,
+        scanned: found.scanned,
         ..PruneOutcome::default()
     };
-    for ident in &batch {
-        if !should_prune(ident, cutoff) {
-            continue;
-        }
+    for identity_id in found.ids {
         let req = DeleteRequest {
-            identity_id: ident.id.clone(),
+            identity_id: identity_id.clone(),
             reason: DeleteReason::Prune,
             actor: DeleteActor::System {
                 source: "unverified-prune".to_string(),
@@ -253,20 +326,10 @@ pub async fn prune_unverified(
                 }
             }
             Err(e) => {
-                tracing::warn!(error = %e, id = %ident.id, "unverified-prune: delete failed");
+                tracing::warn!(error = %e, id = %identity_id, "unverified-prune: delete failed");
                 outcome.failed += 1;
             }
         }
-    }
-
-    if only.is_none() && batch.len() == page_size as usize {
-        tracing::warn!(
-            page_size,
-            "unverified-prune: full page returned; Kratos likely has more identities than \
-             one page. The Link header cursor isn't read, so additional pages \
-             aren't walked — re-run `forseti unverified-prune` until the run reports a \
-             non-full page."
-        );
     }
     Ok(outcome)
 }
@@ -385,6 +448,118 @@ mod tests {
             Some(vec![addr("a@example.com", false)]),
         );
         assert!(!should_prune(&id, cutoff()));
+    }
+
+    /// Writes `count` identities created at `created_at` straight to the native store; returns their ids.
+    #[cfg(feature = "identity-native")]
+    async fn plant_native(
+        db: &DbPool,
+        count: usize,
+        created_at: &str,
+        verified: bool,
+    ) -> anyhow::Result<Vec<String>> {
+        use crate::schema::identities;
+        use diesel::prelude::*;
+        let created_at = created_at.to_string();
+        let ids = crate::db_interact!(db, |conn| {
+            conn.transaction(|conn| {
+                let mut ids = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let id = uuid::Uuid::new_v4().to_string();
+                    let email = format!("{id}@example.test");
+                    diesel::insert_into(identities::table)
+                        .values((
+                            identities::id.eq(&id),
+                            identities::email.eq(&email),
+                            identities::email_norm.eq(&email),
+                            identities::email_verified_at.eq(verified.then(|| created_at.clone())),
+                            identities::state.eq("active"),
+                            identities::state_changed_at.eq(&created_at),
+                            identities::created_at.eq(&created_at),
+                            identities::updated_at.eq(&created_at),
+                            identities::first_verified_at.eq(verified.then(|| created_at.clone())),
+                        ))
+                        .execute(conn)?;
+                    ids.push(id);
+                }
+                Ok::<_, diesel::result::Error>(ids)
+            })
+        })?;
+        Ok(ids)
+    }
+
+    #[cfg(feature = "identity-native")]
+    #[tokio::test]
+    async fn prune_candidates_reach_old_identities_past_the_first_page() {
+        let db = crate::db::test_pool().await;
+        let backend = IdentityImpl::for_test(&db);
+        let mut old = plant_native(&db, 600, "2025-01-01T00:00:00Z", false)
+            .await
+            .unwrap();
+        plant_native(&db, 300, "2025-06-01T00:00:00Z", true)
+            .await
+            .unwrap();
+
+        let mut found = prune_candidates(&backend, cutoff()).await.expect("walk");
+        assert_eq!((found.scanned, found.pages), (900, 4));
+        old.sort();
+        found.ids.sort();
+        assert_eq!(found.ids, old);
+    }
+
+    #[cfg(feature = "identity-native")]
+    #[tokio::test]
+    async fn prune_candidates_stop_on_an_empty_page_after_a_full_one() {
+        let db = crate::db::test_pool().await;
+        let backend = IdentityImpl::for_test(&db);
+        plant_native(&db, 250, "2025-01-01T00:00:00Z", false)
+            .await
+            .unwrap();
+
+        let found = prune_candidates(&backend, cutoff()).await.expect("walk");
+        assert_eq!((found.ids.len(), found.scanned, found.pages), (250, 250, 2));
+    }
+
+    /// `only` reads the one identity and leaves a verified one alone, without listing or calling Hydra.
+    #[cfg(feature = "identity-native")]
+    #[tokio::test]
+    async fn prune_only_checks_the_named_identity() {
+        let db = crate::db::test_pool().await;
+        let backend = IdentityImpl::for_test(&db);
+        plant_native(&db, 300, "2025-01-01T00:00:00Z", false)
+            .await
+            .unwrap();
+        let verified = plant_native(&db, 1, "2025-01-01T00:00:00Z", true)
+            .await
+            .unwrap();
+        let mut cfg = AppConfig::test_fixture();
+        cfg.hydra.admin_url = "http://127.0.0.1:9".to_string();
+        cfg.hydra.public_url = "http://127.0.0.1:9".to_string();
+        let oauth = crate::backend::build_oauth(&cfg);
+        let key_path =
+            std::env::temp_dir().join(format!("forseti-prune-{}.pem", uuid::Uuid::new_v4()));
+        let signing_key =
+            crate::webhook::SigningKey::load_or_generate(&key_path).expect("signing key");
+        let env = DeleteEnv {
+            db: &db,
+            identity: &backend,
+            oauth: &oauth,
+            signing_key: &signing_key,
+            self_url: "http://localhost:3000",
+            issuer: "http://localhost:3000/hydra",
+        };
+
+        let outcome = prune_unverified(&env, 0, Some(&verified[0])).await;
+        let missing = prune_unverified(&env, 0, Some("no-such-id")).await;
+        let _ = std::fs::remove_file(&key_path);
+        assert_eq!(
+            outcome.expect("prune"),
+            PruneOutcome {
+                scanned: 1,
+                ..PruneOutcome::default()
+            }
+        );
+        assert!(missing.is_err());
     }
 
     #[cfg(feature = "identity-ory")]

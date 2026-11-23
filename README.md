@@ -51,8 +51,8 @@ The choice is made at compile time with a cargo feature; a binary carries exactl
 | --- | --- | --- |
 | **Services to run** | Forseti, Kratos, Hydra | Forseti, Hydra |
 | **Self-service flows** | Login, registration, verification, recovery, settings, logout | The same |
-| **Second factors** | TOTP, backup codes, WebAuthn security keys | TOTP, backup codes |
-| **Passwordless sign-in** | Passkeys, email codes | None |
+| **Second factors** | TOTP, backup codes, WebAuthn security keys | The same |
+| **Passwordless sign-in** | Passkeys, email codes | Passkeys (no email codes) |
 | **Upstream sign-in** | Every provider Kratos supports | OpenID Connect providers and GitHub (no Apple) |
 | **Enterprise SAML SSO** *(licensed)* | Yes | Yes |
 | **Mail** | Kratos courier for flow mail, Forseti for invites | Forseti for everything |
@@ -62,7 +62,7 @@ The choice is made at compile time with a cargo feature; a binary carries exactl
 
 The native backend is new in the 0.2 series, and it's my code, not Ory's. The argument under [Why Forseti](#why-forseti) (your auth load sits on Ory's engines) only covers the OAuth side there. What you get in return is one service less to run, configure and back up.
 
-If you need passkeys or security keys, Apple sign-in or another provider that's neither OpenID Connect nor GitHub, or you already have identities in Kratos, stay on Kratos. Setup for each: [Kratos](docs/operator-guide-kratos.md), [native](docs/operator-guide-native.md).
+If you need sign-in by emailed code, Apple sign-in or another provider that's neither OpenID Connect nor GitHub, or you already have identities in Kratos, stay on Kratos. Setup for each: [Kratos](docs/operator-guide-kratos.md), [native](docs/operator-guide-native.md).
 
 ## Authorizing MCP servers
 

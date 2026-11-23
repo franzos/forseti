@@ -1,5 +1,5 @@
-//! Registration submits: traits on step 1, a password on step 2, then the account, a session and
-//! the verification screen.
+//! Registration submits: traits on step 1, a password or a passkey on step 2, then the account, a
+//! session and the verification screen.
 
 use anyhow::Result;
 
@@ -11,8 +11,12 @@ use crate::identity_native::NativeBackend;
 use crate::identity_native::codes::Purpose;
 use crate::identity_native::password::{self, HashError, PasswordConfig, PolicyError};
 use crate::identity_native::session::Issued;
-use crate::identity_native::store::{self, IdentityRow, NAME_MAX_CHARS};
+use crate::identity_native::store::keys::{Key, NewKey};
+use crate::identity_native::store::{
+    self, CreateWithCredential, FirstCredential, IdentityRow, NAME_MAX_CHARS,
+};
 use crate::identity_native::ui::Message;
+use crate::identity_native::webauthn::{self, PASSKEY_NAME, Slot};
 
 pub(super) const ACCOUNT_EXISTS: (u64, &str) = (
     4_000_007,
@@ -32,6 +36,10 @@ pub(super) async fn submit(backend: &NativeBackend, mut s: Submission<'_>) -> Re
     if s.form.get("screen") == Some("previous") {
         s.flow.ctx.credential_step = false;
         return page(backend, s.flow).await;
+    }
+    // The ceremony script submits the form without a button, so no `method` comes with it.
+    if let Some(response) = s.form.get("passkey_register").filter(|v| !v.is_empty()) {
+        return passkey_signup(backend, s, response).await;
     }
     match s.form.get("method") {
         Some("profile") => profile(backend, s).await,
@@ -82,6 +90,8 @@ async fn profile(backend: &NativeBackend, mut s: Submission<'_>) -> Result<Submi
     let traits = traits_of(s.form);
     s.flow.ctx.credential_step = check_traits(&mut s.flow, &traits);
     s.flow.ctx.traits = Some(traits);
+    // The passkey registration names the address, which may have changed.
+    s.flow.ctx.passkey_ceremony = None;
     page(backend, s.flow).await
 }
 
@@ -91,14 +101,55 @@ struct Created {
     verification_flow: Option<String>,
 }
 
+/// The traits step 1 accepted; `None` while the flow is not on step 2.
+fn accepted_traits(flow: &FlowRecord) -> Option<PendingTraits> {
+    flow.ctx.traits.clone().filter(|_| flow.ctx.credential_step)
+}
+
+async fn reject(
+    backend: &NativeBackend,
+    mut flow: FlowRecord,
+    (id, text): (u64, &str),
+) -> Result<Submitted> {
+    flow.add_message(Message::error(id, text));
+    page(backend, flow).await
+}
+
+/// Step 2 with a passkey: the flow's registration ceremony, then the account with the
+/// ceremony's user handle as its id, as [`credential`] does with a password.
+async fn passkey_signup(
+    backend: &NativeBackend,
+    mut s: Submission<'_>,
+    response: &str,
+) -> Result<Submitted> {
+    let Some(traits) = accepted_traits(&s.flow) else {
+        return reject(backend, s.flow, NO_STRATEGY).await;
+    };
+    let Some(rp) = backend.webauthn.as_ref() else {
+        return reject(backend, s.flow, NO_STRATEGY).await;
+    };
+    let Some(ceremony) = backend.take(&mut s.flow, Slot::Passkey).await? else {
+        return reject(backend, s.flow, NO_STRATEGY).await;
+    };
+    let Some((user, passkey)) = webauthn::register_passkey(rp, ceremony, response) else {
+        return reject(backend, s.flow, NO_STRATEGY).await;
+    };
+    let key = NewKey {
+        display_name: PASSKEY_NAME.to_string(),
+        key: Key::Passkey(passkey),
+    };
+    let credential = FirstCredential::Passkey {
+        user,
+        key: Box::new(key),
+    };
+    create_account(backend, s, &traits, credential, "passkey").await
+}
+
 /// Step 2: the password, then the account in one transaction, a session, and a verification flow
 /// with its code mailed.
 async fn credential(backend: &NativeBackend, mut s: Submission<'_>) -> Result<Submitted> {
-    let traits = s.flow.ctx.traits.clone();
-    let Some(traits) = traits.filter(|_| s.flow.ctx.credential_step) else {
-        s.flow
-            .add_message(Message::error(NO_STRATEGY.0, NO_STRATEGY.1));
-        return page(backend, s.flow).await;
+    let Some(traits) = accepted_traits(&s.flow) else {
+        return reject(backend, s.flow, NO_STRATEGY).await;
     };
     let password = s.form.get("password").unwrap_or_default().to_string();
     let min = backend.settings.password_min_length;
@@ -126,22 +177,45 @@ async fn credential(backend: &NativeBackend, mut s: Submission<'_>) -> Result<Su
     let config = serde_json::to_string(&PasswordConfig {
         hashed_password: phc,
     })?;
+    create_account(
+        backend,
+        s,
+        &traits,
+        FirstCredential::Password(config),
+        "password",
+    )
+    .await
+}
+
+/// The account from `traits` and its first `credential` in one transaction, then a session for
+/// `method`, the `identity.created` row, and the verification screen.
+async fn create_account(
+    backend: &NativeBackend,
+    mut s: Submission<'_>,
+    traits: &PendingTraits,
+    credential: FirstCredential,
+    method: &'static str,
+) -> Result<Submitted> {
     let first = Some(traits.first.as_str()).filter(|f| !f.is_empty());
     let last = Some(traits.last.as_str()).filter(|l| !l.is_empty());
-    let Some(row) =
-        store::create_with_password(&backend.db, &traits.email, first, last, &config).await?
-    else {
-        s.flow.ctx.credential_step = false;
-        s.flow
-            .add_message(Message::error(ACCOUNT_EXISTS.0, ACCOUNT_EXISTS.1));
-        return page(backend, s.flow).await;
+    let created =
+        store::create_with_first_credential(&backend.db, &traits.email, first, last, credential)
+            .await?;
+    let row = match created {
+        CreateWithCredential::Created(row) => *row,
+        CreateWithCredential::AddressTaken => {
+            s.flow.ctx.credential_step = false;
+            return reject(backend, s.flow, ACCOUNT_EXISTS).await;
+        }
+        // `ACCOUNT_EXISTS` means the address here; a taken credential id answers as a failed ceremony.
+        CreateWithCredential::KeyTaken => return reject(backend, s.flow, NO_STRATEGY).await,
     };
     // The account exists from here on: every later step is best effort, so the audit row and a
     // response are given even when one fails.
     if let Err(e) = s.flow.finish(&backend.db).await {
         tracing::error!(error = ?e, flow_id = %s.flow.row.id, "registration flow not marked finished");
     }
-    let created = finish(backend, &s, &row).await;
+    let created = finish(backend, &s, &row, method).await;
     let event = AuditEvent::new(action::IDENTITY_CREATED)
         .actor_user(&row.id, &row.email)
         .target(target_kind::IDENTITY, &row.id)
@@ -149,7 +223,7 @@ async fn credential(backend: &NativeBackend, mut s: Submission<'_>) -> Result<Su
             "source" => "native",
             "flow_id" => s.flow.row.id,
             "kratos_session_id" => created.session.as_ref().map(|i| i.id.clone()),
-            "method" => "password",
+            "method" => method,
         ));
     let location = match &created.verification_flow {
         Some(id) => format!("/verification?flow={}", crate::web::urlencode(id)),
@@ -171,9 +245,14 @@ async fn credential(backend: &NativeBackend, mut s: Submission<'_>) -> Result<Su
 
 /// Sign the new identity in and put the verification screen, with its code mailed, in front of it.
 /// Each step that fails is logged and left out; resend on the verification page mails a new code.
-async fn finish(backend: &NativeBackend, s: &Submission<'_>, row: &IdentityRow) -> Created {
+async fn finish(
+    backend: &NativeBackend,
+    s: &Submission<'_>,
+    row: &IdentityRow,
+    method: &str,
+) -> Created {
     let session = backend
-        .issue_session(&row.id, "password", None, Aal::Aal1, s.device)
+        .issue_session(&row.id, method, None, Aal::Aal1, s.device)
         .await
         .inspect_err(|e| tracing::error!(error = ?e, identity_id = %row.id, "session for a new account not issued"))
         .ok();
@@ -356,6 +435,7 @@ mod tests {
         let audit = audit_lines(&done);
         assert_eq!(audit.len(), 1);
         assert!(audit[0].contains("identity.created"), "{}", audit[0]);
+        assert!(audit[0].contains(r#"String("password")"#), "{}", audit[0]);
         assert!(audit[0].contains(&identity.id));
         assert!(!audit[0].contains(STRONG) && !audit[0].contains(&token));
 
@@ -674,5 +754,528 @@ mod tests {
         assert_eq!(location, "/login");
         assert!(session_cookie(&done).is_some(), "still signed in");
         assert_eq!(counts(&db).await, (1, 1));
+    }
+
+    use base64::Engine as _;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use serde_json::Value;
+
+    use crate::identity_native::store::keys;
+    use crate::identity_native::test_authenticator::Authenticator;
+    use crate::identity_native::test_support::{sql, totp_code};
+    use crate::identity_native::totp;
+    use crate::schema::{identity_sessions, identity_webauthn_keys};
+
+    const ORIGIN: &str = "http://localhost:3000";
+    const RP_ID: &str = "localhost";
+
+    async fn key_count(db: &DbPool) -> i64 {
+        sql(db, |c| identity_webauthn_keys::table.count().get_result(c)).await
+    }
+
+    async fn page_of(
+        backend: &NativeBackend,
+        browser: &Browser,
+        kind: FlowKind,
+        id: &str,
+    ) -> crate::flow_view::Flow {
+        let FlowFetch::Ok(flow) = backend.get_flow(kind, id, &browser.cookie()).await.unwrap()
+        else {
+            panic!("{kind:?} flow {id} is readable");
+        };
+        *flow
+    }
+
+    /// The options the page shows in the node `name`; rendering mints them.
+    async fn shown(
+        backend: &NativeBackend,
+        browser: &Browser,
+        kind: FlowKind,
+        id: &str,
+        name: &str,
+    ) -> Value {
+        let flow = page_of(backend, browser, kind, id).await;
+        let value = flow
+            .inputs
+            .iter()
+            .find(|(_, i)| i.name == name)
+            .map(|(_, i)| i.value.clone())
+            .unwrap_or_else(|| panic!("{name} shown"));
+        serde_json::from_str(&value).unwrap()
+    }
+
+    /// Post a registration `response` as `static/webauthn.js` does: the whole form, no button.
+    async fn passkey_post(
+        backend: &NativeBackend,
+        browser: &Browser,
+        id: &str,
+        response: &str,
+        extra: &[(&str, &str)],
+    ) -> Submitted {
+        let mut fields = vec![
+            ("traits.email", "ignored@x.test"),
+            ("passkey_register", response),
+        ];
+        fields.extend_from_slice(extra);
+        submit(backend, browser, FlowKind::Registration, id, &fields).await
+    }
+
+    /// Answer step 2's passkey options with `token` and post the response; the options too.
+    async fn passkey_step(
+        backend: &NativeBackend,
+        browser: &Browser,
+        id: &str,
+        token: &mut Authenticator,
+    ) -> (Value, Submitted) {
+        let options = shown(
+            backend,
+            browser,
+            FlowKind::Registration,
+            id,
+            "passkey_create_data",
+        )
+        .await;
+        let response = token.register(RP_ID, ORIGIN, &options).to_string();
+        let done = passkey_post(backend, browser, id, &response, &[("password", "")]).await;
+        (options, done)
+    }
+
+    fn verification_of(done: &Submitted) -> String {
+        let SubmitOutcome::Redirect { location, .. } = &done.outcome else {
+            panic!("redirected");
+        };
+        location
+            .strip_prefix("/verification?flow=")
+            .expect("to the verification screen")
+            .to_string()
+    }
+
+    fn method_names(session: &crate::backend::identity::Session) -> Vec<String> {
+        session
+            .authentication_methods
+            .clone()
+            .unwrap()
+            .into_iter()
+            .map(|m| m.method.unwrap())
+            .collect()
+    }
+
+    async fn whoami(backend: &NativeBackend, browser: &Browser) -> WhoamiOutcome {
+        backend.whoami(Some(&browser.cookie())).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_passkey_sign_up_creates_the_account_with_the_sealed_user_handle() {
+        let (db, backend) = setup().await;
+        let browser = Browser::new();
+        let id = begin(&backend, &browser, None).await;
+        step_one(&backend, &browser, &id, "Pk@X.test").await;
+        let mut token = Authenticator::passkey();
+        let (options, done) = passkey_step(&backend, &browser, &id, &mut token).await;
+        let verification = verification_of(&done);
+        let cookie = session_cookie(&done).expect("signed in");
+        let signed_in = Browser {
+            csrf: browser.csrf.clone(),
+            session: Some(cookie.clone()),
+        };
+        let WhoamiOutcome::Ok(session) = whoami(&backend, &signed_in).await else {
+            panic!("the new session is live");
+        };
+        let identity = session.identity.clone().unwrap();
+        let handle = options["publicKey"]["user"]["id"].as_str().unwrap();
+        let user = uuid::Uuid::from_slice(&URL_SAFE_NO_PAD.decode(handle).unwrap()).unwrap();
+        assert_eq!(identity.id, user.to_string(), "the user handle is the id");
+        assert_eq!(identity.traits.as_ref().unwrap()["email"], "Pk@X.test");
+        assert!(!identity.verifiable_addresses.as_ref().unwrap()[0].verified);
+        let credentials = identity.credentials.unwrap();
+        assert!(credentials.contains_key("passkey") && !credentials.contains_key("password"));
+        assert_eq!(session.authenticator_assurance_level, Some(Aal::Aal1));
+        assert_eq!(method_names(&session), ["passkey"]);
+
+        let rows = keys::of_identity(&db, &identity.id).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            (rows[0].kind.as_str(), rows[0].display_name.as_str()),
+            ("passkey", "Passkey")
+        );
+        assert_eq!(
+            rows[0].credential_id,
+            URL_SAFE_NO_PAD.encode(&token.credential_id)
+        );
+        assert_eq!(counts(&db).await, (1, 0), "no password credential");
+
+        let rec = backend.load_flow(&verification).await.unwrap().unwrap();
+        assert_eq!(rec.row.state, "sent_email");
+        assert_eq!(rec.ctx.email.as_deref(), Some("Pk@X.test"));
+        assert_eq!(backend.mailed("Pk@X.test").await.len(), 1);
+
+        let audit = audit_lines(&done);
+        assert_eq!(audit.len(), 1);
+        assert!(audit[0].contains("identity.created"), "{}", audit[0]);
+        assert!(audit[0].contains(r#"String("passkey")"#), "{}", audit[0]);
+        assert!(audit[0].contains(&identity.id));
+        let challenge = options["publicKey"]["challenge"].as_str().unwrap();
+        for material in [rows[0].credential_id.as_str(), challenge, handle, &cookie] {
+            assert!(!audit[0].contains(material), "{}", audit[0]);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_passkey_sign_up_with_a_taken_address_answers_as_a_password_one_and_stores_nothing() {
+        let (db, backend) = setup().await;
+        identity_with_password(&db, "taken@x.test", true).await;
+        let mut answers = Vec::new();
+        for passkey in [false, true] {
+            let browser = Browser::new();
+            let id = begin(&backend, &browser, None).await;
+            step_one(&backend, &browser, &id, "TAKEN@x.test").await;
+            let done = if passkey {
+                passkey_step(&backend, &browser, &id, &mut Authenticator::passkey())
+                    .await
+                    .1
+            } else {
+                step_two(&backend, &browser, &id, STRONG).await
+            };
+            assert_eq!(done.outcome, SubmitOutcome::Page);
+            assert!(session_cookie(&done).is_none() && done.audit.is_empty());
+            answers.push((
+                messages(&backend, &id).await,
+                on_step_two(&backend, &id).await,
+            ));
+        }
+        assert_eq!(answers[0], answers[1]);
+        assert_eq!(answers[1], ((vec![4_000_007], Vec::new()), false));
+        assert_eq!(counts(&db).await, (1, 1));
+        assert_eq!(key_count(&db).await, 0);
+        assert!(backend.mailed("TAKEN@x.test").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_passkey_sign_up_needs_step_one_and_a_fresh_ceremony_and_wins_over_a_password() {
+        let (db, backend) = setup().await;
+        let browser = Browser::new();
+        let id = begin(&backend, &browser, None).await;
+        let done = passkey_post(&backend, &browser, &id, "{}", &[]).await;
+        assert_eq!(done.outcome, SubmitOutcome::Page, "not before step 1");
+        assert_eq!(messages(&backend, &id).await.0, [4_040_002]);
+
+        step_one(&backend, &browser, &id, "fresh@x.test").await;
+        let mut token = Authenticator::passkey();
+        let spent = shown(
+            &backend,
+            &browser,
+            FlowKind::Registration,
+            &id,
+            "passkey_create_data",
+        )
+        .await;
+        let elsewhere = token
+            .register(RP_ID, "http://evil.test", &spent)
+            .to_string();
+        passkey_post(&backend, &browser, &id, &elsewhere, &[]).await;
+        assert_eq!(messages(&backend, &id).await.0, [4_040_002], "wrong origin");
+        assert!(on_step_two(&backend, &id).await);
+
+        let replayed = token.register(RP_ID, ORIGIN, &spent).to_string();
+        passkey_post(&backend, &browser, &id, &replayed, &[]).await;
+        assert_eq!(messages(&backend, &id).await.0, [4_040_002], "spent");
+        passkey_post(&backend, &browser, &id, "not json", &[]).await;
+        assert_eq!(messages(&backend, &id).await.0, [4_040_002]);
+        assert_eq!((counts(&db).await, key_count(&db).await), ((0, 0), 0));
+
+        let options = shown(
+            &backend,
+            &browser,
+            FlowKind::Registration,
+            &id,
+            "passkey_create_data",
+        )
+        .await;
+        assert_ne!(
+            options["publicKey"]["challenge"],
+            spent["publicKey"]["challenge"]
+        );
+        let response = token.register(RP_ID, ORIGIN, &options).to_string();
+        let both = [("method", "password"), ("password", STRONG)];
+        let done = passkey_post(&backend, &browser, &id, &response, &both).await;
+        let cookie = session_cookie(&done).expect("signed in");
+        let WhoamiOutcome::Ok(session) = backend
+            .whoami(Some(&format!("forseti_session={cookie}")))
+            .await
+            .unwrap()
+        else {
+            panic!("live");
+        };
+        assert_eq!(method_names(&session), ["passkey"]);
+        assert_eq!(
+            (counts(&db).await, key_count(&db).await),
+            ((1, 0), 1),
+            "the password is ignored"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_passkey_registered_already_creates_nothing() {
+        let (db, backend) = setup().await;
+        let mut token = Authenticator::passkey();
+        let first = Browser::new();
+        let id = begin(&backend, &first, None).await;
+        step_one(&backend, &first, &id, "first@x.test").await;
+        assert!(session_cookie(&passkey_step(&backend, &first, &id, &mut token).await.1).is_some());
+
+        let browser = Browser::new();
+        let id = begin(&backend, &browser, None).await;
+        step_one(&backend, &browser, &id, "second@x.test").await;
+        let done = passkey_step(&backend, &browser, &id, &mut token).await.1;
+        assert_eq!(done.outcome, SubmitOutcome::Page);
+        assert!(session_cookie(&done).is_none() && done.audit.is_empty());
+        assert_eq!(messages(&backend, &id).await.0, [4_040_002]);
+        assert!(on_step_two(&backend, &id).await, "the address was fine");
+        assert_eq!((counts(&db).await, key_count(&db).await), ((1, 0), 1));
+        assert!(backend.mailed("second@x.test").await.is_empty());
+
+        let taken = store::row_by_email(&db, "first@x.test")
+            .await
+            .unwrap()
+            .unwrap()
+            .id;
+        let rp = backend.webauthn.as_ref().unwrap();
+        let user = uuid::Uuid::parse_str(&taken).unwrap();
+        let (options, state) = rp.start_passkey_registration(user, "p", "p", None).unwrap();
+        let response = Authenticator::passkey().register(
+            RP_ID,
+            ORIGIN,
+            &crate::identity_native::webauthn::passkey_options(&options),
+        );
+        let passkey = rp
+            .finish_passkey_registration(&serde_json::from_value(response).unwrap(), &state)
+            .unwrap();
+        let credential = FirstCredential::Passkey {
+            user,
+            key: Box::new(NewKey {
+                display_name: PASSKEY_NAME.to_string(),
+                key: Key::Passkey(passkey),
+            }),
+        };
+        assert!(matches!(
+            store::create_with_first_credential(&db, "third@x.test", None, None, credential)
+                .await
+                .unwrap(),
+            CreateWithCredential::KeyTaken
+        ));
+        assert_eq!(
+            (counts(&db).await, key_count(&db).await),
+            ((1, 0), 1),
+            "a user handle that is an identity id already"
+        );
+    }
+
+    /// Answer the login page's passkey options with `token` and post the response.
+    async fn passkey_login(
+        backend: &NativeBackend,
+        browser: &Browser,
+        id: &str,
+        token: &mut Authenticator,
+    ) -> Submitted {
+        let options = shown(backend, browser, FlowKind::Login, id, "passkey_challenge").await;
+        let response = token.assert(RP_ID, ORIGIN, &options).to_string();
+        submit(
+            backend,
+            browser,
+            FlowKind::Login,
+            id,
+            &[
+                ("identifier", ""),
+                ("password", ""),
+                ("passkey_login", &response),
+            ],
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn a_passkey_only_account_verifies_signs_in_reauthenticates_adds_totp_and_recovers() {
+        let (db, backend) = setup().await;
+        let email = "only@x.test";
+        let mut token = Authenticator::passkey();
+        let registering = Browser::new();
+        let id = begin(&backend, &registering, None).await;
+        step_one(&backend, &registering, &id, email).await;
+        let done = passkey_step(&backend, &registering, &id, &mut token)
+            .await
+            .1;
+        let verification = verification_of(&done);
+        let registered = Browser {
+            csrf: registering.csrf.clone(),
+            session: session_cookie(&done),
+        };
+        let code = backend.mailed(email).await[0].code.clone();
+        submit(
+            &backend,
+            &registered,
+            FlowKind::Verification,
+            &verification,
+            &[("method", "code"), ("code", &code)],
+        )
+        .await;
+        let row = store::row_by_email(&db, email).await.unwrap().unwrap();
+        assert!(row.first_verified_at.is_some(), "verified");
+        let identity = row.id;
+
+        let mut browser = Browser::new();
+        let login = start(&backend, &browser, FlowKind::Login, InitParams::default()).await;
+        let done = passkey_login(&backend, &browser, &login, &mut token).await;
+        browser.session = Some(session_cookie(&done).expect("signed in with the passkey"));
+        let WhoamiOutcome::Ok(session) = whoami(&backend, &browser).await else {
+            panic!("live");
+        };
+        assert_eq!(session.identity.as_ref().unwrap().id, identity);
+        assert_eq!(method_names(&session), ["passkey"]);
+
+        let old = "2026-01-01T00:00:00.000000+00:00";
+        let session_id = session.id.clone();
+        sql(&db, move |c| {
+            diesel::update(identity_sessions::table.find(&session_id))
+                .set(identity_sessions::authenticated_at.eq(old))
+                .execute(c)
+        })
+        .await;
+        let two_fa = "http://localhost:3000/settings/2fa";
+        let refresh = start(
+            &backend,
+            &browser,
+            FlowKind::Login,
+            InitParams {
+                return_to: Some(two_fa),
+                aal2: false,
+                refresh: true,
+            },
+        )
+        .await;
+        let done = passkey_login(&backend, &browser, &refresh, &mut token).await;
+        let SubmitOutcome::Redirect { location, .. } = &done.outcome else {
+            panic!("re-authenticated");
+        };
+        assert_eq!(location, two_fa);
+        let WhoamiOutcome::Ok(refreshed) = whoami(&backend, &browser).await else {
+            panic!("the same token stays live");
+        };
+        assert_eq!(refreshed.id, session.id);
+        assert!(refreshed.authenticated_at.as_deref().unwrap() > old);
+
+        let params = InitParams {
+            return_to: Some(two_fa),
+            ..InitParams::default()
+        };
+        let settings = start(&backend, &browser, FlowKind::Settings, params).await;
+        let page = page_of(&backend, &browser, FlowKind::Settings, &settings).await;
+        let b32 = page.totp_secret.expect("a pending TOTP secret");
+        let secret = base32::decode(base32::Alphabet::Rfc4648 { padding: false }, &b32).unwrap();
+        let now = totp::unix_now();
+        let done = submit(
+            &backend,
+            &browser,
+            FlowKind::Settings,
+            &settings,
+            &[("method", "totp"), ("totp_code", &totp_code(&secret, now))],
+        )
+        .await;
+        assert!(audit_lines(&done)[0].contains("mfa.totp.enrolled"));
+        browser.session = Some(session_cookie(&done).expect("raised to AAL2"));
+        let WhoamiOutcome::Ok(raised) = whoami(&backend, &browser).await else {
+            panic!("live");
+        };
+        assert_eq!(raised.authenticator_assurance_level, Some(Aal::Aal2));
+
+        let lost = Browser::new();
+        let recovery = start(&backend, &lost, FlowKind::Recovery, InitParams::default()).await;
+        submit(
+            &backend,
+            &lost,
+            FlowKind::Recovery,
+            &recovery,
+            &[("method", "code"), ("email", email)],
+        )
+        .await;
+        let code = backend.mailed(email).await.last().unwrap().code.clone();
+        let done = submit(
+            &backend,
+            &lost,
+            FlowKind::Recovery,
+            &recovery,
+            &[("method", "code"), ("code", &code)],
+        )
+        .await;
+        assert!(audit_lines(&done)[0].contains("password.recovered"));
+        let SubmitOutcome::Redirect { location, .. } = &done.outcome else {
+            panic!("recovered");
+        };
+        let handoff = location
+            .strip_prefix("/settings?flow=")
+            .expect("to the settings handoff")
+            .to_string();
+        let mut lost = Browser {
+            csrf: lost.csrf.clone(),
+            session: session_cookie(&done),
+        };
+        assert!(matches!(
+            whoami(&backend, &lost).await,
+            WhoamiOutcome::InsufficientAal
+        ));
+        let aal2 = start(
+            &backend,
+            &lost,
+            FlowKind::Login,
+            InitParams {
+                aal2: true,
+                ..InitParams::default()
+            },
+        )
+        .await;
+        let next = totp_code(&secret, now + totp::STEP_SECS);
+        let done = submit(
+            &backend,
+            &lost,
+            FlowKind::Login,
+            &aal2,
+            &[("method", "totp"), ("totp_code", &next)],
+        )
+        .await;
+        lost.session = Some(session_cookie(&done).expect("the recovery session at AAL2"));
+        let page = page_of(&backend, &lost, FlowKind::Settings, &handoff).await;
+        assert!(page.recovery_handoff && page.has_node("password", "password"));
+        let done = submit(
+            &backend,
+            &lost,
+            FlowKind::Settings,
+            &handoff,
+            &[("method", "password"), ("password", STRONG)],
+        )
+        .await;
+        assert!(audit_lines(&done)[0].contains("password.changed"));
+
+        let fresh = Browser::new();
+        let login = start(&backend, &fresh, FlowKind::Login, InitParams::default()).await;
+        let done = submit(
+            &backend,
+            &fresh,
+            FlowKind::Login,
+            &login,
+            &[
+                ("method", "password"),
+                ("identifier", email),
+                ("password", STRONG),
+            ],
+        )
+        .await;
+        assert!(session_cookie(&done).is_some(), "the new password signs in");
+        let fresh = Browser::new();
+        let login = start(&backend, &fresh, FlowKind::Login, InitParams::default()).await;
+        let done = passkey_login(&backend, &fresh, &login, &mut token).await;
+        assert!(
+            session_cookie(&done).is_some(),
+            "the passkey still signs in"
+        );
+        assert_eq!(key_count(&db).await, 1);
     }
 }

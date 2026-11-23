@@ -150,6 +150,21 @@ pub fn router() -> Router<AppState> {
         .merge(crate::commercial::settings_page::router())
         .merge(client_logo_router())
         .merge(saml_router())
+        .merge(second_factor_reset_router())
+}
+
+#[cfg(feature = "identity-native")]
+fn second_factor_reset_router() -> Router<AppState> {
+    Router::new().route(
+        "/admin/identities/{id}/reset-2fa",
+        get(identities::reset_second_factors_confirm).post(identities::reset_second_factors),
+    )
+}
+
+/// Kratos owns the credentials, so the Ory build has no second-factor reset.
+#[cfg(feature = "identity-ory")]
+fn second_factor_reset_router() -> Router<AppState> {
+    Router::new()
 }
 
 /// SAML SSO connections (commercial).

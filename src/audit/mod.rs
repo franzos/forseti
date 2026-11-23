@@ -105,9 +105,7 @@ pub mod action {
     /// Kratos fires no hook when lookup codes are removed, so only the native build writes it.
     #[cfg(feature = "identity-native")]
     pub const MFA_LOOKUP_DISABLED: &str = "mfa.lookup.disabled";
-    #[cfg(feature = "identity-ory")]
     pub const MFA_WEBAUTHN_ADDED: &str = "mfa.webauthn.added";
-    #[cfg(feature = "identity-ory")]
     pub const MFA_WEBAUTHN_REMOVED: &str = "mfa.webauthn.removed";
     // session (Forseti-mediated)
     pub const SESSION_REVOKED: &str = "session.revoked";
@@ -155,6 +153,8 @@ pub mod action {
     pub const ADMIN_IDENTITY_ENABLED: &str = "admin.identity.enabled";
     pub const ADMIN_IDENTITY_DELETED: &str = "admin.identity.deleted";
     pub const ADMIN_IDENTITY_RECOVERY_CODE_MINTED: &str = "admin.identity.recovery_code_minted";
+    #[cfg(feature = "identity-native")]
+    pub const ADMIN_IDENTITY_SECOND_FACTORS_RESET: &str = "admin.identity.second_factors_reset";
     /// Hand-rolled "claim this email" flow has deleted an unverified
     /// identity that previously held a desired email address. Emitted at
     /// `critical` severity because it's a destructive identity-deletion

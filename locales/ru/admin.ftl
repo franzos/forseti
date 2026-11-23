@@ -47,6 +47,8 @@ admin-identity-action-generate-recovery = Сгенерировать код во
 admin-identity-action-disable = Отключить
 admin-identity-action-enable = Включить
 admin-identity-action-delete = Удалить
+admin-identity-action-reset-second-factors = Сбросить 2FA
+dialog-reset-second-factors-failed-title = Не удалось сбросить 2FA
 admin-identity-section-traits = Атрибуты
 admin-identity-section-addresses = Подтверждаемые адреса
 admin-identity-addresses-empty = У этой личности нет подтверждаемых адресов.
@@ -641,6 +643,8 @@ admin-saml-not-configured-part4 = .
 # Всплывающие сообщения администратора (показываются как баннер после перенаправления)
 flash-identity-disabled = Личность отключена.
 flash-identity-enabled = Личность включена.
+flash-identity-second-factors-reset = 2FA сброшена.
+flash-identity-second-factors-none = У этой личности нет 2FA для сброса.
 flash-session-revoked = Сеанс отозван.
 flash-client-create-failed = Не удалось создать клиента: { $error }
 flash-client-account-deletion-url-rejected = URL удаления аккаунта отклонён: { $error }
