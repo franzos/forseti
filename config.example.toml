@@ -4,21 +4,30 @@
 # Every value is overridable via env var with the `FORSETI_` prefix and a
 # double-underscore section separator, e.g. `FORSETI_KRATOS__PUBLIC_URL`.
 #
-# Two builds read this file. The default (Ory) build fronts Ory Kratos for
-# identities; it reads `[kratos]` and requires `[audit].webhook_token`. The
-# native build (`--no-default-features --features identity-native`) keeps
-# identities, sessions and self-service flows in Forseti's own database; it
-# ignores `[kratos]` and `[audit].webhook_token`, and refuses to boot without
+# A build picks one identity backend and one OAuth backend with cargo features:
+# `identity-ory` or `identity-native`, and `oauth-ory` or `oauth-native`
+# (`--no-default-features --features identity-native,oauth-native` for both
+# native; the default is both Ory).
+#
+# Identity: the Ory build fronts Ory Kratos; it reads `[kratos]` and requires
+# `[audit].webhook_token`. The native build keeps identities, sessions and
+# self-service flows in Forseti's own database; it ignores `[kratos]` and
+# `[audit].webhook_token`, and refuses to boot without
 # `[security].cookie_secret` and `[email]` with `enabled = true`. Its settings
 # live under `[identity]` further down.
+#
+# OAuth: the Ory build fronts Ory Hydra and reads `[hydra]`. The native build
+# is the OAuth2/OIDC server itself: it ignores `[hydra]`, uses `[self].url` as
+# the issuer and refuses to boot without `[security].cookie_secret`.
 
-# Ory build only.
+# Ory identity build only.
 [kratos]
 # Browser-facing public API. Forseti forwards user cookies to this URL.
 public_url = "http://localhost:4433"
 # Server-only admin API. Reachable only from within the trust boundary.
 admin_url  = "http://localhost:4434"
 
+# Ory OAuth build only.
 [hydra]
 public_url = "http://localhost:4444"
 admin_url  = "http://localhost:4445"
@@ -34,6 +43,8 @@ admin_url  = "http://localhost:4445"
 
 [self]
 # Forseti's own externally reachable URL. Used to build `return_to` round-trips.
+# With `oauth-native` it is also the issuer and must be a bare http(s) origin:
+# no path, query, fragment or userinfo.
 url = "http://localhost:3000"
 # Public listener bind address. Default binds all interfaces on port 3000;
 # narrow it (e.g. "127.0.0.1:3000") when a reverse proxy on the same host
@@ -53,6 +64,9 @@ url = "http://localhost:3000"
 # and logout MACs. Changing it makes every enrolled authenticator unreadable
 # and invalidates outstanding codes and backup codes. Back it up with the
 # database.
+# With `oauth-native` it is required as well: the token signing key is stored
+# sealed under it, and a key that doesn't open under the current secret stops
+# the boot.
 # [security]
 # cookie_secret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 #
@@ -149,7 +163,8 @@ support_email = "support@example.com"
 #
 # `allow_private_targets` stands the guard down (allows http:// and
 # loopback/private-IP document URLs) so local fixture servers work in
-# development and CI. Never enable it in production: Forseti refuses to boot
+# development and CI. With `oauth-native` it does the same for back-channel
+# logout delivery. Never enable it in production: Forseti refuses to boot
 # with it on when `[self].url` is https on a host other than localhost or a
 # loopback/private address.
 #
@@ -317,7 +332,8 @@ support_email = "support@example.com"
 # client_secret = "..."
 
 # Internal HTTP listener for machine-to-machine endpoints (the POSIX resolver,
-# `/metrics`, and on the Ory build the Kratos audit webhook receiver). Defaults
+# `/metrics`, on the Ory identity build the Kratos audit webhook receiver, and
+# with `oauth-native` token introspection at `/oauth2/introspect`). Defaults
 # to loopback so the surface
 # stays invisible from outside the host. Override `bind` to e.g.
 # `0.0.0.0:8081` when running inside a container where the trust
@@ -567,6 +583,7 @@ id_token_iat_window_secs = 120   # reject device id_tokens whose iat is older th
 mfa_auth_time_window_secs = 300  # force_mfa hosts: AAL2 session older than this won't unlock (R11 fresh-MFA)
 # hydra_issuer = "http://localhost:4444"  # expected `iss` on the device id_token; defaults to [hydra].issuer, then [hydra].public_url.
                                           # Override when Hydra's urls.self.issuer differs (e.g. host.containers.internal).
+                                          # Ignored with `oauth-native`, where the issuer is [self].url.
 
 # Offline auth (M3a). A dedicated ≥8-char passphrase (NOT the Forseti password)
 # lets an enrolled host authenticate when it can run its daemon but can't reach

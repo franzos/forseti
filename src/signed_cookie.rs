@@ -77,7 +77,11 @@ impl<'a> SignedCookie<'a> {
         headers: &HeaderMap,
         now_secs: u64,
     ) -> Option<(u64, Vec<u8>)> {
-        let raw = read_cookie(headers, self.name)?;
+        self.verify(secret, &read_cookie(headers, self.name)?, now_secs)
+    }
+
+    /// [`Self::decode_with_issued_at`] over one raw value presented under this cookie's name.
+    pub(crate) fn verify(&self, secret: &[u8], raw: &str, now_secs: u64) -> Option<(u64, Vec<u8>)> {
         let parts: Vec<&str> = raw.splitn(3, '.').collect();
         if parts.len() != 3 {
             return None;

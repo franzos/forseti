@@ -17,3 +17,6 @@ referrer-dismiss-aria = ปิดแบนเนอร์ผู้อ้าง�
 
 # OAuth flow continuation (templates/oauth/continue.html)
 oauth-continue-heading = กำลังเปลี่ยนเส้นทาง…
+
+# OAuth sessions left running after a session end (flash suffix)
+flash-oauth-sessions-partial = ไม่สามารถสิ้นสุดบางเซสชันได้

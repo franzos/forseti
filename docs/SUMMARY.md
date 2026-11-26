@@ -11,6 +11,7 @@
 - [Operator guide](./operator-guide.md)
 - [Identity: Kratos](./operator-guide-kratos.md)
 - [Identity: native](./operator-guide-native.md)
+- [OAuth: built in](./operator-guide-native-oauth.md)
 - [Reverse proxy](./operator-guide-proxy.md)
 
 # Integrating

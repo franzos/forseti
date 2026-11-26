@@ -4,6 +4,8 @@
 use axum::Router;
 use axum::routing::{get, post};
 
+#[cfg(feature = "oauth-native")]
+use crate::backend::OAuthBackend;
 use crate::config::{AuthConfig, ProxyConfig};
 use crate::rate_limit;
 use crate::state::AppState;

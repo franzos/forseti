@@ -16,6 +16,8 @@ use crate::FlowQuery;
 use crate::audit::{self, AuditCtx, AuditEvent, AuditFilter, AuditRow, action, target_kind};
 use crate::audit_metadata;
 use crate::backend::IdentityBackend;
+#[cfg(feature = "oauth-native")]
+use crate::backend::OAuthBackend;
 use crate::backend::identity::{Identity, Session};
 use crate::backend::oauth::ConsentSession;
 use crate::db::DbPool;

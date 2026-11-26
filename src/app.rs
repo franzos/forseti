@@ -17,6 +17,7 @@ use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::audit;
+use crate::backend::OAuthBackend;
 use crate::commercial::{self, LicenseHandle};
 use crate::config::{AppConfig, DatabaseBackend, DatabaseConfig};
 use crate::db::DbPool;
@@ -106,7 +107,7 @@ pub(crate) async fn run() -> anyhow::Result<()> {
     check_audit_webhook_token(&cfg);
     #[cfg(feature = "identity-native")]
     require_native_mail(&cfg);
-    #[cfg(feature = "identity-native")]
+    #[cfg(any(feature = "identity-native", feature = "oauth-native"))]
     let cookie_secret = native_cookie_secret(&cfg);
     if cfg.identity.privileged_session_minutes == 0 {
         eprintln!(
@@ -120,6 +121,11 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         eprintln!("config error: {msg}");
         std::process::exit(1);
     }
+    #[cfg(feature = "oauth-native")]
+    if let Err(msg) = check_native_oauth(&cfg) {
+        eprintln!("config error: {msg}");
+        std::process::exit(1);
+    }
     if let Err(msg) = cfg.oauth.cimd.validate(&cfg.self_.url) {
         eprintln!("config error: {msg}");
         std::process::exit(1);
@@ -127,24 +133,6 @@ pub(crate) async fn run() -> anyhow::Result<()> {
 
     // Reject overlapping posix uid/gid bands at boot before a team gid can collide with a user gid on a host.
     cfg.posix.validate_bands()?;
-
-    let oauth = crate::backend::build_oauth(&cfg);
-
-    // Refuse to serve POSIX device auth against a PAM client Hydra reports as
-    // public: Forseti holds the `device_code` on every host's behalf, so a
-    // credential-less token endpoint hands that grant to anyone. Only fires
-    // when device auth is actually configured and Hydra positively answers.
-    if cfg.posix.pam_client_secret.is_some()
-        && crate::oauth::device::pam_client_is_public(&oauth, &cfg.posix).await
-    {
-        eprintln!(
-            "config error: OAuth client '{}' has token_endpoint_auth_method = none. \
-             POSIX device auth requires a confidential client; reset it to \
-             client_secret_basic in Hydra and restart.",
-            cfg.posix.pam_client_id
-        );
-        std::process::exit(1);
-    }
 
     let db = DbPool::init(&cfg.database)?;
     db.ping().await?;
@@ -159,10 +147,38 @@ pub(crate) async fn run() -> anyhow::Result<()> {
     // One Ctrl+C / SIGTERM fans out to the HTTP listeners and the webhook background tasks.
     let shutdown = CancellationToken::new();
 
-    #[cfg(feature = "identity-ory")]
+    #[cfg(not(any(feature = "identity-native", feature = "oauth-native")))]
     let cookie_secret =
         resolve_cookie_secret(cfg.security.cookie_secret.as_deref(), &cfg.self_.url);
     let identity = crate::backend::build_identity(&cfg, &db, &cookie_secret);
+
+    let oauth = crate::backend::build_oauth(&cfg, &db, &cookie_secret);
+    #[cfg(feature = "oauth-native")]
+    oauth.init().await?;
+
+    // Refuse to serve POSIX device auth against a PAM client Hydra reports as
+    // public: Forseti holds the `device_code` on every host's behalf, so a
+    // credential-less token endpoint hands that grant to anyone. Only fires
+    // when device auth is actually configured and Hydra positively answers;
+    // on the native backend a failed client read also stops the boot.
+    if cfg.posix.pam_client_secret.is_some() {
+        match crate::oauth::device::pam_client_is_public(&oauth, &cfg.posix).await {
+            Ok(false) => {}
+            Ok(true) => {
+                eprintln!(
+                    "config error: OAuth client '{}' has token_endpoint_auth_method = none. \
+                     POSIX device auth requires a confidential client; reset it to \
+                     client_secret_basic in Hydra and restart.",
+                    cfg.posix.pam_client_id
+                );
+                std::process::exit(1);
+            }
+            Err(msg) => {
+                eprintln!("config error: {msg}");
+                std::process::exit(1);
+            }
+        }
+    }
 
     if cfg.audit.ip_salt.as_deref().is_none_or(str::is_empty) {
         tracing::warn!(
@@ -222,6 +238,11 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         db.clone(),
         shutdown.clone(),
     ));
+    #[cfg(feature = "oauth-native")]
+    background.push(crate::oauth_native::maintenance::spawn(
+        oauth.clone(),
+        shutdown.clone(),
+    ));
 
     let cfg_public_bind = cfg.self_.bind.clone();
     let cfg_internal_bind = cfg.internal.bind.clone();
@@ -249,6 +270,8 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         )),
         metrics_handle,
     };
+    #[cfg(feature = "oauth-native")]
+    let backchannel = state.oauth.clone();
 
     // Forseti-owned CSRF-protected forms/POSTs. The middleware mints `forseti_csrf` and appends `Set-Cookie`;
     // `/healthz`, `/readyz`, the kratos webhook, and static assets stay outside the layer (no forms).
@@ -314,41 +337,34 @@ pub(crate) async fn run() -> anyhow::Result<()> {
             "/.well-known/webhook-jwks.json",
             get(webhook::jwks_endpoint),
         )
-        .merge(discovery::router())
-        // CIMD: augmented AS discovery (always), the gated Hydra front proxy,
-        // and the rate-limited /oauth2/authorize shim — all public, outside CSRF.
+        .merge(discovery::router());
+    // CIMD: augmented AS discovery (always), the gated Hydra front proxy,
+    // and the rate-limited /oauth2/authorize shim — all public, outside CSRF.
+    #[cfg(feature = "oauth-ory")]
+    let public_app = public_app
         .merge(crate::hydra_front::well_known_router(&state.cfg.hydra))
         .merge(crate::hydra_front::router(&state.cfg.hydra))
-        .merge(oauth::cimd::router(
+        .merge(oauth::cimd_shim::router(
             &state.cfg.oauth,
             &state.cfg.proxy,
             &state.cfg.hydra,
         ));
+    #[cfg(feature = "oauth-native")]
+    let public_app = public_app.merge(crate::oauth_native::routes::router(&state.cfg));
     // SSO routes mount only when [saml] is configured; outside CSRF (Jackson's callback is a cross-site GET).
     let public_app = if state.cfg.saml.is_some() {
         public_app.merge(crate::saml::router())
     } else {
         public_app
     };
-    // Browser-facing issuer origin: [hydra].issuer → [posix].hydra_issuer (legacy
-    // narrow override) → [hydra].public_url.
-    let hydra_issuer = state
-        .cfg
-        .hydra
-        .issuer
-        .clone()
-        .or_else(|| state.cfg.posix.hydra_issuer.clone())
-        .unwrap_or_else(|| state.cfg.hydra.public_url.clone());
     // Native flow forms post to Forseti itself, which `'self'` already covers.
     #[cfg(feature = "identity-ory")]
     let identity_public_url = state.cfg.kratos.public_url.as_str();
     #[cfg(feature = "identity-native")]
     let identity_public_url = "";
-    // With [hydra].issuer set, public_url is server-to-server only (e.g. `http://hydra:4444`).
     let form_action = csp_form_action(
         identity_public_url,
-        state.cfg.hydra.issuer_or_public(),
-        &hydra_issuer,
+        &state.oauth.form_action_origins(),
         &state.cfg.security.extra_form_action,
     );
     let csp_value = axum::http::HeaderValue::from_str(&build_csp(
@@ -416,6 +432,8 @@ pub(crate) async fn run() -> anyhow::Result<()> {
     let internal_app = Router::new();
     #[cfg(feature = "identity-ory")]
     let internal_app = internal_app.merge(audit::kratos_webhook::router());
+    #[cfg(feature = "oauth-native")]
+    let internal_app = internal_app.merge(crate::oauth_native::routes::internal_router(&state.cfg));
     let internal_app = internal_app
         .merge(crate::posix::router(state.clone()))
         .layer(axum::middleware::from_fn_with_state(
@@ -474,6 +492,12 @@ pub(crate) async fn run() -> anyhow::Result<()> {
     .into_future();
 
     tokio::try_join!(public_fut, internal_fut)?;
+
+    // Requests that ended sessions have finished; their back-channel logout tokens are in flight.
+    #[cfg(feature = "oauth-native")]
+    backchannel
+        .drain_deliveries(crate::oauth_native::DELIVERY_DRAIN)
+        .await;
 
     // Listeners are down; give the background tasks a bounded window to
     // finish their current tick before the runtime drops them.
@@ -619,8 +643,36 @@ pub(crate) fn check_native_identity(cfg: &AppConfig) -> Result<(), String> {
     Ok(())
 }
 
-/// The secret seals TOTP secrets and keys code MACs, so an ephemeral fallback is refused.
-#[cfg(feature = "identity-native")]
+/// `[self].url` is the issuer, so it must be a bare origin; `[posix].hydra_issuer` only warns.
+#[cfg(feature = "oauth-native")]
+pub(crate) fn check_native_oauth(cfg: &AppConfig) -> Result<(), String> {
+    let self_url = &cfg.self_.url;
+    let bare_origin = url::Url::parse(self_url).is_ok_and(|u| {
+        matches!(u.scheme(), "http" | "https")
+            && u.host_str().is_some()
+            && u.username().is_empty()
+            && u.password().is_none()
+            && u.path() == "/"
+            && u.query().is_none()
+            && u.fragment().is_none()
+    });
+    if !bare_origin {
+        return Err(format!(
+            "[self].url must be an http(s) origin with no path, query, fragment or userinfo; \
+             the built-in OAuth server uses it as the issuer. Got {self_url:?}."
+        ));
+    }
+    if cfg.posix.hydra_issuer.is_some() {
+        tracing::warn!(
+            "[posix].hydra_issuer is set; it has no meaning on this build, where the issuer is \
+             [self].url."
+        );
+    }
+    Ok(())
+}
+
+/// The secret seals stored keys and secrets and keys code MACs, so an ephemeral fallback is refused.
+#[cfg(any(feature = "identity-native", feature = "oauth-native"))]
 pub(crate) fn native_cookie_secret(cfg: &AppConfig) -> Arc<[u8]> {
     if cfg
         .security
@@ -629,8 +681,8 @@ pub(crate) fn native_cookie_secret(cfg: &AppConfig) -> Arc<[u8]> {
         .is_none_or(|s| s.trim().is_empty())
     {
         eprintln!(
-            "config error: [security].cookie_secret must be set; the native identity backend \
-             derives its encryption and MAC keys from it. Generate one with `openssl rand -hex \
+            "config error: [security].cookie_secret must be set; the native backends \
+             derive their encryption and MAC keys from it. Generate one with `openssl rand -hex \
              32` (or via FORSETI_SECURITY__COOKIE_SECRET) and restart."
         );
         std::process::exit(1);
@@ -726,7 +778,7 @@ async fn shutdown_signal() {
 }
 
 // omits default-src/script-src/style-src/img-src: those break WebAuthn/QR/Shape-2 forms
-fn build_csp(frame_ancestors: &str, form_action: &str) -> String {
+pub(crate) fn build_csp(frame_ancestors: &str, form_action: &str) -> String {
     format!(
         "object-src 'none'; base-uri 'self'; frame-ancestors {frame_ancestors}; \
          form-action {form_action}"
@@ -752,15 +804,10 @@ fn build_csp(frame_ancestors: &str, form_action: &str) -> String {
 /// `[hydra].public_url` (a container-reachable hostname vs `localhost`), so both are listed when
 /// they differ. Origin only (scheme+host+port); CSP source expressions with a path would not match
 /// the flow's action URL anyway.
-fn csp_form_action(
-    kratos_public_url: &str,
-    hydra_public_url: &str,
-    hydra_issuer: &str,
-    extra: &[String],
-) -> String {
+fn csp_form_action(kratos_public_url: &str, oauth_origins: &[String], extra: &[String]) -> String {
     let mut sources = vec!["'self'".to_string()];
-    for url in [kratos_public_url, hydra_public_url, hydra_issuer]
-        .into_iter()
+    for url in std::iter::once(kratos_public_url)
+        .chain(oauth_origins.iter().map(String::as_str))
         .chain(extra.iter().map(String::as_str))
     {
         if let Some(origin) = csp_origin_source(url)
@@ -780,7 +827,7 @@ fn csp_form_action(
 /// the directive. Without this filter, registering that URI appends an
 /// attacker-chosen directive (`sandbox`, say, which neuters the page) to the
 /// header of whichever page allowlists that client.
-fn csp_origin_source(url: &str) -> Option<String> {
+pub(crate) fn csp_origin_source(url: &str) -> Option<String> {
     let origin = crate::csrf::url_origin(url)?;
     origin
         .chars()
@@ -929,6 +976,31 @@ mod tests {
         assert!(check_native_identity(&cfg).is_ok());
     }
 
+    #[cfg(feature = "oauth-native")]
+    #[test]
+    fn native_oauth_wants_a_bare_origin_as_self_url() {
+        use super::check_native_oauth;
+        use crate::config::AppConfig;
+        for (url, accepted) in [
+            ("https://id.example.com", true),
+            ("https://id.example.com/", true),
+            ("http://localhost:3000", true),
+            ("https://id.example.com/auth", false),
+            ("https://id.example.com/auth/", false),
+            ("https://id.example.com/?a=1", false),
+            ("https://id.example.com?", false),
+            ("https://id.example.com/#x", false),
+            ("https://user@id.example.com", false),
+            ("https://user:pw@id.example.com", false),
+            ("ftp://id.example.com", false),
+            ("id.example.com", false),
+        ] {
+            let mut cfg = AppConfig::test_fixture();
+            cfg.self_.url = url.to_string();
+            assert_eq!(check_native_oauth(&cfg).is_ok(), accepted, "{url}");
+        }
+    }
+
     #[test]
     fn worker_stale_threshold_scales_with_tick_and_floors_at_20() {
         assert_eq!(worker_stale_threshold_secs(1), 20);
@@ -975,13 +1047,14 @@ mod tests {
     fn form_action_allows_hydra_as_well_as_kratos() {
         let csp = csp_form_action(
             "http://localhost:4433",
-            "http://localhost:4444",
-            "http://localhost:4444",
+            &[
+                "http://localhost:4444".to_string(),
+                "http://localhost:4444".to_string(),
+            ],
             &[],
         );
         assert!(csp.contains("http://localhost:4433"), "kratos: {csp}");
         assert!(csp.contains("http://localhost:4444"), "hydra: {csp}");
-        // public_url == issuer must not be listed twice.
         assert_eq!(csp.matches("http://localhost:4444").count(), 1, "{csp}");
     }
 
@@ -992,8 +1065,10 @@ mod tests {
     fn form_action_covers_an_issuer_that_differs_from_public_url() {
         let csp = csp_form_action(
             "http://localhost:4433",
-            "http://localhost:4444",
-            "http://host.containers.internal:4444",
+            &[
+                "http://localhost:4444".to_string(),
+                "http://host.containers.internal:4444".to_string(),
+            ],
             &[],
         );
         assert!(csp.contains("http://localhost:4444"), "{csp}");
@@ -1009,8 +1084,7 @@ mod tests {
     fn form_action_appends_operator_supplied_origins() {
         let csp = csp_form_action(
             "http://localhost:4433",
-            "http://localhost:4444",
-            "http://localhost:4444",
+            &["http://localhost:4444".to_string()],
             &["https://idp.example.com/authorize".to_string()],
         );
         assert!(csp.ends_with("https://idp.example.com"), "{csp}");
@@ -1038,8 +1112,7 @@ mod tests {
     fn form_action_drops_an_origin_carrying_a_separator() {
         let csp = csp_form_action(
             "http://localhost:4433",
-            "",
-            "",
+            &[],
             &["https://a;sandbox".to_string()],
         );
         assert!(!csp.contains("sandbox"), "{csp}");
@@ -1059,9 +1132,38 @@ mod tests {
         assert_eq!(extra.0.len(), MAX_EXTRA_FORM_ACTION);
     }
 
+    #[cfg(feature = "oauth-ory")]
+    #[tokio::test]
+    async fn form_action_from_the_backend_matches_the_config_derivation() {
+        use crate::backend::OAuthBackend;
+
+        let db = crate::db::test_pool().await;
+        let public = "http://hydra:4444";
+        let issuer = Some("https://id.example.com/hydra");
+        let posix = Some("https://legacy.example.com/");
+        for (hydra_issuer, posix_issuer, expected) in [
+            (None, None, "http://hydra:4444"),
+            (issuer, None, "https://id.example.com"),
+            (None, posix, "http://hydra:4444 https://legacy.example.com"),
+            (issuer, posix, "https://id.example.com"),
+        ] {
+            let mut cfg = crate::config::AppConfig::test_fixture();
+            cfg.hydra.public_url = public.to_string();
+            cfg.hydra.issuer = hydra_issuer.map(str::to_string);
+            cfg.posix.hydra_issuer = posix_issuer.map(str::to_string);
+
+            let oauth = crate::backend::build_oauth(&cfg, &db, &[]);
+            assert_eq!(
+                csp_form_action("http://localhost:4433", &oauth.form_action_origins(), &[]),
+                format!("'self' http://localhost:4433 {expected}"),
+                "[hydra].issuer={hydra_issuer:?} [posix].hydra_issuer={posix_issuer:?}"
+            );
+        }
+    }
+
     #[test]
     fn form_action_falls_back_to_self_on_unparseable_urls() {
-        assert_eq!(csp_form_action("", "", "", &[]), "'self'");
+        assert_eq!(csp_form_action("", &[], &[]), "'self'");
     }
 
     #[test]
@@ -1083,25 +1185,25 @@ mod tests {
     fn csp_form_action_allows_self_and_kratos_origin() {
         // Kratos renders its flow forms' action; a bare 'self' would break every login POST.
         assert_eq!(
-            csp_form_action("http://127.0.0.1:4433/", "", "", &[]),
+            csp_form_action("http://127.0.0.1:4433/", &[], &[]),
             "'self' http://127.0.0.1:4433"
         );
         assert_eq!(
-            csp_form_action("https://auth.example.com/self-service/login", "", "", &[]),
+            csp_form_action("https://auth.example.com/self-service/login", &[], &[]),
             "'self' https://auth.example.com"
         );
     }
 
     #[test]
     fn csp_form_action_falls_back_to_self_on_unparseable_kratos_url() {
-        assert_eq!(csp_form_action("not a url", "", "", &[]), "'self'");
+        assert_eq!(csp_form_action("not a url", &[], &[]), "'self'");
     }
 
     #[test]
     fn csp_form_action_lands_in_the_header() {
         let csp = build_csp(
             "'none'",
-            &csp_form_action("https://auth.example.com", "", "", &[]),
+            &csp_form_action("https://auth.example.com", &[], &[]),
         );
         assert!(csp.contains("form-action 'self' https://auth.example.com"));
         assert!(csp.contains("frame-ancestors 'none'"));
@@ -1136,8 +1238,7 @@ mod tests {
     fn form_action_includes_an_allowed_issuer_origin() {
         let csp = csp_form_action(
             "http://localhost:4433",
-            "",
-            "",
+            &[],
             &["http://host.containers.internal:8092/default".to_string()],
         );
         assert_eq!(

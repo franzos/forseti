@@ -206,9 +206,9 @@ fn find_conflict(
     None
 }
 
-/// Claims Hydra sets itself, plus the ID-token-only ones resource servers use
+/// Claims the authorization server sets itself, plus the ID-token-only ones resource servers use
 /// to tell an ID token from an access token.
-const RESERVED_CLAIMS: &[&str] = &[
+pub(crate) const RESERVED_CLAIMS: &[&str] = &[
     "iss",
     "sub",
     "aud",
@@ -221,6 +221,14 @@ const RESERVED_CLAIMS: &[&str] = &[
     "ext",
     "nonce",
     "at_hash",
+    "scope",
+    "gid",
+    "acr",
+    "amr",
+    "sid",
+    "auth_time",
+    "azp",
+    "typ",
 ];
 const MAX_CLAIMS: usize = 10;
 const MAX_CLAIM_LEN: usize = 64;
@@ -770,7 +778,22 @@ mod tests {
             parse_access_token_claims(" forgejo_aud, team:id  forgejo_aud\n"),
             Ok(vec!["forgejo_aud".to_string(), "team:id".to_string()])
         );
-        for bad in ["sub", "ext", "nonce", "a b=c", "ünicode", &"x".repeat(65)] {
+        for bad in [
+            "sub",
+            "ext",
+            "nonce",
+            "scope",
+            "gid",
+            "acr",
+            "amr",
+            "sid",
+            "auth_time",
+            "azp",
+            "typ",
+            "a b=c",
+            "ünicode",
+            &"x".repeat(65),
+        ] {
             assert!(
                 parse_access_token_claims(bad).is_err(),
                 "{bad:?} must be refused"

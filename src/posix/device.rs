@@ -19,8 +19,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::audit::{self, AuditCtx, AuditEvent, action};
 use crate::audit_metadata;
-use crate::backend::IdentityBackend;
 use crate::backend::oauth::{DeviceTokenOutcome, TokenSet};
+use crate::backend::{IdentityBackend, OAuthBackend};
 use crate::posix::db::{self, DeviceSession, device_status};
 use crate::posix::host_auth::RequirePosixHost;
 use crate::posix::scope;
@@ -364,11 +364,14 @@ async fn handle_token(
         audit_denied(state, actx, host, session, "token_invalid").await;
         return deny_and_respond(state, session, "token_invalid").await;
     };
-    // Narrow override chain: [posix].hydra_issuer → [hydra].issuer → [hydra].public_url.
+    // [posix].hydra_issuer overrides the backend issuer on the Ory build only.
+    #[cfg(feature = "oauth-ory")]
     let issuer = cfg
         .hydra_issuer
         .as_deref()
-        .unwrap_or_else(|| state.cfg.hydra.issuer_or_public());
+        .unwrap_or_else(|| state.oauth.issuer());
+    #[cfg(feature = "oauth-native")]
+    let issuer = state.oauth.issuer();
     let claims = match state
         .oauth
         .verify_id_token(

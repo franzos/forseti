@@ -29,9 +29,11 @@ version = "0.2.31"
 result_large_err = "allow"
 
 [features]
-default = ["identity-ory"]
+default = ["identity-ory", "oauth-ory"]
 identity-ory = []
 identity-native = ["dep:aws-lc-rs", "dep:qrcode", "dep:base32", "dep:webauthn-rs"]
+oauth-ory = []
+oauth-native = ["dep:aws-lc-rs"]
 
 [dependencies]
 axum = { version = "0.8", features = ["macros", "multipart"] }

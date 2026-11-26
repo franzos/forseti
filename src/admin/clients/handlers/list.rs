@@ -7,6 +7,8 @@ use axum::{
 use serde::Deserialize;
 
 use crate::admin::{AdminSection, render_admin_error};
+#[cfg(feature = "oauth-native")]
+use crate::backend::OAuthBackend;
 use crate::extractors::Csrf;
 use crate::format::looks_like_uuid;
 use crate::oauth_client_metadata;

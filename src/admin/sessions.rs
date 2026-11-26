@@ -206,25 +206,38 @@ pub async fn revoke(
     };
     match state.identity.admin_revoke_session(&id).await {
         Ok(()) => {
-            if let Some(identity_id) = &identity_id {
-                crate::oauth::op_sessions::end_op_sessions_for_browser(
-                    &state.db,
-                    &state.oauth,
-                    identity_id,
-                    &id,
-                    crate::oauth::op_sessions::GrantRevocation::Revoke,
-                )
-                .await;
+            let mut event = ctx
+                .audit_event(action::ADMIN_SESSION_REVOKED, &actx)
+                .target(target_kind::SESSION, id.clone());
+            let ended = match &identity_id {
+                Some(identity_id) => {
+                    crate::oauth::op_sessions::end_op_sessions_for_browser(
+                        &state.db,
+                        &state.oauth,
+                        identity_id,
+                        &id,
+                        crate::oauth::op_sessions::GrantRevocation::Revoke,
+                    )
+                    .await
+                }
+                None => true,
+            };
+            if !ended {
+                tracing::warn!(
+                    id,
+                    "admin: session revoked, but its OAuth sessions and grants were not all ended"
+                );
+                event =
+                    event.merge_metadata(crate::audit_metadata!("op_sessions_revoked" => false));
             }
-            let _ = audit::log(
-                &state.db,
-                ctx.audit_event(action::ADMIN_SESSION_REVOKED, &actx)
-                    .target(target_kind::SESSION, id.clone()),
-            )
-            .await;
+            let _ = audit::log(&state.db, event).await;
             state.flash_redirect(
                 &redirect_to,
-                &crate::i18n::lookup(&ctx.locale, "flash-session-revoked"),
+                &crate::oauth::op_sessions::flash_with_partial_end(
+                    &ctx.locale,
+                    crate::i18n::lookup(&ctx.locale, "flash-session-revoked"),
+                    ended,
+                ),
             )
         }
         Err(e) => {

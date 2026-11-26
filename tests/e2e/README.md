@@ -82,7 +82,7 @@ make e2e-native
 ```
 
 Runs the unlicensed bucket against a Forseti built with
-`--no-default-features --features identity-native`. Like `make e2e` it does
+`--no-default-features --features identity-native,oauth-ory`. Like `make e2e` it does
 not bring the stack up: run `make stack-up-native`, start the native binary
 with `FORSETI_CONFIG_PATH=config.ci.native.toml`, then `make seed-admin-native`
 (prints the same three admin env vars) and `make seed-posix-client`.

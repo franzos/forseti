@@ -164,7 +164,7 @@ async fn account_delete_saga_revokes_hydra_consent_sessions() {
 
     // 1. Establish a remembered Hydra consent grant for this subject.
     let (client_id, _secret, redirect_uri) =
-        hydra_create_test_client(&["openid", "offline", "email"]).await;
+        oauth_create_test_client(&["openid", "offline", "email"]).await;
     let auth_url = oauth_auth_url(&client_id, &redirect_uri, "openid offline email", "");
     let (consent_challenge, csrf, _body) = drive_to_consent(&user.client, &auth_url).await;
     let _code = consent_accept_chase_code(
@@ -177,7 +177,7 @@ async fn account_delete_saga_revokes_hydra_consent_sessions() {
     .await
     .expect("authorization code on callback");
     assert!(
-        hydra_consent_session_count(&identity_id).await >= 1,
+        oauth_consent_session_count(&identity_id).await >= 1,
         "precondition: a remembered consent session should exist before delete"
     );
 
@@ -210,12 +210,12 @@ async fn account_delete_saga_revokes_hydra_consent_sessions() {
         "kratos identity should be deleted"
     );
     assert_eq!(
-        hydra_consent_session_count(&identity_id).await,
+        oauth_consent_session_count(&identity_id).await,
         0,
         "delete saga must revoke all Hydra consent sessions for the subject"
     );
 
-    hydra_delete_client(&client_id).await;
+    oauth_delete_client(&client_id).await;
     // No identity cleanup — already deleted.
 }
 
@@ -290,7 +290,7 @@ async fn webhook_jwks_endpoint_serves_well_formed_ed25519_key() {
 ///    `Arc<Mutex<...>>`. ~50 lines.
 ///
 /// 2. **Hydra client with `account_deletion_url` metadata.** Extend
-///    `hydra_create_test_client` (`common.rs:531`) to accept a
+///    `oauth_create_test_client` (`common.rs:531`) to accept a
 ///    `serde_json::Value` for `metadata`; pass through `account_deletion_url`
 ///    under `metadata.portal.account_deletion_url`. No webhook-secret
 ///    minting step is needed anymore — the portal owns the signing key.

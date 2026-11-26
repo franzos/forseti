@@ -42,6 +42,14 @@ mod native;
 #[path = "support/native_seed.rs"]
 mod native_seed;
 
+#[cfg(feature = "oauth-ory")]
+#[path = "support/oauth_ory.rs"]
+mod oauth_ory;
+
+#[cfg(feature = "oauth-native")]
+#[path = "support/oauth_native.rs"]
+mod oauth_native;
+
 #[path = "integration/aal2_enforcement.rs"]
 mod aal2_enforcement;
 

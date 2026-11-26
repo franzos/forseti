@@ -16,10 +16,13 @@ use uuid::Uuid;
 use crate::audit::{self, AuditCtx, AuditEvent, SafeMetadata, action, target_kind};
 use crate::audit_metadata;
 use crate::backend::identity::Identity;
-use crate::backend::{IdentityBackend, IdentityImpl, OAuthImpl};
+use crate::backend::{IdentityBackend, IdentityImpl, OAuthBackend, OAuthImpl};
 use crate::config::AppConfig;
 use crate::db::DbPool;
-use crate::oauth::op_sessions::{GrantRevocation, end_op_sessions_for_subject, forget_subject};
+use crate::oauth::op_sessions::{
+    GrantRevocation, SubjectEnd, end_op_sessions_before_deletion, end_op_sessions_for_subject,
+    forget_subject,
+};
 use crate::state::AppState;
 use crate::webhook::{self, SetIssuers, SigningKey, WebhookTarget};
 
@@ -44,7 +47,7 @@ impl<'a> DeleteEnv<'a> {
             oauth: &state.oauth,
             signing_key: &state.signing_key,
             self_url: &state.cfg.self_.url,
-            issuer: state.cfg.hydra.issuer_or_public(),
+            issuer: state.oauth.issuer(),
         }
     }
 }
@@ -118,7 +121,7 @@ pub struct DeleteRequest {
     pub identity_id: String,
     pub reason: DeleteReason,
     pub actor: DeleteActor,
-    /// CLI only: proceed past the sole-owner guard.
+    /// CLI only: proceed past the sole-owner guard and a failed OAuth session end.
     pub force: bool,
     pub ctx: Option<AuditCtx>,
     /// Extra audit metadata; merged under the deletion's own keys.
@@ -201,6 +204,8 @@ pub enum DeleteError {
     Guard(anyhow::Error),
     Collect(CollectStep, anyhow::Error),
     Outbox(anyhow::Error),
+    /// A login session or grant could not be revoked.
+    OpSessions,
     Kratos(anyhow::Error),
 }
 
@@ -218,6 +223,7 @@ impl fmt::Display for DeleteError {
                 write!(f, "identity lookup failed: {e}")
             }
             DeleteError::Outbox(e) => write!(f, "outbox write failed: {e}"),
+            DeleteError::OpSessions => f.write_str("ending the OAuth sessions failed"),
             DeleteError::Kratos(e) => write!(f, "kratos delete failed: {e}"),
         }
     }
@@ -376,12 +382,34 @@ pub async fn delete_identity(
     .await
     .map_err(DeleteError::Outbox)?;
 
-    end_op_sessions_for_subject(env.db, env.oauth, id, None, GrantRevocation::Keep).await;
+    // A retry re-reads the consents and `forget_subject` below drops the sid rows,
+    // so a partial revoke stops here unless forced, when nothing will retry. A
+    // failed closing consent revoke may still have removed the consents, so the
+    // targets already enqueued are the ones to notify.
+    let forced = reason == DeleteReason::Cli && req.force;
+    let ended = if forced {
+        if end_op_sessions_for_subject(env.db, env.oauth, id, None, GrantRevocation::Keep).await {
+            SubjectEnd::Done
+        } else {
+            SubjectEnd::Failed
+        }
+    } else {
+        end_op_sessions_before_deletion(env.db, env.oauth, id).await
+    };
+    if ended == SubjectEnd::Failed && !forced {
+        abort_outbox(env.db, event_id).await;
+        return Err(DeleteError::OpSessions);
+    }
+    let op_sessions_revoked = ended == SubjectEnd::Done;
+    if !op_sessions_revoked {
+        tracing::warn!(
+            identity_id = %id,
+            "identity delete: OAuth sessions not all ended; continuing"
+        );
+    }
 
     if let Err(e) = env.identity.admin_delete_identity(id).await {
-        if let Err(e2) = webhook::abort_event(env.db, event_id).await {
-            tracing::error!(error = %e2, event_id = %event_id, "outbox abort failed");
-        }
+        abort_outbox(env.db, event_id).await;
         return Err(DeleteError::Kratos(e));
     }
     if let Err(e) = webhook::confirm_event(env.db, event_id).await {
@@ -456,6 +484,9 @@ pub async fn delete_identity(
             "orgs_left_without_owner" => orgs_left_without_owner.clone(),
         ));
     }
+    if !op_sessions_revoked {
+        metadata = metadata.merge(audit_metadata!("op_sessions_revoked" => false));
+    }
     let mut event = AuditEvent::new(reason.action())
         .target(target_kind::IDENTITY, id.to_string())
         .critical()
@@ -513,6 +544,12 @@ pub async fn delete_identity(
         "identity deleted"
     );
     Ok(report)
+}
+
+async fn abort_outbox(db: &DbPool, event_id: Uuid) {
+    if let Err(e) = webhook::abort_event(db, event_id).await {
+        tracing::error!(error = %e, event_id = %event_id, "outbox abort failed");
+    }
 }
 
 /// [`delete_identity`] in a spawned task, so dropping the caller (request

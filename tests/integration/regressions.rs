@@ -184,13 +184,14 @@ async fn deviation4_consent_checkboxes_render_per_scope() {
     let user = register_test_user("dev4").await;
 
     let (client_id, _secret, redirect_uri) =
-        hydra_create_test_client(&["openid", "offline", "email", "profile"]).await;
+        oauth_create_test_client(&["openid", "offline", "email", "profile"]).await;
     let auth_url = format!(
-        "{HYDRA_PUBLIC}/oauth2/auth?client_id={client_id}\
+        "{}/oauth2/auth?client_id={client_id}\
          &response_type=code\
          &scope=openid+offline+email+profile\
          &redirect_uri={redirect_uri}\
-         &state=dev4-test-state"
+         &state=dev4-test-state",
+        oauth_public()
     );
     let res = user
         .client
@@ -242,7 +243,7 @@ async fn deviation4_consent_checkboxes_render_per_scope() {
         "openid checkbox should be disabled"
     );
 
-    hydra_delete_client(&client_id).await;
+    oauth_delete_client(&client_id).await;
     user.cleanup().await;
 }
 

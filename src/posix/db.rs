@@ -1306,6 +1306,7 @@ pub async fn device_session_by_client_code_hash(
     Ok(row)
 }
 
+#[cfg(feature = "oauth-ory")]
 pub async fn device_session_by_user_code(
     db: &DbPool,
     user_code: &str,
@@ -1317,6 +1318,43 @@ pub async fn device_session_by_user_code(
             .select(DeviceSession::as_select())
             .first(conn)
             .optional()
+    })?;
+    Ok(row)
+}
+
+/// The pending, unexpired session whose user code is `user_code` in the native server's stored
+/// form (case, spaces and dashes do not matter), only while the native device authorization with
+/// that user code is the session's own: the server reissues a user code once its row is pruned.
+#[cfg(feature = "oauth-native")]
+pub async fn device_session_by_user_code(
+    db: &DbPool,
+    user_code: &str,
+) -> anyhow::Result<Option<DeviceSession>> {
+    use crate::schema::oauth_device_codes;
+    let Some(uc) = crate::oauth_native::normalize_user_code(user_code) else {
+        return Ok(None);
+    };
+    let now = crate::db::now_rfc3339();
+    let row: Option<DeviceSession> = db_interact!(db, |conn| {
+        let Some(session) = device_sessions::table
+            .filter(device_sessions::user_code.eq(&uc))
+            .filter(device_sessions::status.eq(device_status::PENDING))
+            .filter(device_sessions::expires_at.gt(&now))
+            .select(DeviceSession::as_select())
+            .first(conn)
+            .optional()?
+        else {
+            return Ok::<_, diesel::result::Error>(None);
+        };
+        let own: i64 = oauth_device_codes::table
+            .filter(
+                oauth_device_codes::device_code_hash
+                    .eq(crate::seal::sha256_hex(session.device_code.as_bytes())),
+            )
+            .filter(oauth_device_codes::user_code.eq(&uc))
+            .count()
+            .get_result(conn)?;
+        Ok((own == 1).then_some(session))
     })?;
     Ok(row)
 }
@@ -1629,6 +1667,74 @@ mod tests {
             .await
             .expect("insert session")
         );
+    }
+
+    #[cfg(feature = "oauth-native")]
+    #[tokio::test]
+    async fn the_native_lookup_finds_only_a_live_session_that_owns_its_user_code() {
+        use crate::backend::OAuthBackend;
+        let db = temp_pool().await;
+        let cfg = crate::config::AppConfig::test_fixture();
+        let oauth = crate::backend::build_oauth(&cfg, &db, &[0x42; 32]);
+        let pam = crate::oauth::device::pam_client_model("forseti-linux-pam", "pam-secret");
+        oauth.create_client(pam).await.unwrap();
+        let other = crate::oauth::device::pam_client_model("other", "other-secret");
+        oauth.create_client(other).await.unwrap();
+        let future = "2099-01-01T00:00:00+00:00";
+
+        // The PAM flow: its own authorization, found as typed.
+        let own = oauth
+            .device_authorization("forseti-linux-pam", "pam-secret", "openid")
+            .await
+            .unwrap();
+        let hash = crate::posix::hash_token("c-own");
+        insert_device_session(
+            &db,
+            &own.device_code,
+            &own.user_code,
+            "h",
+            "alice",
+            future,
+            &hash,
+        )
+        .await
+        .unwrap();
+        let typed = own.user_code.to_lowercase().replace('-', " ");
+        let found = device_session_by_user_code(&db, &typed).await.unwrap();
+        assert_eq!(found.unwrap().device_code, own.device_code);
+
+        // A stale session holding the user code another client's fresh authorization now has.
+        for (i, stale) in ["approved", "denied", "expired", "foreign"]
+            .iter()
+            .enumerate()
+        {
+            let fresh = oauth
+                .device_authorization("other", "other-secret", "openid")
+                .await
+                .unwrap();
+            let code = format!("stale-{i}");
+            let expires = if *stale == "expired" {
+                "2000-01-01T00:00:00+00:00"
+            } else {
+                future
+            };
+            let hash = crate::posix::hash_token(&code);
+            insert_device_session(&db, &code, &fresh.user_code, "h", "alice", expires, &hash)
+                .await
+                .unwrap();
+            match *stale {
+                "approved" => assert!(approve_device_session(&db, &code, "alice").await.unwrap()),
+                "denied" => assert!(deny_device_session(&db, &code).await.unwrap()),
+                _ => {}
+            }
+            assert!(
+                device_session_by_user_code(&db, &fresh.user_code)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "{stale}"
+            );
+        }
     }
 
     #[tokio::test]

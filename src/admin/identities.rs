@@ -583,7 +583,7 @@ pub async fn disable(
         .await
     {
         Ok(_) => {
-            crate::oauth::op_sessions::end_op_sessions_for_subject(
+            let ended = crate::oauth::op_sessions::end_op_sessions_for_subject(
                 &state.db,
                 &state.oauth,
                 &id,
@@ -591,15 +591,25 @@ pub async fn disable(
                 crate::oauth::op_sessions::GrantRevocation::Keep,
             )
             .await;
-            let _ = audit::log(
-                &state.db,
-                ctx.audit_event(action::ADMIN_IDENTITY_DISABLED, &actx)
-                    .target(target_kind::IDENTITY, id.clone()),
-            )
-            .await;
+            let mut event = ctx
+                .audit_event(action::ADMIN_IDENTITY_DISABLED, &actx)
+                .target(target_kind::IDENTITY, id.clone());
+            if !ended {
+                tracing::warn!(
+                    id,
+                    "admin: identity disabled, but its OAuth sessions were not all ended"
+                );
+                event =
+                    event.merge_metadata(crate::audit_metadata!("op_sessions_revoked" => false));
+            }
+            let _ = audit::log(&state.db, event).await;
             state.flash_redirect(
                 &target,
-                &crate::i18n::lookup(&ctx.locale, "flash-identity-disabled"),
+                &crate::oauth::op_sessions::flash_with_partial_end(
+                    &ctx.locale,
+                    crate::i18n::lookup(&ctx.locale, "flash-identity-disabled"),
+                    ended,
+                ),
             )
         }
         Err(e) => {

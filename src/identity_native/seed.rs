@@ -43,7 +43,7 @@ pub fn token_hash(token: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::identity_native::seal::SealKey;
+    use crate::seal::SealKey;
     use crate::signed_cookie::derive_subkey;
 
     #[test]

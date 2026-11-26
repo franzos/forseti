@@ -43,6 +43,8 @@ use serde::Deserialize;
 
 use crate::audit::{self, AuditCtx, AuditEvent, action, target_kind};
 use crate::audit_metadata;
+#[cfg(feature = "oauth-native")]
+use crate::backend::OAuthBackend;
 use crate::config::{HandoffConfig, ProxyConfig};
 use crate::csrf::CsrfForm;
 use crate::flash::redirect_with_cookie;

@@ -1,5 +1,5 @@
 //! Shared test helpers: HTTP client setup, identity factories, Mailcrab
-//! polling, Hydra client registration.
+//! polling, OAuth helpers.
 //!
 //! Every helper here is intentionally synchronous-shaped from the test's POV —
 //! they take a `&reqwest::Client` and `await` internally. The client is
@@ -21,9 +21,20 @@ use sha2::{Digest, Sha256};
 #[cfg(feature = "identity-native")]
 pub use crate::native::*;
 
+#[cfg(feature = "oauth-ory")]
+pub use crate::oauth_ory::*;
+
+#[cfg(feature = "oauth-native")]
+pub use crate::oauth_native::*;
+
 /// Whether this test binary drives the native identity backend.
 pub fn is_native() -> bool {
     cfg!(feature = "identity-native")
+}
+
+/// Whether this test binary drives the native OAuth backend.
+pub fn is_native_oauth() -> bool {
+    cfg!(feature = "oauth-native")
 }
 
 /// The running test's path, `module::test`, for skip notes.
@@ -48,6 +59,24 @@ macro_rules! skip_on_native {
     };
 }
 
+/// On the native OAuth backend, note `SKIPPED-NATIVE-OAUTH: <test>: <reason>` and return from
+/// the test, as [`skip_on_native`] does.
+macro_rules! skip_on_native_oauth {
+    ($reason:expr) => {
+        if $crate::common::is_native_oauth() {
+            fn here() {}
+            let name = $crate::common::test_name(std::any::type_name_of_val(&here));
+            use std::io::Write as _;
+            let _ = writeln!(
+                std::io::stderr(),
+                "SKIPPED-NATIVE-OAUTH: {name}: {}",
+                $reason
+            );
+            return;
+        }
+    };
+}
+
 // --- Endpoints -------------------------------------------------------------
 
 // Must match the host used in `config.toml` and Kratos's config — they all
@@ -63,12 +92,6 @@ pub const PORTAL: &str = "http://localhost:3000";
 pub const INTERNAL: &str = "http://127.0.0.1:8081";
 pub const KRATOS_PUBLIC: &str = "http://localhost:4433";
 pub const KRATOS_ADMIN: &str = "http://localhost:4434";
-// Must match Hydra's `issuer` (host.containers.internal, see infra/hydra/hydra.yml):
-// Hydra scopes its login/consent CSRF cookie to the issuer host, so driving
-// /oauth2/auth via `localhost` drops the cookie mid-flow and the chain 403s with
-// `request_forbidden: No CSRF value available`. Resolves to 127.0.0.1 here.
-pub const HYDRA_PUBLIC: &str = "http://host.containers.internal:4444";
-pub const HYDRA_ADMIN: &str = "http://localhost:4445";
 /// Mailcrab base URL — the user-prompt-mandated replacement for the
 /// older Mailslurper container. Different API shape (`/api/messages`
 /// returns `[{ to: [{ email }], subject, ... }]`); use
@@ -77,8 +100,6 @@ pub const MAILCRAB: &str = "http://localhost:4436";
 /// The stack's mock-oauth2-server issuer (`infra/docker-compose.yml`), allowed
 /// as an outbound target by `config.ci.toml`.
 pub const MOCK_OIDC_ISSUER: &str = "http://host.containers.internal:8092/default";
-/// Forseti's issuer under `config.ci.toml` (`[hydra].issuer`).
-pub const FORSETI_ISSUER: &str = "http://host.containers.internal:3000/hydra";
 
 // --- Client builders -------------------------------------------------------
 
@@ -946,139 +967,6 @@ pub async fn wait_for_mailcrab(
 pub fn extract_code_from_email(body: &str) -> Option<String> {
     let re = regex::Regex::new(r"\b(\d{6})\b").ok()?;
     re.captures(body)?.get(1).map(|m| m.as_str().to_string())
-}
-
-// --- Hydra client registration --------------------------------------------
-
-/// Register an OAuth2 client for tests. Mirrors the `hydra create client`
-/// invocation in the `ory-up` skill but goes via the admin API directly so
-/// we don't have to shell out to `podman exec`.
-///
-/// Returns `(client_id, client_secret, redirect_uri)`. The redirect URI is
-/// the same `http://127.0.0.1:5555/callback` the playground uses (intentionally
-/// unreachable — tests grab the `code` from the redirect Location header).
-pub async fn hydra_create_test_client(scopes: &[&str]) -> (String, String, String) {
-    hydra_create_test_client_with_audience(scopes, &[]).await
-}
-
-/// As [`hydra_create_test_client`], with an operator-written `audience` on the
-/// client record — the shape an admin-created SSO client has, and the only
-/// thing that authorises Hydra's non-standard `audience=` parameter.
-pub async fn hydra_create_test_client_with_audience(
-    scopes: &[&str],
-    audience: &[&str],
-) -> (String, String, String) {
-    let client = browser_client();
-    let redirect_uri = "http://127.0.0.1:5555/callback";
-    let scope = scopes.join(" ");
-    let body = serde_json::json!({
-        "client_name": "integration-test-client",
-        "grant_types": ["authorization_code", "refresh_token"],
-        "response_types": ["code", "id_token"],
-        "scope": scope,
-        "redirect_uris": [redirect_uri],
-        "token_endpoint_auth_method": "client_secret_post",
-        "subject_type": "public",
-        "audience": audience,
-    });
-    let res = client
-        .post(format!("{HYDRA_ADMIN}/admin/clients"))
-        .json(&body)
-        .send()
-        .await
-        .expect("hydra create client transport");
-    assert!(
-        res.status().is_success(),
-        "hydra create client: status {} body {}",
-        res.status(),
-        res.text().await.unwrap_or_default()
-    );
-    let v: Value = res.json().await.expect("hydra create client body");
-    let id = v["client_id"].as_str().expect("client_id").to_string();
-    let secret = v["client_secret"]
-        .as_str()
-        .expect("client_secret")
-        .to_string();
-    (id, secret, redirect_uri.to_string())
-}
-
-/// Write `audience` onto a client's Hydra record via the admin API. Stands in
-/// for any out-of-band credential that can rewrite the record. The client_id
-/// path segment is percent-encoded so URL-shaped (CIMD) ids work too.
-pub async fn hydra_patch_client_audience(client_id: &str, audience: &[&str]) {
-    let client = browser_client();
-    let patch = serde_json::json!([
-        { "op": "replace", "path": "/audience", "value": audience }
-    ]);
-    let res = client
-        .patch(format!(
-            "{HYDRA_ADMIN}/admin/clients/{}",
-            form_urlencode(client_id)
-        ))
-        .header("content-type", "application/json")
-        .json(&patch)
-        .send()
-        .await
-        .expect("hydra patch audience transport");
-    assert!(
-        res.status().is_success(),
-        "hydra PATCH /audience: status {} body {}",
-        res.status(),
-        res.text().await.unwrap_or_default()
-    );
-}
-
-/// RFC 7662 introspection of an access token via Hydra admin. Returns the raw
-/// JSON so callers can assert on `active`, `aud`, `scope`, …
-pub async fn hydra_introspect(token: &str) -> Value {
-    let client = browser_client();
-    let res = client
-        .post(format!("{HYDRA_ADMIN}/admin/oauth2/introspect"))
-        .form(&[("token", token)])
-        .send()
-        .await
-        .expect("hydra introspect transport");
-    res.json().await.unwrap_or(Value::Null)
-}
-
-/// The `audience` allow-list Hydra has stored for a client. Empty when the
-/// client is unknown or carries none. Percent-encodes the client_id path
-/// segment so URL-shaped (CIMD) ids work too.
-pub async fn hydra_client_audience(client_id: &str) -> Vec<String> {
-    let client = browser_client();
-    let Ok(res) = client
-        .get(format!(
-            "{HYDRA_ADMIN}/admin/clients/{}",
-            form_urlencode(client_id)
-        ))
-        .send()
-        .await
-    else {
-        return Vec::new();
-    };
-    let v: Value = res.json().await.unwrap_or(Value::Null);
-    v["audience"]
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .filter_map(|x| x.as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// Delete a Hydra client. Best-effort.
-pub async fn hydra_delete_client(client_id: &str) {
-    let client = browser_client();
-    // CIMD client ids are whole URLs, so the path segment has to be encoded
-    // or the DELETE lands on a different path and the client stays put.
-    let _ = client
-        .delete(format!(
-            "{HYDRA_ADMIN}/admin/clients/{}",
-            form_urlencode(client_id)
-        ))
-        .send()
-        .await;
 }
 
 // --- Status / sanity ------------------------------------------------------
@@ -2153,30 +2041,6 @@ pub fn delete_posix_account(identity_id: &str) {
     .unwrap_or_else(|e| panic!("delete posix_accounts: {e}"));
 }
 
-/// UPSERT `oauth_client_metadata` so the row records `verification =
-/// 'verified'`, `source = 'admin'`, `verified_by = 'test-fixture'`. Works
-/// whether or not a row already exists.
-/// How many Hydra clients carry `client_name`. Lets a test assert that a
-/// rejected create left nothing behind.
-pub async fn hydra_client_count_by_name(client_name: &str) -> usize {
-    let client = browser_client();
-    let Ok(res) = client
-        .get(format!("{HYDRA_ADMIN}/admin/clients?page_size=500"))
-        .send()
-        .await
-    else {
-        return 0;
-    };
-    let v: Value = res.json().await.unwrap_or(Value::Null);
-    v.as_array()
-        .map(|a| {
-            a.iter()
-                .filter(|c| c["client_name"].as_str() == Some(client_name))
-                .count()
-        })
-        .unwrap_or(0)
-}
-
 /// Read `oauth_client_metadata.source` for a client. `None` when there's no
 /// row - the legacy "treat as admin-created" case.
 pub fn client_metadata_source(client_id: &str) -> Option<String> {
@@ -2189,22 +2053,9 @@ pub fn client_metadata_source(client_id: &str) -> Option<String> {
     .ok()
 }
 
-/// Read a single field off a Hydra client via the admin API. `None` when the
-/// client is gone or the field isn't present.
-pub async fn hydra_client_field(client_id: &str, field: &str) -> Option<Value> {
-    let client = browser_client();
-    let res = client
-        .get(format!(
-            "{HYDRA_ADMIN}/admin/clients/{}",
-            form_urlencode(client_id)
-        ))
-        .send()
-        .await
-        .ok()?;
-    let v: Value = res.json().await.ok()?;
-    v.get(field).cloned()
-}
-
+/// UPSERT `oauth_client_metadata` so the row records `verification =
+/// 'verified'`, `source = 'admin'`, `verified_by = 'test-fixture'`. Works
+/// whether or not a row already exists.
 pub fn mark_client_verified(client_id: &str) {
     let now = chrono::Utc::now().to_rfc3339();
     let conn = forseti_db_conn();
@@ -2245,27 +2096,6 @@ pub fn set_client_metadata_owner(client_id: &str, source: &str, org_id: &str) {
             params![client_id, source, org_id, now],
         )
         .unwrap_or_else(|e| panic!("plant oauth_client_metadata: {e}"));
-}
-
-/// Flip a Hydra client's `skip_consent` via the admin API, for tests that need
-/// to prove the auto-grant gate actually gates.
-pub async fn hydra_set_client_skip_consent(client_id: &str, skip: bool) {
-    let client = browser_client();
-    let patch = serde_json::json!([
-        { "op": "replace", "path": "/skip_consent", "value": skip }
-    ]);
-    let res = client
-        .patch(format!("{HYDRA_ADMIN}/admin/clients/{client_id}"))
-        .json(&patch)
-        .send()
-        .await
-        .expect("patch hydra client skip_consent");
-    assert!(
-        res.status().is_success(),
-        "patch skip_consent: {} {}",
-        res.status(),
-        res.text().await.unwrap_or_default()
-    );
 }
 
 /// UPSERT `oauth_client_metadata` as an ORG-created client: verified, but
@@ -2651,11 +2481,12 @@ pub const WEBHOOK_TOKEN: &str = "dev-playground-token-change-me";
 pub fn oauth_auth_url(client_id: &str, redirect_uri: &str, scope: &str, extra: &str) -> String {
     let scope_plus = scope.replace(' ', "+");
     format!(
-        "{HYDRA_PUBLIC}/oauth2/auth?client_id={client_id}\
+        "{}/oauth2/auth?client_id={client_id}\
          &response_type=code\
          &scope={scope_plus}\
          &redirect_uri={redirect_uri}\
-         &state=forseti-test-state{extra}"
+         &state=forseti-test-state{extra}",
+        oauth_public()
     )
 }
 
@@ -2809,7 +2640,7 @@ pub async fn exchange_code_for_tokens(
 ) -> Value {
     let client = browser_client();
     let res = client
-        .post(format!("{HYDRA_PUBLIC}/oauth2/token"))
+        .post(format!("{}/oauth2/token", oauth_public()))
         .form(&[
             ("grant_type", "authorization_code"),
             ("client_id", client_id),
@@ -3047,25 +2878,6 @@ pub async fn whoami_session_id(client: &Client) -> Option<String> {
     body["id"].as_str().map(str::to_string)
 }
 
-/// Count Hydra consent sessions for a subject via the admin API
-/// (`GET /admin/oauth2/auth/sessions/consent?subject=...`). Used to assert the
-/// account-delete saga and the per-client revoke actually wiped grants.
-pub async fn hydra_consent_session_count(subject: &str) -> usize {
-    let client = browser_client();
-    let res = client
-        .get(format!(
-            "{HYDRA_ADMIN}/admin/oauth2/auth/sessions/consent?subject={subject}"
-        ))
-        .send()
-        .await
-        .expect("list consent sessions transport");
-    if res.status() == StatusCode::NO_CONTENT || !res.status().is_success() {
-        return 0;
-    }
-    let body: Value = res.json().await.unwrap_or(Value::Null);
-    body.as_array().map(|a| a.len()).unwrap_or(0)
-}
-
 /// POST a synthetic Kratos webhook event to the portal's internal ingest
 /// endpoint (`/internal/audit/kratos?action=...`) with the playground bearer.
 /// Returns the response status. Mirrors what Kratos's webhook hook posts.
@@ -3202,6 +3014,7 @@ pub async fn device_stack_ready() -> bool {
 /// Whether the `forseti-linux-pam` OAuth client `forseti posix-init-client`
 /// creates is present in Hydra. `make stack-up` / `seed-admin` don't provision
 /// it; prefer [`device_stack_ready`] over calling this directly.
+#[cfg(feature = "oauth-ory")]
 pub async fn pam_device_client_ready() -> bool {
     let client = browser_client();
     client
@@ -3211,6 +3024,14 @@ pub async fn pam_device_client_ready() -> bool {
         .await
         .map(|r| r.status().is_success())
         .unwrap_or(false)
+}
+
+/// Whether the `forseti-linux-pam` OAuth client is registered with the native server.
+#[cfg(feature = "oauth-native")]
+pub async fn pam_device_client_ready() -> bool {
+    oauth_client_field("forseti-linux-pam", "client_id")
+        .await
+        .is_some()
 }
 
 /// Pull the `value` of a hidden `_csrf` input from an HTML form body.
@@ -3249,7 +3070,8 @@ pub fn count_reveals_with_token(token: &str) -> i64 {
 
 /// A local HTTP listener standing in for an RP's `backchannel_logout_uri`.
 /// Hydra runs in a container, so it reaches the listener through
-/// `host.containers.internal`.
+/// `host.containers.internal`; the native server runs on this host and posts
+/// to loopback.
 pub struct BackchannelSink {
     pub url: String,
     tokens: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
@@ -3282,8 +3104,13 @@ impl BackchannelSink {
         tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
         });
+        let host = if is_native_oauth() {
+            "127.0.0.1"
+        } else {
+            "host.containers.internal"
+        };
         BackchannelSink {
-            url: format!("http://host.containers.internal:{port}/bc"),
+            url: format!("http://{host}:{port}/bc"),
             tokens,
         }
     }
@@ -3310,49 +3137,10 @@ impl BackchannelSink {
     }
 }
 
-/// A confidential client with `backchannel_logout_uri` (session required) and
-/// the refresh grant. Returns `(client_id, client_secret, redirect_uri)`.
-pub async fn hydra_create_backchannel_client(
-    scopes: &[&str],
-    backchannel_logout_uri: &str,
-) -> (String, String, String) {
-    let redirect_uri = "http://127.0.0.1:5555/callback";
-    let body = serde_json::json!({
-        "client_name": "integration-test-backchannel",
-        "grant_types": ["authorization_code", "refresh_token"],
-        "response_types": ["code"],
-        "scope": scopes.join(" "),
-        "redirect_uris": [redirect_uri],
-        "token_endpoint_auth_method": "client_secret_post",
-        "backchannel_logout_uri": backchannel_logout_uri,
-        "backchannel_logout_session_required": true,
-    });
-    let res = browser_client()
-        .post(format!("{HYDRA_ADMIN}/admin/clients"))
-        .json(&body)
-        .send()
-        .await
-        .expect("hydra create client transport");
-    assert!(
-        res.status().is_success(),
-        "hydra create client: {}",
-        res.status()
-    );
-    let v: Value = res.json().await.expect("hydra create client body");
-    (
-        v["client_id"].as_str().expect("client_id").to_string(),
-        v["client_secret"]
-            .as_str()
-            .expect("client_secret")
-            .to_string(),
-        redirect_uri.to_string(),
-    )
-}
-
 /// Refresh at Hydra's token endpoint; `true` when Hydra issues new tokens.
 pub async fn refresh_succeeds(client_id: &str, client_secret: &str, refresh_token: &str) -> bool {
     browser_client()
-        .post(format!("{HYDRA_PUBLIC}/oauth2/token"))
+        .post(format!("{}/oauth2/token", oauth_public()))
         .form(&[
             ("grant_type", "refresh_token"),
             ("client_id", client_id),
@@ -3407,7 +3195,7 @@ pub async fn refresh_tokens(
     refresh_token: &str,
 ) -> Option<Value> {
     let res = browser_client()
-        .post(format!("{HYDRA_PUBLIC}/oauth2/token"))
+        .post(format!("{}/oauth2/token", oauth_public()))
         .form(&[
             ("grant_type", "refresh_token"),
             ("client_id", client_id),

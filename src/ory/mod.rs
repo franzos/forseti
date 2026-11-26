@@ -1,5 +1,5 @@
 //! Ory backends: [`KratosBackend`] implements `IdentityBackend` over the private wrappers in `kratos`;
-//! [`HydraBackend`] carries its calls as inherent methods in `hydra` and `discovery`. Both are called over
+//! [`HydraBackend`] implements `OAuthBackend` in `hydra_backend` over its inherent methods in `hydra` and `discovery`. Both are called over
 //! plain HTTP with the workspace `reqwest`: Hydra responses deserialize straight into `crate::backend` types,
 //! Kratos bodies into the private structs in `kratos_wire`, converted by `convert_identity`. Forseti talks to
 //! Kratos via its public API (forwarding the user's `Cookie`) and its admin API, and to Hydra via its admin
@@ -16,8 +16,12 @@ use serde::de::DeserializeOwned;
 
 #[cfg(feature = "identity-ory")]
 mod convert_identity;
+#[cfg(feature = "oauth-ory")]
 mod discovery;
+#[cfg(feature = "oauth-ory")]
 mod hydra;
+#[cfg(feature = "oauth-ory")]
+mod hydra_backend;
 #[cfg(feature = "identity-ory")]
 mod kratos;
 #[cfg(feature = "identity-ory")]
@@ -25,6 +29,7 @@ mod kratos_backend;
 #[cfg(feature = "identity-ory")]
 mod kratos_wire;
 
+#[cfg(feature = "oauth-ory")]
 pub use hydra::HydraBackend;
 #[cfg(feature = "identity-ory")]
 pub use kratos_backend::KratosBackend;
@@ -117,17 +122,59 @@ async fn send_json<T: DeserializeOwned>(req: reqwest::RequestBuilder) -> Result<
     serde_json::from_str(&body).map_err(|e| CallError::Decode(e.to_string()))
 }
 
+/// Parse `Link: <…?page_token=XYZ&…>; rel="next"` and return the
+/// `page_token` value. Hydra emits the standard RFC 5988 shape; we
+/// only care about the `next` relation.
+pub(crate) fn next_link(headers: &reqwest::header::HeaderMap) -> Option<String> {
+    let raw = headers.get("link").and_then(|v| v.to_str().ok())?;
+    for part in raw.split(',') {
+        let part = part.trim();
+        // Skip malformed parts; aborting with None would read as end-of-pagination.
+        let Some((url_part, params)) = part.split_once(';') else {
+            continue;
+        };
+        if !params.contains("rel=\"next\"") && !params.contains("rel=next") {
+            continue;
+        }
+        let url_str = url_part
+            .trim()
+            .trim_start_matches('<')
+            .trim_end_matches('>');
+        let url = url::Url::parse(url_str).ok()?;
+        return url
+            .query_pairs()
+            .find(|(k, _)| k == "page_token")
+            .map(|(_, v)| v.into_owned());
+    }
+    None
+}
+
 /// Hydra endpoints pinned at startup, held behind `Arc` by [`HydraBackend`].
+#[cfg(feature = "oauth-ory")]
 struct OryClients {
     /// Browser-facing Hydra OAuth2 public endpoint.
     hydra_public: Endpoint,
     /// Server-only Hydra admin API (login/consent/logout challenges).
     hydra_admin: Endpoint,
+    /// `[hydra].issuer`, else `[hydra].public_url`.
+    issuer: String,
+    /// Hydra's browser-facing origins, as CSP `form-action` sources.
+    form_action_origins: Vec<String>,
 }
 
+#[cfg(feature = "oauth-ory")]
 impl OryClients {
     fn from_config(cfg: &AppConfig) -> Arc<OryClients> {
-        Arc::new(OryClients::new(&cfg.hydra.public_url, &cfg.hydra.admin_url))
+        let hydra = &cfg.hydra;
+        let browser_issuer = hydra
+            .issuer
+            .as_deref()
+            .or(cfg.posix.hydra_issuer.as_deref())
+            .unwrap_or(&hydra.public_url);
+        let mut clients = OryClients::new(&hydra.public_url, &hydra.admin_url);
+        clients.issuer = hydra.issuer_or_public().to_string();
+        clients.form_action_origins = origins_of(&[hydra.issuer_or_public(), browser_issuer]);
+        Arc::new(clients)
     }
 
     fn new(public: &str, admin: &str) -> OryClients {
@@ -141,12 +188,30 @@ impl OryClients {
                 base: admin.to_string(),
                 http,
             },
+            issuer: public.to_string(),
+            form_action_origins: origins_of(&[public]),
         }
     }
 }
 
+/// Distinct CSP origin sources of `urls`, in order.
+#[cfg(feature = "oauth-ory")]
+fn origins_of(urls: &[&str]) -> Vec<String> {
+    let mut origins = Vec::new();
+    for origin in urls
+        .iter()
+        .filter_map(|url| crate::app::csp_origin_source(url))
+    {
+        if !origins.contains(&origin) {
+            origins.push(origin);
+        }
+    }
+    origins
+}
+
 /// One client (one pool, one timeout) for both Hydra endpoints. Both are operator-configured,
 /// so this is not the SSRF-guarded `outbound` client.
+#[cfg(feature = "oauth-ory")]
 fn hydra_http() -> reqwest::Client {
     reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(3))
@@ -200,27 +265,82 @@ fn kratos_http() -> reqwest::Client {
         .expect("reqwest client builds")
 }
 
-/// Both backends over clients pointed at the given base URLs, for tests without an `AppConfig`.
+/// A Kratos backend over clients pointed at the given base URLs, for tests without an `AppConfig`.
 #[cfg(all(test, feature = "identity-ory"))]
-pub(crate) fn test_backends(
-    kratos_public: &str,
-    kratos_admin: &str,
-    hydra_public: &str,
-    hydra_admin: &str,
-) -> (Arc<KratosBackend>, Arc<HydraBackend>) {
-    (
-        Arc::new(KratosBackend {
-            clients: Arc::new(KratosClients::new(kratos_public, kratos_admin)),
-            https: false,
-        }),
-        Arc::new(HydraBackend {
-            clients: Arc::new(OryClients::new(hydra_public, hydra_admin)),
-        }),
-    )
+pub(crate) fn test_kratos_backend(public: &str, admin: &str) -> Arc<KratosBackend> {
+    Arc::new(KratosBackend {
+        clients: Arc::new(KratosClients::new(public, admin)),
+        https: false,
+    })
+}
+
+/// A Hydra backend over clients pointed at the given base URLs, for tests without an `AppConfig`.
+// Its only caller also drives Kratos.
+#[cfg(all(test, feature = "identity-ory", feature = "oauth-ory"))]
+pub(crate) fn test_hydra_backend(public: &str, admin: &str) -> Arc<HydraBackend> {
+    Arc::new(HydraBackend {
+        clients: Arc::new(OryClients::new(public, admin)),
+    })
 }
 
 #[cfg(test)]
 mod tests {
+    use reqwest::header::{HeaderMap, HeaderValue};
+
+    use super::next_link;
+
+    #[test]
+    fn next_link_extracts_page_token() {
+        let mut h = HeaderMap::new();
+        h.insert(
+            "link",
+            HeaderValue::from_static(
+                "<https://hydra/admin/oauth2/auth/sessions/consent?page_token=abc123&page_size=250>; rel=\"next\"",
+            ),
+        );
+        assert_eq!(next_link(&h).as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn next_link_handles_multiple_relations() {
+        let mut h = HeaderMap::new();
+        h.insert(
+            "link",
+            HeaderValue::from_static(
+                "<https://hydra/prev?page_token=xyz>; rel=\"prev\", <https://hydra/next?page_token=def>; rel=\"next\"",
+            ),
+        );
+        assert_eq!(next_link(&h).as_deref(), Some("def"));
+    }
+
+    #[test]
+    fn next_link_skips_bare_part_before_next() {
+        let mut h = HeaderMap::new();
+        h.insert(
+            "link",
+            HeaderValue::from_static(
+                "<https://hydra/first?page_token=xyz>, <https://hydra/next?page_token=def>; rel=\"next\"",
+            ),
+        );
+        assert_eq!(next_link(&h).as_deref(), Some("def"));
+    }
+
+    #[test]
+    fn next_link_returns_none_when_only_prev() {
+        let mut h = HeaderMap::new();
+        h.insert(
+            "link",
+            HeaderValue::from_static("<https://hydra/prev?page_token=xyz>; rel=\"prev\""),
+        );
+        assert_eq!(next_link(&h), None);
+    }
+
+    #[test]
+    fn next_link_missing_header() {
+        let h = HeaderMap::new();
+        assert_eq!(next_link(&h), None);
+    }
+
     #[test]
     fn urlencode_form_encodes_path_segments() {
         for (input, want) in [

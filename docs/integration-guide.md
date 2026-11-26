@@ -14,6 +14,8 @@ For operators deploying `forseti` itself, see [`operator-guide.md`](./operator-g
 
 Integration follows the standard OIDC authorization-code flow. Forseti is a normal OIDC Provider as far as your OAuth2 library is concerned.
 
+Some installs run Forseti's built-in OAuth server instead of Hydra. Then Forseti is the provider itself, at its own origin, and a few things differ: see [The built-in OAuth server](#the-built-in-oauth-server). The rest of this guide describes the Hydra build unless it says otherwise.
+
 ## Spec alignment (OAuth 2.1 / RFC 9700)
 
 Where the playground sits relative to current OAuth / OIDC normative work (as of May 2026):
@@ -36,6 +38,95 @@ Where the playground sits relative to current OAuth / OIDC normative work (as of
 | RFC 9700 OAuth Security BCP (Jan 2025) | Reference document — the items above cover the BCP's MUST-level requirements except DPoP/mTLS |
 
 If you're building an MCP server, see also [Protecting an MCP server](#protecting-an-mcp-server) — Forseti does not host RFC 9728 Protected Resource Metadata on your behalf.
+
+The table describes the Hydra build. The built-in server differs on RFC 9068 (`typ: at+jwt`), PAR (no endpoint) and JAR (request objects refused); see the next section.
+
+## The built-in OAuth server
+
+On an install built with Forseti's built-in OAuth server there is no Hydra. You can tell from discovery: the `issuer` is Forseti's own origin with no path (`https://accounts.example.com`). Everything in this guide about the flow, the id_token claims, scopes and consent applies; the differences are below.
+
+### Issuer and endpoints
+
+The issuer is the operator's Forseti URL, without a path or trailing slash. The endpoints keep Hydra's paths on that origin:
+
+| What | URL |
+|---|---|
+| Discovery | `https://accounts.example.com/.well-known/openid-configuration`, also at `/.well-known/oauth-authorization-server` |
+| Authorization | `https://accounts.example.com/oauth2/authorize` (advertised); `/oauth2/auth` works too |
+| Token | `https://accounts.example.com/oauth2/token` |
+| Device authorization | `https://accounts.example.com/oauth2/device/auth` |
+| Revocation | `https://accounts.example.com/oauth2/revoke` |
+| End session | `https://accounts.example.com/oauth2/sessions/logout` |
+| Userinfo | `https://accounts.example.com/userinfo` |
+| JWKS | `https://accounts.example.com/.well-known/jwks.json` |
+
+Point your library at the discovery URL and pin `iss` to the `issuer` it returns. Introspection exists only on the operator's internal listener and isn't in discovery (see [Logout, revocation, introspection, device grant, CIMD](#logout-revocation-introspection-device-grant-cimd)).
+
+The JWKS answers `Cache-Control: no-store` and is rate limited per IP (300 per minute, 3000 per hour). Cache it and refetch when a token names a `kid` you don't have; fetching it on every validation, or from many processes behind one address, gets `429`. Retired keys stay in it after a rotation.
+
+### Client registration
+
+- **Redirect URIs match exactly**, byte for byte. The only exception is `http` on `localhost`, `127.0.0.1` or `[::1]`, where any port matches the registered one, for native apps that pick a port per login.
+- **PKCE** is `S256` only, and required for public clients (`token_endpoint_auth_method: none`); a public client's request without `code_challenge` is answered with `invalid_request`. Confidential clients may use it and should.
+- **Client authentication** is `none`, `client_secret_basic` (the default) or `client_secret_post`, exactly the registered one. The operator sees the secret once, on create or rotate; ask again for a rotation if it's lost.
+- **Refresh tokens** need `refresh_token` among the client's grant types and `offline_access` (or `offline`) in the granted scope.
+- **Grant types** are `authorization_code`, `refresh_token` and the device code grant; there is no `client_credentials`, so a machine-to-machine client can't be registered. **Response types** may list `code` and `id_token`; the authorization endpoint serves `code` only.
+- **`backchannel_logout_uri`, `frontchannel_logout_uri`, `client_uri` and `logo_uri`** must be absolute `http` or `https` URIs without fragment or userinfo. A back-channel logout URI on a private or loopback address, or with `http`, gets no logout token on a production install (see [Logout, revocation, introspection, device grant, CIMD](#logout-revocation-introspection-device-grant-cimd)).
+- **`audience`** values in the request must be registered on the client. `resource` (RFC 8707) is read and goes through the resource registry at consent, as on the Hydra build.
+
+### Authorization requests and responses
+
+- `response_type=code` only, with `response_mode` `query` (default) or `form_post`. No implicit or hybrid flows, no `request` or `request_uri`.
+- `prompt` takes `none`, `login`, `consent` and `create`; `select_account` is accepted and ignored. `prompt=none` combined with another value is `invalid_request`.
+- Every response to your `redirect_uri` carries `iss` (RFC 9207), on success and on error. Check it against the issuer if your library supports that.
+- An unknown `client_id`, a missing or unregistered `redirect_uri`, or a repeated `client_id` or `redirect_uri` ends on Forseti's error page, not at your callback.
+- The `form_post` page lets the browser submit to your redirect URI's origin only. If your callback answers the POST with a redirect to another origin, Chrome and Safari can block that hop; finish the callback on its own origin.
+- At the token endpoint, send `redirect_uri` exactly as in the authorization request.
+
+### Tokens
+
+| Token | Format | Lifetime |
+|---|---|---|
+| Authorization code | opaque, one use | 10 minutes |
+| Access token | RS256 JWT, header `typ: at+jwt` | 5 minutes |
+| ID token | RS256 JWT, header `typ: JWT` | 1 hour |
+| Refresh token | opaque | 720 hours from its issue |
+
+The lifetimes are fixed. `sub` is the identity id for every client; there are no pairwise subjects.
+
+**Access tokens follow RFC 9068.** The header `typ` is `at+jwt`. A validator that pins `typ` to `JWT` (the right setting for the Hydra build) rejects every token here, so accept `at+jwt`. The payload has `iss`, `sub`, `aud` (an array), `client_id`, `iat`, `nbf`, `exp`, `jti` and the granted scopes twice: RFC 9068's space-separated `scope` and Hydra's `scp` array. `ext` carries the consent-time access-token claims as on the Hydra build, `acr` is set when known, and `gid` is a private claim naming the consent grant. A validator written for the Hydra build works unchanged once it accepts `at+jwt`.
+
+```json
+{
+  "iss": "https://accounts.example.com",
+  "sub": "f8c9d0e1-...",
+  "aud": ["https://mcp.yourapp.com/mcp"],
+  "client_id": "my-mcp-client",
+  "scope": "formshive:forms:read formshive:forms:write",
+  "scp": ["formshive:forms:read", "formshive:forms:write"],
+  "iat": 1700000000,
+  "nbf": 1700000000,
+  "exp": 1700000300,
+  "jti": "5d7c3a91-2f04-4d8b-9e2c-a3b1d6f0e842",
+  "acr": "aal1",
+  "ext": {},
+  "gid": "0b6f1a52-..."
+}
+```
+
+**Refresh tokens rotate on every use.** Each refresh returns a new `refresh_token`; store it and drop the old one. Presenting a refresh token a second time is treated as theft: every refresh token descended from the same authorization code is deleted and the answer is `invalid_grant`, so the next step is a new authorization. Redeeming a code twice does the same. There is no grace period, so serialize refreshes across processes and tabs. Access tokens already issued stay valid until they expire. A refresh may ask for a narrower `scope` or `resource` for that one response; the new refresh token still carries the full grant.
+
+**Userinfo** returns `sub` and the consent-time claims, as on the Hydra build. Once the user revokes your app, or your client revokes the grant's refresh token or the access token itself, `/userinfo` answers `401 invalid_token` for those tokens, and a revoked refresh token stops working.
+
+### Logout, revocation, introspection, device grant, CIMD
+
+- **RP-initiated logout** works as in [Global logout via RP-initiated logout](#global-logout-via-rp-initiated-logout), at `/oauth2/sessions/logout` on Forseti's origin. Send `id_token_hint`: without one, `post_logout_redirect_uri` is refused. The hint's session ends, and so does the browser's current session if it's another session of the same user. `post_logout_redirect_uri` must be an `http` or `https` URI registered on your client, byte for byte, and `state` may be up to 2048 bytes. Anything wrong with the request ends on Forseti's error page, never at your redirect URI. Your grants survive, so refresh tokens keep working.
+- **Back-channel logout** reaches your `backchannel_logout_uri` when a login session that holds a grant of yours ends by `sid`: RP-initiated logout, the user signing out of Forseti, or a session ended on the sessions pages. It is one `POST` of `logout_token=<jwt>` with a 3 second timeout and no retry; answer `2xx`. The token has header `typ: logout+jwt` and claims `iss`, `aud` (your `client_id`), `iat`, `exp` (120 seconds after `iat`), `jti`, `sub`, `sid` and the `events` member, never `nonce`. Hydra's token has no `exp` and `typ: JWT`, so accept both if you face either build. An admin disable or an account deletion ends each recorded session by `sid` first, which sends tokens as above; the subject-wide revoke that follows as a backstop sends none. Delivery goes to `https` URIs on public addresses only, unless the operator runs a development install.
+- **Revocation** at `/oauth2/revoke` (RFC 7009) authenticates your client as the token endpoint does; a public client sends its `client_id`. Unknown tokens and other clients' tokens answer `200` and change nothing. Revoking a refresh token ends it, every refresh token of the same authorization, and the grant's access tokens at `/userinfo` and introspection. Revoking an access token ends it there too. A resource server that validates JWTs locally against the JWKS still accepts those access tokens until `exp`, at most 5 minutes.
+- **Introspection** (RFC 7662) is `POST /oauth2/introspect` on the operator's internal listener, for confidential clients only, and any of them may introspect any token. It reports a revoked or denylisted access token as `active: false`. Each call costs an Argon2 check of your secret and shares capacity with the token endpoint, so validate JWTs locally on the hot path and introspect only where the 5-minute window matters.
+- **Device grant** (RFC 8628) at `/oauth2/device/auth` and the token endpoint. It serves Forseti's Linux PAM sign-in; the verification page approves only device sessions a PAM host started, so another client's device codes are never approved.
+- **CIMD** works as on the Hydra build (see [The two client paths](#the-two-client-paths-cimd-and-pre-registered)): a URL-shaped `client_id` at the authorization endpoint is fetched, validated and registered. Point `authorization_servers` in your RFC 9728 document at the issuer, `https://accounts.example.com`.
+- **Dynamic client registration** is retired, as on the Hydra build.
 
 ## Registering your app
 
@@ -69,7 +160,7 @@ From the operator, capture:
 
 Config changes later go back through the operator (admin UI or admin API) — there is no client-held management credential.
 
-For the operator-side CLI invocation, see [`operator-guide.md`](./operator-guide.md#client-registration).
+For the operator-side CLI invocation, see [`operator-guide.md`](./operator-guide.md#client-registration). On the built-in OAuth server, public clients must use PKCE, there is no `client_credentials` grant, and the logout and web URIs must be absolute http(s); see [Client registration](#client-registration) there.
 
 ## The auth code flow
 
@@ -155,6 +246,8 @@ https://yourapp.com/auth/callback?code=<authorization code>&state=<your state>
 ```
 
 Verify `state` matches what your app sent. If it does not, abort with a 400.
+
+If the consent page, the consent decision or the account switch on it comes from a browser signed in as someone other than the user the request belongs to, Forseti shows its error page and your callback gets nothing, on both builds. The request stays pending for its owner; on the Hydra build it expires at Hydra if the owner never decides, and you receive no `access_denied` for it. A consent submission whose request Forseti can't read ends on the error page the same way.
 
 ### 3. Exchange the code for tokens
 
@@ -341,7 +434,7 @@ fn verify_id_token(id_token: &str, jwks: &Jwks, expected_nonce: &str) -> anyhow:
 - **Node.js**: `openid-client` (the maintained successor to `node-openid-client`).
 - **Java**: `nimbus-jose-jwt` plus `oauth2-oidc-sdk`.
 
-All of these consume the OIDC discovery document at `https://hydra.example.com/.well-known/openid-configuration`. Prefer discovery over hardcoded endpoints; it surfaces JWKS URI, supported algorithms, and endpoint URLs.
+All of these consume the OIDC discovery document at `https://hydra.example.com/.well-known/openid-configuration`. Prefer discovery over hardcoded endpoints; it surfaces JWKS URI, supported algorithms, and endpoint URLs. On the built-in OAuth server the issuer and the discovery document are on Forseti's own origin (see [Issuer and endpoints](#issuer-and-endpoints)); the validation steps are the same.
 
 ## Refresh tokens
 
@@ -372,6 +465,8 @@ The playground config (`infra/hydra/hydra.yml`) uses Hydra's defaults: **strict 
 
 Reuse — replaying a token Hydra has already seen — is a security signal. Hydra invalidates the entire token chain (current refresh token + every access token issued from it) and returns `invalid_grant`. The next call has to be a fresh auth flow.
 
+The built-in OAuth server rotates the same way, with no grace period; see [Tokens](#tokens) under the built-in server.
+
 Hydra also offers a **graceful rotation** mode (`oauth2.grant.refresh_token.grace_period`, off by default) that keeps the old token usable for a short overlap window. Useful if your app makes concurrent refresh attempts from multiple processes or tabs — without it, the second-place process gets `invalid_grant` on a token the first process already burned. Ask your operator to enable it if you're hitting that race; the cost is a slightly larger reuse-detection blind spot.
 
 ### Handling `invalid_grant`
@@ -399,6 +494,8 @@ Same caveat as the opaque access-token case (see [Alternative: opaque + introspe
 
 `active: true` confirms the token is currently redeemable. `active: false` means dead — skip the redemption round trip and go straight to re-auth.
 
+On the built-in OAuth server the same request goes to `POST /oauth2/introspect` on Forseti's internal listener, with your confidential client's credentials as at the token endpoint; a public client can't introspect.
+
 ### Refresh cadence
 
 Refresh ahead of the access token's `expires_in`. A common pattern is to refresh at 80% of the lifetime (~4 minutes in for a 5-minute access token). Don't refresh on every request — that defeats the JWT-local-validation win and turns Hydra's token endpoint into a hot path.
@@ -416,7 +513,7 @@ Authorization: Basic <base64(client_id:client_secret)>
 token=<the refresh token>
 ```
 
-RFC 7009. Revoking a refresh token kills it and every access token minted from it. Confidential clients authenticate on this endpoint; public clients pass `client_id` in the body without credentials. Always best-effort — the spec says return 200 even if the token was already invalid, so don't trust the response code for diagnostics.
+RFC 7009. Revoking a refresh token kills it and every access token minted from it. Confidential clients authenticate on this endpoint; public clients pass `client_id` in the body without credentials. Always best-effort — the spec says return 200 even if the token was already invalid, so don't trust the response code for diagnostics. On the built-in OAuth server, "every access token" means at `/userinfo` and introspection; a resource server validating the JWT locally accepts it until `exp` (see [Logout, revocation, introspection, device grant, CIMD](#logout-revocation-introspection-device-grant-cimd)).
 
 ### Patterns by client type
 
@@ -490,7 +587,7 @@ Nothing exists today. Forseti only pushes RISC `account-purged` (see [Account de
 
 ## Logout
 
-Two patterns. Use one or both.
+Two patterns. Use one or both. Both builds serve RP-initiated and back-channel logout; the built-in OAuth server's differences are under [Logout, revocation, introspection, device grant, CIMD](#logout-revocation-introspection-device-grant-cimd).
 
 ### Local logout
 
@@ -894,7 +991,7 @@ Verification checklist:
 
 Reject with `401` and `WWW-Authenticate: Bearer error="invalid_token"` on signature / aud / exp failures; reject with `403` and `error="insufficient_scope", scope="<required>"` on scope failures. Claude reads these and either refreshes or prompts the user to re-consent.
 
-Hydra emits `typ: JWT` today, not RFC 9068's `typ: at+jwt`. If you use a strict validator, configure it to accept `JWT` here.
+Hydra emits `typ: JWT` today, not RFC 9068's `typ: at+jwt`. If you use a strict validator, configure it to accept `JWT` here. The built-in OAuth server emits `typ: at+jwt` and a space-separated `scope` next to `scp`; a validator that pins `typ` to `JWT` rejects its tokens, so accept both values if your server may face either build (see [Tokens](#tokens) under the built-in server).
 
 A typical Hydra-issued JWT access token payload:
 

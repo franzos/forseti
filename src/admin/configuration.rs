@@ -9,6 +9,8 @@ use axum::{extract::State, response::Response};
 
 use crate::admin::{AdminSection, FORSETI_VERSION};
 use crate::backend::IdentityBackend;
+#[cfg(feature = "oauth-native")]
+use crate::backend::OAuthBackend;
 use crate::backend::oauth::{JwkSummary, OidcDiscovery};
 use crate::extractors::RequireAdmin;
 use crate::page_chrome::PageChrome;

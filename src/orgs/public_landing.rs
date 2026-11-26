@@ -180,13 +180,7 @@ mod tests {
 
     #[cfg(feature = "identity-ory")]
     async fn identity() -> std::sync::Arc<IdentityImpl> {
-        crate::ory::test_backends(
-            "http://kratos:4433",
-            "http://kratos:4434",
-            "http://hydra:4444",
-            "http://hydra:4445",
-        )
-        .0
+        crate::ory::test_kratos_backend("http://kratos:4433", "http://kratos:4434")
     }
 
     #[cfg(feature = "identity-native")]

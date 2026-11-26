@@ -1,18 +1,18 @@
 # Native identity backend
 
-For operators running the native build (`identity-native`), which needs Hydra but no Kratos. It covers what differs from the Kratos build: building it, its required settings, sessions, WebAuthn, throttles, mail, upstream providers and SAML. Everything both builds share is in the [operator guide](./operator-guide.md); the Kratos build has its own guide, [Kratos identity backend](./operator-guide-kratos.md).
+For operators running the native build (`identity-native`), which needs no Kratos. It covers what differs from the Kratos build: building it, its required settings, sessions, WebAuthn, throttles, mail, upstream providers and SAML. Everything both builds share is in the [operator guide](./operator-guide.md); the Kratos build has its own guide, [Kratos identity backend](./operator-guide-kratos.md).
 
-The native build keeps identities, credentials, sessions and the self-service flows (login, registration, verification, recovery, settings, logout) in Forseti's own database. Hydra stays: OAuth2 and OIDC work the same on both builds. The choice is made at compile time with a cargo feature, and a binary carries exactly one identity backend.
+The native build keeps identities, credentials, sessions and the self-service flows (login, registration, verification, recovery, settings, logout) in Forseti's own database. OAuth2 and OIDC come from Hydra or from Forseti's built-in server, whichever the build names; with Hydra they work the same as on the Kratos build, and the built-in server has its own guide, [Built-in OAuth server](./operator-guide-native-oauth.md). The choice is made at compile time with cargo features, and a binary carries exactly one identity backend and one OAuth backend.
 
 ## Building and running it
 
 ```bash
-cargo build --release --locked --no-default-features --features identity-native
+cargo build --release --locked --no-default-features --features identity-native,oauth-ory
 make check-native    # cargo check + clippy with the native feature
 make run-native      # debug run against config.toml
 ```
 
-`--all-features` does not build: the two identity features exclude each other. `static/styles.css` is committed, so `make css` is only needed after a template change.
+For the build without Hydra, use `--features identity-native,oauth-native` and `make run-native-oauth`. `--all-features` does not build: the two identity features exclude each other, as do the two OAuth features. `static/styles.css` is committed, so `make css` is only needed after a template change.
 
 ## What it replaces and what it leaves out
 
@@ -79,7 +79,7 @@ On the native build every identity key is derived from `[security].cookie_secret
 - outstanding verification and recovery codes, backup codes and logout links stop matching;
 - queued mail no longer decrypts and is abandoned unsent.
 
-Passwords, sessions, passkeys and security keys survive: password hashes are Argon2id PHC strings, session tokens are stored as plain SHA-256 hashes, and a WebAuthn key is stored as its public key. There is no rotation tooling. Back the secret up with the database, and treat losing it like losing the database.
+Passwords, sessions, passkeys and security keys survive: password hashes are Argon2id PHC strings, session tokens are stored as plain SHA-256 hashes, and a WebAuthn key is stored as its public key. There is no rotation tooling. Back the secret up with the database, and treat losing it like losing the database. With the built-in OAuth server the token signing key is sealed under the same secret, and a changed secret stops Forseti at boot; see [`cookie_secret` and the signing key](./operator-guide-native-oauth.md#cookie_secret-and-the-signing-key).
 
 ## Mail and the first admin
 
@@ -211,7 +211,7 @@ It is the path Kratos uses, so an install moving from the Ory build re-registers
 
 An account counts as never verified until a code mailed to its address has been entered once (verification, recovery or an address change), unless it was created verified (a provider sign-up with a provider-verified address, a SAML just-in-time account). An address change does not reset that state. Three rules hang off it, so that someone who registered an address they do not own keeps nothing once the owner proves it:
 
-- **Recovery by mailed code resets the account.** Before the recovering user gets a session, Forseti revokes the account's sessions, deletes its password, TOTP, backup codes, passkeys, security keys, provider links and offline passphrase, drops its outstanding codes and pending address changes, and ends its OAuth sessions and grants at Hydra. The user then sets a new password on the recovery handoff page. The `password.recovered` audit row carries `unverified_reset: true` and the counts of what went. Organization memberships, profile fields and resource claims stay. A recovery code an admin minted proves no mailbox and resets nothing.
+- **Recovery by mailed code resets the account.** Before the recovering user gets a session, Forseti revokes the account's sessions, deletes its password, TOTP, backup codes, passkeys, security keys, provider links and offline passphrase, drops its outstanding codes and pending address changes, and ends its OAuth sessions and grants, at Hydra or in the built-in OAuth server. The user then sets a new password on the recovery handoff page. The `password.recovered` audit row carries `unverified_reset: true` and the counts of what went. Organization memberships, profile fields and resource claims stay. A recovery code an admin minted proves no mailbox and resets nothing.
 - **No second factor, WebAuthn key or provider link before verification.** Enrolling TOTP, generating backup codes, adding a passkey or security key and linking a provider are refused with "Account not active yet. Did you forget to verify your email address?" (message `4000010`).
 - **An email change stays pending until proven.** The account keeps its current address, verified mark and sign-in until the code mailed to the new address is entered, from a browser signed in to that account: a signed-out browser is sent to sign in first, an account with TOTP or a security key to its second factor, then back to the code page. A newer change request replaces the pending one. The audit rows are `profile.updated` with `address_change: requested`, then `verification.completed` with `address_change: applied`.
 

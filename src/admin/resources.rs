@@ -23,6 +23,7 @@ use crate::admin::{
 };
 use crate::audit::{self, AuditCtx, action, target_kind};
 use crate::audit_metadata;
+use crate::backend::OAuthBackend;
 use crate::csrf::{CsrfForm, NoPayload};
 use crate::extractors::{Csrf, RequireAdminScoped};
 use crate::format::humanise_timestamp;
@@ -842,7 +843,7 @@ async fn check_and_store(
 ) -> Result<Option<&'static str>, anyhow::Error> {
     let Some(check) = protected_resource::check(
         resource,
-        state.cfg.hydra.issuer_or_public(),
+        state.oauth.issuer(),
         state.cfg.oauth.cimd.allow_private_targets,
     )
     .await

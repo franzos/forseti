@@ -22,3 +22,6 @@ referrer-dismiss-aria = إغلاق شريط جهة الإحالة
 
 # OAuth flow continuation (templates/oauth/continue.html)
 oauth-continue-heading = جارٍ إعادة التوجيه…
+
+# OAuth sessions left running after a session end (flash suffix)
+flash-oauth-sessions-partial = تعذّر إنهاء بعض الجلسات.

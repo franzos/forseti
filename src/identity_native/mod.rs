@@ -7,6 +7,8 @@ use tokio::sync::{Notify, Semaphore};
 use crate::config::{AppConfig, IdentityConfig};
 use crate::db::DbPool;
 use crate::rate_limit::KeyedQuota;
+use crate::seal;
+use crate::seal::random_bytes;
 use crate::signed_cookie::derive_subkey;
 use crate::webhook::WorkerHandle;
 
@@ -19,7 +21,6 @@ pub(crate) mod mail;
 pub(crate) mod maintenance;
 pub(crate) mod password;
 pub(crate) mod routes;
-mod seal;
 pub(crate) mod seed;
 mod session;
 mod store;
@@ -204,17 +205,6 @@ impl NativeBackend {
         built.upstream = built.upstream.with_github_urls(github);
         Arc::new(built)
     }
-}
-
-/// `N` bytes from the operating system's CSPRNG.
-fn random_bytes<const N: usize>() -> [u8; N] {
-    use rand::TryRng as _;
-    let mut buf = [0u8; N];
-    // An OS without a working random source cannot mint keys or tokens safely; there is no fallback.
-    rand::rngs::SysRng
-        .try_fill_bytes(&mut buf)
-        .expect("OS random source is available");
-    buf
 }
 
 #[cfg(test)]

@@ -1,6 +1,6 @@
 # Forseti - CI / playground configuration for the native identity backend.
 #
-# For a build with `--no-default-features --features identity-native` against
+# For a build with `--no-default-features --features identity-native,oauth-ory` against
 # `make stack-up-native` (Hydra, Mailcrab and the mock OIDC upstream, no
 # Kratos) or `make stack-up-native-saml`. Point at it with FORSETI_CONFIG_PATH=config.ci.native.toml. NOT
 # production values.

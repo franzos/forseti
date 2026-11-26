@@ -16,6 +16,8 @@ use axum::response::{IntoResponse, Redirect, Response};
 
 use crate::admin::{AdminSection, ConfirmForm, render_admin_error, with_org};
 use crate::audit::{self, AuditCtx, action, target_kind};
+#[cfg(feature = "oauth-native")]
+use crate::backend::OAuthBackend;
 use crate::backend::oauth::OAuthClient;
 use crate::csrf::CsrfForm;
 use crate::extractors::{Csrf, RequireAdminScoped};

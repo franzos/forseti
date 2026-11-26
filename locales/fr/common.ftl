@@ -18,3 +18,6 @@ referrer-dismiss-aria = Fermer la bannière de référent
 
 # OAuth flow continuation (templates/oauth/continue.html)
 oauth-continue-heading = Redirection…
+
+# OAuth sessions left running after a session end (flash suffix)
+flash-oauth-sessions-partial = Impossible de mettre fin à certaines sessions.

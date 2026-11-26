@@ -252,20 +252,8 @@ fn augment_discovery_doc(
         "acr_values_supported".to_string(),
         serde_json::json!(["aal1", "aal2"]),
     );
-    if !idp_provider_ids.is_empty() {
-        let hints: Vec<serde_json::Value> = idp_provider_ids
-            .iter()
-            .map(|id| {
-                serde_json::json!({
-                    "id": id,
-                    "name": crate::oidc_providers::display_name(id),
-                })
-            })
-            .collect();
-        doc.insert(
-            "idp_hints_supported".to_string(),
-            serde_json::Value::Array(hints),
-        );
+    if let Some(hints) = crate::oidc_providers::idp_hints_supported(idp_provider_ids) {
+        doc.insert("idp_hints_supported".to_string(), hints);
     }
     Some(serde_json::Value::Object(doc))
 }

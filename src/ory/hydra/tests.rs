@@ -3,7 +3,6 @@ use std::sync::{Arc, Mutex};
 
 use axum::body::{Body, Bytes};
 use axum::http::Uri;
-use reqwest::header::{HeaderMap, HeaderValue};
 use serde_json::json;
 
 use super::*;
@@ -276,58 +275,6 @@ fn id_token_unknown_kid_rejected() {
     let tok = encode(&header, &TestClaims::default(), &key).unwrap();
     let err = verify(&tok).unwrap_err().to_string();
     assert!(err.contains("kid"), "got: {err}");
-}
-
-#[test]
-fn next_link_extracts_page_token() {
-    let mut h = HeaderMap::new();
-    h.insert(
-        "link",
-        HeaderValue::from_static(
-            "<https://hydra/admin/oauth2/auth/sessions/consent?page_token=abc123&page_size=250>; rel=\"next\"",
-        ),
-    );
-    assert_eq!(next_link(&h).as_deref(), Some("abc123"));
-}
-
-#[test]
-fn next_link_handles_multiple_relations() {
-    let mut h = HeaderMap::new();
-    h.insert(
-        "link",
-        HeaderValue::from_static(
-            "<https://hydra/prev?page_token=xyz>; rel=\"prev\", <https://hydra/next?page_token=def>; rel=\"next\"",
-        ),
-    );
-    assert_eq!(next_link(&h).as_deref(), Some("def"));
-}
-
-#[test]
-fn next_link_skips_bare_part_before_next() {
-    let mut h = HeaderMap::new();
-    h.insert(
-        "link",
-        HeaderValue::from_static(
-            "<https://hydra/first?page_token=xyz>, <https://hydra/next?page_token=def>; rel=\"next\"",
-        ),
-    );
-    assert_eq!(next_link(&h).as_deref(), Some("def"));
-}
-
-#[test]
-fn next_link_returns_none_when_only_prev() {
-    let mut h = HeaderMap::new();
-    h.insert(
-        "link",
-        HeaderValue::from_static("<https://hydra/prev?page_token=xyz>; rel=\"prev\""),
-    );
-    assert_eq!(next_link(&h), None);
-}
-
-#[test]
-fn next_link_missing_header() {
-    let h = HeaderMap::new();
-    assert_eq!(next_link(&h), None);
 }
 
 // --- client audience patch --------------------------------------------

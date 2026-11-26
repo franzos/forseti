@@ -15,9 +15,10 @@ else
 TAILWIND_RUN  := guix shell glibc gcc-toolchain -- bash -c 'export LD_LIBRARY_PATH=$$LIBRARY_PATH:$$LD_LIBRARY_PATH; $(TAILWIND) $$0 "$$@"' --
 endif
 
-.PHONY: css css-watch dev build check check-native clean run run-native test-integration \
-	test-integration-native fuzz stack-up stack-up-native stack-up-saml stack-up-native-saml stack-wait stack-down \
-	stack-reset stack-logs seed-admin seed-admin-native \
+.PHONY: css css-watch dev build check check-native check-matrix clean run run-native run-native-oauth \
+	test-integration test-integration-native test-integration-native-oauth fuzz stack-up stack-up-native \
+	stack-up-native-oauth stack-up-saml stack-up-native-saml stack-wait stack-down \
+	stack-reset stack-logs seed-admin seed-admin-native seed-admin-native-oauth \
 	e2e e2e-native e2e-expired e2e-licensed e2e-licensed-native e2e-trace license-fixtures \
 	test-linux-host linux-test-seed linux-test-unseed linux-test-build
 
@@ -61,11 +62,20 @@ check: ## cargo check + clippy (forseti, forseti-config, forseti-common)
 	cargo check -p forseti $(CONFIG_CRATES)
 	cargo clippy --all-targets -p forseti $(CONFIG_CRATES) -- -D warnings
 
-NATIVE_FEATURES := --no-default-features --features identity-native
+NATIVE_FEATURES := --no-default-features --features identity-native,oauth-ory
 
 check-native: ## cargo check + clippy with the native identity backend
 	cargo check $(NATIVE_FEATURES)
 	cargo clippy --all-targets $(NATIVE_FEATURES) -- -D warnings
+
+NATIVE_OAUTH_FEATURES := --no-default-features --features identity-ory,oauth-native
+ALL_NATIVE_FEATURES   := --no-default-features --features identity-native,oauth-native
+
+check-matrix: check check-native ## cargo check + clippy on all four backend combinations
+	cargo check $(NATIVE_OAUTH_FEATURES)
+	cargo clippy --all-targets $(NATIVE_OAUTH_FEATURES) -- -D warnings
+	cargo check $(ALL_NATIVE_FEATURES)
+	cargo clippy --all-targets $(ALL_NATIVE_FEATURES) -- -D warnings
 
 clean:
 	cargo clean
@@ -76,6 +86,9 @@ run: ## Run the portal (debug) against the local playground stack
 
 run-native: ## Run the portal (debug) with the native identity backend
 	cargo run $(NATIVE_FEATURES)
+
+run-native-oauth: ## Run the portal (debug) with the native identity and OAuth backends
+	cargo run $(ALL_NATIVE_FEATURES)
 
 # cargo-fuzz needs nightly, which Guix doesn't ship; run it in a container.
 # FUZZ_SECS bounds the run; TARGET is any name under fuzz/fuzz_targets.
@@ -96,6 +109,13 @@ test-integration-native: ## Rust integration suite against a native Forseti (sta
 	FORSETI_CONFIG_PATH="$${FORSETI_CONFIG_PATH:-$(NATIVE_CONFIG)}" \
 		cargo test $(NATIVE_FEATURES) --test integration -- --test-threads=1
 
+# The config for a build with both native backends.
+NATIVE_OAUTH_CONFIG ?= config.ci.native-oauth.toml
+
+test-integration-native-oauth: ## Rust integration suite against a fully native Forseti (stack-up-native-oauth + run-native-oauth + seed-admin-native-oauth)
+	FORSETI_CONFIG_PATH="$${FORSETI_CONFIG_PATH:-$(NATIVE_OAUTH_CONFIG)}" \
+		cargo test $(ALL_NATIVE_FEATURES) --test integration -- --test-threads=1
+
 # --- Playground stack lifecycle --------------------------------------------
 #
 # Brings the Ory playground (Kratos, Hydra, Mailcrab, Postgres) up and down.
@@ -111,6 +131,10 @@ stack-up: ## Bring the playground up and block until Kratos + Hydra are ready
 stack-up-native: ## Bring up Hydra, Mailcrab and the mock OIDC upstream (no Kratos); wait for Hydra
 	$(COMPOSE) -f $(COMPOSE_FILE) up -d postgres hydra-migrate hydra mailslurper mock-oidc
 	@$(MAKE) stack-wait ORY_READY_URLS=http://127.0.0.1:4445/health/ready
+
+stack-up-native-oauth: ## Bring up Mailcrab and the mock OIDC upstream (no Kratos, no Hydra); wait for the mock
+	$(COMPOSE) -f $(COMPOSE_FILE) up -d mailslurper mock-oidc
+	@$(MAKE) stack-wait ORY_READY_URLS=http://127.0.0.1:8092/default/.well-known/openid-configuration
 
 # podman-compose 1.5.0 ignores the COMPOSE_PROFILES env var, so pass the
 # profile as a flag — works for both podman-compose and docker compose.
@@ -149,6 +173,12 @@ seed-admin: ## Seed a deterministic admin (password + planted TOTP) into the pla
 seed-admin-native: ## Seed the deterministic admin (password + TOTP) into forseti.db for a native Forseti
 	FORSETI_CONFIG_PATH="$${FORSETI_CONFIG_PATH:-$(NATIVE_CONFIG)}" \
 		cargo run --quiet $(NATIVE_FEATURES) --example seed_admin_native
+
+seed-admin-native-oauth: ## As seed-admin-native plus the forseti-linux-pam client, for a Forseti with both native backends
+	FORSETI_CONFIG_PATH="$${FORSETI_CONFIG_PATH:-$(NATIVE_OAUTH_CONFIG)}" \
+		cargo run --quiet $(ALL_NATIVE_FEATURES) --example seed_admin_native
+	FORSETI_CONFIG_PATH="$${FORSETI_CONFIG_PATH:-$(NATIVE_OAUTH_CONFIG)}" \
+		cargo run --quiet $(ALL_NATIVE_FEATURES) --bin forseti -- posix-init-client
 
 # Provision the forseti-linux-pam device-grant OAuth client in Hydra so the
 # device-auth integration tests run (they skip cleanly if it's absent). Needs a

@@ -402,6 +402,17 @@ async fn submit(
                 // A later recovery is no reset, so nothing retries this.
                 if !all && kept.is_none() {
                     tracing::error!(identity_id = %identity_id, "OAuth sessions and grants of a reset identity not fully ended");
+                } else if !all {
+                    tracing::warn!(identity_id = %identity_id, "password changed, but the other browsers' OAuth sessions and grants were not all ended");
+                }
+                if !all {
+                    let event =
+                        crate::audit::AuditEvent::new(crate::audit::action::SESSIONS_BULK_REVOKED)
+                            .target(crate::audit::target_kind::IDENTITY, identity_id.as_str())
+                            .with_ctx(&audit)
+                            .metadata(crate::audit_metadata!("op_sessions_revoked" => false))
+                            .failed("OAuth sessions and grants not all ended");
+                    let _ = crate::audit::log(&state.db, event).await;
                 }
             }
             respond(kind, &id, done.outcome)
@@ -1039,6 +1050,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "oauth-ory")]
     /// A Hydra admin API that accepts every revoke and lists no consent sessions; returns its
     /// base URL and the requests it saw.
     async fn fake_hydra_admin() -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
@@ -1221,6 +1233,7 @@ mod tests {
         assert!(row.email_verified_at.is_some());
     }
 
+    #[cfg(feature = "oauth-ory")]
     #[tokio::test]
     async fn a_recovery_reset_over_http_ends_every_op_session_and_grant() {
         use crate::identity_native::test_support::identity_with_password;
@@ -1271,6 +1284,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "oauth-ory")]
     #[tokio::test]
     async fn a_password_change_over_http_audits_with_the_request_and_keeps_the_browser_signed_in() {
         let (hydra, seen) = fake_hydra_admin().await;
@@ -4660,6 +4674,7 @@ mod tests {
         assert!(oidc_inputs(&app.flow(FlowKind::Login, &flow, &cookie).await).is_empty());
     }
 
+    #[cfg(feature = "oauth-ory")]
     /// An app with `root@x.test` allowlisted as admin and Hydra's admin API stubbed, and that
     /// admin's AAL2 browser: (admin id, cookie header, CSRF token).
     async fn admin_app() -> (App, String, String, String) {
@@ -4673,6 +4688,7 @@ mod tests {
         (app, admin, cookie, token)
     }
 
+    #[cfg(feature = "oauth-ory")]
     /// A browser holding a session of `identity_id` at `aal`: (cookie header, CSRF token).
     async fn browser_at(app: &App, identity_id: &str, aal: Aal) -> (String, String) {
         let issued = app
@@ -4685,6 +4701,7 @@ mod tests {
         (cookie, token)
     }
 
+    #[cfg(feature = "oauth-ory")]
     /// The identity page as `cookie` sees it right after `redirect`, with its flash cookie.
     async fn page_after(app: &App, redirect: &Response, cookie: &str) -> String {
         let flash = set_cookies(redirect)
@@ -4698,6 +4715,7 @@ mod tests {
         body(page).await
     }
 
+    #[cfg(feature = "oauth-ory")]
     #[tokio::test]
     async fn admin_second_factor_reset_keeps_passkeys_and_sessions_and_is_audited() {
         use store::keys::{self, KeyKind};
@@ -4776,6 +4794,7 @@ mod tests {
         assert_eq!(resets(audit_rows(&app.db).await.unwrap()).len(), 1);
     }
 
+    #[cfg(feature = "oauth-ory")]
     #[tokio::test]
     async fn admin_second_factor_reset_needs_an_aal2_admin() {
         let (app, admin, _, _) = admin_app().await;
@@ -4804,6 +4823,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "oauth-ory")]
     #[tokio::test]
     async fn admin_disable_revokes_sessions_and_enable_brings_none_back() {
         let (app, _, cookie, csrf) = admin_app().await;

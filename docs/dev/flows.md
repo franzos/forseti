@@ -594,7 +594,7 @@ Steps:
 
 1. Verify Forseti's own double-submit CSRF token (`csrf::verify_csrf`, `src/csrf.rs`). 403 on mismatch.
 2. Forward the cookies to Kratos's `/self-service/logout/browser` (`fetch_logout_url`, `src/ory/kratos.rs:944`). Kratos returns `{ logout_url: "...&logout_token=..." }` — the URL embeds a single-use token.
-3. End the Hydra login sessions this browser signed in to, best-effort (`op_sessions::end_op_sessions_for_browser`, `src/oauth/op_sessions.rs`). `/oauth/login` records each accepted Hydra `sid` against the subject and the Kratos session in `hydra_login_sessions`, because Hydra only sends back-channel logout when a login session is revoked by `sid` and has no API to list a subject's sessions. Each recorded `sid` is revoked at Hydra, which notifies every client with a `backchannel_logout_uri`; the subject's sessions in other browsers and its consent grants stay, so offline refresh tokens survive a plain logout (Back-Channel Logout 1.0 §2.7). Logout then sweeps the subject's `sid`s whose recorded Kratos session is no longer active, such as one the browser rotated away from (`op_sessions::sweep_dead_browser_sessions`); a failed Kratos lookup skips the sweep. The account switcher (both the switcher and the consent-screen "not you?") ends one Kratos session's `sid`s the same way.
+3. End the Hydra login sessions this browser signed in to, best-effort (`op_sessions::end_op_sessions_for_browser`, `src/oauth/op_sessions.rs`). `/oauth/login` records each accepted Hydra `sid` against the subject and the Kratos session in `hydra_login_sessions`, because Hydra only sends back-channel logout when a login session is revoked by `sid` and has no API to list a subject's sessions. Each recorded `sid` is revoked at Hydra, or at the built-in OAuth server, which notifies every client with a `backchannel_logout_uri`; the subject's sessions in other browsers and its consent grants stay, so offline refresh tokens survive a plain logout (Back-Channel Logout 1.0 §2.7). Logout then sweeps the subject's `sid`s whose recorded Kratos session is no longer active, such as one the browser rotated away from (`op_sessions::sweep_dead_browser_sessions`); a failed Kratos lookup skips the sweep. The account switcher (both the switcher and the consent-screen "not you?") ends one Kratos session's `sid`s the same way.
 
    A security event ends `sid`s and also revokes their grants (RFC 9700 §4.14.2): single-session revoke and revoke-others on the Sessions page, the admin single-session revoke, and a password change (which spares the current browser). `/oauth/consent` records each accepted consent request against its `sid` in `hydra_consent_grants`, and ending a `sid` this way revokes each recorded grant at Hydra by `consent_request_id`, falling back to Hydra's consent listing by login session when none is recorded. Admin disable, identity delete and account self-deletion end every recorded `sid` of the subject, then revoke the subject's login and consent sessions as a backstop for sessions recorded before the table existed; those subject-wide revokes kill the grants but send no back-channel logout.
 4. 302 the browser to that URL. Kratos clears the `ory_kratos_session` cookie and 303s to `selfservice.flows.logout.after.default_browser_return_url` (= `/login`, `infra/kratos/kratos.yml:110-112`).
@@ -836,13 +836,17 @@ Ory calls:
 sessions that Kratos session signed in to and revokes their grants, since
 revoking a session is a security event (see [Logout](#logout)), and 303s
 back to the list with a flash cookie set ("Session signed out." / "Could not
-sign out that session.").
+sign out that session."). When the OAuth sessions or grants were not all
+ended, the success flash gets "Some sessions could not be ended." appended
+(`op_sessions::flash_with_partial_end`, `src/oauth/op_sessions.rs:435`), and
+the audit row carries `op_sessions_revoked: false`.
 
 `POST /settings/sessions/revoke-others` — `settings_sessions_revoke_others`
 (`src/settings/sessions.rs:188`). Calls `kratos::revoke_other_sessions`
 (`src/ory/kratos.rs:357`) which returns the count of revoked sessions, then
 ends every recorded Hydra `sid` of the user except this browser's and revokes
-their grants; flash message reflects the number.
+their grants; flash message reflects the number, with the same partial-end
+sentence appended when needed.
 
 Flash messages are cookie-based one-shots (`flash::store_flash` /
 `flash::take_flash`) scoped to the path.
@@ -1243,6 +1247,70 @@ Forseti acts as Hydra's login + consent UI. Hydra issues challenges
 resolves them against the Kratos session and accepts/rejects them via
 Hydra's admin API. The Hydra wrappers live in `src/ory/hydra.rs`.
 
+### Built-in OAuth build
+
+With `--features oauth-native`, `OAuthImpl` is `NativeOAuth` (`src/oauth_native/mod.rs:65`) and the same `/oauth/login`, `/oauth/register`, `/oauth/consent`, `/oauth/logout` and `/oauth/device` handlers run unchanged against its `OAuthBackend` impl (`src/oauth_native/backend.rs:11`). The challenges are Forseti's own: requests live in `oauth_authorize_requests`, and every state change is a conditional `UPDATE ... WHERE state = <expected>`, so of two concurrent accepts or resumes exactly one wins.
+
+- **Authorize** (`authorize_get`, `src/oauth_native/routes.rs:179`; GET at `/oauth2/authorize` and `/oauth2/auth`, a POST is answered with a 303 to the same request as a GET, `authorize_post`, `:216`): a URL-shaped `client_id` first goes through `resolve_cimd` (`:200`), which admits it under the CIMD per-IP limit (`CimdIpLimit`, `:46`) and calls `oauth::cimd::resolve` (see [CIMD authorization shim](#cimd-authorization-shim-get-oauth2authorize)); a request with a repeated parameter skips it. Then `authorize_request` (`:223`): `validate` (`src/oauth_native/authorize.rs:194`) checks the client and redirect URI first (a failure there goes to `/error`), then everything else answers at the redirect URI with `iss`. `login_step` (`:544`) reads the `forseti_op` cookie's login session and decides skip, show login, `/oauth/register` (`prompt=create`) or `login_required`. `challenge::create` (`src/oauth_native/challenge.rs:288`) stores the request, and the browser gets a 303 to `/oauth/login?login_challenge=...` (or `/oauth/register`) plus a `forseti_flow` cookie with `Path=/oauth2/auth/resume/{flow_id}` binding that one request to it (`challenge::bind`, `:254`).
+- **Login accept** (`accept_login`, `src/oauth_native/challenge.rs:489`): moves the request to `login_accepted`, writes the login session for a fresh login, and returns `/oauth2/auth/resume/{flow_id}?verifier=...` as `redirect_to`.
+- **Resume** (`resume`, `src/oauth_native/routes.rs:322`; `challenge::resume`, `src/oauth_native/challenge.rs:776`): a path id that isn't the verifier's request is refused, and only a browser holding a valid binding cookie for that path (`challenge::is_bound`, `:263`) may consume the verifier; a refused resume consumes nothing. From `login_accepted`, `to_consent` (`:824`) computes the consent skip (`grants::consent_skip`, `src/oauth_native/grants.rs:111`, which ignores `auto_granted` grants), sets `forseti_op` for a fresh remembered login and redirects to `/oauth/consent?consent_challenge=...`. From `consent_accepted`, `issue_code` (`:873`) stores the code against the grant `accept_consent` (`:687`) wrote, and `response::success` (`src/oauth_native/response.rs:36`) delivers `code`, `state` and `iss` by query redirect or `form_post`. A rejected request goes back through `deliver_rejection` (`:928`). The code and error responses clear the binding cookie.
+- **Consent accept** (`NativeOAuth::accept_consent_on`, `src/oauth_native/mod.rs:229`): `finalize_consent` passes the handler's `GrantPath`; a grant reached on the no-screen path without an earlier grant is stored with `auto_granted = 1` and never backs a later consent skip.
+- **Token** (`token`, `src/oauth_native/token_endpoint.rs:280`): `authenticate_client` (`:241`) authenticates the client by its registered method, then the code is redeemed (`redeem_code`, `src/oauth_native/tokens.rs:339`), the refresh token rotated (`refresh`, `:513`) or the device code redeemed (`redeem_device_code`, `:358`; both redemptions share `consume`, `:378`), then `mint` (`src/oauth_native/token_endpoint.rs:406`) signs the `at+jwt` access token and, with `openid`, the ID token. A replayed code or refresh token deletes the refresh tokens of its family.
+- **Revocation and introspection** (`src/oauth_native/revocation.rs`): `revoke` (`:61`, `POST /oauth2/revoke`) puts an access token of the caller on the `oauth_revoked_tokens` denylist by `jti` until `exp` plus 60 s, or hands anything else to `tokens::revoke_refresh` (`src/oauth_native/tokens.rs:252`), which deletes the caller's refresh token family and sets the grant's `tokens_revoked_at`. `introspect` (`revocation.rs:156`, `POST /oauth2/introspect`) is mounted on the internal listener (`routes::internal_router`, `src/oauth_native/routes.rs:162`) for confidential clients. Userinfo and introspection read both through `live_grant` (`revocation.rs:133`).
+- **Keys** (`src/oauth_native/keys.rs`, `src/oauth_native/mod.rs`): the loaded `KeySet` sits in an `ArcSwapOption`. `reload_keys` (`mod.rs:122`) reloads at most once per 2 s; `verify_jwt` and `verify_hint` (`:146`, `:160`) reload once on an unknown `kid` and retry, `published_keys` (`:206`) reloads when the stored `kid` list differs, and the hourly maintenance pass reloads too. `keys::rotate` (`keys.rs:147`), behind `forseti rotate-oauth-key` (`src/lib.rs:196`), checks every row opens under the seal, then retires the active row and inserts a new one in one transaction.
+
+On `oauth-native` the ungated `src/oauth/cimd.rs` runs inside the authorize handler; the Hydra-only shim (`src/oauth/cimd_shim.rs`) is not mounted.
+
+```mermaid
+sequenceDiagram
+    participant RP as Relying party
+    participant B as Browser
+    participant F as Forseti (/oauth2/*)
+    participant L as Forseti (/oauth/login, /oauth/consent)
+    RP->>B: redirect to /oauth2/authorize?...
+    B->>F: GET /oauth2/authorize
+    F->>F: validate, store request
+    F->>B: 303 /oauth/login?login_challenge=... + forseti_flow (Path=/oauth2/auth/resume/{flow_id})
+    B->>L: GET /oauth/login
+    L->>F: accept_login_request (in process)
+    L->>B: redirect to /oauth2/auth/resume/{flow_id}?verifier=...
+    B->>F: GET /oauth2/auth/resume/{flow_id} (binding cookie)
+    F->>B: 303 /oauth/consent?consent_challenge=... (+ forseti_op)
+    B->>L: GET /oauth/consent, user approves
+    L->>F: accept_consent_request (in process)
+    L->>B: continue to /oauth2/auth/resume/{flow_id}?verifier=...
+    B->>F: GET /oauth2/auth/resume/{flow_id} (binding cookie)
+    F->>B: 303 redirect_uri?code=...&state=...&iss=... (clears forseti_flow)
+    B->>RP: callback
+    RP->>F: POST /oauth2/token
+    F->>RP: access_token (at+jwt), id_token, refresh_token
+```
+
+**Device flow** (`src/oauth_native/device.rs`). `POST /oauth2/device/auth` (`device::authorize`, `:351`) authenticates the client, checks the device grant and scope, and stores an `oauth_device_codes` row (device code hashed, user code `XXXX-XXXX`, 600 s, interval 5 s, at most 1000 undecided rows per client); the POSIX module calls the same code in process (`device::start`, `poll_token`). On `/oauth/device` confirm, `accept_user_code_request` normalises the typed code (`device::accept_user_code`, `:152`) and `challenge::accept_user_code` (`src/oauth_native/challenge.rs:349`) moves the row to `accepted` and stores a flow row with `response_mode = device` and no redirect URI in one transaction, returning the login URL. Login and consent run unforked, but consent skip is never consulted and `accept_consent` refuses an automatic accept. Resume needs no binding cookie for a device flow, sets no `forseti_op`, and `approve_device` (`:971`) stores a code row keyed by the device code hash and moves the device row to `approved` (or `denied` on rejection), then answers `/oauth/device/done`. The poll at the token endpoint redeems it once through `redeem_device_code`; RFC 8628 errors, with `slow_down` raising the interval by 5 s. `/oauth/device` itself only approves a POSIX `device_sessions` row whose device code owns that user code (`posix::db::device_session_by_user_code`, the `oauth-native` variant, `src/posix/db.rs:1329`).
+
+**Logout** (`src/oauth_native/logout.rs`). `GET|POST /oauth2/sessions/logout` (`get`, `post`, `:102`, `:115`) parses the parameters (`Params::parse`, `:68`: 16 KiB cap, `state` up to 2048 bytes, no repeats) and `open` (`:161`) stores an `oauth_logout_requests` row: with an `id_token_hint` (`NativeOAuth::verify_hint`, signature, issuer and `typ`, `exp` ignored) the hint's `aud`, `sid` and `sub`, a matching `client_id`, a registered http(s) `post_logout_redirect_uri`, and as `browser_sid` the `forseti_op` session when it is another session of the hint's `sub`; without one the `forseti_op` session and no redirect URI. Every refusal is a 303 to `/error`, success a 303 to `/oauth/logout?logout_challenge=...`. The shared `/oauth/logout` POST calls `accept_logout_request` (`:311`), which ends the session, then `browser_sid` if it still belongs to the request's subject, consumes the row once, and returns the redirect URI with `state` if still registered, else `/signed-out`.
+
+**Back-channel logout.** `revoke_login_session_by_sid` (`src/oauth_native/backend.rs:195`) is `logout::end_session` (`src/oauth_native/logout.rs:390`): it reads the session and the clients with a grant under the `sid` and a `backchannel_logout_uri` (`recipients`, `:361`), deletes the session (`sessions::revoke_by_sid`), and only if that call deleted the row spawns one delivery per recipient into a tracked `JoinSet` (`spawn_deliveries`, `:404`). `Delivery::send` (`:462`) checks the target with `outbound::check_target`, signs a `logout+jwt` (`jwt::logout_token_claims`, `src/oauth_native/jwt.rs:132`: `iss`, `aud`, `iat`, `exp` 120 s, `jti`, `sub`, `sid`, `events`) and POSTs `logout_token=` with a 3 s timeout; a failure logs the client id and host and audits `oauth.backchannel_logout.failed`, without retry. `drain_deliveries` (`src/oauth_native/mod.rs:184`) waits up to 5 s for them at server shutdown and before `delete-identity` and `unverified-prune` exit. `revoke_login_sessions_for_subject` sends none.
+
+```mermaid
+sequenceDiagram
+    participant RP as Relying party
+    participant B as Browser
+    participant F as Forseti (/oauth2/sessions/logout)
+    participant L as Forseti (/oauth/logout)
+    participant C as Clients' backchannel_logout_uri
+    RP->>B: redirect to /oauth2/sessions/logout?id_token_hint=...&post_logout_redirect_uri=...&state=...
+    B->>F: GET
+    F->>F: verify_hint, check client and redirect URI, store request
+    F->>B: 303 /oauth/logout?logout_challenge=...
+    B->>L: GET, confirm, POST
+    L->>F: accept_logout_request (in process): end_session(sid), end_session(browser_sid)
+    F--)C: POST logout_token=<logout+jwt> (detached, 3 s, once)
+    L->>B: continue to post_logout_redirect_uri?state=... or /signed-out
+```
+
+`maintenance::prune` (`src/oauth_native/maintenance.rs:87`), started by `maintenance::spawn` (`:48`), runs hourly and reloads the signing keys after each pass.
+
 ### OAuth Login
 
 `GET /oauth/login?login_challenge=...` — handler `oauth_login`
@@ -1405,7 +1473,10 @@ page when Hydra says `skip == true` (a remembered consent for this user ×
 client × scope tuple) or the client carries `skip_consent == true`; an
 **org**-vouched client skips only on a consent the user chose to remember.
 The auto-grant is itself remembered at Hydra, so a later `prompt=none`
-authorize gets a code without UI. Never for the PAM device client or a CIMD
+authorize gets a code without UI. On the built-in OAuth build a grant made
+on this path for `skip_consent` (not from a remembered consent) is stored
+with `auto_granted` and never backs a later consent skip, so turning
+`skip_consent` off brings the screen back. Never for the PAM device client or a CIMD
 client, whatever its verification. `skip_consent` is ignored for every CIMD/DCR row, every org-created client
 (`source = 'org'` — an org owner can create a client in their own org, so
 their word is not an operator review), and any client Forseti has **no
@@ -1423,7 +1494,7 @@ auto-granting or rendering the page, the handler verifies the Kratos session
 subject matches Hydra's claimed subject — without this check a crafted
 consent link bound to identity A could be auto-granted while identity B is
 signed in, or show A's email and requested scopes to whoever holds the
-challenge. Mismatch → `reject_consent_request` with `access_denied`.
+challenge. Mismatch (`reject_unless_session_subject`, `src/oauth/consent.rs:738`) → 302 to `/error` with a warning log; the challenge is left untouched, so its owner can still decide it, and on the Hydra build the client gets no `access_denied` (the request expires at Hydra if nobody decides). Same on both builds.
 
 With `prompt=none`, a consent that isn't auto-granted is rejected with
 `consent_required` instead of rendering the page.
@@ -1449,11 +1520,14 @@ guards it on `verified && cimd_host.is_empty()`). Names inside a CIMD
 document are self-asserted; the host is what its operator provably
 controls.
 
-Submission decisions: apart from `switch_account`, the handler fetches the
-consent request once and checks the session subject owns it before acting
-on any decision, deny included, so a deny posted from another account's
-browser hits the subject gate (`access_denied`) and is never recorded as the
-owner's decision. A failed fetch rejects with `temporarily_unavailable`.
+Submission decisions: the handler fetches the consent request once and
+checks the session subject owns it before acting on any decision, deny
+included, so a deny posted from another account's browser hits the subject
+gate (`/error`, request untouched) and is never recorded as the owner's
+decision. `switch_account` (`src/oauth/consent.rs:773`, both entry points)
+runs the same gate before the session teardown, the audit event and the
+restart redirect, since the restart URL carries the owner's authorize
+parameters. A failed fetch answers `/error` and rejects nothing.
 
 - `decision = deny` → `HydraBackend::reject_consent_request` with
   `access_denied`. RP gets an OAuth2 error redirect.
@@ -1545,8 +1619,7 @@ sequenceDiagram
     alt skip==true or client.skip_consent
         P->>K: whoami → check subject matches
         alt subject mismatch
-            P->>H: reject_consent_request(access_denied)
-            H-->>U: 302 → RP (error)
+            P-->>U: 302 → /error (challenge left pending)
         else match
             P->>K: admin_get_identity(subject)
             P->>H: accept_consent_request(c2, scopes, claims)
@@ -1571,10 +1644,10 @@ sequenceDiagram
 Edge cases:
 
 - Hydra `get_login_request` / `get_consent_request` failure on the first
-  GET → 302 to `/error` (there's no challenge to reject). Later failures
-  while the challenge is valid reject it back to the RP
-  (`consent::reject_to_client`) with `server_error` or
-  `temporarily_unavailable`.
+  GET, or `get_consent_request` failure on the POST → 302 to `/error`
+  (nothing is rejected). Later failures while the challenge is valid
+  reject it back to the RP (`consent::reject_to_client`) with
+  `server_error` or `temporarily_unavailable`.
 - CSRF failure on POST → 403 plain text.
 - The form repeats `grant_scope` once per checked scope; axum's form
   extractor handles the `Vec<String>` deserialisation. Missing scopes
@@ -1646,15 +1719,20 @@ Edge cases worth knowing:
 
 ### CIMD authorization shim (`GET /oauth2/authorize`)
 
-`GET /oauth2/authorize` — handler `authorize` (`src/oauth/cimd.rs:180`),
-mounted with dual-window per-IP rate limits (`oauth::cimd::router`,
-`src/oauth/cimd.rs:60`). The global windows are checked in
-`authorize_core` and charged only for a `client_id` with no metadata row
+On the Hydra build, `GET /oauth2/authorize` — handler `authorize`
+(`src/oauth/cimd_shim.rs:94`), mounted with dual-window per-IP rate limits
+(`oauth::cimd_shim::router`, `src/oauth/cimd_shim.rs:25`). Both it and the
+POST handler go through `authorize_core` (`:116`), which calls
+`oauth::cimd::resolve` (`src/oauth/cimd.rs:98`) and then redirects to
+Hydra. The client resolution itself is backend-neutral and lives in
+`resolve`; the built-in OAuth build calls it from its own authorize handler
+(see [Built-in OAuth build](#built-in-oauth-build)). The global windows are
+checked in `resolve` and charged only for a `client_id` with no metadata row
 yet, before the document fetch (`cimd_global_limit`). The limits apply
 only to URL-shaped (CIMD) `client_id`s; any other authorize request is
 redirected to Hydra unlimited. `POST /oauth2/authorize` (OIDC Core 3.1.2.1) becomes a
 303 to Hydra's `/oauth2/auth` with the form as the query
-(`redirect_post_to_hydra`, RFC 9110 §15.4.4). Hydra resumes every flow with
+(`redirect_post_to_hydra`, `src/oauth/cimd_shim.rs:180`, RFC 9110 §15.4.4). Hydra resumes every flow with
 a GET to the request URL it stored, so a POST re-sent with a 307 would lose
 its parameters after login or consent; what the client posted therefore ends
 up in a URL, as with a GET. Hydra v26 has no pushed authorization requests
@@ -1687,24 +1765,24 @@ sequenceDiagram
     Note over P: hydra_front::well_known_router (src/hydra_front.rs:45) via the shared DiscoveryCache;<br/>augment_discovery_doc (src/hydra_front.rs:183): +cimd flag, authorization_endpoint → shim, −registration_endpoint
     P-->>CD: augmented doc (CORS *)
     CD-->>U: open {origin}/oauth2/authorize?client_id=https://…&redirect_uri=…&resource=…&code_challenge=…
-    U->>P: GET /oauth2/authorize (src/oauth/cimd.rs:180)
+    U->>P: GET /oauth2/authorize (src/oauth/cimd_shim.rs:94)
     alt client_id is not an https:// URL
         P-->>U: 302 → /hydra/oauth2/auth?… (query byte-identical — pre-registered clients pass through)
-    else CIMD path
+    else CIMD path: cimd::resolve (src/oauth/cimd.rs:98)
         P->>DB: oauth_client_metadata::get(client_id)
         Note over P: source != 'cimd' → 400 (never mutate an admin client)
-        P->>P: host policy (allowed_client_hosts, src/oauth/cimd.rs:546)
+        P->>P: host policy (allowed_client_hosts, src/oauth/cimd.rs:373)
         P->>Doc: GET client_id URL (cimd_fetch::fetch_document, src/oauth/cimd_fetch.rs:107)
         Note over P,Doc: SSRF guard + cache: single-flight, TTL from Cache-Control clamped [60s,24h],<br/>64 KiB cap, 5s timeout, no redirects, serve-stale-on-error 1h
-        P->>P: validate_doc (src/oauth/cimd.rs:560): client_id byte-equal, auth method none,<br/>code flow only, https/loopback redirect URIs
-        P->>P: match_redirect_uri (src/oauth/cimd.rs:619): exact, or loopback any-port
-        P->>P: discover_scopes (src/oauth/cimd.rs:739): global allowlist, then registry rows named by resource=,<br/>then one throttled RFC 9728 re-fetch of a named row
+        P->>P: validate_doc (src/oauth/cimd.rs:387): client_id byte-equal, auth method none,<br/>code flow only, https/loopback redirect URIs
+        P->>P: match_redirect_uri (src/oauth/cimd.rs:456): exact, or loopback any-port
+        P->>P: discover_scopes (src/oauth/cimd.rs:576): global allowlist, then registry rows named by resource=,<br/>then one throttled RFC 9728 re-fetch of a named row
         P->>H: GET /admin/clients/{id} (get_client_opt, src/ory/hydra.rs:904)
         alt warm path: doc hash unchanged && redirect_uri and allowed scopes already on row
-            Note over P: skip every write (src/oauth/cimd.rs:358)
+            Note over P: skip every write (src/oauth/cimd.rs:250)
         else cold path
-            P->>H: create/update client (upsert_hydra_client, src/oauth/cimd.rs:934)<br/>scope union capped 256, ≤5 loopback literals, audience preserved
-            P->>DB: insert_or_get_cimd + set_cimd_doc_hash (src/oauth_client_metadata.rs:139)
+            P->>H: create/update client (upsert_client, src/oauth/cimd.rs:782)<br/>scope union capped 256, ≤5 loopback literals, audience preserved
+            P->>DB: insert_or_get_cimd + set_cimd_doc_hash (src/oauth_client_metadata.rs:162)
         end
         P->>DB: audit oauth.client.cimd_seen
         P-->>U: 302 → /hydra/oauth2/auth?… (query byte-identical)
@@ -1716,12 +1794,12 @@ Details that matter:
 
 - **The redirect into Hydra is a relative path** (`/hydra/oauth2/auth?…`
   when `[hydra].issuer` carries a path, `redirect_to_hydra`,
-  `src/oauth/cimd.rs:504`): the browser must stay on the issuer origin
+  `src/oauth/cimd_shim.rs:173`): the browser must stay on the issuer origin
   it arrived on or Hydra's host-scoped CSRF cookies are lost. A
   path-less issuer (front-proxy-less deployment) falls back to the
   absolute `public_url`.
 - **Rejections render a plain 400** naming the reason
-  (`reject`, `src/oauth/cimd.rs:533`) — never a redirect, because the
+  (`reject`, `src/oauth/cimd.rs:360`) — never a redirect, because the
   redirect_uri is not yet trusted. Each emits an
   `oauth.client.cimd_rejected` audit row (WARNING).
 - **The `localhost` gap.** Hydra port-matches loopback redirect URIs
@@ -1730,16 +1808,23 @@ Details that matter:
   `http://localhost/callback`. When the request matched only via the
   any-port rule, the literal is upserted onto the Hydra row, capped at
   5 non-document entries with oldest-first eviction
-  (`src/oauth/cimd.rs:957`).
+  (`src/oauth/cimd.rs:805`). The built-in OAuth build ignores loopback
+  ports at match time, so it stores no literal and keeps exactly the
+  document's redirect URIs; its warm path port-matches the row
+  (`redirect_registered`, `src/oauth/cimd.rs:448`).
+- **Native store rules.** On the built-in OAuth build a document
+  `client_uri` or `logo_uri` the client store refuses is dropped
+  (`store_accepts_web_uri`, `src/oauth/cimd.rs:773`); a document redirect
+  URI the store refuses fails the upsert, a 502.
 - **Scope union never shrinks** the existing row's scope
-  (`scope_union`, `src/oauth/cimd.rs:893`): existing entries first, then
+  (`scope_union`, `src/oauth/cimd.rs:730`): existing entries first, then
   base `openid offline offline_access`, `client_scope_extra`, the
   document's scope, the request's allowlisted scopes; capped at 256 with a
   warn-log on truncation, so request scopes never evict operator or
   document entries.
 - **Request scopes are allowlisted** in three stages (`discover_scopes`,
-  `src/oauth/cimd.rs:739`). Stage 1 is the global set (`ScopeAllowlist`,
-  `src/oauth/cimd.rs:646`): base scopes, `consent::SUPPORTED_SCOPES`, keys
+  `src/oauth/cimd.rs:576`). Stage 1 is the global set (`ScopeAllowlist`,
+  `src/oauth/cimd.rs:483`): base scopes, `consent::SUPPORTED_SCOPES`, keys
   of `[oauth].scope_descriptions`, whitespace-split `client_scope_extra`
   and the document's scope. Stage 2 runs only when stage 1 dropped
   something and the request carries `resource=`: it adds the stored
@@ -1760,11 +1845,17 @@ Details that matter:
   a newly allowed scope reaches the row on the next request naming it.
 - **Updates start from the existing Hydra record** so the `audience`
   array written by the consent-time heal survives Hydra's PUT-override
-  (`upsert_hydra_client`, `src/oauth/cimd.rs:378`).
+  (`upsert_client`, `src/oauth/cimd.rs:782`).
 - **`http://` client_ids** count as CIMD only under the
   `[oauth.cimd].allow_private_targets` test/dev hatch (loopback fixture
   servers); in production they pass through to Hydra like any other
   non-CIMD client_id.
+- **On the built-in OAuth build** the native authorize handler resolves a
+  URL-shaped `client_id` before request validation, behind its own per-IP
+  `CimdIpLimit` (`src/oauth_native/routes.rs:46`, the
+  `[oauth.cimd].ip_rate_per_*` values, a `KeyedQuota` pair capped at
+  10,000 keys; no client IP is a 429); failures are the same plain-text
+  responses.
 
 The front proxy (`hydra_front::passthrough`, `src/hydra_front.rs:60`,
 gated on `[hydra].front_proxy`) forwards
@@ -1780,7 +1871,7 @@ through the passthrough is served augmented, never proxied verbatim
 
 Trust state: the shim inserts `oauth_client_metadata` rows with
 `source = 'cimd'`, `verification = 'unverified'`
-(`insert_or_get_cimd`, `src/oauth_client_metadata.rs:139`; `org_id`
+(`insert_or_get_cimd`, `src/oauth_client_metadata.rs:162`; `org_id`
 stamped to the Default org). Because the auto-grant guard requires
 `verified`, an unverified CIMD row always renders consent — with the
 client host as the primary identity (see [Consent](#consent)) and never
@@ -1829,7 +1920,10 @@ POST path:
    this flow.
 4. `HydraBackend::accept_logout_request` → returns the RP-specified
    post-logout URL. 302 there. Hydra sends back-channel logout to every
-   client of that login session.
+   client of that login session. On the built-in OAuth build this is
+   `logout::accept_logout_request`, which ends the session by `sid` and
+   sends the back-channel tokens itself (see
+   [Built-in OAuth build](#built-in-oauth-build)).
 
 The confirmation page says an app asked to sign the user out only when the
 logout request names a client; a bare `/oauth2/sessions/logout` with no
@@ -2255,7 +2349,8 @@ Disabling does **not** revoke existing sessions — the confirm copy makes
 this explicit. Admin must follow up via `/admin/sessions` if desired.
 
 Flash cookies carry per-action banners ("Identity disabled." / "Identity
-enabled.") scoped to the identity's show path.
+enabled.") scoped to the identity's show path. A disable whose OAuth
+session end failed appends "Some sessions could not be ended."
 
 #### Identity picker (`/admin/identity-picker`)
 
@@ -2302,7 +2397,8 @@ Ory calls:
 `?active_only=1|true|on` toggles the filter passed to Kratos. Each row
 projects identity email, device user-agent / IP, authenticated_at,
 expires_at. Revoke flow is the standard confirm screen → POST → flash
-banner ("Session revoked."). The session's identity is looked up before the
+banner ("Session revoked.", with "Some sessions could not be ended."
+appended when the OAuth sessions or grants were not all ended). The session's identity is looked up before the
 revoke (the session may 404 afterwards); once Kratos revokes it, the Hydra
 `sid`s that session signed in to are ended and their grants revoked, as for
 the user's own single-session revoke (see [Logout](#logout)). A failed lookup
@@ -2943,7 +3039,7 @@ one NAT exhaust the poll bucket. The real backoff is Forseti owning the
   Forseti hands the daemon a longer `interval` so it owns the backoff. On a
   token it runs the binding.
 - **`handle_token`** (`src/posix/device.rs:328`) — validates the id_token
-  (`HydraBackend::verify_id_token`, issuer from `[posix].hydra_issuer` ?? `[hydra].public_url`,
+  (`OAuthBackend::verify_id_token`; issuer from `[posix].hydra_issuer` ?? the backend issuer on the Hydra build, the backend issuer (`[self].url`) on the built-in OAuth build,
   audience pinned to `pam_client_id`, `iat` within `id_token_iat_window_secs`),
   resolves the approver's account by the token `sub`, runs the pure
   `evaluate_binding`, then **atomically** approves (the `WHERE status='pending'`
@@ -2998,6 +3094,15 @@ the session is denied. Codes and tokens are never logged.
   login + consent leg. Consent **never auto-skips** for the PAM client (guard
   in `consent.rs`) so the binding panel is always shown.
 
+On the built-in OAuth build the same handlers run against `NativeOAuth`:
+`device_init` and `device_poll` call the device functions in process,
+`accept_user_code_request` starts the flow described under
+[Built-in OAuth build](#built-in-oauth-build), and the lookup by user code
+(`posix::db::device_session_by_user_code`, `src/posix/db.rs:1329`)
+normalises the typed code and matches only a pending, unexpired session
+whose device code owns that user code. A device code of any other client
+has no `device_sessions` row, so `/oauth/device` can't approve it.
+
 ### Hydra confidential-client bridge
 
 `src/oauth/device.rs` owns the `forseti-linux-pam` confidential client model
@@ -3005,7 +3110,8 @@ the session is denied. Codes and tokens are never logged.
 false`). `ensure_pam_client` (`device.rs:61`) is create-if-absent and
 idempotent — it **never overwrites** an existing client — and is driven only
 by the `forseti posix-init-client` CLI verb (`src/main.rs:97`), which reveals a
-freshly-minted secret exactly once.
+freshly-minted secret exactly once. On the built-in OAuth build it creates
+the client in `oauth_clients` through the same trait call.
 
 ### Host-side PAM module
 

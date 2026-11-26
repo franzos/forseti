@@ -418,7 +418,7 @@ pub async fn list_identity_sessions_all(
                 "kratos list_identity_sessions returned {status}: {body}"
             ));
         }
-        let next = super::hydra::next_link(resp.headers());
+        let next = super::next_link(resp.headers());
         let batch: Vec<wire::Session> = resp
             .json()
             .await

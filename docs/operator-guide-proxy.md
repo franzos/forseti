@@ -343,7 +343,7 @@ backend be_kratos
 
 ## Forseti's internal listener
 
-Separate from the public frontends above, Forseti binds a second HTTP listener on `[internal].bind` (no default — operator-configured). It exists for one purpose today: receiving Kratos's webhook events at `POST /internal/audit/kratos`, authenticated with a shared bearer (`[audit].webhook_token`).
+Separate from the public frontends above, Forseti binds a second HTTP listener on `[internal].bind` (no default — operator-configured). It exists for one purpose today: receiving Kratos's webhook events at `POST /internal/audit/kratos`, authenticated with a shared bearer (`[audit].webhook_token`). On the built-in OAuth build it also serves token introspection at `POST /oauth2/introspect`, authenticated as a confidential OAuth client.
 
 Bind it to loopback when Kratos and Forseti share a host, or to a private interface (or pod-network address inside a container) when they don't. **Never expose this on a public interface, and never add it to the haproxy frontends above** — the public proxy must not route to it. CSRF middleware is not applied on this listener; the bearer token is the trust boundary.
 
@@ -362,6 +362,18 @@ On the native identity build (see [Native identity backend](./operator-guide-nat
 - **The session cookie is Forseti's.** It is `forseti_session`, or `__Host-forseti_session` when `[self].url` is https. The `__Host-` prefix means `Secure`, `Path=/` and no `Domain`, so the cookie is host-only on Forseti's hostname and is never shared with another subdomain. Whether cookies are `Secure` follows the scheme of `[self].url`, not `X-Forwarded-Proto`.
 - **Login throttling is built in.** Forseti limits `POST /self-service/login` per client IP itself (`[identity].login_ip_rate_per_minute` and `login_ip_rate_per_hour`) and password attempts per email address. A proxy-level throttle is optional; the per-IP buckets need `[proxy].trust_forwarded_for` and `trusted_hops` set to tell clients apart behind the proxy.
 - **The internal listener** has no audit webhook receiver; it carries the POSIX resolver and `/metrics`.
+
+---
+
+## Built-in OAuth build
+
+On the built-in OAuth build (see [Built-in OAuth server](./operator-guide-native-oauth.md)) there is no Hydra to route. What changes in the sketches above:
+
+- **The OAuth endpoints are Forseti's.** `/oauth2/authorize`, `/oauth2/auth`, `/oauth2/auth/resume/{flow_id}`, `/oauth2/token`, `/oauth2/device/auth`, `/oauth2/revoke`, `/oauth2/sessions/logout`, `/userinfo`, `/.well-known/openid-configuration`, `/.well-known/oauth-authorization-server` and `/.well-known/jwks.json` are served by Forseti at the root of its host, and the issuer is `[self].url`. Drop the `/hydra/*` ACL, rewrite and backend in Shape (1), and the Hydra subdomain in Shape (2). Do not strip or rewrite `/oauth2/` in front of Forseti.
+- **Introspection stays internal.** `POST /oauth2/introspect` is served on the internal listener only. Don't route any public path to it; resource servers that introspect need their own route into the internal network.
+- **Cookies on `/oauth2`.** `forseti_op` (the remembered sign-in, `Path=/oauth2`) and `forseti_flow` (binds one pending request to the browser that started it, one cookie per request with `Path=/oauth2/auth/resume/{flow_id}`, 30 minutes) are host-only, `HttpOnly`, `SameSite=Lax`, `Secure` when `[self].url` is https. Pass them through unchanged, and keep the resume path as the browser sees it: a cookie path that doesn't match the request path is never sent.
+- **Rate limits are built in** for the authorization, logout, token, device authorization, revocation, userinfo and JWKS endpoints, per client IP; they need `[proxy].trust_forwarded_for` and `trusted_hops` set to tell clients apart behind the proxy. Introspection's limit keys on `[internal].trust_forwarded_for`.
+- **No admin port.** There is nothing like Hydra's `:4445` to keep off the public frontends.
 
 ---
 
@@ -390,7 +402,9 @@ providers, and `[security].extra_form_action`. It deliberately omits
 identity build `form-action` carries no Kratos origin: the flow forms post to
 Forseti itself, which `'self'` covers, and each configured upstream
 provider's issuer origin (`https://github.com` for GitHub) is added on the
-pages that show its button.
+pages that show its button. On the built-in OAuth build `form-action` carries
+no Hydra origin; the `form_post` response page adds the client's redirect URI
+origin for that one response.
 
 Chrome and Safari check `form-action` against every hop of a form
 submission's redirect chain, Firefox against none. No OAuth client origin

@@ -5,7 +5,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use diesel::prelude::*;
 use hmac::{Hmac, KeyInit, Mac};
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
 use subtle::ConstantTimeEq;
 
 use super::{NativeBackend, random_bytes};
@@ -390,7 +390,7 @@ pub(super) fn new_session_token() -> String {
 
 /// Lowercase hex SHA-256 of the cookie value, the form stored in `identity_sessions.token_hash`.
 pub(super) fn session_token_hash(token: &str) -> String {
-    hex::encode(Sha256::digest(token.as_bytes()))
+    crate::seal::sha256_hex(token.as_bytes())
 }
 
 #[cfg(test)]

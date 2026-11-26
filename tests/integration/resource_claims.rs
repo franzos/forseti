@@ -804,7 +804,7 @@ async fn resource_claim_linked_value_reaches_the_access_token() {
     let (tokens, client_id, _) = crate::oauth::registry_claims_flow(&user, &resource).await;
     let claims = decode_jwt_claims(tokens["access_token"].as_str().expect("access_token"));
     assert_eq!(claims["ext"][&claim], value.as_str(), "got {claims}");
-    hydra_delete_client(&client_id).await;
+    oauth_delete_client(&client_id).await;
     delete_client_metadata(&client_id);
 
     let (tokens, client_id, _) = crate::oauth::registry_claims_flow(&user, &other).await;
@@ -813,7 +813,7 @@ async fn resource_claim_linked_value_reaches_the_access_token() {
         claims.get(&claim).is_none() && claims["ext"].get(&claim).is_none(),
         "a resource without the claim must not get it; got {claims}"
     );
-    hydra_delete_client(&client_id).await;
+    oauth_delete_client(&client_id).await;
     delete_client_metadata(&client_id);
 
     user.cleanup().await;

@@ -273,14 +273,20 @@ async fn end_other_browsers_after_password_change(state: &AppState, payload: &Kr
         );
         return;
     };
-    crate::oauth::op_sessions::end_op_sessions_for_subject(
+    if !crate::oauth::op_sessions::end_op_sessions_for_subject(
         &state.db,
         &state.oauth,
         identity_id,
         Some(ksid),
         crate::oauth::op_sessions::GrantRevocation::Revoke,
     )
-    .await;
+    .await
+    {
+        tracing::warn!(
+            identity_id,
+            "kratos audit webhook: password change; other browsers' app sessions and grants not all ended",
+        );
+    }
 }
 
 /// Index of the first accept-list entry the presented bearer matches, or

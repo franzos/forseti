@@ -11,6 +11,8 @@ use serde::Deserialize;
 use crate::audit::{self, AuditCtx, AuditEvent, action, severity, target_kind};
 use crate::audit_metadata;
 use crate::backend::IdentityBackend;
+#[cfg(feature = "oauth-native")]
+use crate::backend::OAuthBackend;
 use crate::backend::identity::{Identity, WhoamiOutcome};
 use crate::csrf::CsrfForm;
 use crate::extractors::{Csrf, OptionalSession};
@@ -214,9 +216,7 @@ pub(crate) async fn oauth_consent(
     // The consent screen and an auto-grant both belong to the challenge's
     // subject only; the page would otherwise show their email and the
     // requested scopes to whoever holds the challenge.
-    if let Some(rejected) =
-        reject_unless_session_subject(&state, &challenge, &subject, &session, &locale).await
-    {
+    if let Some(rejected) = reject_unless_session_subject(&subject, &session) {
         return rejected;
     }
     if auto_grant {
@@ -457,12 +457,14 @@ pub(crate) struct ConsentSwitchForm {
 pub(crate) async fn consent_switch(
     State(state): State<AppState>,
     headers: HeaderMap,
+    session: OptionalSession,
     actx: AuditCtx,
     CsrfForm(form): CsrfForm<ConsentSwitchForm>,
 ) -> Response {
     switch_account(
         &state,
         &headers,
+        &session,
         &actx,
         &form.consent_challenge,
         Some(&form.identity_id),
@@ -480,7 +482,15 @@ pub(crate) async fn oauth_consent_submit(
     CsrfForm(form): CsrfForm<OAuthConsentForm>,
 ) -> Response {
     if form.decision == "switch_account" {
-        return switch_account(&state, &headers, &actx, &form.consent_challenge, None).await;
+        return switch_account(
+            &state,
+            &headers,
+            &session,
+            &actx,
+            &form.consent_challenge,
+            None,
+        )
+        .await;
     }
 
     // The browser's session must own the challenge before any decision on it,
@@ -493,26 +503,11 @@ pub(crate) async fn oauth_consent_submit(
         Ok(r) => r,
         Err(e) => {
             tracing::error!(error = ?e, "hydra get_consent_request failed during submit");
-            return reject_to_client(
-                &state,
-                &form.consent_challenge,
-                "temporarily_unavailable",
-                "The consent service is unavailable.",
-                &req_locale,
-            )
-            .await;
+            return Redirect::to("/error").into_response();
         }
     };
     let subject = req.subject.clone().unwrap_or_default();
-    if let Some(rejected) = reject_unless_session_subject(
-        &state,
-        &form.consent_challenge,
-        &subject,
-        &session,
-        &req_locale,
-    )
-    .await
-    {
+    if let Some(rejected) = reject_unless_session_subject(&subject, &session) {
         return rejected;
     }
 
@@ -733,19 +728,14 @@ async fn reject_to_client(
     }
 }
 
-/// Gate every grant path on "the consent subject IS the signed-in identity":
-/// a consent link bound to one subject and opened by another would otherwise
-/// mint tokens for the link's owner while the clicking user believes they
-/// authorised their own account (CWE-384 at the relying party). Returns the
-/// `access_denied` rejection response on mismatch, `None` when the grant may
-/// proceed. An empty subject never passes.
-async fn reject_unless_session_subject(
-    state: &AppState,
-    challenge: &str,
-    subject: &str,
-    session: &OptionalSession,
-    locale: &LanguageIdentifier,
-) -> Option<Response> {
+/// Gate the consent page, every consent decision and the account switch on
+/// "the consent subject IS the signed-in identity": a consent link bound to one subject and opened by another would
+/// otherwise mint tokens for the link's owner while the clicking user believes
+/// they authorised their own account (CWE-384 at the relying party). Returns a
+/// redirect to `/error` on mismatch and leaves the challenge untouched, so the
+/// owner's browser can still decide it; `None` when the decision may proceed.
+/// An empty subject never passes.
+fn reject_unless_session_subject(subject: &str, session: &OptionalSession) -> Option<Response> {
     // InsufficientAal means a session exists we couldn't read here; treating
     // it as "no subject" keeps the mismatch check conservative.
     let session_subject = session.identity_id().unwrap_or_default();
@@ -757,16 +747,7 @@ async fn reject_unless_session_subject(
         session_subject = %session_subject,
         "rejecting consent: session subject mismatch"
     );
-    Some(
-        reject_to_client(
-            state,
-            challenge,
-            "access_denied",
-            "Consent subject does not match the signed-in identity.",
-            locale,
-        )
-        .await,
-    )
+    Some(Redirect::to("/error").into_response())
 }
 
 /// The grant predicate behind [`reject_unless_session_subject`]: an empty
@@ -787,10 +768,12 @@ fn intersect_requested_scope(granted: Vec<String>, requested: &[String]) -> Vec<
 
 /// Tear down the Kratos session and restart the OAuth flow with
 /// `prompt=login` so the user lands on `/login` to authenticate as someone
-/// else. Teardown is best-effort; the user may already be signed out.
+/// else. Only the challenge's subject may switch: the restart URL carries the
+/// owner's authorize parameters. Teardown is best-effort.
 async fn switch_account(
     state: &AppState,
     headers: &axum::http::HeaderMap,
+    session: &OptionalSession,
     actx: &AuditCtx,
     challenge: &str,
     login_hint: Option<&str>,
@@ -803,6 +786,9 @@ async fn switch_account(
         }
     };
     let subject = req.subject.clone().unwrap_or_default();
+    if let Some(rejected) = reject_unless_session_subject(&subject, session) {
+        return rejected;
+    }
     let client_id = req
         .client
         .as_ref()
@@ -1140,7 +1126,7 @@ async fn lookup_identity_email(state: &AppState, subject: &str) -> String {
 /// Scopes that apply to every audience: base and supported scopes,
 /// `[oauth].scope_descriptions` keys and `[oauth.cimd].client_scope_extra`.
 fn global_scopes(oauth: &crate::config::OAuthConfig) -> std::collections::HashSet<&str> {
-    super::cimd::CIMD_BASE_SCOPES
+    super::CIMD_BASE_SCOPES
         .iter()
         .chain(SUPPORTED_SCOPES.iter())
         .copied()
@@ -1273,7 +1259,7 @@ fn resolve_claim_active_org(
 
 /// How the consent was reached.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GrantPath {
+pub(crate) enum GrantPath {
     /// Hydra `skip` or the client's `skip_consent`: no human saw the audience.
     Auto,
     /// The user clicked Allow on the consent screen.
@@ -1281,7 +1267,7 @@ enum GrantPath {
 }
 
 impl GrantPath {
-    fn remember(self) -> bool {
+    pub(crate) fn remember(self) -> bool {
         match self {
             // Remembered, so Hydra can answer the next `prompt=none` itself.
             GrantPath::Auto => true,
@@ -1333,7 +1319,6 @@ async fn finalize_consent(state: &AppState, grant: ConsentGrant<'_>) -> Finalize
         login_session_id,
         consent_request_id,
     } = grant;
-    let remember = path.remember();
     let user_approved = path.user_approved();
     // Both policy arms are fetched lazily: skipped entirely when nothing was
     // requested, so a consent with no audience carrier costs no extra
@@ -1533,18 +1518,32 @@ async fn finalize_consent(state: &AppState, grant: ConsentGrant<'_>) -> Finalize
     let claim_keys = access_token_claim_keys(state, &grant_audience).await;
     let access_token_session = build_access_token_claims(identity.as_ref(), &claim_keys);
 
-    match state
+    #[cfg(feature = "oauth-ory")]
+    let accepted = state
         .oauth
         .accept_consent_request(
             challenge,
             grant_scope.clone(),
             grant_audience,
-            remember,
+            path.remember(),
             id_token_session,
             access_token_session,
         )
-        .await
-    {
+        .await;
+    // Native stores whether the grant was automatic; the trait has no place for it.
+    #[cfg(feature = "oauth-native")]
+    let accepted = state
+        .oauth
+        .accept_consent_on(
+            path,
+            challenge,
+            grant_scope.clone(),
+            grant_audience,
+            id_token_session,
+            access_token_session,
+        )
+        .await;
+    match accepted {
         Ok(redirect) => {
             match (login_session_id, consent_request_id) {
                 (Some(sid), Some(crid)) => {
@@ -1959,6 +1958,38 @@ mod tests {
         assert!(!subject_is_signed_in("id-1", ""));
     }
 
+    fn signed_in(identity_id: &str) -> crate::extractors::OptionalSession {
+        crate::extractors::OptionalSession::Ok {
+            session: Box::default(),
+            identity_id: identity_id.to_string(),
+            email: format!("{identity_id}@example.com"),
+        }
+    }
+
+    #[test]
+    fn session_gate_passes_the_consent_subject() {
+        assert!(super::reject_unless_session_subject("id-1", &signed_in("id-1")).is_none());
+    }
+
+    #[test]
+    fn session_gate_sends_every_other_browser_to_the_error_page() {
+        use crate::extractors::OptionalSession;
+        for session in [
+            signed_in("id-2"),
+            OptionalSession::None,
+            OptionalSession::InsufficientAal,
+        ] {
+            let resp = super::reject_unless_session_subject("id-1", &session)
+                .expect("a foreign browser is refused");
+            assert_eq!(resp.status(), axum::http::StatusCode::SEE_OTHER);
+            assert_eq!(
+                resp.headers().get(axum::http::header::LOCATION).unwrap(),
+                "/error"
+            );
+        }
+        assert!(super::reject_unless_session_subject("", &signed_in("")).is_some());
+    }
+
     #[test]
     fn downscope_registry_keeps_registry_scopes_for_their_audience_only() {
         use crate::resource_registry::{RegistryScopes, ScopeRow};
@@ -2088,6 +2119,17 @@ mod tests {
         assert_eq!(p(false, false, false, false, true, true), (false, false));
         assert_eq!(p(false, true, true, false, true, true), (false, false));
         assert_eq!(p(true, false, true, false, true, true), (false, false));
+    }
+
+    #[test]
+    fn a_client_that_cannot_remember_never_yields_remember() {
+        use super::{GrantPath, consent_policy};
+        assert!(GrantPath::Auto.remember());
+        for bits in 0u8..64 {
+            let b = |i: u8| bits & (1 << i) != 0;
+            let r = consent_policy(b(0), b(1), b(2), b(3), b(4), b(5));
+            assert!(r.can_remember || !r.auto_grant, "{bits:06b}");
+        }
     }
 
     #[test]

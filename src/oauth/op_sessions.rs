@@ -7,6 +7,8 @@ use diesel::prelude::*;
 
 use serde::Serialize;
 
+#[cfg(feature = "oauth-native")]
+use crate::backend::OAuthBackend;
 use crate::backend::{IdentityBackend, IdentityImpl, OAuthImpl};
 use crate::db::DbPool;
 use crate::db_interact;
@@ -223,6 +225,19 @@ async fn sids_for_subject(
     })?)
 }
 
+/// Clear the row's Kratos session. The logout and sweep lookups match on it and
+/// end rows with [`GrantRevocation::Keep`], which would drop a row that still
+/// owes a grant revoke; the subject-wide ends still find it.
+async fn detach_from_browser(db: &DbPool, sid: &str) -> anyhow::Result<()> {
+    let sid = sid.to_string();
+    db_interact!(db, |conn| {
+        diesel::update(hydra_login_sessions::table.filter(hydra_login_sessions::sid.eq(&sid)))
+            .set(hydra_login_sessions::kratos_session_id.eq(None::<String>))
+            .execute(conn)
+    })?;
+    Ok(())
+}
+
 async fn forget(db: &DbPool, sid: &str) -> anyhow::Result<()> {
     let sid = sid.to_string();
     db_interact!(db, |conn| {
@@ -234,39 +249,47 @@ async fn forget(db: &DbPool, sid: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Where collecting the grants of a `sid` failed.
+enum GrantLookupError {
+    /// Forseti's own rows.
+    Local(anyhow::Error),
+    /// The OAuth server's listing by login session, which Hydra can't answer
+    /// once that login session is deleted.
+    Listing(anyhow::Error),
+}
+
 /// The consent request ids granted under `sid`: the recorded ones, else the
-/// consents Hydra lists for the login session. Empty when neither lookup
-/// works.
-async fn grant_ids_for_sid(db: &DbPool, oauth: &OAuthImpl, sid: &str) -> Vec<String> {
-    match consent_grants_for_sid(db, sid).await {
-        Ok(recorded) if !recorded.is_empty() => return recorded,
-        Ok(_) => {}
-        Err(e) => {
-            tracing::warn!(error = %e, "hydra consent grant lookup failed");
-            return Vec::new();
-        }
+/// consents Hydra lists for the login session. Empty when the `sid` has no
+/// row.
+async fn grant_ids_for_sid(
+    db: &DbPool,
+    oauth: &OAuthImpl,
+    sid: &str,
+) -> Result<Vec<String>, GrantLookupError> {
+    use anyhow::Context as _;
+    let recorded = consent_grants_for_sid(db, sid)
+        .await
+        .context("hydra consent grant lookup failed")
+        .map_err(GrantLookupError::Local)?;
+    if !recorded.is_empty() {
+        return Ok(recorded);
     }
-    let subject = match subject_for_sid(db, sid).await {
-        Ok(Some(s)) => s,
-        Ok(None) => return Vec::new(),
-        Err(e) => {
-            tracing::warn!(error = %e, "hydra login session lookup failed");
-            return Vec::new();
-        }
+    let Some(subject) = subject_for_sid(db, sid)
+        .await
+        .context("hydra login session lookup failed")
+        .map_err(GrantLookupError::Local)?
+    else {
+        return Ok(Vec::new());
     };
-    match oauth
+    let sessions = oauth
         .list_consent_sessions_by_login_session(&subject, sid)
         .await
-    {
-        Ok(sessions) => sessions
-            .into_iter()
-            .filter_map(|s| s.consent_request_id)
-            .collect(),
-        Err(e) => {
-            tracing::warn!(error = %e, "hydra consent listing by login session failed");
-            Vec::new()
-        }
-    }
+        .context("hydra consent listing by login session failed")
+        .map_err(GrantLookupError::Listing)?;
+    Ok(sessions
+        .into_iter()
+        .filter_map(|s| s.consent_request_id)
+        .collect())
 }
 
 /// Revoke one `sid` at Hydra (firing back-channel logout) and drop its row.
@@ -274,7 +297,10 @@ async fn grant_ids_for_sid(db: &DbPool, oauth: &OAuthImpl, sid: &str) -> Vec<Str
 /// Hydra can still list them by login session, and revoked after the logout:
 /// Hydra picks the clients to notify from the login session's consents, so
 /// revoking those first would silence the back-channel. On failure the row
-/// stays so a later logout can retry it.
+/// stays so a later logout can retry it. When the OAuth server's listing
+/// fails nothing is revoked. When Forseti's own grant rows can't be read or a
+/// grant revoke fails, the login session is still revoked, the row is kept
+/// off the browser lookups (see [`detach_from_browser`]) and the call fails.
 pub(crate) async fn end_sid(
     db: &DbPool,
     oauth: &OAuthImpl,
@@ -282,17 +308,34 @@ pub(crate) async fn end_sid(
     grants: GrantRevocation,
 ) -> anyhow::Result<()> {
     let grant_ids = match grants {
-        GrantRevocation::Revoke => grant_ids_for_sid(db, oauth, sid).await,
-        GrantRevocation::Keep => Vec::new(),
+        GrantRevocation::Keep => Ok(Vec::new()),
+        GrantRevocation::Revoke => match grant_ids_for_sid(db, oauth, sid).await {
+            Ok(ids) => Ok(ids),
+            Err(GrantLookupError::Listing(e)) => return Err(e),
+            Err(GrantLookupError::Local(e)) => Err(e),
+        },
     };
     oauth.revoke_login_session_by_sid(sid).await?;
-    for consent_request_id in grant_ids {
-        if let Err(e) = oauth
-            .revoke_consent_sessions_by_request_id(&consent_request_id)
-            .await
-        {
-            tracing::warn!(error = %e, "hydra consent revoke by request id failed");
+    let mut failed = None;
+    match grant_ids {
+        Ok(ids) => {
+            for consent_request_id in ids {
+                if let Err(e) = oauth
+                    .revoke_consent_sessions_by_request_id(&consent_request_id)
+                    .await
+                {
+                    tracing::warn!(error = %e, "hydra consent revoke by request id failed");
+                    failed = Some(e);
+                }
+            }
         }
+        Err(e) => failed = Some(e),
+    }
+    if let Some(e) = failed {
+        if let Err(e) = detach_from_browser(db, sid).await {
+            tracing::warn!(error = %e, "hydra login session row update failed");
+        }
+        return Err(e);
     }
     if let Err(e) = forget(db, sid).await {
         tracing::warn!(error = %e, "hydra login session row delete failed");
@@ -310,7 +353,10 @@ async fn revoke_sids(
     let mut all = true;
     for sid in sids {
         if let Err(e) = end_sid(db, oauth, &sid, grants).await {
-            tracing::warn!(error = %e, "hydra login-session revoke by sid failed");
+            tracing::warn!(
+                error = format!("{e:#}"),
+                "hydra login-session revoke by sid failed"
+            );
             all = false;
         }
     }
@@ -319,19 +365,21 @@ async fn revoke_sids(
 
 /// End the app sessions one browser's Kratos session signed in to. The
 /// subject's sessions in other browsers stay, and so do its grants unless
-/// `grants` says otherwise.
+/// `grants` says otherwise. `false` when the lookup or any login-session or
+/// grant revoke failed.
 pub(crate) async fn end_op_sessions_for_browser(
     db: &DbPool,
     oauth: &OAuthImpl,
     subject: &str,
     kratos_session_id: &str,
     grants: GrantRevocation,
-) {
+) -> bool {
     match sids_for_browser(db, subject, kratos_session_id).await {
-        Ok(sids) => {
-            revoke_sids(db, oauth, sids, grants).await;
+        Ok(sids) => revoke_sids(db, oauth, sids, grants).await,
+        Err(e) => {
+            tracing::warn!(error = %e, "hydra login session lookup failed");
+            false
         }
-        Err(e) => tracing::warn!(error = %e, "hydra login session lookup failed"),
     }
 }
 
@@ -378,6 +426,54 @@ pub(crate) async fn end_op_sessions_for_subject(
     except_kratos_session: Option<&str>,
     grants: GrantRevocation,
 ) -> bool {
+    end_for_subject(db, oauth, subject, except_kratos_session, grants, true).await
+        == SubjectEnd::Done
+}
+
+/// `flash` with `flash-oauth-sessions-partial` appended when the session end
+/// reported failure (`ended` false), else `flash` unchanged.
+pub(crate) fn flash_with_partial_end(
+    locale: &crate::locale::LanguageIdentifier,
+    flash: String,
+    ended: bool,
+) -> String {
+    if ended {
+        return flash;
+    }
+    // Chinese sentences follow a full-width stop without a space.
+    let sep = if flash.ends_with('。') { "" } else { " " };
+    let partial = crate::i18n::lookup(locale, "flash-oauth-sessions-partial");
+    format!("{flash}{sep}{partial}")
+}
+
+/// How far ending a subject's sessions got.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SubjectEnd {
+    Done,
+    /// Every step but the closing subject-wide consent revoke succeeded.
+    ConsentRevokeFailed,
+    Failed,
+}
+
+/// [`end_op_sessions_for_subject`] ahead of an account deletion, grants kept.
+/// After a failed step the subject-wide revokes are skipped, so a retry still
+/// finds the consents whose clients it notifies.
+pub(crate) async fn end_op_sessions_before_deletion(
+    db: &DbPool,
+    oauth: &OAuthImpl,
+    subject: &str,
+) -> SubjectEnd {
+    end_for_subject(db, oauth, subject, None, GrantRevocation::Keep, false).await
+}
+
+async fn end_for_subject(
+    db: &DbPool,
+    oauth: &OAuthImpl,
+    subject: &str,
+    except_kratos_session: Option<&str>,
+    grants: GrantRevocation,
+    backstop_after_failure: bool,
+) -> SubjectEnd {
     let mut all = match sids_for_subject(db, subject, except_kratos_session).await {
         Ok(sids) => revoke_sids(db, oauth, sids, grants).await,
         Err(e) => {
@@ -385,18 +481,32 @@ pub(crate) async fn end_op_sessions_for_subject(
             false
         }
     };
-    if except_kratos_session.is_some() {
-        return all;
+    let outcome = |all: bool| {
+        if all {
+            SubjectEnd::Done
+        } else {
+            SubjectEnd::Failed
+        }
+    };
+    if except_kratos_session.is_some() || (!all && !backstop_after_failure) {
+        return outcome(all);
     }
     if let Err(e) = oauth.revoke_login_sessions_for_subject(subject).await {
         tracing::warn!(error = %e, "hydra login-session revoke failed");
+        if !backstop_after_failure {
+            return SubjectEnd::Failed;
+        }
         all = false;
     }
     if let Err(e) = oauth.revoke_consent_sessions_for_subject(subject).await {
         tracing::warn!(error = %e, "hydra consent-session revoke failed");
-        all = false;
+        return if all {
+            SubjectEnd::ConsentRevokeFailed
+        } else {
+            SubjectEnd::Failed
+        };
     }
-    all
+    outcome(all)
 }
 
 /// A recorded Hydra login session of a subject.
@@ -469,6 +579,29 @@ pub(crate) async fn forget_subject(db: &DbPool, subject: &str) -> anyhow::Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_complete_end_leaves_the_flash_alone() {
+        let en = crate::locale::default_locale();
+        assert_eq!(
+            flash_with_partial_end(&en, "Session revoked.".to_string(), true),
+            "Session revoked."
+        );
+    }
+
+    #[test]
+    fn a_partial_end_appends_the_translated_notice() {
+        let en = crate::locale::default_locale();
+        assert_eq!(
+            flash_with_partial_end(&en, "Session revoked.".to_string(), false),
+            "Session revoked. Some sessions could not be ended."
+        );
+        let zh: crate::locale::LanguageIdentifier = "zh".parse().unwrap();
+        assert_eq!(
+            flash_with_partial_end(&zh, "会话已撤销。".to_string(), false),
+            "会话已撤销。部分会话无法结束。"
+        );
+    }
 
     #[tokio::test]
     async fn record_is_idempotent_and_follows_the_latest_kratos_session() {
@@ -692,5 +825,260 @@ mod tests {
         );
         assert_eq!(consent_ids(&db, "sid-3").await, vec!["cr-3"]);
         forget_subject(&db, "user-a").await.unwrap();
+    }
+
+    #[cfg(feature = "oauth-ory")]
+    #[tokio::test]
+    async fn failed_revoke_at_hydra_fails_and_keeps_the_sid() {
+        let db = crate::orgs::db::test_pool().await;
+        let mut cfg = crate::config::AppConfig::test_fixture();
+        cfg.hydra.admin_url = "http://127.0.0.1:9".to_string();
+        cfg.hydra.public_url = "http://127.0.0.1:9".to_string();
+        let oauth = crate::backend::build_oauth(&cfg, &db, &[]);
+        record(&db, "sid-1", "user-a", "ks-1", 86400).await.unwrap();
+
+        // The listing error, not the login-session revoke's: the listing fails before the revoke.
+        let err = end_sid(&db, &oauth, "sid-1", GrantRevocation::Revoke)
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("consent listing"), "{err:#}");
+        assert!(
+            !end_op_sessions_for_browser(&db, &oauth, "user-a", "ks-1", GrantRevocation::Revoke)
+                .await
+        );
+        assert_eq!(
+            end_op_sessions_before_deletion(&db, &oauth, "user-a").await,
+            SubjectEnd::Failed
+        );
+        assert!(
+            !end_op_sessions_for_subject(
+                &db,
+                &oauth,
+                "user-a",
+                Some("ks-2"),
+                GrantRevocation::Revoke
+            )
+            .await
+        );
+        assert_eq!(
+            recorded_kratos_session(&db, "sid-1").await.unwrap(),
+            RecordedKratosSession::Some("ks-1".into())
+        );
+    }
+
+    #[cfg(feature = "oauth-native")]
+    async fn exec(db: &DbPool, sql: &'static str) {
+        let r: anyhow::Result<usize> = async {
+            Ok(db_interact!(db, |conn| {
+                diesel::sql_query(sql).execute(conn)
+            })?)
+        }
+        .await;
+        r.unwrap();
+    }
+
+    #[cfg(feature = "oauth-native")]
+    async fn native_session_exists(db: &DbPool, sid: &str) -> bool {
+        use crate::schema::oauth_login_sessions;
+        let sid = sid.to_string();
+        let r: anyhow::Result<i64> = async {
+            Ok(db_interact!(db, |conn| {
+                oauth_login_sessions::table
+                    .filter(oauth_login_sessions::sid.eq(&sid))
+                    .count()
+                    .get_result(conn)
+            })?)
+        }
+        .await;
+        r.unwrap() > 0
+    }
+
+    /// `user-a` signed in as `sid-1` from browser `ks-1`, recorded here and at the native server.
+    #[cfg(feature = "oauth-native")]
+    async fn native_fixture() -> (DbPool, std::sync::Arc<OAuthImpl>) {
+        use crate::schema::oauth_login_sessions;
+        let db = crate::orgs::db::test_pool().await;
+        let oauth = crate::backend::build_oauth(
+            &crate::config::AppConfig::test_fixture(),
+            &db,
+            &[0x42; 32],
+        );
+        record(&db, "sid-1", "user-a", "ks-1", 86400).await.unwrap();
+        let now = crate::db::now_rfc3339();
+        let inserted: anyhow::Result<usize> = async {
+            Ok(db_interact!(db, |conn| {
+                diesel::insert_into(oauth_login_sessions::table)
+                    .values((
+                        oauth_login_sessions::sid.eq("sid-1"),
+                        oauth_login_sessions::subject.eq("user-a"),
+                        oauth_login_sessions::auth_time.eq(&now),
+                        oauth_login_sessions::amr.eq("[]"),
+                        oauth_login_sessions::remember.eq(1),
+                        oauth_login_sessions::created_at.eq(&now),
+                        oauth_login_sessions::expires_at.eq("2999-01-01T00:00:00Z"),
+                    ))
+                    .execute(conn)
+            })?)
+        }
+        .await;
+        inserted.unwrap();
+        (db, oauth)
+    }
+
+    /// The subject-wide revoke that retries a kept row; the gone login session counts as revoked.
+    #[cfg(feature = "oauth-native")]
+    async fn assert_retry_clears(db: &DbPool, oauth: &OAuthImpl) {
+        assert!(
+            end_op_sessions_for_subject(db, oauth, "user-a", Some("ks-2"), GrantRevocation::Revoke)
+                .await
+        );
+        assert_eq!(
+            recorded_kratos_session(db, "sid-1").await.unwrap(),
+            RecordedKratosSession::Unknown
+        );
+    }
+
+    /// A row kept for its grants is off the logout and sweep lookups.
+    #[cfg(feature = "oauth-native")]
+    async fn assert_detached(db: &DbPool, oauth: &OAuthImpl) {
+        assert_eq!(
+            recorded_kratos_session(db, "sid-1").await.unwrap(),
+            RecordedKratosSession::None
+        );
+        assert!(
+            end_op_sessions_for_browser(db, oauth, "user-a", "ks-1", GrantRevocation::Keep).await
+        );
+        assert!(
+            sids_with_kratos_session_for_subject(db, "user-a")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            recorded_kratos_session(db, "sid-1").await.unwrap(),
+            RecordedKratosSession::None
+        );
+    }
+
+    #[cfg(feature = "oauth-native")]
+    #[tokio::test]
+    async fn failed_backend_listing_revokes_nothing_and_keeps_the_row_attached() {
+        let (db, oauth) = native_fixture().await;
+        exec(
+            &db,
+            "ALTER TABLE oauth_consent_grants RENAME TO oauth_consent_grants_gone",
+        )
+        .await;
+
+        assert!(
+            !end_op_sessions_for_browser(&db, &oauth, "user-a", "ks-1", GrantRevocation::Revoke)
+                .await
+        );
+        assert!(native_session_exists(&db, "sid-1").await);
+        assert_eq!(
+            recorded_kratos_session(&db, "sid-1").await.unwrap(),
+            RecordedKratosSession::Some("ks-1".into())
+        );
+
+        exec(
+            &db,
+            "ALTER TABLE oauth_consent_grants_gone RENAME TO oauth_consent_grants",
+        )
+        .await;
+        assert!(
+            end_op_sessions_for_browser(&db, &oauth, "user-a", "ks-1", GrantRevocation::Revoke)
+                .await
+        );
+        assert!(!native_session_exists(&db, "sid-1").await);
+        assert_eq!(
+            recorded_kratos_session(&db, "sid-1").await.unwrap(),
+            RecordedKratosSession::Unknown
+        );
+    }
+
+    #[cfg(feature = "oauth-native")]
+    #[tokio::test]
+    async fn failed_local_grant_lookup_still_logs_out_and_keeps_a_detached_row() {
+        let (db, oauth) = native_fixture().await;
+        exec(
+            &db,
+            "ALTER TABLE hydra_consent_grants RENAME TO hydra_consent_grants_gone",
+        )
+        .await;
+
+        assert!(
+            !end_op_sessions_for_browser(&db, &oauth, "user-a", "ks-1", GrantRevocation::Revoke)
+                .await
+        );
+        assert!(!native_session_exists(&db, "sid-1").await);
+        assert_detached(&db, &oauth).await;
+
+        exec(
+            &db,
+            "ALTER TABLE hydra_consent_grants_gone RENAME TO hydra_consent_grants",
+        )
+        .await;
+        assert_retry_clears(&db, &oauth).await;
+    }
+
+    #[cfg(feature = "oauth-native")]
+    #[tokio::test]
+    async fn failed_grant_revoke_keeps_a_detached_row_and_its_grant_ids() {
+        use crate::schema::oauth_consent_grants;
+        let (db, oauth) = native_fixture().await;
+        oauth
+            .create_client(crate::backend::oauth::OAuthClient {
+                client_id: Some("app-1".to_string()),
+                redirect_uris: Some(vec!["https://app.example/cb".to_string()]),
+                scope: Some("openid".to_string()),
+                token_endpoint_auth_method: Some("client_secret_basic".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let now = crate::db::now_rfc3339();
+        let inserted: anyhow::Result<usize> = async {
+            Ok(db_interact!(db, |conn| {
+                diesel::insert_into(oauth_consent_grants::table)
+                    .values((
+                        oauth_consent_grants::id.eq("cr-1"),
+                        oauth_consent_grants::client_id.eq("app-1"),
+                        oauth_consent_grants::subject.eq("user-a"),
+                        oauth_consent_grants::session_id.eq("sid-1"),
+                        oauth_consent_grants::scope.eq("[\"openid\"]"),
+                        oauth_consent_grants::audience.eq("[]"),
+                        oauth_consent_grants::id_token_claims.eq("{}"),
+                        oauth_consent_grants::access_token_claims.eq("{}"),
+                        oauth_consent_grants::remember.eq(1),
+                        oauth_consent_grants::skipped.eq(0),
+                        oauth_consent_grants::handled_at.eq(&now),
+                    ))
+                    .execute(conn)
+            })?)
+        }
+        .await;
+        inserted.unwrap();
+        record_consent(&db, "cr-1", "sid-1", "user-a", "app-1")
+            .await
+            .unwrap();
+        exec(
+            &db,
+            "CREATE TRIGGER block_grant_delete BEFORE DELETE ON oauth_consent_grants \
+             BEGIN SELECT RAISE(ABORT, 'blocked'); END",
+        )
+        .await;
+
+        assert!(
+            end_sid(&db, &oauth, "sid-1", GrantRevocation::Revoke)
+                .await
+                .is_err()
+        );
+        assert!(!native_session_exists(&db, "sid-1").await);
+        assert_eq!(consent_ids(&db, "sid-1").await, vec!["cr-1"]);
+        assert_detached(&db, &oauth).await;
+
+        exec(&db, "DROP TRIGGER block_grant_delete").await;
+        assert_retry_clears(&db, &oauth).await;
+        assert!(consent_ids(&db, "sid-1").await.is_empty());
     }
 }

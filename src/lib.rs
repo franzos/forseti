@@ -2,6 +2,12 @@
 compile_error!("features `identity-ory` and `identity-native` are mutually exclusive");
 #[cfg(not(any(feature = "identity-ory", feature = "identity-native")))]
 compile_error!("enable exactly one identity backend: `identity-ory` or `identity-native`");
+#[cfg(all(feature = "oauth-ory", feature = "oauth-native"))]
+compile_error!("features `oauth-ory` and `oauth-native` are mutually exclusive");
+#[cfg(not(any(feature = "oauth-ory", feature = "oauth-native")))]
+compile_error!(
+    "enable exactly one OAuth backend: `oauth-ory` or `oauth-native`; valid builds are `--features identity-ory,oauth-ory` (the default), `identity-native,oauth-ory`, `identity-ory,oauth-native` and `identity-native,oauth-native`"
+);
 
 mod accounts;
 mod admin;
@@ -26,6 +32,7 @@ mod flow_json;
 mod flow_view;
 mod format;
 mod handoff;
+#[cfg(feature = "oauth-ory")]
 mod hydra_front;
 mod i18n;
 mod identity;
@@ -38,9 +45,12 @@ mod mailer;
 mod metrics;
 mod oauth;
 mod oauth_client_metadata;
+#[cfg(feature = "oauth-native")]
+mod oauth_native;
 mod oidc_providers;
 mod oidc_rp;
 mod orgs;
+#[cfg(any(feature = "identity-ory", feature = "oauth-ory"))]
 mod ory;
 mod outbound;
 mod page_chrome;
@@ -52,6 +62,8 @@ mod render;
 mod resource_registry;
 mod saml;
 mod schema;
+#[cfg(any(feature = "identity-native", feature = "oauth-native"))]
+mod seal;
 mod session_view;
 mod settings;
 mod signed_cookie;
@@ -63,11 +75,13 @@ mod web;
 mod webhook;
 
 pub mod fuzz_api;
-#[cfg(feature = "identity-native")]
+#[cfg(any(feature = "identity-native", feature = "oauth-native"))]
 pub mod native_test_support;
 
 pub(crate) use web::{FlowQuery, render_error_boundary, safe_return_to};
 
+#[cfg(feature = "oauth-native")]
+use backend::OAuthBackend;
 use clap::Parser as _;
 use cli::{Cli, Cmd};
 
@@ -90,16 +104,24 @@ pub async fn run_cli() -> anyhow::Result<()> {
             // Deletes go through Kratos's admin API but cascade to the local POSIX tables, so the pool is needed.
             let db = bootstrap_db(&cfg).await?;
             let identity_backend = cli_identity(&cfg, &db);
-            let oauth_backend = backend::build_oauth(&cfg);
+            let oauth_backend = cli_oauth(&cfg, &db);
+            #[cfg(feature = "oauth-native")]
+            cli_load_signing_keys(&oauth_backend).await;
             let code =
                 identity::prune_unverified_cli(&cfg, &db, &identity_backend, &oauth_backend).await;
+            #[cfg(feature = "oauth-native")]
+            oauth_backend
+                .drain_deliveries(oauth_native::DELIVERY_DRAIN)
+                .await;
             std::process::exit(code);
         }
         Some(Cmd::DeleteIdentity { id, yes, force }) => {
             let cfg = config::AppConfig::load()?;
             let db = bootstrap_db(&cfg).await?;
             let identity_backend = cli_identity(&cfg, &db);
-            let oauth_backend = backend::build_oauth(&cfg);
+            let oauth_backend = cli_oauth(&cfg, &db);
+            #[cfg(feature = "oauth-native")]
+            cli_load_signing_keys(&oauth_backend).await;
             let code = identity::delete_identity_cli(
                 &cfg,
                 &db,
@@ -110,6 +132,10 @@ pub async fn run_cli() -> anyhow::Result<()> {
                 force,
             )
             .await;
+            #[cfg(feature = "oauth-native")]
+            oauth_backend
+                .drain_deliveries(oauth_native::DELIVERY_DRAIN)
+                .await;
             std::process::exit(code);
         }
         Some(Cmd::PosixReconcile) => {
@@ -129,7 +155,11 @@ pub async fn run_cli() -> anyhow::Result<()> {
         }
         Some(Cmd::PosixInitClient) => {
             let cfg = config::AppConfig::load()?;
-            let oauth_backend = backend::build_oauth(&cfg);
+            // Hydra needs no pool, so this verb works on a host without `forseti.db`.
+            #[cfg(feature = "oauth-ory")]
+            let oauth_backend = backend::HydraBackend::from_config(&cfg);
+            #[cfg(feature = "oauth-native")]
+            let oauth_backend = cli_oauth(&cfg, &bootstrap_db(&cfg).await?);
             match oauth::device::ensure_pam_client(&oauth_backend, &cfg.posix).await {
                 Ok(oauth::device::EnsureOutcome::AlreadyExists) => {
                     println!(
@@ -162,10 +192,31 @@ pub async fn run_cli() -> anyhow::Result<()> {
                 }
             }
         }
+        #[cfg(feature = "oauth-native")]
+        Some(Cmd::RotateOauthKey) => {
+            let cfg = config::AppConfig::load()?;
+            let oauth_backend = cli_oauth(&cfg, &bootstrap_db(&cfg).await?);
+            match oauth_backend.rotate_key().await {
+                Ok(rotated) => {
+                    println!(
+                        "rotate-oauth-key: retired {}, active {}",
+                        rotated.retired, rotated.active
+                    );
+                    println!(
+                        "  running instances sign with the new key after their next key reload, within an hour"
+                    );
+                    std::process::exit(0);
+                }
+                Err(e) => {
+                    eprintln!("rotate-oauth-key: {e:#}");
+                    std::process::exit(1);
+                }
+            }
+        }
         Some(Cmd::ReconcileClientMetadata) => {
             let cfg = config::AppConfig::load()?;
-            let oauth_backend = backend::build_oauth(&cfg);
             let db = bootstrap_db(&cfg).await?;
+            let oauth_backend = cli_oauth(&cfg, &db);
             match reconcile_client_metadata(&db, &oauth_backend).await {
                 Ok((stamped, seen)) => {
                     println!(
@@ -192,6 +243,32 @@ fn init_cli_tracing() {
         .with_writer(std::io::stderr)
         .with_env_filter(filter)
         .try_init();
+}
+
+#[cfg(feature = "oauth-ory")]
+fn cli_oauth(cfg: &config::AppConfig, db: &db::DbPool) -> std::sync::Arc<backend::OAuthImpl> {
+    backend::build_oauth(cfg, db, &[])
+}
+
+#[cfg(feature = "oauth-native")]
+fn cli_oauth(cfg: &config::AppConfig, db: &db::DbPool) -> std::sync::Arc<backend::OAuthImpl> {
+    let cookie_secret = app::native_cookie_secret(cfg);
+    if let Err(msg) = app::check_native_oauth(cfg) {
+        eprintln!("config error: {msg}");
+        std::process::exit(1);
+    }
+    backend::build_oauth(cfg, db, &cookie_secret)
+}
+
+/// The logout tokens of the sessions a verb ends are signed with these keys.
+#[cfg(feature = "oauth-native")]
+async fn cli_load_signing_keys(oauth: &backend::OAuthImpl) {
+    if let Err(e) = oauth.init().await {
+        tracing::warn!(
+            error = format!("{e:#}"),
+            "oauth signing keys did not load; back-channel logout will fail"
+        );
+    }
 }
 
 // Kratos ignores the cookie secret; resolving it here would add the server's boot checks to the CLI.

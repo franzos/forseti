@@ -15,36 +15,7 @@ pub use yamlutil::{parse_yaml, to_yaml, yaml_scalar};
 
 use cli::{Cli, ConfigCmd, PruneCmd, RotateCmd};
 
-/// Claims Forseti and Hydra put in ID tokens, advertised through Hydra's
-/// `webfinger.oidc_discovery.supported_claims`.
-pub(crate) const SUPPORTED_CLAIMS: [&str; 26] = [
-    "sub",
-    "iss",
-    "aud",
-    "exp",
-    "iat",
-    "auth_time",
-    "nonce",
-    "acr",
-    "amr",
-    "sid",
-    "email",
-    "email_verified",
-    "name",
-    "given_name",
-    "family_name",
-    "picture",
-    "website",
-    "preferred_username",
-    "locale",
-    "updated_at",
-    "org",
-    "orgs",
-    "groups",
-    "bio",
-    "pronouns",
-    "links",
-];
+pub(crate) use forseti_common::SUPPORTED_CLAIMS;
 
 /// Parse the command line and run it; returns the process exit code. Bare
 /// `forseti-config` drops into the interactive menu when stdin is a TTY;

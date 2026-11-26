@@ -17,3 +17,6 @@ referrer-dismiss-aria = 关闭来源提示
 
 # OAuth flow continuation (templates/oauth/continue.html)
 oauth-continue-heading = 正在跳转…
+
+# OAuth sessions left running after a session end (flash suffix)
+flash-oauth-sessions-partial = 部分会话无法结束。

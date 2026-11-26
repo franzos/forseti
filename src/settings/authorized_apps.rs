@@ -9,6 +9,8 @@ use axum::response::{IntoResponse, Response};
 
 use crate::audit::{self, AuditCtx, AuditEvent, action, target_kind};
 use crate::audit_metadata;
+#[cfg(feature = "oauth-native")]
+use crate::backend::OAuthBackend;
 use crate::csrf::CsrfForm;
 use crate::flash;
 use crate::format::humanise_timestamp;

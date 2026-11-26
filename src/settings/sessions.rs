@@ -110,7 +110,7 @@ pub(crate) async fn settings_sessions_revoke(
         Ok(false) => Err(anyhow::anyhow!("session is not one of the actor's")),
         Err(e) => Err(e),
     };
-    let (msg, ok) = match revoked {
+    let (mut msg, ok) = match revoked {
         Ok(()) => (
             crate::i18n::lookup(&locale, "flash-session-signed-out"),
             true,
@@ -124,7 +124,7 @@ pub(crate) async fn settings_sessions_revoke(
         }
     };
     if ok {
-        crate::oauth::op_sessions::end_op_sessions_for_browser(
+        let ended = crate::oauth::op_sessions::end_op_sessions_for_browser(
             &state.db,
             &state.oauth,
             &actor_id,
@@ -132,14 +132,19 @@ pub(crate) async fn settings_sessions_revoke(
             crate::oauth::op_sessions::GrantRevocation::Revoke,
         )
         .await;
-        let _ = audit::log(
-            &state.db,
-            AuditEvent::new(action::SESSION_REVOKED)
-                .actor_user(&actor_id, &actor_email)
-                .target(target_kind::SESSION, session_id.clone())
-                .with_ctx(&actx),
-        )
-        .await;
+        let mut event = AuditEvent::new(action::SESSION_REVOKED)
+            .actor_user(&actor_id, &actor_email)
+            .target(target_kind::SESSION, session_id.clone())
+            .with_ctx(&actx);
+        if !ended {
+            tracing::warn!(
+                session_id,
+                "session signed out, but its OAuth sessions and grants were not all ended"
+            );
+            event = event.merge_metadata(audit_metadata!("op_sessions_revoked" => false));
+        }
+        let _ = audit::log(&state.db, event).await;
+        msg = crate::oauth::op_sessions::flash_with_partial_end(&locale, msg, ended);
     }
     state.flash_redirect("/settings/sessions", &msg)
 }
@@ -162,7 +167,7 @@ pub(crate) async fn settings_sessions_revoke_others(
         .await
     {
         Ok(n) => {
-            crate::oauth::op_sessions::end_op_sessions_for_subject(
+            let ended = crate::oauth::op_sessions::end_op_sessions_for_subject(
                 &state.db,
                 &state.oauth,
                 &actor_id,
@@ -170,20 +175,28 @@ pub(crate) async fn settings_sessions_revoke_others(
                 crate::oauth::op_sessions::GrantRevocation::Revoke,
             )
             .await;
-            let _ = audit::log(
-                &state.db,
-                AuditEvent::new(action::SESSIONS_BULK_REVOKED)
-                    .actor_user(&actor_id, &actor_email)
-                    .with_ctx(&actx)
-                    .metadata(audit_metadata!("count" => n)),
-            )
-            .await;
+            let mut event = AuditEvent::new(action::SESSIONS_BULK_REVOKED)
+                .actor_user(&actor_id, &actor_email)
+                .with_ctx(&actx)
+                .metadata(audit_metadata!("count" => n));
+            if !ended {
+                tracing::warn!(
+                    identity_id = %actor_id,
+                    "other sessions signed out, but their OAuth sessions and grants were not all ended"
+                );
+                event = event.merge_metadata(audit_metadata!("op_sessions_revoked" => false));
+            }
+            let _ = audit::log(&state.db, event).await;
             let mut args: std::collections::HashMap<
                 std::borrow::Cow<'static, str>,
                 fluent_templates::fluent_bundle::FluentValue,
             > = std::collections::HashMap::new();
             args.insert(std::borrow::Cow::Borrowed("count"), (n as i64).into());
-            crate::i18n::lookup_args(&locale, "flash-sessions-signed-out-others", &args)
+            crate::oauth::op_sessions::flash_with_partial_end(
+                &locale,
+                crate::i18n::lookup_args(&locale, "flash-sessions-signed-out-others", &args),
+                ended,
+            )
         }
         Err(e) => {
             tracing::error!(error = ?e, "revoke_other_sessions failed");

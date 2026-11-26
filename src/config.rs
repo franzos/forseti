@@ -16,6 +16,7 @@ use serde::Deserialize;
 pub struct AppConfig {
     #[cfg(feature = "identity-ory")]
     pub kratos: KratosConfig,
+    #[cfg(feature = "oauth-ory")]
     pub hydra: HydraConfig,
     #[serde(rename = "self")]
     pub self_: SelfConfig,
@@ -351,6 +352,7 @@ pub struct KratosConfig {
     pub admin_url: String,
 }
 
+#[cfg(feature = "oauth-ory")]
 #[derive(Debug, Clone, Deserialize)]
 pub struct HydraConfig {
     pub public_url: String,
@@ -366,6 +368,7 @@ pub struct HydraConfig {
     pub issuer: Option<String>,
 }
 
+#[cfg(feature = "oauth-ory")]
 impl HydraConfig {
     /// The effective issuer: `[hydra].issuer` when set, else `public_url`.
     pub fn issuer_or_public(&self) -> &str {
@@ -1677,6 +1680,7 @@ impl AppConfig {
                 public_url: "http://kratos:4433".into(),
                 admin_url: "http://kratos:4434".into(),
             },
+            #[cfg(feature = "oauth-ory")]
             hydra: HydraConfig {
                 public_url: "http://hydra:4444".into(),
                 admin_url: "http://hydra:4445".into(),
@@ -1771,6 +1775,7 @@ mod tests {
 
     // --- HydraConfig issuer helpers ----------------------------------------
 
+    #[cfg(feature = "oauth-ory")]
     fn hydra_cfg(public_url: &str, issuer: Option<&str>) -> HydraConfig {
         HydraConfig {
             public_url: public_url.to_string(),
@@ -1780,6 +1785,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "oauth-ory")]
     #[test]
     fn issuer_or_public_prefers_issuer() {
         let cfg = hydra_cfg(
@@ -1792,24 +1798,28 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "oauth-ory")]
     #[test]
     fn issuer_or_public_falls_back_to_public_url() {
         let cfg = hydra_cfg("http://localhost:4444", None);
         assert_eq!(cfg.issuer_or_public(), "http://localhost:4444");
     }
 
+    #[cfg(feature = "oauth-ory")]
     #[test]
     fn issuer_path_extracts_path_segment() {
         let cfg = hydra_cfg("http://localhost:4444", Some("http://host:3000/hydra"));
         assert_eq!(cfg.issuer_path(), Some("hydra"));
     }
 
+    #[cfg(feature = "oauth-ory")]
     #[test]
     fn issuer_path_none_for_pathless_issuer() {
         let cfg = hydra_cfg("http://localhost:4444", Some("http://host:4444"));
         assert_eq!(cfg.issuer_path(), None);
     }
 
+    #[cfg(feature = "oauth-ory")]
     #[test]
     fn issuer_path_trims_trailing_slash() {
         let cfg = hydra_cfg("http://localhost:4444", Some("http://host:3000/hydra/"));

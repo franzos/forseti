@@ -10,7 +10,7 @@ pub mod pseudonymise;
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 
-use crate::backend::{IdentityBackend, IdentityImpl, OAuthImpl};
+use crate::backend::{IdentityBackend, IdentityImpl, OAuthBackend, OAuthImpl};
 use crate::config::AppConfig;
 use crate::db::DbPool;
 use crate::webhook::SigningKey;
@@ -98,7 +98,7 @@ pub async fn delete_identity_cli(
         oauth,
         signing_key: &signing_key,
         self_url: &cfg.self_.url,
-        issuer: cfg.hydra.issuer_or_public(),
+        issuer: oauth.issuer(),
     };
     let req = DeleteRequest {
         identity_id: id.to_string(),
@@ -165,7 +165,7 @@ pub async fn prune_unverified_cli(
         oauth,
         signing_key: &signing_key,
         self_url: &cfg.self_.url,
-        issuer: cfg.hydra.issuer_or_public(),
+        issuer: oauth.issuer(),
     };
     let ttl_days = cfg.identity.unverified_ttl_days;
     match prune_unverified(&env, ttl_days, None).await {
@@ -521,7 +521,7 @@ mod tests {
     }
 
     /// `only` reads the one identity and leaves a verified one alone, without listing or calling Hydra.
-    #[cfg(feature = "identity-native")]
+    #[cfg(all(feature = "identity-native", feature = "oauth-ory"))]
     #[tokio::test]
     async fn prune_only_checks_the_named_identity() {
         let db = crate::db::test_pool().await;
@@ -535,7 +535,7 @@ mod tests {
         let mut cfg = AppConfig::test_fixture();
         cfg.hydra.admin_url = "http://127.0.0.1:9".to_string();
         cfg.hydra.public_url = "http://127.0.0.1:9".to_string();
-        let oauth = crate::backend::build_oauth(&cfg);
+        let oauth = crate::backend::build_oauth(&cfg, &db, &[]);
         let key_path =
             std::env::temp_dir().join(format!("forseti-prune-{}.pem", uuid::Uuid::new_v4()));
         let signing_key =
@@ -562,12 +562,243 @@ mod tests {
         assert!(missing.is_err());
     }
 
-    #[cfg(feature = "identity-ory")]
+    #[cfg(all(feature = "identity-native", feature = "oauth-native"))]
+    async fn exec_sql(db: &DbPool, sql: &'static str) {
+        use diesel::RunQueryDsl;
+        let r: anyhow::Result<usize> = async {
+            Ok(crate::db_interact!(db, |c| {
+                diesel::sql_query(sql).execute(c)
+            })?)
+        }
+        .await;
+        r.unwrap();
+    }
+
+    /// One native identity with a remembered grant to a client that registered a deletion URL.
+    #[cfg(all(feature = "identity-native", feature = "oauth-native"))]
+    async fn identity_with_notified_app(db: &DbPool, oauth: &OAuthImpl) -> String {
+        use crate::schema::oauth_consent_grants;
+        use diesel::prelude::*;
+        let id = plant_native(db, 1, "2025-01-01T00:00:00Z", false)
+            .await
+            .unwrap()
+            .remove(0);
+        oauth
+            .create_client(crate::backend::oauth::OAuthClient {
+                client_id: Some("notified".to_string()),
+                client_name: Some("Notified".to_string()),
+                redirect_uris: Some(vec!["https://app.example/cb".to_string()]),
+                scope: Some("openid".to_string()),
+                token_endpoint_auth_method: Some("client_secret_basic".to_string()),
+                metadata: Some(serde_json::json!({"forseti": {
+                    "client_type": "web_app",
+                    "account_deletion_url": "https://app.example/deleted",
+                }})),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let (subject, now) = (id.clone(), crate::db::now_rfc3339());
+        let inserted: anyhow::Result<usize> = async {
+            Ok(crate::db_interact!(db, |c| {
+                diesel::insert_into(oauth_consent_grants::table)
+                    .values((
+                        oauth_consent_grants::id.eq("grant-1"),
+                        oauth_consent_grants::client_id.eq("notified"),
+                        oauth_consent_grants::subject.eq(&subject),
+                        oauth_consent_grants::session_id.eq("sid-1"),
+                        oauth_consent_grants::scope.eq("[\"openid\"]"),
+                        oauth_consent_grants::audience.eq("[]"),
+                        oauth_consent_grants::id_token_claims.eq("{}"),
+                        oauth_consent_grants::access_token_claims.eq("{}"),
+                        oauth_consent_grants::remember.eq(1),
+                        oauth_consent_grants::skipped.eq(0),
+                        oauth_consent_grants::handled_at.eq(&now),
+                    ))
+                    .execute(c)
+            })?)
+        }
+        .await;
+        inserted.unwrap();
+        id
+    }
+
+    #[cfg(all(feature = "identity-native", feature = "oauth-native"))]
+    async fn delete_with(
+        db: &DbPool,
+        identity: &IdentityImpl,
+        oauth: &OAuthImpl,
+        id: &str,
+        reason: DeleteReason,
+        force: bool,
+    ) -> Result<delete::DeletionReport, DeleteError> {
+        let key_path =
+            std::env::temp_dir().join(format!("forseti-delete-{}.pem", uuid::Uuid::new_v4()));
+        let signing_key =
+            crate::webhook::SigningKey::load_or_generate(&key_path).expect("signing key");
+        let env = DeleteEnv {
+            db,
+            identity,
+            oauth,
+            signing_key: &signing_key,
+            self_url: "http://localhost:3000",
+            issuer: "http://localhost:3000",
+        };
+        let req = DeleteRequest {
+            identity_id: id.to_string(),
+            reason,
+            actor: DeleteActor::System {
+                source: "test".to_string(),
+            },
+            force,
+            ctx: None,
+            metadata: crate::audit::SafeMetadata::empty(),
+        };
+        let result = delete_identity(&env, req).await;
+        let _ = std::fs::remove_file(&key_path);
+        result
+    }
+
+    /// A failed OP-session end stops before the identity delete and leaves the consents, so the
+    /// retry still notifies their clients.
+    #[cfg(all(feature = "identity-native", feature = "oauth-native"))]
+    #[tokio::test]
+    async fn delete_aborts_before_the_identity_when_op_sessions_fail() {
+        let db = crate::db::test_pool().await;
+        let backend = IdentityImpl::for_test(&db);
+        let oauth = crate::backend::build_oauth(&AppConfig::test_fixture(), &db, &[0x42; 32]);
+        let id = identity_with_notified_app(&db, &oauth).await;
+        exec_sql(
+            &db,
+            "ALTER TABLE hydra_login_sessions RENAME TO hydra_login_sessions_gone",
+        )
+        .await;
+
+        let result = delete_with(&db, &backend, &oauth, &id, DeleteReason::Prune, false).await;
+        assert!(
+            matches!(result, Err(DeleteError::OpSessions)),
+            "{:?}",
+            result.map(|r| r.identity_id)
+        );
+        assert!(
+            backend
+                .admin_get_identity_optional(&id)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        let targets = delete::notified_clients(&oauth, &id).await.unwrap();
+        assert_eq!(targets.len(), 1);
+
+        exec_sql(
+            &db,
+            "ALTER TABLE hydra_login_sessions_gone RENAME TO hydra_login_sessions",
+        )
+        .await;
+        let report = delete_with(&db, &backend, &oauth, &id, DeleteReason::Prune, false)
+            .await
+            .expect("retry deletes");
+        assert_eq!(report.removed.webhook_targets, 1);
+        assert!(
+            backend
+                .admin_get_identity_optional(&id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// The `op_sessions_revoked` flag of the one `action` audit row targeting `id`.
+    #[cfg(all(feature = "identity-native", feature = "oauth-native"))]
+    async fn audited_op_sessions_flag(
+        db: &DbPool,
+        id: &str,
+        action: &'static str,
+    ) -> serde_json::Value {
+        use crate::schema::audit_events;
+        use diesel::prelude::*;
+        let target = id.to_string();
+        let rows: anyhow::Result<Vec<String>> = async {
+            Ok(crate::db_interact!(db, |c| {
+                audit_events::table
+                    .filter(audit_events::target_id.eq(&target))
+                    .filter(audit_events::action.eq(action))
+                    .select(audit_events::metadata)
+                    .load::<String>(c)
+            })?)
+        }
+        .await;
+        let rows = rows.unwrap();
+        assert_eq!(rows.len(), 1);
+        let meta: serde_json::Value = serde_json::from_str(&rows[0]).unwrap();
+        meta["op_sessions_revoked"].clone()
+    }
+
+    /// Only the closing consent revoke failing does not abort: the consents may already be gone,
+    /// so the enqueued targets go out and the audit row records it.
+    #[cfg(all(feature = "identity-native", feature = "oauth-native"))]
+    #[tokio::test]
+    async fn delete_proceeds_past_a_failed_closing_consent_revoke() {
+        let db = crate::db::test_pool().await;
+        let backend = IdentityImpl::for_test(&db);
+        let oauth = crate::backend::build_oauth(&AppConfig::test_fixture(), &db, &[0x42; 32]);
+        let id = identity_with_notified_app(&db, &oauth).await;
+        exec_sql(
+            &db,
+            "CREATE TRIGGER block_grant_delete BEFORE DELETE ON oauth_consent_grants \
+             BEGIN SELECT RAISE(ABORT, 'blocked'); END",
+        )
+        .await;
+
+        let report = delete_with(&db, &backend, &oauth, &id, DeleteReason::Prune, false)
+            .await
+            .expect("delete proceeds");
+        assert_eq!(report.removed.webhook_targets, 1);
+        assert!(
+            backend
+                .admin_get_identity_optional(&id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            audited_op_sessions_flag(&db, &id, crate::audit::action::IDENTITY_PRUNED).await,
+            serde_json::json!(false)
+        );
+    }
+
+    /// `delete-identity --force` proceeds past a failed OP-session end and says so in the audit row.
+    #[cfg(all(feature = "identity-native", feature = "oauth-native"))]
+    #[tokio::test]
+    async fn forced_cli_delete_proceeds_past_a_failed_op_session_end() {
+        let db = crate::db::test_pool().await;
+        let backend = IdentityImpl::for_test(&db);
+        let oauth = crate::backend::build_oauth(&AppConfig::test_fixture(), &db, &[0x42; 32]);
+        let id = identity_with_notified_app(&db, &oauth).await;
+        exec_sql(
+            &db,
+            "ALTER TABLE hydra_login_sessions RENAME TO hydra_login_sessions_gone",
+        )
+        .await;
+
+        let unforced = delete_with(&db, &backend, &oauth, &id, DeleteReason::Cli, false).await;
+        assert!(matches!(unforced, Err(DeleteError::OpSessions)));
+        let report = delete_with(&db, &backend, &oauth, &id, DeleteReason::Cli, true)
+            .await
+            .expect("forced delete");
+        assert_eq!(report.removed.webhook_targets, 1);
+        assert_eq!(
+            audited_op_sessions_flag(&db, &id, crate::audit::action::ADMIN_IDENTITY_DELETED).await,
+            serde_json::json!(false)
+        );
+    }
+
+    #[cfg(all(feature = "identity-ory", feature = "oauth-ory"))]
     type Leftovers = (i64, Vec<(String, Option<String>)>);
 
     /// Profile rows left for `id` and the `(actor_kind, actor_email)` of its
     /// prune audit rows.
-    #[cfg(feature = "identity-ory")]
+    #[cfg(all(feature = "identity-ory", feature = "oauth-ory"))]
     async fn leftovers(db: &DbPool, id: &str) -> anyhow::Result<Leftovers> {
         use crate::schema::{audit_events, member_profiles};
         use diesel::prelude::*;
@@ -589,7 +820,7 @@ mod tests {
 
     /// Runs against the playground's Kratos and Hydra admin APIs with a
     /// private sqlite pool; skipped when they aren't reachable.
-    #[cfg(feature = "identity-ory")]
+    #[cfg(all(feature = "identity-ory", feature = "oauth-ory"))]
     #[tokio::test]
     async fn prune_deletes_one_unverified_identity_and_its_rows() {
         use uuid::Uuid;
@@ -614,8 +845,8 @@ mod tests {
                 return;
             }
         }
-        let (identity, oauth) =
-            crate::ory::test_backends(&kratos_admin, &kratos_admin, &hydra_admin, &hydra_admin);
+        let identity = crate::ory::test_kratos_backend(&kratos_admin, &kratos_admin);
+        let oauth = crate::ory::test_hydra_backend(&hydra_admin, &hydra_admin);
         let db = crate::orgs::db::test_pool().await;
         let key_path = std::env::temp_dir().join(format!("forseti-prune-{}.pem", Uuid::new_v4()));
         let signing_key =

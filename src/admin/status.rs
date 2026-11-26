@@ -8,6 +8,8 @@ use axum::{extract::State, response::Response};
 
 use crate::admin::{AdminSection, FORSETI_VERSION};
 use crate::backend::IdentityBackend;
+#[cfg(feature = "oauth-native")]
+use crate::backend::OAuthBackend;
 use crate::backend::identity::CourierStatus;
 use crate::config::{DatabaseBackend, DatabaseConfig};
 use crate::extractors::RequireAdmin;
@@ -120,11 +122,21 @@ pub async fn show(State(state): State<AppState>, admin: RequireAdmin) -> Respons
         ["Identity (built in, alive)", "Identity (built in, ready)"],
         "database",
     );
+    #[cfg(feature = "oauth-ory")]
+    let (oauth_names, oauth_detail) = (
+        ["Hydra (alive)", "Hydra (ready)"],
+        state.cfg.hydra.admin_url.as_str(),
+    );
+    #[cfg(feature = "oauth-native")]
+    let (oauth_names, oauth_detail) = (
+        ["OAuth (built in, alive)", "OAuth (built in, ready)"],
+        "database",
+    );
     let services = vec![
         probe(identity_names[0], identity_detail, kratos_alive),
         probe(identity_names[1], identity_detail, kratos_ready),
-        probe("Hydra (alive)", &state.cfg.hydra.admin_url, hydra_alive),
-        probe("Hydra (ready)", &state.cfg.hydra.admin_url, hydra_ready),
+        probe(oauth_names[0], oauth_detail, hydra_alive),
+        probe(oauth_names[1], oauth_detail, hydra_ready),
     ];
 
     let courier_pending = count_courier(courier_queued);

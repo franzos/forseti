@@ -823,33 +823,6 @@ fn consent_sessions_from_wire(sessions: Vec<Value>) -> Result<Vec<ConsentSession
         .map_err(|e| anyhow::anyhow!("hydra list_consent_sessions decode: {e}"))
 }
 
-/// Parse `Link: <…?page_token=XYZ&…>; rel="next"` and return the
-/// `page_token` value. Hydra emits the standard RFC 5988 shape; we
-/// only care about the `next` relation.
-pub(crate) fn next_link(headers: &reqwest::header::HeaderMap) -> Option<String> {
-    let raw = headers.get("link").and_then(|v| v.to_str().ok())?;
-    for part in raw.split(',') {
-        let part = part.trim();
-        // Skip malformed parts; aborting with None would read as end-of-pagination.
-        let Some((url_part, params)) = part.split_once(';') else {
-            continue;
-        };
-        if !params.contains("rel=\"next\"") && !params.contains("rel=next") {
-            continue;
-        }
-        let url_str = url_part
-            .trim()
-            .trim_start_matches('<')
-            .trim_end_matches('>');
-        let url = url::Url::parse(url_str).ok()?;
-        return url
-            .query_pairs()
-            .find(|(k, _)| k == "page_token")
-            .map(|(_, v)| v.into_owned());
-    }
-    None
-}
-
 /// Generate a random client secret. 40 alphanumerics is about 238 bits of entropy, well above the OAuth2 spec's recommendation.
 fn generate_client_secret() -> String {
     use rand::RngExt;

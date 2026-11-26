@@ -17,7 +17,7 @@ async fn registered_bare_hostname_audience_survives_consent() {
     let audience = "stackpit-web";
     let user = register_test_user("oauth-aud").await;
     let (client_id, client_secret, redirect_uri) =
-        hydra_create_test_client_with_audience(&["openid", "offline"], &[audience]).await;
+        oauth_create_test_client_with_audience(&["openid", "offline"], &[audience]).await;
     // What the admin-UI create path writes: source = 'admin', verified.
     mark_client_verified(&client_id);
 
@@ -40,7 +40,7 @@ async fn registered_bare_hostname_audience_survives_consent() {
 
     let tokens = exchange_code_for_tokens(&client_id, &client_secret, &redirect_uri, &code).await;
     let access_token = tokens["access_token"].as_str().expect("access_token");
-    let introspected = hydra_introspect(access_token).await;
+    let introspected = oauth_introspect(access_token).await;
     assert_eq!(
         introspected["active"],
         serde_json::json!(true),
@@ -59,12 +59,12 @@ async fn registered_bare_hostname_audience_survives_consent() {
         "a bare-hostname audience registered on the client must survive consent; got {introspected}"
     );
     assert_eq!(
-        hydra_client_audience(&client_id).await,
+        oauth_client_audience(&client_id).await,
         vec![audience.to_string()],
         "granting an already-registered audience must not rewrite the client record"
     );
 
-    hydra_delete_client(&client_id).await;
+    oauth_delete_client(&client_id).await;
     user.cleanup().await;
 }
 
@@ -77,16 +77,17 @@ async fn auth_code_flow_with_reduced_scope_drops_email_from_token() {
 
     // 2. Register a Hydra client that *requests* openid + offline + email.
     let (client_id, client_secret, redirect_uri) =
-        hydra_create_test_client(&["openid", "offline", "email", "profile"]).await;
+        oauth_create_test_client(&["openid", "offline", "email", "profile"]).await;
 
     // 3. Build the auth URL and follow the chain.
     let state = "explore-test-state-1234";
     let auth_url = format!(
-        "{HYDRA_PUBLIC}/oauth2/auth?client_id={client_id}\
+        "{}/oauth2/auth?client_id={client_id}\
          &response_type=code\
          &scope=openid+offline+email+profile\
          &redirect_uri={redirect_uri}\
-         &state={state}"
+         &state={state}",
+        oauth_public()
     );
 
     // The portal's `/oauth/consent` form is the place where the user picks
@@ -156,7 +157,7 @@ async fn auth_code_flow_with_reduced_scope_drops_email_from_token() {
     // 6. Exchange the code at Hydra's token endpoint.
     let token_client = browser_client();
     let res = token_client
-        .post(format!("{HYDRA_PUBLIC}/oauth2/token"))
+        .post(format!("{}/oauth2/token", oauth_public()))
         .form(&[
             ("grant_type", "authorization_code"),
             ("client_id", client_id.as_str()),
@@ -185,14 +186,19 @@ async fn auth_code_flow_with_reduced_scope_drops_email_from_token() {
     );
 
     // 7. Introspect to confirm.
-    let res = token_client
-        .post(format!("{HYDRA_ADMIN}/admin/oauth2/introspect"))
-        .form(&[("token", access_token.as_str())])
-        .send()
-        .await
-        .expect("introspect");
-    assert!(res.status().is_success(), "introspect: {}", res.status());
-    let v: serde_json::Value = res.json().await.expect("introspect body");
+    #[cfg(feature = "oauth-ory")]
+    let v: serde_json::Value = {
+        let res = token_client
+            .post(format!("{HYDRA_ADMIN}/admin/oauth2/introspect"))
+            .form(&[("token", access_token.as_str())])
+            .send()
+            .await
+            .expect("introspect");
+        assert!(res.status().is_success(), "introspect: {}", res.status());
+        res.json().await.expect("introspect body")
+    };
+    #[cfg(feature = "oauth-native")]
+    let v = oauth_introspect(&access_token).await;
     let introspected = v["scope"].as_str().unwrap_or_default();
     assert!(
         v["active"].as_bool().unwrap_or(false),
@@ -203,7 +209,7 @@ async fn auth_code_flow_with_reduced_scope_drops_email_from_token() {
         "introspect: scope should NOT contain `email`; got `{introspected}`"
     );
 
-    hydra_delete_client(&client_id).await;
+    oauth_delete_client(&client_id).await;
     user.cleanup().await;
 }
 
@@ -300,7 +306,7 @@ async fn groups_only_emits_active_org_slugs() {
 
     let user = register_test_user("grp-active").await;
     let (client_id, client_secret, redirect_uri) =
-        hydra_create_test_client(&["openid", "groups"]).await;
+        oauth_create_test_client(&["openid", "groups"]).await;
     // Only an operator-written client may pin an org other than its own.
     set_client_metadata_owner(&client_id, "admin", "default");
 
@@ -341,7 +347,7 @@ async fn groups_only_emits_active_org_slugs() {
     delete_team(&team_id);
     delete_org_membership(&org_id, &user.identity_id);
     delete_organization(&org_id);
-    hydra_delete_client(&client_id).await;
+    oauth_delete_client(&client_id).await;
     delete_client_metadata(&client_id);
     user.cleanup().await;
 }
@@ -355,7 +361,7 @@ async fn an_org_client_sees_only_its_own_org() {
 
     let user = register_test_user("oauth-org-scope").await;
     let (client_id, client_secret, redirect_uri) =
-        hydra_create_test_client(&["openid", "orgs", "groups"]).await;
+        oauth_create_test_client(&["openid", "orgs", "groups"]).await;
 
     seed_org_membership("default", &user.identity_id, "member");
     delete_team_by_slug("default", "c2-secret");
@@ -407,7 +413,7 @@ async fn an_org_client_sees_only_its_own_org() {
     delete_team(&default_team);
     delete_org_membership(&org_b, &user.identity_id);
     delete_organization(&org_b);
-    hydra_delete_client(&client_id).await;
+    oauth_delete_client(&client_id).await;
     delete_client_metadata(&client_id);
     user.cleanup().await;
 }
@@ -418,7 +424,7 @@ async fn groups_excludes_other_orgs() {
 
     let user = register_test_user("grp-exclude").await;
     let (client_id, client_secret, redirect_uri) =
-        hydra_create_test_client(&["openid", "groups"]).await;
+        oauth_create_test_client(&["openid", "groups"]).await;
 
     // Pin a resolvable default-org membership at consent time. The auto-join
     // middleware seeds it lazily on authenticated portal requests; this makes
@@ -468,7 +474,7 @@ async fn groups_excludes_other_orgs() {
     delete_team(&team_id);
     delete_org_membership(&org2_id, &user.identity_id);
     delete_organization(&org2_id);
-    hydra_delete_client(&client_id).await;
+    oauth_delete_client(&client_id).await;
     user.cleanup().await;
 }
 
@@ -478,9 +484,9 @@ async fn groups_present_on_skip_consent() {
 
     let user = register_test_user("grp-skip").await;
     let (client_id, client_secret, redirect_uri) =
-        hydra_create_test_client(&["openid", "groups"]).await;
+        oauth_create_test_client(&["openid", "groups"]).await;
     // A client Forseti has no trust row for is not auto-grant eligible, so
-    // stamp it the way the admin create path does. `hydra_create_test_client`
+    // stamp it the way the admin create path does. `oauth_create_test_client`
     // talks to Hydra directly and writes no Forseti row.
     mark_client_verified(&client_id);
 
@@ -553,7 +559,7 @@ async fn groups_present_on_skip_consent() {
     );
 
     delete_team(&team_id);
-    hydra_delete_client(&client_id).await;
+    oauth_delete_client(&client_id).await;
     user.cleanup().await;
 }
 
@@ -563,7 +569,7 @@ async fn groups_empty_array_when_no_teams() {
 
     let user = register_test_user("grp-empty").await;
     let (client_id, client_secret, redirect_uri) =
-        hydra_create_test_client(&["openid", "groups"]).await;
+        oauth_create_test_client(&["openid", "groups"]).await;
 
     // User is in the default org but has no team memberships.
     let auth_url = oauth_auth_url(
@@ -592,7 +598,7 @@ async fn groups_empty_array_when_no_teams() {
         "groups must be an empty array when user has no team memberships"
     );
 
-    hydra_delete_client(&client_id).await;
+    oauth_delete_client(&client_id).await;
     user.cleanup().await;
 }
 
@@ -610,7 +616,7 @@ async fn consent_grant_hands_off_with_a_document_not_a_redirect() {
 
     let user = register_test_user("csp-handoff").await;
     let (client_id, _client_secret, redirect_uri) =
-        hydra_create_test_client(&["openid", "email"]).await;
+        oauth_create_test_client(&["openid", "email"]).await;
     let auth_url = oauth_auth_url(&client_id, &redirect_uri, "openid email", "");
 
     // Drive inline rather than via `drive_to_consent`: the CSP assertion needs
@@ -679,7 +685,7 @@ async fn consent_grant_hands_off_with_a_document_not_a_redirect() {
         "handoff should continue at Hydra's authorize endpoint; got {target}"
     );
 
-    hydra_delete_client(&client_id).await;
+    oauth_delete_client(&client_id).await;
     user.cleanup().await;
 }
 
@@ -724,7 +730,7 @@ async fn prompt_login_forces_reauthentication() {
     assert!(portal_reachable().await);
 
     let user = register_test_user("oauth-prompt-login").await;
-    let (client_id, _secret, redirect_uri) = hydra_create_test_client(&["openid"]).await;
+    let (client_id, _secret, redirect_uri) = oauth_create_test_client(&["openid"]).await;
     mark_client_verified(&client_id);
 
     // Control: without `prompt`, a live session SSOs straight through to the
@@ -748,7 +754,7 @@ async fn prompt_login_forces_reauthentication() {
         "prompt=login must not reach consent without re-authentication; landed on {landed}"
     );
 
-    hydra_delete_client(&client_id).await;
+    oauth_delete_client(&client_id).await;
     delete_client_metadata(&client_id);
     user.cleanup().await;
 }
@@ -761,7 +767,7 @@ async fn max_age_bounces_a_session_older_than_the_window() {
     assert!(portal_reachable().await);
 
     let user = register_test_user("oauth-max-age").await;
-    let (client_id, _secret, redirect_uri) = hydra_create_test_client(&["openid"]).await;
+    let (client_id, _secret, redirect_uri) = oauth_create_test_client(&["openid"]).await;
     mark_client_verified(&client_id);
 
     // A generous window: the session was authenticated seconds ago.
@@ -780,7 +786,7 @@ async fn max_age_bounces_a_session_older_than_the_window() {
         "max_age=0 must bounce to a login screen; landed on {landed}"
     );
 
-    hydra_delete_client(&client_id).await;
+    oauth_delete_client(&client_id).await;
     delete_client_metadata(&client_id);
     user.cleanup().await;
 }
@@ -796,7 +802,7 @@ async fn prompt_login_completes_after_the_user_reauthenticates() {
     // Re-authenticating means a fresh password login, which Kratos's
     // `require_verified_address` hook gates.
     mark_identity_verified(&user.identity_id).await;
-    let (client_id, _secret, redirect_uri) = hydra_create_test_client(&["openid"]).await;
+    let (client_id, _secret, redirect_uri) = oauth_create_test_client(&["openid"]).await;
     mark_client_verified(&client_id);
 
     let prompted = oauth_auth_url(&client_id, &redirect_uri, "openid", "&prompt=login");
@@ -835,7 +841,7 @@ async fn prompt_login_completes_after_the_user_reauthenticates() {
          must continue to consent instead of bouncing again; landed on {landed}"
     );
 
-    hydra_delete_client(&client_id).await;
+    oauth_delete_client(&client_id).await;
     delete_client_metadata(&client_id);
     user.cleanup().await;
 }
@@ -856,22 +862,8 @@ async fn fresh_login_challenge(client: &reqwest::Client, auth_url: &str) -> Stri
     panic!("no login_challenge in the authorize chain");
 }
 
-async fn hydra_login_request_skip(challenge: &str) -> bool {
-    let v: serde_json::Value = reqwest::Client::new()
-        .get(format!(
-            "{HYDRA_ADMIN}/admin/oauth2/auth/requests/login?login_challenge={challenge}"
-        ))
-        .send()
-        .await
-        .expect("get login request")
-        .json()
-        .await
-        .expect("login request body");
-    v["skip"].as_bool().expect("skip field")
-}
-
 async fn access_token_active(token: &str) -> bool {
-    hydra_introspect(token).await["active"]
+    oauth_introspect(token).await["active"]
         .as_bool()
         .unwrap_or(false)
 }
@@ -886,7 +878,7 @@ async fn logout_ends_the_hydra_login_and_consent_sessions() {
     assert!(portal_reachable().await);
 
     let user = register_test_user("oauth-op-logout").await;
-    let (client_id, client_secret, redirect_uri) = hydra_create_test_client(&["openid"]).await;
+    let (client_id, client_secret, redirect_uri) = oauth_create_test_client(&["openid"]).await;
     let auth_url = oauth_auth_url(&client_id, &redirect_uri, "openid", "");
 
     let (consent_challenge, csrf, _) = drive_to_consent(&user.client, &auth_url).await;
@@ -906,7 +898,7 @@ async fn logout_ends_the_hydra_login_and_consent_sessions() {
     // Control: Hydra remembers the login, so the next authorize is a skip.
     let challenge = fresh_login_challenge(&user.manual_client, &auth_url).await;
     assert!(
-        hydra_login_request_skip(&challenge).await,
+        oauth_login_request_skip(&challenge).await,
         "precondition: a remembered Hydra login session yields skip=true"
     );
 
@@ -931,11 +923,11 @@ async fn logout_ends_the_hydra_login_and_consent_sessions() {
 
     let challenge = fresh_login_challenge(&user.manual_client, &auth_url).await;
     assert!(
-        !hydra_login_request_skip(&challenge).await,
+        !oauth_login_request_skip(&challenge).await,
         "after /logout Hydra must not skip-login the old subject"
     );
 
-    hydra_delete_client(&client_id).await;
+    oauth_delete_client(&client_id).await;
     delete_client_metadata(&client_id);
     user.cleanup().await;
 }
@@ -952,7 +944,7 @@ async fn only_an_operator_client_wears_the_admin_badge() {
     assert!(portal_reachable().await);
 
     let user = register_test_user("consent-badge").await;
-    let (client_id, _secret, redirect_uri) = hydra_create_test_client(&["openid"]).await;
+    let (client_id, _secret, redirect_uri) = oauth_create_test_client(&["openid"]).await;
 
     // 1. No metadata row at all: Forseti must not vouch for it.
     let auth_url = oauth_auth_url(&client_id, &redirect_uri, "openid", "");
@@ -982,7 +974,7 @@ async fn only_an_operator_client_wears_the_admin_badge() {
         "an operator-created client must still wear the admin badge"
     );
 
-    hydra_delete_client(&client_id).await;
+    oauth_delete_client(&client_id).await;
     delete_client_metadata(&client_id);
     user.cleanup().await;
 }
@@ -994,8 +986,8 @@ async fn an_org_vouched_client_does_not_auto_grant() {
     assert!(portal_reachable().await);
 
     let user = register_test_user("consent-autogrant").await;
-    let (client_id, _secret, redirect_uri) = hydra_create_test_client(&["openid"]).await;
-    hydra_set_client_skip_consent(&client_id, true).await;
+    let (client_id, _secret, redirect_uri) = oauth_create_test_client(&["openid"]).await;
+    oauth_set_client_skip_consent(&client_id, true).await;
 
     mark_client_org_verified(&client_id);
     let auth_url = oauth_auth_url(&client_id, &redirect_uri, "openid", "");
@@ -1011,7 +1003,7 @@ async fn an_org_vouched_client_does_not_auto_grant() {
         "an operator-reviewed skip_consent client should auto-grant"
     );
 
-    hydra_delete_client(&client_id).await;
+    oauth_delete_client(&client_id).await;
     delete_client_metadata(&client_id);
     user.cleanup().await;
 }
@@ -1037,10 +1029,10 @@ async fn an_auto_granted_registry_resource_is_not_healed_onto_the_client() {
     set_registry_resource_enabled(resource, true);
 
     let user = register_test_user("consent-aud-heal").await;
-    let (client_id, _secret, redirect_uri) = hydra_create_test_client(&["openid", "offline"]).await;
+    let (client_id, _secret, redirect_uri) = oauth_create_test_client(&["openid", "offline"]).await;
     mark_client_verified(&client_id);
     assert!(
-        hydra_client_audience(&client_id).await.is_empty(),
+        oauth_client_audience(&client_id).await.is_empty(),
         "fixture precondition: the client starts with no registered audience"
     );
 
@@ -1059,18 +1051,18 @@ async fn an_auto_granted_registry_resource_is_not_healed_onto_the_client() {
     );
 
     // Now the silent path: skip_consent means no human sees that page at all.
-    hydra_set_client_skip_consent(&client_id, true).await;
+    oauth_set_client_skip_consent(&client_id, true).await;
     assert!(
         !lands_on_the_consent_form(&user.client, &auth_url).await,
         "fixture precondition: the client should now auto-grant"
     );
     assert!(
-        hydra_client_audience(&client_id).await.is_empty(),
+        oauth_client_audience(&client_id).await.is_empty(),
         "an auto-granted registry-only resource must not be written onto the client, \
          where it would become policy for every later consent"
     );
 
-    hydra_delete_client(&client_id).await;
+    oauth_delete_client(&client_id).await;
     delete_client_metadata(&client_id);
     delete_registry_resource(resource);
     user.cleanup().await;
@@ -1090,7 +1082,7 @@ async fn an_approved_registry_resource_is_registered_for_the_refresh_grant() {
 
     let user = register_test_user("consent-aud-approve").await;
     let (client_id, client_secret, redirect_uri) =
-        hydra_create_test_client(&["openid", "offline"]).await;
+        oauth_create_test_client(&["openid", "offline"]).await;
     mark_client_verified(&client_id);
 
     let auth_url = oauth_auth_url(
@@ -1112,7 +1104,7 @@ async fn an_approved_registry_resource_is_registered_for_the_refresh_grant() {
 
     let tokens = exchange_code_for_tokens(&client_id, &client_secret, &redirect_uri, &code).await;
     let access_token = tokens["access_token"].as_str().expect("access_token");
-    let introspected = hydra_introspect(access_token).await;
+    let introspected = oauth_introspect(access_token).await;
     let aud: Vec<String> = introspected["aud"]
         .as_array()
         .cloned()
@@ -1124,13 +1116,28 @@ async fn an_approved_registry_resource_is_registered_for_the_refresh_grant() {
         aud.iter().any(|a| a == resource),
         "an approved registry resource must be granted on the token; got {introspected}"
     );
-    assert_eq!(
-        hydra_client_audience(&client_id).await,
-        vec![resource.to_string()],
-        "an approved audience must be registered, or the refresh grant fails"
-    );
+    if is_native_oauth() {
+        // Native keeps the granted audience on the grant, not on the client record.
+        let refresh_token = tokens["refresh_token"].as_str().expect("refresh_token");
+        let refreshed = refresh_tokens(&client_id, &client_secret, refresh_token)
+            .await
+            .expect("the refresh grant must succeed for an approved audience");
+        let access_token = refreshed["access_token"].as_str().expect("access_token");
+        let introspected = oauth_introspect(access_token).await;
+        let aud = introspected["aud"].as_array().cloned().unwrap_or_default();
+        assert!(
+            aud.iter().any(|a| a.as_str() == Some(resource)),
+            "the refreshed token must keep the approved audience; got {introspected}"
+        );
+    } else {
+        assert_eq!(
+            oauth_client_audience(&client_id).await,
+            vec![resource.to_string()],
+            "an approved audience must be registered, or the refresh grant fails"
+        );
+    }
 
-    hydra_delete_client(&client_id).await;
+    oauth_delete_client(&client_id).await;
     delete_client_metadata(&client_id);
     delete_registry_resource(resource);
     user.cleanup().await;
@@ -1142,7 +1149,7 @@ pub(crate) async fn registry_claims_flow(
     resource: &str,
 ) -> (serde_json::Value, String, String) {
     let (client_id, client_secret, redirect_uri) =
-        hydra_create_test_client(&["openid", "offline"]).await;
+        oauth_create_test_client(&["openid", "offline"]).await;
     mark_client_verified(&client_id);
     let auth_url = oauth_auth_url(
         &client_id,
@@ -1227,7 +1234,7 @@ async fn registry_access_token_claims_follow_the_granted_resource() {
         claims["forgejo_aud"], "u:7:integration",
         "refresh keeps the claim; got {claims}"
     );
-    hydra_delete_client(&client_id).await;
+    oauth_delete_client(&client_id).await;
     delete_client_metadata(&client_id);
 
     // Another resource: no claim anywhere.
@@ -1237,7 +1244,7 @@ async fn registry_access_token_claims_follow_the_granted_resource() {
         claims.get("forgejo_aud").is_none() && claims["ext"].get("forgejo_aud").is_none(),
         "a resource without claims must not get them; got {claims}"
     );
-    hydra_delete_client(&client_id).await;
+    oauth_delete_client(&client_id).await;
     delete_client_metadata(&client_id);
 
     // Disabled row: the audience is dropped, and its claims with it.
@@ -1248,7 +1255,7 @@ async fn registry_access_token_claims_follow_the_granted_resource() {
         claims.get("forgejo_aud").is_none() && claims["ext"].get("forgejo_aud").is_none(),
         "a disabled row must not contribute claims; got {claims}"
     );
-    hydra_delete_client(&client_id).await;
+    oauth_delete_client(&client_id).await;
     delete_client_metadata(&client_id);
     set_registry_resource_enabled(with_claims, true);
 
@@ -1260,7 +1267,7 @@ async fn registry_access_token_claims_follow_the_granted_resource() {
         claims.get("forgejo_aud").is_none(),
         "no metadata, no claim; got {claims}"
     );
-    hydra_delete_client(&client_id).await;
+    oauth_delete_client(&client_id).await;
     delete_client_metadata(&client_id);
 
     for r in [with_claims, without_claims] {

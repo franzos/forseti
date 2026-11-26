@@ -19,7 +19,7 @@ async fn consent_deny_redirects_with_access_denied() {
 
     let user = register_test_user("consent-deny").await;
     let (client_id, _secret, redirect_uri) =
-        hydra_create_test_client(&["openid", "offline", "email"]).await;
+        oauth_create_test_client(&["openid", "offline", "email"]).await;
 
     let auth_url = oauth_auth_url(&client_id, &redirect_uri, "openid offline email", "");
     let (consent_challenge, csrf, _body) = drive_to_consent(&user.client, &auth_url).await;
@@ -37,7 +37,7 @@ async fn consent_deny_redirects_with_access_denied() {
         "denied consent must carry error=access_denied; full location {location}"
     );
 
-    hydra_delete_client(&client_id).await;
+    oauth_delete_client(&client_id).await;
     user.cleanup().await;
 }
 
@@ -65,7 +65,7 @@ async fn id_token_carries_email_profile_and_org_claims() {
     );
 
     let scope = "openid email profile extended_profile org orgs";
-    let (client_id, _secret, redirect_uri) = hydra_create_test_client(&[
+    let (client_id, _secret, redirect_uri) = oauth_create_test_client(&[
         "openid",
         "email",
         "profile",
@@ -163,7 +163,7 @@ async fn id_token_carries_email_profile_and_org_claims() {
         "orgs claim must list at least the default-org membership"
     );
 
-    hydra_delete_client(&client_id).await;
+    oauth_delete_client(&client_id).await;
     delete_member_profile(&user.identity_id);
     user.cleanup().await;
 }
@@ -177,7 +177,7 @@ async fn authorized_apps_lists_then_revoke_clears_grant() {
 
     let user = register_test_user("authzapps").await;
     let (client_id, _secret, redirect_uri) =
-        hydra_create_test_client(&["openid", "offline", "email"]).await;
+        oauth_create_test_client(&["openid", "offline", "email"]).await;
 
     // 1. Complete a consent with remember=true so Hydra persists a consent
     //    session for this (subject, client).
@@ -194,7 +194,7 @@ async fn authorized_apps_lists_then_revoke_clears_grant() {
     .expect("authorization code on callback");
 
     assert!(
-        hydra_consent_session_count(&user.identity_id).await >= 1,
+        oauth_consent_session_count(&user.identity_id).await >= 1,
         "Hydra should record a consent session after a remembered grant"
     );
 
@@ -231,12 +231,12 @@ async fn authorized_apps_lists_then_revoke_clears_grant() {
 
     // 4. Hydra should no longer hold a consent session for this subject.
     assert_eq!(
-        hydra_consent_session_count(&user.identity_id).await,
+        oauth_consent_session_count(&user.identity_id).await,
         0,
         "per-client revoke must clear the Hydra consent session"
     );
 
-    hydra_delete_client(&client_id).await;
+    oauth_delete_client(&client_id).await;
     user.cleanup().await;
 }
 
@@ -250,7 +250,7 @@ async fn oauth_authorize_with_organization_id_param_completes() {
 
     let user = register_test_user("oauth-orgid").await;
     let (client_id, _secret, redirect_uri) =
-        hydra_create_test_client(&["openid", "offline", "org"]).await;
+        oauth_create_test_client(&["openid", "offline", "org"]).await;
 
     // DEFAULT_ORG_ID is the seeded org every identity auto-joins.
     let auth_url = oauth_auth_url(
@@ -276,7 +276,7 @@ async fn oauth_authorize_with_organization_id_param_completes() {
         "token exchange after organization_id authorize must succeed"
     );
 
-    hydra_delete_client(&client_id).await;
+    oauth_delete_client(&client_id).await;
     user.cleanup().await;
 }
 
@@ -292,7 +292,7 @@ async fn handoff_validates_client_and_origin_matches_referrer() {
     // The test client registers redirect_uri http://127.0.0.1:5555/callback,
     // so its origin is http://127.0.0.1:5555.
     let (client_id, _secret, _redirect_uri) =
-        hydra_create_test_client(&["openid", "offline"]).await;
+        oauth_create_test_client(&["openid", "offline"]).await;
     let client = manual_redirect_client();
 
     // A client nobody vouched for - registered straight at Hydra, no Forseti
@@ -369,5 +369,5 @@ async fn handoff_validates_client_and_origin_matches_referrer() {
         "a rejected handoff must not set the app-referrer cookie"
     );
 
-    hydra_delete_client(&client_id).await;
+    oauth_delete_client(&client_id).await;
 }

@@ -55,6 +55,19 @@ pub(crate) fn continue_to(target: &str, locale: &LanguageIdentifier) -> Response
     })
 }
 
+/// Continue to a private-use scheme `target` (RFC 8252 section 7.1) whose scheme the caller has
+/// already checked. Never logs `target`: it carries an authorization code.
+#[cfg(feature = "oauth-native")]
+pub(crate) fn continue_to_app(target: &str, locale: &LanguageIdentifier) -> Response {
+    render(&ContinueTemplate {
+        lang: locale.to_string(),
+        dir: crate::locale::dir_for(locale),
+        target: target.to_string(),
+        heading: crate::i18n::lookup(locale, "oauth-continue-heading"),
+        continue_label: crate::i18n::lookup(locale, "common-action-continue"),
+    })
+}
+
 fn is_http_url(raw: &str) -> bool {
     url::Url::parse(raw).is_ok_and(|u| matches!(u.scheme(), "http" | "https"))
 }

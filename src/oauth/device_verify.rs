@@ -1,13 +1,13 @@
 //! `/oauth/device` — the browser-facing device-verification screen (RFC 8628).
 //!
-//! Hydra redirects the human here (`verification_uri`) with
-//! `?device_challenge=…&user_code=…`. Correlation is by `user_code` against
-//! Forseti's own `device_sessions` row, not Hydra context: the device-authz
-//! request carries none and there's no get-device-request admin API. The
-//! host-bound "did YOU start this login as `<username>` on `<hostname>`?"
-//! prompt is the RFC 8628 §5.4 phishing mitigation.
+//! The human lands here (`verification_uri`) with `?user_code=…`, plus
+//! `device_challenge=…` when Hydra redirects. Correlation is by `user_code`
+//! against Forseti's own `device_sessions` row, not backend context: Hydra's
+//! device-authz request carries none and there's no get-device-request admin
+//! API. The host-bound "did YOU start this login as `<username>` on
+//! `<hostname>`?" prompt is the RFC 8628 §5.4 phishing mitigation.
 //!
-//! On confirm we POST `accept_user_code_request`, which drives the login +
+//! On confirm we call `accept_user_code_request`, which drives the login +
 //! consent leg (consent never auto-skips for the PAM client; see
 //! `consent.rs`).
 
@@ -16,6 +16,8 @@ use axum::extract::{Query, State};
 use axum::response::{IntoResponse, Redirect, Response};
 use serde::Deserialize;
 
+#[cfg(feature = "oauth-native")]
+use crate::backend::OAuthBackend;
 use crate::csrf::CsrfForm;
 use crate::extractors::RequireSession;
 use crate::page_chrome::{Chrome, PageChrome, ReqLocale};
@@ -136,8 +138,8 @@ pub(crate) struct DeviceVerifyForm {
     user_code: String,
 }
 
-/// `POST /oauth/device` — accept the user code with Hydra, which then drives
-/// login + consent. On success we follow Hydra's `redirect_to`.
+/// `POST /oauth/device` — accept the user code with the OAuth backend, which
+/// then drives login + consent. On success we follow its `redirect_to`.
 pub(crate) async fn device_verify_submit(
     State(state): State<AppState>,
     session: RequireSession,

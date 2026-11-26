@@ -243,7 +243,8 @@ async fn admin_happy_clients_create_and_delete() {
         .form(&[
             ("_csrf", csrf.as_str()),
             ("name", "integration-admin-test"),
-            ("grant_types", "authorization_code,refresh_token"),
+            ("grant_types", "authorization_code"),
+            ("grant_types", "refresh_token"),
             ("response_types", "code"),
             ("scope", "openid email"),
             ("redirect_uris", "http://127.0.0.1:5555/callback"),
@@ -284,16 +285,24 @@ async fn admin_happy_clients_create_and_delete() {
     assert!(res.status().is_success(), "delete status {}", res.status());
 
     // 4. The client should be gone from Hydra now.
-    let probe = browser_client();
-    let res = probe
-        .get(format!("{HYDRA_ADMIN}/admin/clients/{client_id}"))
-        .send()
-        .await
-        .expect("hydra get client after delete");
-    assert_eq!(
-        res.status().as_u16(),
-        404,
-        "client should be gone from Hydra after delete"
+    #[cfg(feature = "oauth-ory")]
+    {
+        let probe = browser_client();
+        let res = probe
+            .get(format!("{HYDRA_ADMIN}/admin/clients/{client_id}"))
+            .send()
+            .await
+            .expect("hydra get client after delete");
+        assert_eq!(
+            res.status().as_u16(),
+            404,
+            "client should be gone from Hydra after delete"
+        );
+    }
+    #[cfg(feature = "oauth-native")]
+    assert!(
+        oauth_client_field(&client_id, "client_id").await.is_none(),
+        "client should be gone after delete"
     );
 }
 
@@ -514,7 +523,7 @@ async fn admin_sessions_list_and_revoke_kills_target() {
     mark_identity_verified(&victim.identity_id).await;
     let sink = BackchannelSink::start().await;
     let (rp_id, rp_secret, rp_redirect) =
-        hydra_create_backchannel_client(&["openid", "offline_access"], &sink.url).await;
+        oauth_create_backchannel_client(&["openid", "offline_access"], &sink.url).await;
     let victim_browser = crate::sso_spec::Browser {
         client: victim.client.clone(),
         manual: victim.manual_client.clone(),
@@ -568,7 +577,7 @@ async fn admin_sessions_list_and_revoke_kills_target() {
         "admin revoke must kill the session's grants"
     );
 
-    hydra_delete_client(&rp_id).await;
+    oauth_delete_client(&rp_id).await;
     victim.cleanup().await;
 }
 
@@ -634,7 +643,7 @@ async fn admin_client_update_persists_name_change() {
     };
 
     // Seed a client straight via Hydra so the test owns its lifecycle.
-    let (client_id, _secret, redirect_uri) = hydra_create_test_client(&["openid", "email"]).await;
+    let (client_id, _secret, redirect_uri) = oauth_create_test_client(&["openid", "email"]).await;
 
     // Fetch the edit form for a CSRF token bound to this admin jar.
     let res = client
@@ -671,21 +680,26 @@ async fn admin_client_update_persists_name_change() {
     );
 
     // Hydra should reflect the new name.
-    let probe = browser_client();
-    let hydra = probe
-        .get(format!("{HYDRA_ADMIN}/admin/clients/{client_id}"))
-        .send()
-        .await
-        .expect("hydra get client after update");
-    assert_eq!(hydra.status().as_u16(), 200);
-    let v: serde_json::Value = hydra.json().await.expect("client json");
+    #[cfg(feature = "oauth-ory")]
+    let v: serde_json::Value = {
+        let probe = browser_client();
+        let hydra = probe
+            .get(format!("{HYDRA_ADMIN}/admin/clients/{client_id}"))
+            .send()
+            .await
+            .expect("hydra get client after update");
+        assert_eq!(hydra.status().as_u16(), 200);
+        hydra.json().await.expect("client json")
+    };
+    #[cfg(feature = "oauth-native")]
+    let v = oauth_get_client_json(&client_id).await;
     assert_eq!(
         v["client_name"].as_str(),
         Some(new_name),
         "update_client should have persisted the new name to Hydra"
     );
 
-    hydra_delete_client(&client_id).await;
+    oauth_delete_client(&client_id).await;
 }
 
 /// The admin clients form must not be able to make the PAM device-auth client
@@ -740,15 +754,20 @@ async fn admin_cannot_make_the_pam_client_public() {
     );
 
     // The refusal has to have stopped the write, not just rendered a warning.
-    let probe = browser_client();
-    let v: serde_json::Value = probe
-        .get(format!("{HYDRA_ADMIN}/admin/clients/forseti-linux-pam"))
-        .send()
-        .await
-        .expect("hydra get PAM client")
-        .json()
-        .await
-        .expect("client json");
+    #[cfg(feature = "oauth-ory")]
+    let v: serde_json::Value = {
+        let probe = browser_client();
+        probe
+            .get(format!("{HYDRA_ADMIN}/admin/clients/forseti-linux-pam"))
+            .send()
+            .await
+            .expect("hydra get PAM client")
+            .json()
+            .await
+            .expect("client json")
+    };
+    #[cfg(feature = "oauth-native")]
+    let v = oauth_get_client_json("forseti-linux-pam").await;
     assert_ne!(
         v["token_endpoint_auth_method"].as_str(),
         Some("none"),

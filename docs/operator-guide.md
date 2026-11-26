@@ -1,18 +1,29 @@
 # Operator Guide
 
-A reference for deploying `forseti` as the self-service UI and OAuth2 login/consent bridge for an Ory Hydra installation, with Ory Kratos or Forseti's native identity backend holding the identities, at, for example, `accounts.example.com`.
+A reference for deploying `forseti` as the self-service UI and OAuth2 login/consent bridge for an Ory Hydra installation, or with its built-in OAuth server instead of Hydra, and with Ory Kratos or Forseti's native identity backend holding the identities, at, for example, `accounts.example.com`.
 
-This guide assumes self-hosting the full stack: `forseti`, Hydra, Postgres, and on the Kratos build also Kratos. It does not assume prior familiarity with Kratos's surface area. It covers what both builds share; what only one build needs is in [Kratos identity backend](./operator-guide-kratos.md) and [Native identity backend](./operator-guide-native.md) (see [Choosing an identity backend](#choosing-an-identity-backend)).
+This guide assumes self-hosting the full stack: `forseti`, Postgres, Hydra on the Hydra build and Kratos on the Kratos build. It does not assume prior familiarity with Kratos's surface area. It covers what the builds share; what only one build needs is in [Kratos identity backend](./operator-guide-kratos.md), [Native identity backend](./operator-guide-native.md) and [Built-in OAuth server](./operator-guide-native-oauth.md) (see [Choosing the backends](#choosing-the-backends)).
 
 For app-developer documentation on how downstream applications consume Forseti as an OIDC Provider, see [`integration-guide.md`](./integration-guide.md). For project status and milestones, see [`../README.md`](../README.md) and [`../ROADMAP.md`](../ROADMAP.md).
 
 ## What this is
 
-`forseti` is a Rust + Axum self-service UI for Ory Kratos or its own native identity backend, and an OAuth2 login/consent/logout bridge for Ory Hydra. It renders the self-service flows (login, registration, recovery, verification, settings) and implements the three handlers Hydra delegates to the IdP: `/oauth/login`, `/oauth/consent`, `/oauth/logout`. Branding is config-driven; there are no hardcoded organization names. Licensing: AGPL-3.0-or-later for the OSS core, with `src/commercial/` under the proprietary source-available Forseti Commercial License 1.0 — see the [License section of the README](../README.md#license).
+`forseti` is a Rust + Axum self-service UI for Ory Kratos or its own native identity backend, and an OAuth2 login/consent/logout bridge for Ory Hydra or its own built-in OAuth server. It renders the self-service flows (login, registration, recovery, verification, settings) and implements the three handlers Hydra delegates to the IdP: `/oauth/login`, `/oauth/consent`, `/oauth/logout`. Branding is config-driven; there are no hardcoded organization names. Licensing: AGPL-3.0-or-later for the OSS core, with `src/commercial/` under the proprietary source-available Forseti Commercial License 1.0 — see the [License section of the README](../README.md#license).
 
-## Choosing an identity backend
+## Choosing the backends
 
-Forseti builds with one of two identity backends, chosen at compile time with a cargo feature; a binary carries exactly one. The Kratos backend (`identity-ory`, the default) renders Ory Kratos's flows, and the native backend (`identity-native`) keeps identities, sessions and self-service flows in Forseti's own database. Ory Hydra provides OAuth2 and OIDC on both.
+Forseti builds with one identity backend and one OAuth backend, each chosen at compile time with a cargo feature; a binary carries exactly one of each. On the identity side, the Kratos backend (`identity-ory`, the default) renders Ory Kratos's flows, and the native backend (`identity-native`) keeps identities, sessions and self-service flows in Forseti's own database. On the OAuth side, Ory Hydra (`oauth-ory`, the default) is the OAuth2 and OIDC server, and the built-in server (`oauth-native`) serves them from Forseti itself.
+
+| Build | Features | Services to run |
+|---|---|---|
+| Kratos + Hydra (default) | `identity-ory,oauth-ory` | Forseti, Kratos, Hydra |
+| Native identity + Hydra | `identity-native,oauth-ory` | Forseti, Hydra |
+| Kratos + built-in OAuth | `identity-ory,oauth-native` | Forseti, Kratos |
+| Native identity + built-in OAuth | `identity-native,oauth-native` | Forseti |
+
+Any other combination doesn't compile. The release artifacts carry the default build; the other three are built from source with `--no-default-features --features <identity>,<oauth>`.
+
+The identity backends compare like this:
 
 | | Kratos backend | Native backend |
 |---|---|---|
@@ -26,13 +37,28 @@ Forseti builds with one of two identity backends, chosen at compile time with a 
 | Audit of flow events | Kratos webhooks to the internal listener | written directly |
 | Config tooling | `forseti-config` verbs | none |
 | Existing Kratos identities | in place | no import; fresh installs |
-| How to get it | release tarballs, packages and the container image | build from source with `--no-default-features --features identity-native` |
+| How to get it | release tarballs, packages and the container image | build from source with `--no-default-features --features identity-native,oauth-ory` (or `,oauth-native`) |
 
-Build-specific setup is in [Kratos identity backend](./operator-guide-kratos.md) and [Native identity backend](./operator-guide-native.md).
+And the OAuth backends:
+
+| | Hydra | Built-in server |
+|---|---|---|
+| Issuer | Hydra's `urls.self.issuer`, e.g. `https://accounts.example.com/hydra` | `[self].url`, no path |
+| Flows | authorization code, device grant (Linux PAM sign-in), client credentials | authorization code, device grant (Linux PAM sign-in) |
+| Logout | RP-initiated and back-channel | RP-initiated and back-channel (`logout+jwt` token with `exp`) |
+| Revocation, introspection | yes | yes; introspection on the internal listener |
+| CIMD (MCP clients onboarding themselves) | yes | yes |
+| `/hydra` front proxy | yes | no |
+| Signing key rotation | through Hydra | `forseti rotate-oauth-key` |
+| Access tokens | JWT, `typ: JWT` | JWT, `typ: at+jwt` (RFC 9068) |
+| Signing keys | Hydra's JWKS, in Hydra's database | generated on first boot, sealed under `[security].cookie_secret` in Forseti's database |
+| Existing Hydra clients and consents | in place | no import; fresh installs |
+
+Build-specific setup is in [Kratos identity backend](./operator-guide-kratos.md), [Native identity backend](./operator-guide-native.md) and [Built-in OAuth server](./operator-guide-native-oauth.md).
 
 ## Deployment topology
 
-The recommended shape is **path-prefixed on a single host**: Forseti at the root, Hydra under `/hydra/*`, Kratos under `/kratos/*`. Everything is same-origin, cookies are host-only, no CORS to configure, only `:443` exposed. Hydra's production guide explicitly endorses this layout. The subdomain shape (`accounts.example.com` / `hydra.example.com` / `kratos.example.com`) is also supported when there's a reason to split — different rate-limit tiers, independent WAF rules, splitting Hydra to its own cluster. See [`operator-guide-proxy.md`](./operator-guide-proxy.md) for the comparison and haproxy configs. The diagram shows the Kratos build; the native build has no Kratos, so it drops the `/kratos/*` route, both Kratos ports and the Kratos database.
+The recommended shape is **path-prefixed on a single host**: Forseti at the root, Hydra under `/hydra/*`, Kratos under `/kratos/*`. Everything is same-origin, cookies are host-only, no CORS to configure, only `:443` exposed. Hydra's production guide explicitly endorses this layout. The subdomain shape (`accounts.example.com` / `hydra.example.com` / `kratos.example.com`) is also supported when there's a reason to split — different rate-limit tiers, independent WAF rules, splitting Hydra to its own cluster. See [`operator-guide-proxy.md`](./operator-guide-proxy.md) for the comparison and haproxy configs. The diagram shows the Kratos build; the native build has no Kratos, so it drops the `/kratos/*` route, both Kratos ports and the Kratos database. The built-in OAuth build has no Hydra, so it drops the `/hydra/*` route, both Hydra ports and the Hydra database, and Forseti serves the OAuth2 endpoints at its root.
 
 ```
                           Internet
@@ -79,9 +105,9 @@ The recommended shape is **path-prefixed on a single host**: Forseti at the root
 
 ## Prerequisites
 
-- **Postgres** (>= 13). One database per service: `kratos` (Kratos build only), `hydra`, optionally `forseti`. The playground's `init-db.sh` shows the bootstrap pattern.
+- **Postgres** (>= 13). One database per service: `kratos` (Kratos build only), `hydra` (Hydra build only), optionally `forseti`. The playground's `init-db.sh` shows the bootstrap pattern.
 - **Mail provider.** Mailcrab (used in `infra/docker-compose.yml`) is a development sink. In production, use a real provider. On the Kratos build, two pieces of the stack send mail independently: **Kratos** (verification, recovery, MFA-enrol mails) speaks SMTP via `courier.smtp.connection_uri` in `kratos.yml`, and **Forseti** (org-invite + claim-email mails) sends via `[email]` in `config.toml`, which supports Lettermint, Postmark, SendGrid, or an SMTP relay. Both can point at the same SMTP relay. The native build sends all of its mail, verification and recovery codes included, through `[email]`, and refuses to boot without it.
-- **DNS** records pointing `accounts.example.com`, `hydra.example.com`, and on the Kratos build `kratos.example.com` (or a single hostname with path-based routing) at the reverse proxy.
+- **DNS** records pointing `accounts.example.com`, on the Hydra build `hydra.example.com`, and on the Kratos build `kratos.example.com` (or a single hostname with path-based routing) at the reverse proxy.
 - **TLS certificates.** Let's Encrypt via Caddy or `certbot`, or a managed cert solution.
 - **Container runtime** if running Forseti as a container, or a Linux host with a writable working directory if running the static binary.
 
@@ -92,6 +118,8 @@ Forseti loads configuration from `config.toml` (or the path in `$FORSETI_CONFIG_
 The authoritative schema is `src/config.rs`. The example file is `config.example.toml`. Every key both builds read follows; `[kratos]` is in the [Kratos guide](./operator-guide-kratos.md#kratos), and the `[identity]` keys only the native build reads are in the [native guide](./operator-guide-native.md#identity-configuration).
 
 ### `[hydra]`
+
+Hydra build only; the built-in OAuth build does not read it (see [Built-in OAuth server](./operator-guide-native-oauth.md#configuration)).
 
 | Key          | Type   | Default | Description                              |
 |--------------|--------|---------|------------------------------------------|
@@ -104,13 +132,13 @@ The authoritative schema is `src/config.rs`. The example file is `config.example
 
 | Key   | Type   | Default | Description                                                              |
 |-------|--------|---------|--------------------------------------------------------------------------|
-| `url` | string | —       | Forseti's own externally reachable URL. Used to build `return_to` round-trips. |
+| `url` | string | —       | Forseti's own externally reachable URL. Used to build `return_to` round-trips. On the built-in OAuth build also the issuer, so it must be an http(s) origin with no path, query, fragment or userinfo. |
 
 ### `[security]`
 
 | Key                | Type   | Default            | Description                                                            |
 |--------------------|--------|--------------------|------------------------------------------------------------------------|
-| `cookie_secret`    | string | ephemeral per-boot (Ory build); required (native build) | Seeds the HMAC keys for every Forseti-signed cookie. On the native build also the key material for stored TOTP secrets and one-time codes. Long random secret. |
+| `cookie_secret`    | string | ephemeral per-boot (default build); required (any build with a native backend) | Seeds the HMAC keys for every Forseti-signed cookie. On the native identity build also the key material for stored TOTP secrets and one-time codes, on the built-in OAuth build for the sealed signing key. Long random secret. |
 | `frame_ancestors`  | string | `"'self'"`         | CSP `frame-ancestors` on every public_app response. `"'none'"` blocks framing entirely. |
 | `x_frame_options`  | bool   | `true`             | Also emit `X-Frame-Options: SAMEORIGIN` for older browsers.            |
 | `extra_form_action` | list of strings | `[]`      | Extra origins for the CSP `form-action` directive. Needed for an upstream OIDC provider added to `kratos.yml` by hand, or a host a provider bounces through. On the native build, for a configured provider whose authorization endpoint is on another host than its `issuer`. |
@@ -119,9 +147,9 @@ The authoritative schema is `src/config.rs`. The example file is `config.example
 
 Generate one with `openssl rand -hex 32` (a hex string is decoded to bytes; anything that isn't valid hex is taken as raw UTF-8 bytes). The decoded key must be at least 32 bytes or Forseti hard-fails at boot. Override via `FORSETI_SECURITY__COOKIE_SECRET`.
 
-On the Ory build, when unset, Forseti generates a 32-byte ephemeral key per process and logs a warning. That means flash, active-org, and app-referrer cookies don't survive a restart, and separate instances can't validate each other's cookies, so **set `cookie_secret` in production** and on any multi-instance deployment. On that build none of these are the session cookie (that's Kratos's), and none are catastrophic on their own (the flash banner is short-lived, the org cookie's selection is re-validated at use, the handoff cookie's `referrer_uri` is re-checked against the Hydra client), but a stable secret avoids the restart churn.
+On the default build (Kratos and Hydra), when unset, Forseti generates a 32-byte ephemeral key per process and logs a warning. That means flash, active-org, and app-referrer cookies don't survive a restart, and separate instances can't validate each other's cookies, so **set `cookie_secret` in production** and on any multi-instance deployment. On that build none of these are the session cookie (that's Kratos's), and none are catastrophic on their own (the flash banner is short-lived, the org cookie's selection is re-validated at use, the handoff cookie's `referrer_uri` is re-checked against the Hydra client), but a stable secret avoids the restart churn.
 
-The native build refuses to boot without `cookie_secret`, because there the secret is durable key material: changing it makes stored TOTP secrets unreadable and invalidates outstanding codes, backup codes and logout links. See [`cookie_secret` is key material](./operator-guide-native.md#cookie_secret-is-key-material).
+A build with either native backend refuses to boot without `cookie_secret`, because there the secret is durable key material. On the native identity build, changing it makes stored TOTP secrets unreadable and invalidates outstanding codes, backup codes and logout links; see [`cookie_secret` is key material](./operator-guide-native.md#cookie_secret-is-key-material). On the built-in OAuth build, the stored signing key no longer opens and Forseti refuses to boot until the old secret is back; see [`cookie_secret` and the signing key](./operator-guide-native-oauth.md#cookie_secret-and-the-signing-key).
 
 CSRF protection uses a double-submit token (`src/csrf.rs`) keyed off the same secret; there's nothing extra to configure for it.
 
@@ -411,9 +439,9 @@ under the `html.dark` scope if you ship custom brand colours.
 
 ### Language
 
-The UI ships with nine locales: English (`en`, default), German (`de`), French
+The UI ships with ten locales: English (`en`, default), German (`de`), French
 (`fr`), Spanish (`es`), Italian (`it`), Portuguese (`pt`), Russian (`ru`), Thai
-(`th`), and Arabic (`ar`). Arabic renders right-to-left. Kratos's own error and
+(`th`), Chinese (`zh`), and Arabic (`ar`). Arabic renders right-to-left. Kratos's own error and
 prompt messages are translated too, so a login failure reads in the visitor's
 language rather than falling back to Kratos English.
 
@@ -563,7 +591,7 @@ The two-tier code lives at `src/admin/mod.rs::require_admin` (Tier 1) and `src/a
 
 ### App templates
 
-`/admin/clients/new` shows a "Popular apps" group below the five base client types. Picking one (GitLab, Nextcloud, Grafana, …) pre-fills the create form for that app — redirect URIs, scope, token-endpoint auth method, PKCE, and any logout/webhook URLs — so you don't have to look up each app's OIDC quirks.
+`/admin/clients/new` shows a "Popular apps" group below the five base client types. Picking one (GitLab, Nextcloud, Grafana, …) pre-fills the create form for that app — redirect URIs, scope, token-endpoint auth method, PKCE, and any logout/webhook URLs — so you don't have to look up each app's OIDC quirks. On the built-in OAuth build the machine-to-machine type (`client_credentials`) is offered but refused on save (see [Clients](./operator-guide-native-oauth.md#clients) in its guide).
 
 The picker at `/admin/clients/new` is always the source of truth, but the bundled templates are:
 
@@ -734,7 +762,7 @@ Account-materialisation knobs plus the interactive PAM device-auth settings. The
 | `device_poll_cap_secs`      | u64             | `90`                 | Hard wall-clock cap (seconds) on a single device-auth poll loop. Keep it strictly **below sshd's `LoginGraceTime`** (default 120s) so an abandoned login can't pin the session. Forseti returns it so the daemon can bound its own polling. |
 | `id_token_iat_window_secs`  | u64             | `120`                | `iat` freshness window (seconds) for the device id_token — rejects a token whose `iat` is older than this. A tight replay guard layered on top of `exp`. |
 | `mfa_auth_time_window_secs` | u64             | `300`                | `auth_time` freshness window (seconds) for `force_mfa` hosts. An AAL2 session older than this won't unlock such a host — an hours-old MFA shouldn't grant a login. |
-| `hydra_issuer`              | string          | *(unset)*            | Expected `iss` on the device id_token. Unset falls back to `[hydra].public_url`. Override when Hydra's own `urls.self.issuer` differs from that URL — see the [gotcha](#enabling-pam-login-device-auth) below. |
+| `hydra_issuer`              | string          | *(unset)*            | Expected `iss` on the device id_token. Unset falls back to `[hydra].public_url`. Override when Hydra's own `urls.self.issuer` differs from that URL — see the [gotcha](#enabling-pam-login-device-auth) below. Hydra build only; the built-in OAuth build ignores it with a boot warning. |
 
 ```toml
 [posix]
@@ -809,7 +837,7 @@ Each host belongs to one organisation (set at enrollment). You can scope a host 
 
 The resolver hands a host the *shape* of an account (uid/gid, shell, home, keys). Interactive password/console login — `ssh` with a password, a TTY login, `sudo` re-auth — is a separate path built on the OAuth 2.0 Device Authorization Grant (RFC 8628). The host's PAM module starts a device flow for the named account, the human approves it in their browser, and Forseti binds the approving identity to the named account before the host is told the login is `approved`. The full mechanism is in [`docs/dev/flows.md` → POSIX device-auth login](./dev/flows.md#posix-device-auth-login-rfc-8628).
 
-This path needs one extra thing the resolver doesn't: a confidential OAuth client Forseti authenticates as when it drives the device grant through Hydra.
+This path needs one extra thing the resolver doesn't: a confidential OAuth client Forseti authenticates as when it drives the device grant, at Hydra or at the built-in OAuth server. The steps below are the same on both builds; on the built-in one the client lives in Forseti's database and `[posix].hydra_issuer` is ignored (see [Linux device sign-in](./operator-guide-native-oauth.md#linux-device-sign-in)).
 
 1. **Mint the client.** Run
 
@@ -914,7 +942,7 @@ The full mechanism (the server-unreachable trigger, the gate, the host keystore,
 
 ## Hydra configuration
 
-Hydra is the OAuth2 server. Forseti is the IdP UI Hydra delegates to. Reference config: `infra/hydra/hydra.yml`.
+On the Hydra build, Hydra is the OAuth2 server and Forseti is the IdP UI Hydra delegates to. Reference config: `infra/hydra/hydra.yml`. The built-in OAuth build has no Hydra to configure; see [Built-in OAuth server](./operator-guide-native-oauth.md).
 
 ### URLs
 
@@ -1001,6 +1029,8 @@ Where the playground sits relative to current OAuth / OIDC normative work (as of
 | CIMD (draft-ietf-oauth-client-id-metadata-document) | Implemented by Forseti's `/oauth2/authorize` shim + augmented discovery, since Hydra has no native support ([ory/hydra#4061](https://github.com/ory/hydra/issues/4061)). Public clients (`token_endpoint_auth_method: "none"`) only |
 
 ### MCP support
+
+This section is about the Hydra build. The built-in OAuth server reads `resource=` itself, uses the same resource registry and resolves CIMD clients at its own authorization endpoint, with no front proxy or path-insertion discovery (see [CIMD](./operator-guide-native-oauth.md#cimd) in its guide).
 
 Hydra works as the authorization server for [Model Context Protocol](https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization) servers (Claude Desktop, Claude Code, claude.ai). Forseti supplies what Hydra lacks for MCP: CIMD client onboarding (Hydra has no native support, [ory/hydra#4061](https://github.com/ory/hydra/issues/4061)), the RFC 8707 `resource` → `aud` bridge at consent, and the augmented discovery documents that advertise both. This section is the operator-side checklist.
 
@@ -1446,7 +1476,7 @@ The following secrets must be unique, long, and protected:
 | `kratos.yml: secrets.cookie`               | Kratos                       | Signs Kratos session cookies.                      |
 | `kratos.yml: secrets.cipher`               | Kratos                       | Encrypts sensitive trait values at rest.           |
 | OIDC client secrets (per upstream)         | `kratos.yml` env substitution | Authenticate to upstream OIDC providers.          |
-| `[security].cookie_secret`                 | Forseti                      | Signs Forseti's cookies. On the native build also encrypts stored TOTP secrets and keys one-time codes, so it must be kept and backed up (see [`cookie_secret` is key material](./operator-guide-native.md#cookie_secret-is-key-material)). |
+| `[security].cookie_secret`                 | Forseti                      | Signs Forseti's cookies. On the native identity build also encrypts stored TOTP secrets and keys one-time codes, and on the built-in OAuth build seals the signing key, so it must be kept and backed up (see [`cookie_secret` is key material](./operator-guide-native.md#cookie_secret-is-key-material) and [`cookie_secret` and the signing key](./operator-guide-native-oauth.md#cookie_secret-and-the-signing-key)). |
 
 Recommended pattern: load secrets from environment variables injected by your orchestrator or secrets manager (AWS Secrets Manager, HashiCorp Vault, Doppler, 1Password Connect). Do not commit any of the above to a repository.
 
@@ -1456,7 +1486,7 @@ Generate fresh values with `openssl rand -base64 64` (cookie/session secrets) or
 
 - **Kratos's Postgres database** holds every identity, credential hash, and active session. Restoring it restores user accounts.
 - **Hydra's Postgres database** holds OAuth2 client registrations, consent grants, refresh tokens, and the JWKS used to sign id_tokens. Losing the JWKS invalidates every previously-issued id_token's signature.
-- **Forseti's own database** holds organizations, the audit log, the webhook outbox, the resource registry, client trust metadata, and POSIX accounts; on the native build also every identity, credential and session. Restore a native database with the same `[security].cookie_secret`, or its stored TOTP secrets stay unreadable. On the default sqlite backend that's `forseti.db` next to the binary: copy it while Forseti is stopped, or use `sqlite3 forseti.db ".backup backup.db"` online (a plain file copy of a live WAL-mode database can be inconsistent). On Postgres, include it in the `pg_dump` routine.
+- **Forseti's own database** holds organizations, the audit log, the webhook outbox, the resource registry, client trust metadata, and POSIX accounts; on the native build also every identity, credential and session, and on the built-in OAuth build every client, grant, refresh token and the sealed signing keys. Restore a native database with the same `[security].cookie_secret`, or its stored TOTP secrets stay unreadable and the built-in OAuth server refuses to boot. On the default sqlite backend that's `forseti.db` next to the binary: copy it while Forseti is stopped, or use `sqlite3 forseti.db ".backup backup.db"` online (a plain file copy of a live WAL-mode database can be inconsistent). On Postgres, include it in the `pg_dump` routine.
 - **Forseti's webhook signing key** (`[webhook].signing_key_path`, default `data/webhook-signing-key.pem`, created `0600`) signs outbound Security Event Tokens. Without a backup, a rebuilt host mints a fresh key and `kid`, and receivers that pinned the old JWKS reject deliveries (see [Rotating the webhook signing key](#rotating-the-webhook-signing-key)).
 - Take daily logical backups (`pg_dump`) at minimum. Streaming replication or PITR is preferable for production.
 - Test restore quarterly. A backup you have never restored is not a backup.
@@ -1494,7 +1524,7 @@ Gotchas specific to the Kratos build (cookie domain, CORS, AAL2, return URLs, We
 
 ### Issuer URL changes
 
-If `urls.self.issuer` in `hydra.yml` ever changes, every previously-issued id_token becomes invalid (it embeds `iss`). Existing OAuth2 clients also discover endpoints via `<issuer>/.well-known/openid-configuration`, so OIDC discovery URLs change as well. Treat the issuer URL as immutable post-launch.
+If `urls.self.issuer` in `hydra.yml` ever changes, every previously-issued id_token becomes invalid (it embeds `iss`). Existing OAuth2 clients also discover endpoints via `<issuer>/.well-known/openid-configuration`, so OIDC discovery URLs change as well. Treat the issuer URL as immutable post-launch. On the built-in OAuth build the issuer is `[self].url`, and the same applies to it.
 
 ## Commercial license
 

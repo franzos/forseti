@@ -11,6 +11,8 @@ use crate::state::AppState;
 
 pub(crate) mod cimd;
 pub(crate) mod cimd_fetch;
+#[cfg(feature = "oauth-ory")]
+pub(crate) mod cimd_shim;
 pub(crate) mod consent;
 pub(crate) mod continue_nav;
 pub(crate) mod device;
@@ -38,6 +40,11 @@ pub(crate) fn default_scope_description(scope: &str) -> Option<&'static str> {
     })
 }
 
+/// Base scopes every CIMD client's Hydra row carries; `[oauth.cimd].client_scope_extra`,
+/// the document's own `scope` and the request's allowlisted `scope` values
+/// union in on top. A ceiling, never a grant: consent stays the authorization.
+const CIMD_BASE_SCOPES: &[&str] = &["openid", "offline", "offline_access"];
+
 /// Canonical form of an RFC 8707 resource identifier, used both to match
 /// against `[oauth].allowed_resource_audiences` and as the value actually
 /// granted or registered. Absolute URIs only; the fragment is dropped (RFC 8707
@@ -63,7 +70,7 @@ pub(crate) fn router(oauth_cfg: &OAuthConfig, proxy_cfg: &ProxyConfig) -> Router
             "/oauth/logout",
             get(logout::oauth_logout).post(logout::oauth_logout_submit),
         )
-        // RFC 8628 device-verification screen (Hydra's `verification_uri`),
+        // RFC 8628 device-verification screen (the `verification_uri`),
         // session-gated and per-IP rate-limited (see `device_router`).
         .merge(device_router(oauth_cfg, proxy_cfg))
         .route("/oauth/device/done", get(device_verify::device_done))

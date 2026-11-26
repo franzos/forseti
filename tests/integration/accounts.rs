@@ -172,7 +172,7 @@ async fn consent_remember_appends_known_account() {
     );
 
     let user = register_test_user("acct-consent-remember").await;
-    let (client_id, _secret, redirect_uri) = hydra_create_test_client(&["openid", "profile"]).await;
+    let (client_id, _secret, redirect_uri) = oauth_create_test_client(&["openid", "profile"]).await;
 
     let auth_url = oauth_auth_url(&client_id, &redirect_uri, "openid profile", "");
     let (consent_challenge, csrf, _body) = drive_to_consent(&user.client, &auth_url).await;
@@ -225,6 +225,6 @@ async fn consent_remember_appends_known_account() {
         "consent accept with remember_account=true should set forseti_known_accounts cookie"
     );
 
-    hydra_delete_client(&client_id).await;
+    oauth_delete_client(&client_id).await;
     user.cleanup().await;
 }

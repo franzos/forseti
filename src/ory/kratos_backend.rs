@@ -276,13 +276,7 @@ mod tests {
     const KRATOS: &str = "http://kratos:4433/";
 
     fn kratos() -> Arc<KratosBackend> {
-        crate::ory::test_backends(
-            KRATOS,
-            "http://kratos:4434",
-            "http://hydra:4444",
-            "http://hydra:4445",
-        )
-        .0
+        crate::ory::test_kratos_backend(KRATOS, "http://kratos:4434")
     }
 
     #[test]
@@ -413,16 +407,7 @@ mod tests {
         for https in [false, true] {
             let backend = KratosBackend {
                 https,
-                ..Arc::into_inner(
-                    crate::ory::test_backends(
-                        KRATOS,
-                        &admin,
-                        "http://hydra:4444",
-                        "http://hydra:4445",
-                    )
-                    .0,
-                )
-                .unwrap()
+                ..Arc::into_inner(crate::ory::test_kratos_backend(KRATOS, &admin)).unwrap()
             };
             let origin = SessionOrigin {
                 method: "saml",

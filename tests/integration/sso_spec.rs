@@ -9,7 +9,10 @@ async fn discovery_advertises_only_supported_features() {
     assert!(portal_reachable().await);
 
     let doc: serde_json::Value = browser_client()
-        .get("http://host.containers.internal:3000/hydra/.well-known/openid-configuration")
+        .get(format!(
+            "{}/.well-known/openid-configuration",
+            oauth_issuer()
+        ))
         .send()
         .await
         .expect("discovery transport")
@@ -138,7 +141,7 @@ async fn two_browsers_authorized(
         manual: user.manual_client.clone(),
     };
     let b = second_browser(&user).await;
-    let rp = hydra_create_backchannel_client(&["openid", "offline_access"], &sink.url).await;
+    let rp = oauth_create_backchannel_client(&["openid", "offline_access"], &sink.url).await;
     (user, a, b, rp)
 }
 
@@ -175,8 +178,23 @@ async fn dashboard_logout_sends_backchannel_for_that_browser_only() {
         "the other browser's grant must survive"
     );
 
-    hydra_delete_client(&id).await;
+    oauth_delete_client(&id).await;
     user.cleanup().await;
+}
+
+/// Waits up to `secs` for the native OP login session `sid` to end, then a short grace for the
+/// grant revokes that follow it.
+#[cfg(feature = "oauth-native")]
+async fn login_session_ends(sid: &str, secs: u64) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    while oauth_login_session_exists(sid).await {
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    true
 }
 
 #[tokio::test]
@@ -187,6 +205,8 @@ async fn revoke_others_keeps_current_browser() {
         two_browsers_authorized("bc-revoke-others", &sink).await;
     let (_sid_a, refresh_a) = authorize(&a, &id, &secret, &redirect).await;
     let (sid_b, refresh_b) = authorize(&b, &id, &secret, &redirect).await;
+    #[cfg(feature = "oauth-native")]
+    assert!(oauth_login_session_exists(&sid_b).await);
 
     let body = a
         .client
@@ -205,7 +225,12 @@ async fn revoke_others_keeps_current_browser() {
         .await
         .expect("POST revoke-others");
 
-    assert_eq!(sink.sids_after(1, 10).await, vec![sid_b]);
+    assert_eq!(sink.sids_after(1, 10).await, vec![sid_b.clone()]);
+    #[cfg(feature = "oauth-native")]
+    assert!(
+        login_session_ends(&sid_b, 10).await,
+        "the other browser's OAuth login session must end"
+    );
     assert!(
         whoami_is_active(&a.client).await,
         "current browser stays signed in"
@@ -219,7 +244,7 @@ async fn revoke_others_keeps_current_browser() {
         "the current browser keeps its grant"
     );
 
-    hydra_delete_client(&id).await;
+    oauth_delete_client(&id).await;
     user.cleanup().await;
 }
 
@@ -261,7 +286,7 @@ async fn admin_disable_sends_backchannel_for_every_session() {
     want.sort();
     assert_eq!(got, want);
 
-    hydra_delete_client(&id).await;
+    oauth_delete_client(&id).await;
     user.cleanup().await;
 }
 
@@ -334,7 +359,7 @@ async fn revoke_session_kills_the_grant_for(skip_consent: bool) {
         two_browsers_authorized("bc-revoke-grant", &sink).await;
     if skip_consent {
         mark_client_verified(&id);
-        hydra_set_client_skip_consent(&id, true).await;
+        oauth_set_client_skip_consent(&id, true).await;
     }
     let (sid_b, refresh_b) = if skip_consent {
         authorize_skip_consent(&b, &id, &secret, &redirect).await
@@ -348,16 +373,23 @@ async fn revoke_session_kills_the_grant_for(skip_consent: bool) {
         .as_str()
         .expect("rotated refresh_token")
         .to_string();
+    #[cfg(feature = "oauth-native")]
+    assert!(oauth_login_session_exists(&sid_b).await);
 
     revoke_session_from(&a, &b).await;
 
-    assert_eq!(sink.sids_after(1, 10).await, vec![sid_b]);
+    assert_eq!(sink.sids_after(1, 10).await, vec![sid_b.clone()]);
+    #[cfg(feature = "oauth-native")]
+    assert!(
+        login_session_ends(&sid_b, 10).await,
+        "the revoked session's OAuth login session must end"
+    );
     assert!(
         !refresh_succeeds(&id, &secret, &refresh_b).await,
         "the revoked session's grant must die (skip_consent: {skip_consent})"
     );
 
-    hydra_delete_client(&id).await;
+    oauth_delete_client(&id).await;
     if skip_consent {
         delete_client_metadata(&id);
     }
@@ -384,10 +416,17 @@ async fn password_change_signs_out_other_browsers_and_kills_grants() {
         two_browsers_authorized("bc-password-change", &sink).await;
     let (_sid_a, refresh_a) = authorize(&a, &id, &secret, &redirect).await;
     let (sid_b, refresh_b) = authorize(&b, &id, &secret, &redirect).await;
+    #[cfg(feature = "oauth-native")]
+    assert!(oauth_login_session_exists(&sid_b).await);
 
     kratos_change_password(&a.client, &format!("{}-changed", user.password)).await;
 
-    assert_eq!(sink.sids_after(1, 15).await, vec![sid_b]);
+    assert_eq!(sink.sids_after(1, 15).await, vec![sid_b.clone()]);
+    #[cfg(feature = "oauth-native")]
+    assert!(
+        login_session_ends(&sid_b, 15).await,
+        "the other browser's OAuth login session must end"
+    );
     assert!(
         !refresh_succeeds(&id, &secret, &refresh_b).await,
         "the other browser's grant must die"
@@ -397,7 +436,7 @@ async fn password_change_signs_out_other_browsers_and_kills_grants() {
         "the browser that changed the password keeps its grant"
     );
 
-    hydra_delete_client(&id).await;
+    oauth_delete_client(&id).await;
     user.cleanup().await;
 }
 
@@ -410,6 +449,8 @@ async fn logout_keeps_offline_grants() {
     let (user, a, _b, (id, secret, redirect)) =
         two_browsers_authorized("bc-logout-keeps", &sink).await;
     let (sid_a, refresh_a) = authorize(&a, &id, &secret, &redirect).await;
+    #[cfg(feature = "oauth-native")]
+    assert!(oauth_login_session_exists(&sid_a).await);
 
     let body = a
         .client
@@ -428,13 +469,18 @@ async fn logout_keeps_offline_grants() {
         .await
         .expect("POST /logout");
 
-    assert_eq!(sink.sids_after(1, 10).await, vec![sid_a]);
+    assert_eq!(sink.sids_after(1, 10).await, vec![sid_a.clone()]);
+    #[cfg(feature = "oauth-native")]
+    assert!(
+        login_session_ends(&sid_a, 10).await,
+        "logout must end the browser's OAuth login session"
+    );
     assert!(
         refresh_succeeds(&id, &secret, &refresh_a).await,
         "an offline grant survives plain logout"
     );
 
-    hydra_delete_client(&id).await;
+    oauth_delete_client(&id).await;
     user.cleanup().await;
 }
 
@@ -474,7 +520,7 @@ async fn first_authorize(
 async fn prompt_none_without_kratos_session_returns_login_required() {
     assert!(portal_reachable().await);
     let user = register_test_user("prompt-none-signed-out").await;
-    let (id, _secret, redirect) = hydra_create_test_client(&["openid"]).await;
+    let (id, _secret, redirect) = oauth_create_test_client(&["openid"]).await;
     first_authorize(&user, &id, &redirect, "openid").await;
 
     kratos_admin_end_sessions(&user.identity_id).await;
@@ -484,7 +530,7 @@ async fn prompt_none_without_kratos_session_returns_login_required() {
         "login_required",
     );
 
-    hydra_delete_client(&id).await;
+    oauth_delete_client(&id).await;
     user.cleanup().await;
 }
 
@@ -492,7 +538,7 @@ async fn prompt_none_without_kratos_session_returns_login_required() {
 async fn prompt_none_needing_step_up_returns_login_required() {
     assert!(portal_reachable().await);
     let user = register_test_user("prompt-none-step-up").await;
-    let (id, _secret, redirect) = hydra_create_test_client(&["openid"]).await;
+    let (id, _secret, redirect) = oauth_create_test_client(&["openid"]).await;
     first_authorize(&user, &id, &redirect, "openid").await;
 
     let url = oauth_auth_url(&id, &redirect, "openid", "&prompt=none&acr_values=aal2");
@@ -501,7 +547,7 @@ async fn prompt_none_needing_step_up_returns_login_required() {
         "login_required",
     );
 
-    hydra_delete_client(&id).await;
+    oauth_delete_client(&id).await;
     user.cleanup().await;
 }
 
@@ -511,7 +557,7 @@ async fn prompt_none_with_username_step_returns_interaction_required() {
     // A fresh account without a username would see the username step on a
     // `profile` request; the first authorize asks for `openid` only.
     let user = register_test_user_with_username_step("prompt-none-username").await;
-    let (id, _secret, redirect) = hydra_create_test_client(&["openid", "profile"]).await;
+    let (id, _secret, redirect) = oauth_create_test_client(&["openid", "profile"]).await;
     first_authorize(&user, &id, &redirect, "openid").await;
 
     let url = oauth_auth_url(&id, &redirect, "openid profile", "&prompt=none");
@@ -520,7 +566,7 @@ async fn prompt_none_with_username_step_returns_interaction_required() {
         "interaction_required",
     );
 
-    hydra_delete_client(&id).await;
+    oauth_delete_client(&id).await;
     user.cleanup().await;
 }
 
@@ -528,7 +574,7 @@ async fn prompt_none_with_username_step_returns_interaction_required() {
 async fn prompt_none_unvouched_client_returns_consent_required() {
     assert!(portal_reachable().await);
     let user = register_test_user("prompt-none-consent").await;
-    let (id, _secret, redirect) = hydra_create_test_client(&["openid"]).await;
+    let (id, _secret, redirect) = oauth_create_test_client(&["openid"]).await;
     // Consent not remembered, so the next request needs the consent screen.
     first_authorize(&user, &id, &redirect, "openid").await;
 
@@ -538,7 +584,7 @@ async fn prompt_none_unvouched_client_returns_consent_required() {
         "consent_required",
     );
 
-    hydra_delete_client(&id).await;
+    oauth_delete_client(&id).await;
     user.cleanup().await;
 }
 
@@ -550,16 +596,22 @@ async fn prompt_none_unvouched_client_returns_consent_required() {
 async fn prompt_none_with_another_value_is_an_error() {
     assert!(portal_reachable().await);
     let user = register_test_user("prompt-none-login").await;
-    let (id, _secret, redirect) = hydra_create_test_client(&["openid"]).await;
+    let (id, _secret, redirect) = oauth_create_test_client(&["openid"]).await;
     first_authorize(&user, &id, &redirect, "openid").await;
 
     let url = oauth_auth_url(&id, &redirect, "openid", "&prompt=none+login");
+    // OIDC Core 3.1.2.1 prescribes no code; Hydra answers login_required.
+    let expected = if is_native_oauth() {
+        "invalid_request"
+    } else {
+        "login_required"
+    };
     assert_rp_error(
         authorize_chase_callback(&user.manual_client, &url).await,
-        "login_required",
+        expected,
     );
 
-    hydra_delete_client(&id).await;
+    oauth_delete_client(&id).await;
     user.cleanup().await;
 }
 
@@ -569,7 +621,7 @@ async fn prompt_none_with_another_value_is_an_error() {
 async fn consent_failure_returns_server_error_to_client() {
     assert!(portal_reachable().await);
     let user = register_test_user("consent-server-error").await;
-    let (id, _secret, redirect) = hydra_create_test_client(&["openid"]).await;
+    let (id, _secret, redirect) = oauth_create_test_client(&["openid"]).await;
     let auth_url = oauth_auth_url(&id, &redirect, "openid", "");
     let (challenge, csrf, _) = drive_to_consent(&user.client, &auth_url).await;
 
@@ -598,7 +650,7 @@ async fn consent_failure_returns_server_error_to_client() {
     }
     assert_rp_error(callback, "server_error");
 
-    hydra_delete_client(&id).await;
+    oauth_delete_client(&id).await;
     user.cleanup().await;
 }
 
@@ -613,7 +665,7 @@ async fn stale_hydra_login_for_other_subject_signs_in_once() {
     let a = register_test_user("stale-login-a").await;
     let b = register_test_user("stale-login-b").await;
     mark_identity_verified(&b.identity_id).await;
-    let (id, secret, redirect) = hydra_create_backchannel_client(&["openid"], &sink.url).await;
+    let (id, secret, redirect) = oauth_create_backchannel_client(&["openid"], &sink.url).await;
 
     let code = first_authorize(&a, &id, &redirect, "openid").await;
     let tokens = exchange_code_for_tokens(&id, &secret, &redirect, &code).await;
@@ -675,7 +727,7 @@ async fn stale_hydra_login_for_other_subject_signs_in_once() {
     );
     assert_eq!(sink.sids_after(1, 10).await, vec![sid_a]);
 
-    hydra_delete_client(&id).await;
+    oauth_delete_client(&id).await;
     a.cleanup().await;
     b.cleanup().await;
 }
@@ -690,7 +742,7 @@ async fn stale_hydra_login_with_live_session_rejects_login_required() {
     let b = register_test_user("stale-live-b").await;
     mark_identity_verified(&a.identity_id).await;
     mark_identity_verified(&b.identity_id).await;
-    let (id, _secret, redirect) = hydra_create_backchannel_client(&["openid"], &sink.url).await;
+    let (id, _secret, redirect) = oauth_create_backchannel_client(&["openid"], &sink.url).await;
 
     // A authorizes in a browser whose cookie jar we can read.
     let (a_client, a_manual, a_jar) = paired_clients();
@@ -704,21 +756,30 @@ async fn stale_hydra_login_with_live_session_rejects_login_required() {
     // B's browser carries A's Hydra cookies; A's Kratos session stays live.
     let (b_client, b_manual, b_jar) = paired_clients();
     password_login_aal1(&b_client, &b.email, &b.password).await;
-    let hydra: reqwest::Url = HYDRA_PUBLIC.parse().unwrap();
+    // The native OP cookies are `Path=/oauth2` on the portal host, next to B's own session.
+    let (op_url, op_path) = if is_native_oauth() {
+        (format!("{}/oauth2/auth", oauth_public()), "/oauth2")
+    } else {
+        (oauth_public().to_string(), "/")
+    };
+    let hydra: reqwest::Url = op_url.parse().unwrap();
     let hydra_cookies = reqwest::cookie::CookieStore::cookies(a_jar.as_ref(), &hydra)
         .expect("A holds Hydra cookies")
         .to_str()
         .unwrap()
         .to_string();
     for c in hydra_cookies.split("; ") {
-        b_jar.add_cookie_str(&format!("{c}; Path=/"), &hydra);
+        if is_native_oauth() && !c.starts_with("forseti_op=") {
+            continue;
+        }
+        b_jar.add_cookie_str(&format!("{c}; Path={op_path}"), &hydra);
     }
 
     let callback = authorize_chase_callback(&b_manual, &auth_url).await;
     assert_rp_error(callback, "login_required");
     assert!(sink.sids_after(1, 3).await.is_empty(), "nothing is revoked");
 
-    hydra_delete_client(&id).await;
+    oauth_delete_client(&id).await;
     a.cleanup().await;
     b.cleanup().await;
 }
@@ -732,7 +793,7 @@ async fn logout_sweeps_a_rotated_browsers_dead_sid() {
     let user = register_test_user("bc-sweep").await;
     mark_identity_verified(&user.identity_id).await;
     let (id, secret, redirect) =
-        hydra_create_backchannel_client(&["openid", "offline_access"], &sink.url).await;
+        oauth_create_backchannel_client(&["openid", "offline_access"], &sink.url).await;
     let a = Browser {
         client: user.client.clone(),
         manual: user.manual_client.clone(),
@@ -763,7 +824,7 @@ async fn logout_sweeps_a_rotated_browsers_dead_sid() {
 
     assert_eq!(sink.sids_after(1, 10).await, vec![sid]);
 
-    hydra_delete_client(&id).await;
+    oauth_delete_client(&id).await;
     user.cleanup().await;
 }
 
@@ -773,9 +834,9 @@ async fn logout_sweeps_a_rotated_browsers_dead_sid() {
 async fn prompt_none_ignores_an_org_the_user_would_have_to_join() {
     assert!(portal_reachable().await);
     let user = register_test_user("prompt-none-org").await;
-    let (id, _secret, redirect) = hydra_create_test_client(&["openid"]).await;
+    let (id, _secret, redirect) = oauth_create_test_client(&["openid"]).await;
     mark_client_verified(&id);
-    hydra_set_client_skip_consent(&id, true).await;
+    oauth_set_client_skip_consent(&id, true).await;
     let org_id = uuid::Uuid::new_v4().to_string();
     let slug = format!("pn-{}", &org_id[..8]);
     seed_organization(&org_id, &slug, "Prompt None Org", "all");
@@ -801,69 +862,227 @@ async fn prompt_none_ignores_an_org_the_user_would_have_to_join() {
     );
 
     delete_organization(&org_id);
-    hydra_delete_client(&id).await;
+    oauth_delete_client(&id).await;
     delete_client_metadata(&id);
     user.cleanup().await;
 }
 
 /// The consent screen is the challenge owner's: another account's browser
-/// opening it gets `access_denied` at the client instead of a page with the
-/// owner's email and requested scopes.
+/// opening it lands on Forseti's `/error` instead of a page with the owner's
+/// email and requested scopes, and the owner can still decide the request.
 #[tokio::test]
 async fn consent_page_from_another_session_is_rejected() {
     assert!(portal_reachable().await);
     let a = register_test_user("consent-view2-a").await;
     let b = register_test_user("consent-view2-b").await;
-    let (id, _secret, redirect) = hydra_create_test_client(&["openid"]).await;
+    let (id, _secret, redirect) = oauth_create_test_client(&["openid"]).await;
 
     let auth_url = oauth_auth_url(&id, &redirect, "openid", "");
-    let (challenge, _csrf_a, _) = drive_to_consent(&a.client, &auth_url).await;
+    let (challenge, csrf_a, _) = drive_to_consent(&a.client, &auth_url).await;
 
     let consent_url = format!(
         "{PORTAL}/oauth/consent?consent_challenge={}",
         form_urlencode(&challenge)
     );
-    let callback = authorize_chase_callback(&b.manual_client, &consent_url).await;
-    assert_rp_error(callback, "access_denied");
+    let resp = b
+        .manual_client
+        .get(&consent_url)
+        .send()
+        .await
+        .expect("GET consent as B");
+    assert_foreign_consent_ends_on_error(&b.manual_client, resp, &a, &id, &redirect).await;
+    assert_owner_still_gets_a_code(&a, &csrf_a, &challenge).await;
 
-    hydra_delete_client(&id).await;
+    oauth_delete_client(&id).await;
     a.cleanup().await;
     b.cleanup().await;
 }
 
+/// Another session using `owner`'s consent challenge ends on Forseti's `/error`, and nothing
+/// reaches the client.
+async fn assert_foreign_consent_ends_on_error(
+    client: &reqwest::Client,
+    mut resp: reqwest::Response,
+    owner: &RegisteredUser,
+    client_id: &str,
+    redirect: &str,
+) {
+    let mut seen = vec![resp.url().clone()];
+    let body = loop {
+        assert!(seen.len() <= 15, "hop chain too long: {seen:?}");
+        let next = if resp.status().is_redirection() {
+            next_hop(resp).await.expect("redirect with a Location")
+        } else {
+            let base = resp.url().clone();
+            let body = resp.text().await.unwrap_or_default();
+            match continue_target(&body, &base) {
+                Some(next) => next,
+                None => break body,
+            }
+        };
+        seen.push(next.clone());
+        resp = client.get(next).send().await.expect("follow hop");
+    };
+    let last = seen.last().expect("at least the first URL");
+    assert_eq!(last.path(), "/error", "{seen:?}");
+    assert!(
+        !seen.iter().any(|u| u.as_str().starts_with(redirect)),
+        "nothing may reach the client: {seen:?}"
+    );
+    assert!(
+        !body.contains(&owner.email) && !body.contains("consent_challenge"),
+        "the owner's consent page must not be shown"
+    );
+    #[cfg(feature = "oauth-native")]
+    assert_eq!(
+        oauth_grant_and_code_count(&owner.identity_id, client_id).await,
+        (0, 0),
+        "the owner's request must yield no grant or code"
+    );
+    #[cfg(not(feature = "oauth-native"))]
+    let _ = client_id;
+}
+
+/// The request is still pending after a foreign browser touched it: the owner's
+/// browser accepts consent on the same challenge and the client receives a code.
+async fn assert_owner_still_gets_a_code(owner: &RegisteredUser, csrf: &str, challenge: &str) {
+    let code =
+        consent_accept_chase_code(&owner.manual_client, csrf, challenge, &["openid"], false).await;
+    assert!(code.is_some(), "the owner's accept must still yield a code");
+}
+
 /// A deny posted from a browser signed in as someone else hits the subject
-/// gate first, so it is never recorded as the challenge owner's decision.
+/// gate first, so it is never recorded as the challenge owner's decision and
+/// the owner can still decide the request.
 #[tokio::test]
 async fn consent_deny_from_another_session_is_rejected() {
     assert!(portal_reachable().await);
     let a = register_test_user("consent-deny-a").await;
     let b = register_test_user("consent-deny-b").await;
-    let (id, _secret, redirect) = hydra_create_test_client(&["openid"]).await;
+    let (id, _secret, redirect) = oauth_create_test_client(&["openid"]).await;
 
     let auth_url = oauth_auth_url(&id, &redirect, "openid", "");
-    let (challenge, _csrf_a, _) = drive_to_consent(&a.client, &auth_url).await;
+    let (challenge, csrf_a, _) = drive_to_consent(&a.client, &auth_url).await;
 
-    let body = b
-        .client
-        .get(format!("{PORTAL}/settings"))
+    let csrf_b = settings_csrf(&b).await;
+    let resp = b
+        .manual_client
+        .post(format!("{PORTAL}/oauth/consent"))
+        .form(&[
+            ("_csrf", csrf_b.as_str()),
+            ("consent_challenge", challenge.as_str()),
+            ("decision", "deny"),
+        ])
         .send()
         .await
-        .expect("GET /settings as B")
-        .text()
-        .await
-        .expect("settings body");
-    let csrf_b = extract_csrf_form_token(&body).expect("_csrf on /settings");
-    let loc = consent_deny_chase_location(&b.manual_client, &csrf_b, &challenge).await;
-    assert_rp_error(loc, "access_denied");
+        .expect("POST consent deny as B");
+    assert_foreign_consent_ends_on_error(&b.manual_client, resp, &a, &id, &redirect).await;
     assert_eq!(
         count_audit_events_for_target("oauth.consent.denied", &id),
         0,
         "B's deny must not be recorded as A's decision"
     );
+    assert_owner_still_gets_a_code(&a, &csrf_a, &challenge).await;
 
-    hydra_delete_client(&id).await;
+    oauth_delete_client(&id).await;
     a.cleanup().await;
     b.cleanup().await;
+}
+
+/// An account switch posted from another session, through either entry point,
+/// lands on `/error` without the owner's authorize URL, ends no session and
+/// writes no audit row; the request stays in consent and the owner can still
+/// accept it.
+#[tokio::test]
+async fn consent_switch_from_another_session_leaves_the_request_pending() {
+    assert!(portal_reachable().await);
+    let a = register_test_user("consent-switch-a").await;
+    let b = register_test_user("consent-switch-b").await;
+    let (id, _secret, redirect) = oauth_create_test_client(&["openid"]).await;
+
+    let auth_url = oauth_auth_url(&id, &redirect, "openid", "");
+    let (challenge, csrf_a, _) = drive_to_consent(&a.client, &auth_url).await;
+
+    let csrf_b = settings_csrf(&b).await;
+    let resp = b
+        .manual_client
+        .post(format!("{PORTAL}/oauth/consent"))
+        .form(&[
+            ("_csrf", csrf_b.as_str()),
+            ("consent_challenge", challenge.as_str()),
+            ("decision", "switch_account"),
+        ])
+        .send()
+        .await
+        .expect("POST consent switch_account as B");
+    assert_foreign_consent_ends_on_error(&b.manual_client, resp, &a, &id, &redirect).await;
+
+    let resp = b
+        .manual_client
+        .post(format!("{PORTAL}/oauth/consent/switch"))
+        .form(&[
+            ("_csrf", csrf_b.as_str()),
+            ("consent_challenge", challenge.as_str()),
+            ("identity_id", a.identity_id.as_str()),
+        ])
+        .send()
+        .await
+        .expect("POST /oauth/consent/switch as B");
+    assert_foreign_consent_ends_on_error(&b.manual_client, resp, &a, &id, &redirect).await;
+
+    assert_eq!(
+        count_audit_events_for_target("oauth.account.switch", &id),
+        0,
+        "B's switch must not be recorded as A's"
+    );
+    let settings = b
+        .manual_client
+        .get(format!("{PORTAL}/settings"))
+        .send()
+        .await
+        .expect("GET /settings as B");
+    assert_eq!(
+        settings.status(),
+        reqwest::StatusCode::OK,
+        "B's own session is not torn down"
+    );
+
+    let consent_url = format!(
+        "{PORTAL}/oauth/consent?consent_challenge={}",
+        form_urlencode(&challenge)
+    );
+    let page = a
+        .client
+        .get(&consent_url)
+        .send()
+        .await
+        .expect("GET consent as A")
+        .text()
+        .await
+        .expect("consent body");
+    assert!(
+        page.contains("consent_challenge"),
+        "the owner still sees the consent page"
+    );
+    assert_owner_still_gets_a_code(&a, &csrf_a, &challenge).await;
+
+    oauth_delete_client(&id).await;
+    a.cleanup().await;
+    b.cleanup().await;
+}
+
+/// A `_csrf` token for `user`'s session, read off `/settings`.
+async fn settings_csrf(user: &RegisteredUser) -> String {
+    let body = user
+        .client
+        .get(format!("{PORTAL}/settings"))
+        .send()
+        .await
+        .expect("GET /settings")
+        .text()
+        .await
+        .expect("settings body");
+    extract_csrf_form_token(&body).expect("_csrf on /settings")
 }
 
 // --- Remembered consent (goal 3) ---------------------------------------------
@@ -872,9 +1091,9 @@ async fn consent_deny_from_another_session_is_rejected() {
 async fn skip_consent_client_prompt_none_returns_code_on_second_authorize() {
     assert!(portal_reachable().await);
     let user = register_test_user("remember-skip-consent").await;
-    let (id, _secret, redirect) = hydra_create_test_client(&["openid"]).await;
+    let (id, _secret, redirect) = oauth_create_test_client(&["openid"]).await;
     mark_client_verified(&id);
-    hydra_set_client_skip_consent(&id, true).await;
+    oauth_set_client_skip_consent(&id, true).await;
 
     let first = oauth_auth_url(&id, &redirect, "openid", "");
     let loc = authorize_chase_callback(&user.manual_client, &first)
@@ -891,7 +1110,7 @@ async fn skip_consent_client_prompt_none_returns_code_on_second_authorize() {
         "silent sign-in: {loc}"
     );
 
-    hydra_delete_client(&id).await;
+    oauth_delete_client(&id).await;
     delete_client_metadata(&id);
     user.cleanup().await;
 }
@@ -900,7 +1119,7 @@ async fn skip_consent_client_prompt_none_returns_code_on_second_authorize() {
 async fn org_vouched_remembered_consent_is_not_shown_again() {
     assert!(portal_reachable().await);
     let user = register_test_user("remember-org-vouched").await;
-    let (id, _secret, redirect) = hydra_create_test_client(&["openid"]).await;
+    let (id, _secret, redirect) = oauth_create_test_client(&["openid"]).await;
     mark_client_org_verified(&id);
 
     let auth_url = oauth_auth_url(&id, &redirect, "openid", "");
@@ -918,20 +1137,30 @@ async fn org_vouched_remembered_consent_is_not_shown_again() {
         .expect("second authorize skips the consent page");
     assert!(extract_query_param(&loc, "code").is_some(), "{loc}");
 
-    hydra_delete_client(&id).await;
+    oauth_delete_client(&id).await;
     delete_client_metadata(&id);
     user.cleanup().await;
 }
 
 // --- The authorize endpoint (goals 5, 7) -------------------------------------
 
-/// `/oauth2/authorize` on the portal origin (Forseti's authorization endpoint).
-/// On the issuer's origin, as discovery advertises it: Hydra's CSRF cookie is
-/// host-scoped, and a flow resumed on another host fails `request_forbidden`.
+/// The origin of Forseti's authorization endpoint as discovery advertises it.
+/// Hydra's CSRF cookie and the native flow cookie are host-scoped, and a flow
+/// resumed on another host fails.
+fn authorize_origin() -> &'static str {
+    if is_native_oauth() {
+        oauth_issuer()
+    } else {
+        "http://host.containers.internal:3000"
+    }
+}
+
+/// `/oauth2/authorize` on the issuer's origin (Forseti's authorization endpoint).
 fn shim_url(client_id: &str, redirect: &str, extra: &str) -> String {
     format!(
-        "http://host.containers.internal:3000/oauth2/authorize?client_id={}&response_type=code&scope=openid\
+        "{}/oauth2/authorize?client_id={}&response_type=code&scope=openid\
          &redirect_uri={}&state=forseti-test-state{extra}",
+        authorize_origin(),
         form_urlencode(client_id),
         form_urlencode(redirect),
     )
@@ -957,7 +1186,7 @@ async fn chase_to_path(
 async fn authorize_via_post_completes_with_a_code() {
     assert!(portal_reachable().await);
     let user = register_test_user("post-authorize").await;
-    let (id, _secret, redirect) = hydra_create_test_client(&["openid"]).await;
+    let (id, _secret, redirect) = oauth_create_test_client(&["openid"]).await;
     let form = [
         ("client_id", id.as_str()),
         ("response_type", "code"),
@@ -967,7 +1196,7 @@ async fn authorize_via_post_completes_with_a_code() {
     ];
     let resp = user
         .manual_client
-        .post("http://host.containers.internal:3000/oauth2/authorize")
+        .post(format!("{}/oauth2/authorize", authorize_origin()))
         .form(&form)
         .send()
         .await
@@ -980,7 +1209,12 @@ async fn authorize_via_post_completes_with_a_code() {
         .expect("Location")
         .to_string();
     let hydra_auth = resp.url().join(&location).expect("Location resolves");
-    assert!(hydra_auth.path().ends_with("/oauth2/auth"), "{hydra_auth}");
+    let get_form = if is_native_oauth() {
+        "/oauth2/authorize"
+    } else {
+        "/oauth2/auth"
+    };
+    assert!(hydra_auth.path().ends_with(get_form), "{hydra_auth}");
     assert_eq!(
         extract_query_param(hydra_auth.as_str(), "client_id").as_deref(),
         Some(id.as_str())
@@ -996,14 +1230,14 @@ async fn authorize_via_post_completes_with_a_code() {
         "a POSTed authorization request ends in a code"
     );
 
-    hydra_delete_client(&id).await;
+    oauth_delete_client(&id).await;
     user.cleanup().await;
 }
 
 #[tokio::test]
 async fn prompt_create_lands_on_registration_with_challenge() {
     assert!(portal_reachable().await);
-    let (id, secret, redirect) = hydra_create_test_client(&["openid"]).await;
+    let (id, secret, redirect) = oauth_create_test_client(&["openid"]).await;
     let (client, manual, _jar) = paired_clients();
     let resp = manual
         .get(shim_url(&id, &redirect, "&prompt=create"))
@@ -1045,14 +1279,14 @@ async fn prompt_create_lands_on_registration_with_challenge() {
         serde_json::json!(identity_id)
     );
 
-    hydra_delete_client(&id).await;
+    oauth_delete_client(&id).await;
     let _ = delete_test_identity(&identity_id).await;
 }
 
 #[tokio::test]
 async fn login_hint_prefills_identifier() {
     assert!(portal_reachable().await);
-    let (id, _secret, redirect) = hydra_create_test_client(&["openid"]).await;
+    let (id, _secret, redirect) = oauth_create_test_client(&["openid"]).await;
     let client = browser_client();
     let body = client
         .get(shim_url(&id, &redirect, "&login_hint=hinted%40example.com"))
@@ -1066,7 +1300,7 @@ async fn login_hint_prefills_identifier() {
         body.contains("value=\"hinted@example.com\""),
         "the sign-in identifier is prefilled from login_hint"
     );
-    hydra_delete_client(&id).await;
+    oauth_delete_client(&id).await;
 }
 
 /// The CIMD limiter guards URL-shaped client_ids only: a busy first-party app
@@ -1074,7 +1308,7 @@ async fn login_hint_prefills_identifier() {
 #[tokio::test]
 async fn non_cimd_authorize_is_not_rate_limited() {
     assert!(portal_reachable().await);
-    let (id, _secret, redirect) = hydra_create_test_client(&["openid"]).await;
+    let (id, _secret, redirect) = oauth_create_test_client(&["openid"]).await;
     let client = manual_redirect_client();
     for _ in 0..60 {
         let res = client
@@ -1090,7 +1324,7 @@ async fn non_cimd_authorize_is_not_rate_limited() {
     }
     // The CIMD half isn't asserted here: the test configs raise
     // `[oauth.cimd]` limits to 1000/min so the CIMD suite can run.
-    hydra_delete_client(&id).await;
+    oauth_delete_client(&id).await;
 }
 
 // --- `idp_hint`: hand off to an upstream provider ----------------------------
@@ -1170,7 +1404,10 @@ async fn submit_handoff(manual: &reqwest::Client, page: &reqwest::Url, body: &st
 async fn discovery_lists_idp_hints_supported() {
     assert!(portal_reachable().await);
     let doc: serde_json::Value = browser_client()
-        .get("http://host.containers.internal:3000/hydra/.well-known/openid-configuration")
+        .get(format!(
+            "{}/.well-known/openid-configuration",
+            oauth_issuer()
+        ))
         .send()
         .await
         .expect("discovery transport")
@@ -1218,7 +1455,7 @@ async fn discovery_lists_idp_hints_supported() {
 #[tokio::test]
 async fn idp_hint_full_round_trip() {
     assert!(portal_reachable().await);
-    let (id, secret, redirect) = hydra_create_test_client(&["openid"]).await;
+    let (id, secret, redirect) = oauth_create_test_client(&["openid"]).await;
     let manual = manual_redirect_client();
 
     let (visited, body) =
@@ -1304,14 +1541,14 @@ async fn idp_hint_full_round_trip() {
         .expect("sub")
         .to_string();
 
-    hydra_delete_client(&id).await;
+    oauth_delete_client(&id).await;
     let _ = delete_test_identity(&sub).await;
 }
 
 #[tokio::test]
 async fn idp_hint_with_prompt_create_hands_off_from_registration() {
     assert!(portal_reachable().await);
-    let (id, _secret, redirect) = hydra_create_test_client(&["openid"]).await;
+    let (id, _secret, redirect) = oauth_create_test_client(&["openid"]).await;
     let manual = manual_redirect_client();
 
     let (visited, body) = chase_all(
@@ -1336,13 +1573,13 @@ async fn idp_hint_with_prompt_create_hands_off_from_registration() {
         "{upstream}"
     );
 
-    hydra_delete_client(&id).await;
+    oauth_delete_client(&id).await;
 }
 
 #[tokio::test]
 async fn unknown_idp_hint_shows_normal_login() {
     assert!(portal_reachable().await);
-    let (id, _secret, redirect) = hydra_create_test_client(&["openid"]).await;
+    let (id, _secret, redirect) = oauth_create_test_client(&["openid"]).await;
 
     let (_, known) = chase_all(
         &manual_redirect_client(),
@@ -1369,7 +1606,7 @@ async fn unknown_idp_hint_shows_normal_login() {
         "the normal sign-in form renders"
     );
 
-    hydra_delete_client(&id).await;
+    oauth_delete_client(&id).await;
 }
 
 #[tokio::test]
@@ -1377,7 +1614,7 @@ async fn idp_hint_ignored_with_session() {
     assert!(portal_reachable().await);
     let user = register_test_user("idp-hint-session").await;
     mark_identity_verified(&user.identity_id).await;
-    let (id, _secret, redirect) = hydra_create_test_client(&["openid"]).await;
+    let (id, _secret, redirect) = oauth_create_test_client(&["openid"]).await;
 
     let (visited, body) = chase_all(
         &user.manual_client,
@@ -1401,6 +1638,6 @@ async fn idp_hint_ignored_with_session() {
         "no sign-in page in the chain: {visited:?}"
     );
 
-    hydra_delete_client(&id).await;
+    oauth_delete_client(&id).await;
     user.cleanup().await;
 }

@@ -24,7 +24,7 @@ pub enum Cmd {
         /// Skip the confirmation prompt (required when stdin is not a terminal)
         #[arg(long)]
         yes: bool,
-        /// Delete even if the identity is the only owner of an organization with other members
+        /// Delete even if the identity is the only owner of an organization with other members, or its OAuth sessions could not all be ended
         #[arg(long)]
         force: bool,
     },
@@ -32,6 +32,9 @@ pub enum Cmd {
     PosixReconcile,
     /// Create the Hydra OAuth2 client the POSIX/PAM device flow logs in with
     PosixInitClient,
+    /// Retire the active OAuth signing key and generate a new one; retired keys stay published
+    #[cfg(feature = "oauth-native")]
+    RotateOauthKey,
     /// Stamp every Hydra client Forseti has no trust row for as operator-created.
     /// Run this ONCE before upgrading, while a missing row still reads as verified.
     ReconcileClientMetadata,
@@ -45,6 +48,12 @@ mod tests {
     #[test]
     fn unknown_subcommand_errors() {
         assert!(Cli::try_parse_from(["forseti", "confi-check"]).is_err());
+    }
+
+    #[test]
+    fn rotate_oauth_key_exists_only_on_the_native_oauth_build() {
+        let parsed = Cli::try_parse_from(["forseti", "rotate-oauth-key"]);
+        assert_eq!(parsed.is_ok(), cfg!(feature = "oauth-native"));
     }
 
     #[test]

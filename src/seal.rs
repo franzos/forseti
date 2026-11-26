@@ -3,12 +3,11 @@
 use aws_lc_rs::aead::{AES_256_GCM, Aad, LessSafeKey, NONCE_LEN, Nonce, UnboundKey};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-
-use super::random_bytes;
+use sha2::{Digest as _, Sha256};
 
 const VERSION: &str = "v1";
 
-pub(super) struct SealKey(LessSafeKey);
+pub(crate) struct SealKey(LessSafeKey);
 
 impl std::fmt::Debug for SealKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -27,12 +26,12 @@ fn aad(purpose: &str, binding: &str) -> Vec<u8> {
 }
 
 impl SealKey {
-    pub(super) fn new(key: &[u8; 32]) -> Self {
+    pub(crate) fn new(key: &[u8; 32]) -> Self {
         let unbound = UnboundKey::new(&AES_256_GCM, key).expect("32 bytes is an AES-256 key");
         Self(LessSafeKey::new(unbound))
     }
 
-    pub(super) fn seal(&self, purpose: &str, binding: &str, plaintext: &[u8]) -> String {
+    pub(crate) fn seal(&self, purpose: &str, binding: &str, plaintext: &[u8]) -> String {
         self.seal_with_nonce(random_bytes(), purpose, binding, plaintext)
     }
 
@@ -60,7 +59,7 @@ impl SealKey {
     }
 
     /// The plaintext, or `None` on any version, format, key, purpose or binding mismatch.
-    pub(super) fn open(&self, purpose: &str, binding: &str, sealed: &str) -> Option<Vec<u8>> {
+    pub(crate) fn open(&self, purpose: &str, binding: &str, sealed: &str) -> Option<Vec<u8>> {
         let mut parts = sealed.split('.');
         let (Some(VERSION), Some(nonce), Some(body), None) =
             (parts.next(), parts.next(), parts.next(), parts.next())
@@ -79,6 +78,23 @@ impl SealKey {
             .ok()?;
         Some(plain.to_vec())
     }
+}
+
+/// `N` bytes from the operating system's CSPRNG.
+pub(crate) fn random_bytes<const N: usize>() -> [u8; N] {
+    use rand::TryRng as _;
+    let mut buf = [0u8; N];
+    // An OS without a working random source cannot mint keys or tokens safely; there is no fallback.
+    rand::rngs::SysRng
+        .try_fill_bytes(&mut buf)
+        .expect("OS random source is available");
+    buf
+}
+
+/// Lowercase hex SHA-256, the form token hashes are stored in.
+#[cfg_attr(not(feature = "identity-native"), allow(dead_code))]
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(bytes))
 }
 
 #[cfg(test)]

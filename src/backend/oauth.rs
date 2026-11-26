@@ -151,6 +151,8 @@ pub struct TokenSet {
 /// Outcome of one device-code token poll (RFC 8628 §3.5). The error
 /// strings Hydra returns at `/oauth2/token` map onto these so callers
 /// pattern-match instead of string-sniffing.
+// Only the Hydra backend constructs these.
+#[cfg_attr(feature = "oauth-native", allow(dead_code))]
 #[derive(Debug, Clone)]
 pub enum DeviceTokenOutcome {
     /// `authorization_pending`: keep polling at the current interval.

@@ -77,9 +77,18 @@ async fn shim_authorize_scope_resource(
     let resource = resource
         .map(|r| format!("&resource={}", form_urlencode(r)))
         .unwrap_or_default();
+    // Native validates the request once CIMD is done, and a CIMD client is public.
+    let pkce = if is_native_oauth() {
+        format!(
+            "&code_challenge={}&code_challenge_method=S256",
+            pkce_pair().1
+        )
+    } else {
+        String::new()
+    };
     let url = format!(
         "{PORTAL}/oauth2/authorize?client_id={}&response_type=code&scope={}\
-         &redirect_uri={}&state=cimd-test{resource}",
+         &redirect_uri={}&state=cimd-test{resource}{pkce}",
         form_urlencode(client_id),
         form_urlencode(scope),
         form_urlencode(redirect_uri)
@@ -98,6 +107,25 @@ async fn shim_authorize_scope_resource(
         .to_string();
     let body = res.text().await.unwrap_or_default();
     (status, location, body)
+}
+
+/// Status of a request CIMD lets through: a 302 on to Hydra's authorize endpoint, or on native a
+/// 303 to the login page, or to the client with an authorization error.
+fn proceeds_status() -> StatusCode {
+    if is_native_oauth() {
+        StatusCode::SEE_OTHER
+    } else {
+        StatusCode::FOUND
+    }
+}
+
+/// Start of the `Location` of a request CIMD lets through and that validates.
+fn proceeds_location() -> String {
+    if is_native_oauth() {
+        format!("{}/oauth/login?login_challenge=", oauth_issuer())
+    } else {
+        "/hydra/oauth2/auth".to_string()
+    }
 }
 
 /// A loopback RFC 9728 protected-resource fixture.
@@ -141,7 +169,7 @@ pub(crate) async fn serve_prm(
         hits: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     };
     let doc_resource = doc_resource.unwrap_or(&resource).to_string();
-    let servers = authorization_servers.unwrap_or_else(|| vec![FORSETI_ISSUER.to_string()]);
+    let servers = authorization_servers.unwrap_or_else(|| vec![oauth_issuer().to_string()]);
     let (scopes, hits) = (prm.scopes.clone(), prm.hits.clone());
     let handler = move || {
         let body = serde_json::json!({
@@ -179,31 +207,12 @@ fn unique_suffix() -> String {
 }
 
 async fn client_row_scopes(client_id: &str) -> Vec<String> {
-    hydra_get_client_json(client_id).await["scope"]
+    oauth_get_client_json(client_id).await["scope"]
         .as_str()
         .unwrap_or_default()
         .split_whitespace()
         .map(str::to_string)
         .collect()
-}
-
-/// GET the Hydra client row via the admin API. URL-shaped client_ids need the
-/// path segment percent-encoded.
-async fn hydra_get_client_json(client_id: &str) -> serde_json::Value {
-    let res = browser_client()
-        .get(format!(
-            "{HYDRA_ADMIN}/admin/clients/{}",
-            form_urlencode(client_id)
-        ))
-        .send()
-        .await
-        .expect("hydra get client transport");
-    assert!(
-        res.status().is_success(),
-        "hydra get client {client_id}: status {}",
-        res.status()
-    );
-    res.json().await.expect("hydra client json")
 }
 
 fn client_redirect_uris(client: &serde_json::Value) -> Vec<String> {
@@ -233,8 +242,9 @@ fn pkce_pair() -> (String, String) {
 
 /// Full shim authorize URL for a browser-style (session-carrying) flow. Uses
 /// the issuer's host (not `localhost`) so Hydra's CSRF cookie set on the
-/// first `/hydra/oauth2/auth` hop rides along on the resumed one. The
-/// verifier is discarded — callers that exchange the code use
+/// first `/hydra/oauth2/auth` hop rides along on the resumed one; on native
+/// the issuer is the portal itself. The verifier is discarded — callers that
+/// exchange the code use
 /// [`shim_auth_url_with`] with a caller-held pair.
 fn shim_auth_url(client_id: &str, redirect_uri: &str, state: &str) -> String {
     shim_auth_url_with(client_id, redirect_uri, state, &pkce_pair().1, "")
@@ -268,8 +278,13 @@ fn shim_auth_url_scoped(
     scope: &str,
     extra: &str,
 ) -> String {
+    let origin = if is_native_oauth() {
+        oauth_public()
+    } else {
+        "http://host.containers.internal:3000"
+    };
     format!(
-        "http://host.containers.internal:3000/oauth2/authorize?client_id={}&response_type=code\
+        "{origin}/oauth2/authorize?client_id={}&response_type=code\
          &scope={}&redirect_uri={}&state={state}\
          &code_challenge={challenge}&code_challenge_method=S256{extra}",
         form_urlencode(client_id),
@@ -288,7 +303,7 @@ async fn exchange_code_public(
     verifier: &str,
 ) -> serde_json::Value {
     let res = browser_client()
-        .post(format!("{HYDRA_PUBLIC}/oauth2/token"))
+        .post(format!("{}/oauth2/token", oauth_public()))
         .form(&[
             ("grant_type", "authorization_code"),
             ("client_id", client_id),
@@ -310,7 +325,7 @@ async fn exchange_code_public(
 
 /// The `aud` claim of a decoded JWT as a list; absent/empty both come back
 /// as an empty vec.
-fn jwt_aud(claims: &serde_json::Value) -> Vec<String> {
+pub(crate) fn jwt_aud(claims: &serde_json::Value) -> Vec<String> {
     match &claims["aud"] {
         serde_json::Value::String(s) => vec![s.clone()],
         serde_json::Value::Array(a) => a
@@ -323,13 +338,7 @@ fn jwt_aud(claims: &serde_json::Value) -> Vec<String> {
 
 /// Best-effort cleanup of a shim-created Hydra client (URL-shaped id).
 async fn cleanup_cimd_client(client_id: &str) {
-    let _ = browser_client()
-        .delete(format!(
-            "{HYDRA_ADMIN}/admin/clients/{}",
-            form_urlencode(client_id)
-        ))
-        .send()
-        .await;
+    oauth_delete_client(client_id).await;
 }
 
 // --- tests ----------------------------------------------------------------
@@ -379,6 +388,12 @@ async fn cimd_non_https_client_id_passes_through() {
         "http://127.0.0.1:5555/callback",
     )
     .await;
+    if is_native_oauth() {
+        // Unregistered and not URL-shaped: client validation answers, CIMD never runs.
+        assert_eq!(status, StatusCode::SEE_OTHER, "body: {body}");
+        assert_eq!(location, "/error", "body: {body}");
+        return;
+    }
     assert_eq!(status, StatusCode::FOUND, "body: {body}");
     assert!(
         location.starts_with("/hydra/oauth2/auth"),
@@ -422,15 +437,25 @@ async fn cimd_loopback_port_literal_upserted_and_capped() {
     for port in &ports {
         let redirect = format!("http://127.0.0.1:{port}/callback");
         let (status, location, body) = shim_authorize(&url, &redirect).await;
-        assert_eq!(status, StatusCode::FOUND, "port {port} body: {body}");
+        assert_eq!(status, proceeds_status(), "port {port} body: {body}");
         assert!(
-            location.starts_with("/hydra/oauth2/auth"),
+            location.starts_with(&proceeds_location()),
             "port {port}: got {location}"
         );
     }
 
-    let client = hydra_get_client_json(&url).await;
+    let client = oauth_get_client_json(&url).await;
     let uris = client_redirect_uris(&client);
+    if is_native_oauth() {
+        // Native matches the loopback port at authorize, so no literal is stored.
+        assert_eq!(
+            uris,
+            ["http://127.0.0.1/callback", "http://localhost/callback"],
+            "row must hold the document URIs only; got {uris:?}"
+        );
+        cleanup_cimd_client(&url).await;
+        return;
+    }
     for doc_uri in ["http://127.0.0.1/callback", "http://localhost/callback"] {
         assert!(
             uris.iter().any(|u| u == doc_uri),
@@ -593,33 +618,43 @@ async fn cimd_warm_path_skips_admin_write() {
     let redirect = "http://127.0.0.1:43399/callback";
 
     let (status, _loc, body) = shim_authorize(&url, redirect).await;
-    assert_eq!(status, StatusCode::FOUND, "first flow body: {body}");
+    assert_eq!(status, proceeds_status(), "first flow body: {body}");
     assert!(
         read_client_cimd_doc_hash(&url).is_some(),
         "first flow must store the document hash on the metadata row"
     );
-    let uris_after_first = client_redirect_uris(&hydra_get_client_json(&url).await);
+    let uris_after_first = client_redirect_uris(&oauth_get_client_json(&url).await);
 
     // Canary a cold-path upsert would overwrite from the document.
-    let patch = serde_json::json!([
-        { "op": "replace", "path": "/client_name", "value": "cimd-warm-canary" }
-    ]);
-    let res = browser_client()
-        .patch(format!(
-            "{HYDRA_ADMIN}/admin/clients/{}",
-            form_urlencode(&url)
-        ))
-        .header("content-type", "application/json")
-        .json(&patch)
-        .send()
-        .await
-        .expect("hydra patch transport");
-    assert!(res.status().is_success(), "canary patch: {}", res.status());
+    #[cfg(feature = "oauth-ory")]
+    {
+        let patch = serde_json::json!([
+            { "op": "replace", "path": "/client_name", "value": "cimd-warm-canary" }
+        ]);
+        let res = browser_client()
+            .patch(format!(
+                "{HYDRA_ADMIN}/admin/clients/{}",
+                form_urlencode(&url)
+            ))
+            .header("content-type", "application/json")
+            .json(&patch)
+            .send()
+            .await
+            .expect("hydra patch transport");
+        assert!(res.status().is_success(), "canary patch: {}", res.status());
+    }
+    #[cfg(feature = "oauth-native")]
+    oauth_set_client_name(&url, "cimd-warm-canary").await;
 
     let (status, _loc, body) = shim_authorize(&url, redirect).await;
-    assert_eq!(status, StatusCode::FOUND, "second flow body: {body}");
+    assert_eq!(status, proceeds_status(), "second flow body: {body}");
+    if is_native_oauth() {
+        // No literal on the row: another loopback port is warm as well.
+        let (status, _loc, body) = shim_authorize(&url, "http://127.0.0.1:43400/callback").await;
+        assert_eq!(status, proceeds_status(), "other-port flow body: {body}");
+    }
 
-    let client = hydra_get_client_json(&url).await;
+    let client = oauth_get_client_json(&url).await;
     assert_eq!(
         client["client_name"].as_str(),
         Some("cimd-warm-canary"),
@@ -645,8 +680,8 @@ async fn cimd_junk_scopes_stay_off_the_row() {
     let scope = "openid email junk:x";
 
     let (status, _loc, body) = shim_authorize_scope(&url, redirect, scope).await;
-    assert_eq!(status, StatusCode::FOUND, "first flow body: {body}");
-    let row_scope = hydra_get_client_json(&url).await["scope"]
+    assert_eq!(status, proceeds_status(), "first flow body: {body}");
+    let row_scope = oauth_get_client_json(&url).await["scope"]
         .as_str()
         .unwrap_or_default()
         .to_string();
@@ -655,25 +690,30 @@ async fn cimd_junk_scopes_stay_off_the_row() {
     assert!(entries.contains(&"email"), "{row_scope}");
     assert!(!entries.contains(&"junk:x"), "{row_scope}");
 
-    let patch = serde_json::json!([
-        { "op": "replace", "path": "/client_name", "value": "cimd-junk-canary" }
-    ]);
-    let res = browser_client()
-        .patch(format!(
-            "{HYDRA_ADMIN}/admin/clients/{}",
-            form_urlencode(&url)
-        ))
-        .header("content-type", "application/json")
-        .json(&patch)
-        .send()
-        .await
-        .expect("hydra patch transport");
-    assert!(res.status().is_success(), "canary patch: {}", res.status());
+    #[cfg(feature = "oauth-ory")]
+    {
+        let patch = serde_json::json!([
+            { "op": "replace", "path": "/client_name", "value": "cimd-junk-canary" }
+        ]);
+        let res = browser_client()
+            .patch(format!(
+                "{HYDRA_ADMIN}/admin/clients/{}",
+                form_urlencode(&url)
+            ))
+            .header("content-type", "application/json")
+            .json(&patch)
+            .send()
+            .await
+            .expect("hydra patch transport");
+        assert!(res.status().is_success(), "canary patch: {}", res.status());
+    }
+    #[cfg(feature = "oauth-native")]
+    oauth_set_client_name(&url, "cimd-junk-canary").await;
 
     let (status, _loc, body) = shim_authorize_scope(&url, redirect, scope).await;
-    assert_eq!(status, StatusCode::FOUND, "second flow body: {body}");
+    assert_eq!(status, proceeds_status(), "second flow body: {body}");
     assert_eq!(
-        hydra_get_client_json(&url).await["client_name"].as_str(),
+        oauth_get_client_json(&url).await["client_name"].as_str(),
         Some("cimd-junk-canary"),
         "a request naming a dropped scope must take the warm path"
     );
@@ -721,10 +761,18 @@ async fn cimd_golden_path_end_to_end() {
 
     // Consent is what registers the audience on the record, and only the
     // granted one — the refresh below breaks without it.
+    #[cfg(feature = "oauth-ory")]
     assert_eq!(
-        hydra_client_audience(&url).await,
+        oauth_client_audience(&url).await,
         vec![resource.to_string()],
         "consent must register exactly the audience it granted"
+    );
+    // Native keeps the granted audience on the grant, which the refresh reads.
+    #[cfg(feature = "oauth-native")]
+    assert_eq!(
+        oauth_grant_audiences(&url).await,
+        vec![vec![resource.to_string()]],
+        "consent must grant exactly the audience requested"
     );
 
     let token = exchange_code_public(&url, redirect, &code, &verifier).await;
@@ -747,7 +795,7 @@ async fn cimd_golden_path_end_to_end() {
     // Refresh as the same public client: the CIMD URL is the client_id, no
     // client secret.
     let res = browser_client()
-        .post(format!("{HYDRA_PUBLIC}/oauth2/token"))
+        .post(format!("{}/oauth2/token", oauth_public()))
         .form(&[
             ("grant_type", "refresh_token"),
             ("client_id", url.as_str()),
@@ -815,10 +863,17 @@ async fn repeat_consent_does_not_duplicate_the_client_audience() {
         .expect("authorization code on callback URL");
     }
 
+    #[cfg(feature = "oauth-ory")]
     assert_eq!(
-        hydra_client_audience(&url).await,
+        oauth_client_audience(&url).await,
         vec![resource.to_string()],
         "a repeat consent for the same resource must not re-append it"
+    );
+    #[cfg(feature = "oauth-native")]
+    assert_eq!(
+        oauth_grant_audiences(&url).await,
+        vec![vec![resource.to_string()]; 2],
+        "each consent grants the resource once"
     );
 
     cleanup_cimd_client(&url).await;
@@ -845,11 +900,11 @@ async fn cimd_client_record_audience_is_never_policy() {
 
     // Cold-path flow creates the Hydra row the audience is then written onto.
     let (status, _loc, body) = shim_authorize(&url, redirect).await;
-    assert_eq!(status, StatusCode::FOUND, "setup flow body: {body}");
+    assert_eq!(status, proceeds_status(), "setup flow body: {body}");
 
-    hydra_patch_client_audience(&url, &[self_written]).await;
+    oauth_patch_client_audience(&url, &[self_written]).await;
     assert_eq!(
-        hydra_client_audience(&url).await,
+        oauth_client_audience(&url).await,
         vec![self_written.to_string()],
         "test setup: the record must carry the self-written audience"
     );
@@ -884,40 +939,6 @@ async fn cimd_client_record_audience_is_never_policy() {
     user.cleanup().await;
 }
 
-/// Create a public (`token_endpoint_auth_method: none`) client straight via
-/// Hydra's admin API, with a self-declared `audience` on the record and no
-/// Forseti involvement. Returns the Hydra-minted client_id.
-async fn hydra_admin_create_public_client(
-    name: &str,
-    scope: &str,
-    redirect_uris: &[&str],
-    audience: &[&str],
-) -> String {
-    let body = serde_json::json!({
-        "client_name": name,
-        "grant_types": ["authorization_code", "refresh_token"],
-        "response_types": ["code"],
-        "scope": scope,
-        "redirect_uris": redirect_uris,
-        "token_endpoint_auth_method": "none",
-        "audience": audience,
-    });
-    let res = browser_client()
-        .post(format!("{HYDRA_ADMIN}/admin/clients"))
-        .json(&body)
-        .send()
-        .await
-        .expect("hydra admin create transport");
-    assert!(
-        res.status().is_success(),
-        "hydra admin create: status {} body {}",
-        res.status(),
-        res.text().await.unwrap_or_default()
-    );
-    let v: serde_json::Value = res.json().await.expect("hydra admin create body");
-    v["client_id"].as_str().expect("client_id").to_string()
-}
-
 /// Port of dcr.rs `client_registered_outside_forseti_gets_no_audience`: a
 /// client created straight against Hydra's admin API (standing in for any
 /// out-of-band path now that DCR is retired) declares its own audience and
@@ -932,7 +953,7 @@ async fn client_registered_outside_forseti_gets_no_audience() {
     let self_declared = "https://outside-forseti.test/mcp";
     let redirect_uri = "http://127.0.0.1:5555/callback";
 
-    let client_id = hydra_admin_create_public_client(
+    let client_id = oauth_admin_create_public_client(
         "integration-test-direct-hydra",
         "openid",
         &[redirect_uri],
@@ -940,7 +961,7 @@ async fn client_registered_outside_forseti_gets_no_audience() {
     )
     .await;
     assert_eq!(
-        hydra_client_audience(&client_id).await,
+        oauth_client_audience(&client_id).await,
         vec![self_declared.to_string()],
         "test setup: the admin API honours a declared audience"
     );
@@ -952,7 +973,7 @@ async fn client_registered_outside_forseti_gets_no_audience() {
     let user = register_test_user("direct-hydra").await;
     let (verifier, challenge) = pkce_pair();
     let auth_url = format!(
-        "{HYDRA_PUBLIC}/oauth2/auth?client_id={client_id}\
+        "{}/oauth2/auth?client_id={client_id}\
          &response_type=code\
          &scope=openid\
          &redirect_uri={redirect_uri}\
@@ -960,6 +981,7 @@ async fn client_registered_outside_forseti_gets_no_audience() {
          &audience={}\
          &code_challenge={challenge}\
          &code_challenge_method=S256",
+        oauth_public(),
         form_urlencode(self_declared)
     );
     let (consent_challenge, csrf, _body) = drive_to_consent(&user.client, &auth_url).await;
@@ -980,7 +1002,7 @@ async fn client_registered_outside_forseti_gets_no_audience() {
         "a client with no metadata row must not have its record trusted; got {claims}"
     );
 
-    hydra_delete_client(&client_id).await;
+    oauth_delete_client(&client_id).await;
     user.cleanup().await;
 }
 
@@ -1163,6 +1185,7 @@ async fn config_import_seeded_registry_rows() {
 /// with the CIMD mutations, CORS `*`, and the issuer untouched.
 #[tokio::test]
 async fn front_proxy_discovery_is_augmented_with_cors() {
+    skip_on_native_oauth!("the front proxy is not mounted on native OAuth");
     assert!(portal_reachable().await);
 
     for url in [
@@ -1196,7 +1219,7 @@ async fn front_proxy_discovery_is_augmented_with_cors() {
         );
         assert_eq!(
             doc["issuer"],
-            serde_json::json!("http://host.containers.internal:3000/hydra"),
+            serde_json::json!(oauth_issuer()),
             "{url}: issuer must stay Hydra's, byte-identical"
         );
     }
@@ -1207,9 +1230,10 @@ async fn front_proxy_discovery_is_augmented_with_cors() {
 /// through, or Hydra's flow CSRF checks fail on the resumed hop.
 #[tokio::test]
 async fn front_proxy_forwards_cookies_and_does_not_follow_redirects() {
+    skip_on_native_oauth!("the front proxy is not mounted on native OAuth");
     assert!(portal_reachable().await);
 
-    let (client_id, _secret, redirect_uri) = hydra_create_test_client(&["openid"]).await;
+    let (client_id, _secret, redirect_uri) = oauth_create_test_client(&["openid"]).await;
     // Syntactically plausible but bogus flow: real client, throwaway state.
     let url = format!(
         "http://host.containers.internal:3000/hydra/oauth2/auth?client_id={}&response_type=code\
@@ -1237,7 +1261,7 @@ async fn front_proxy_forwards_cookies_and_does_not_follow_redirects() {
         "Hydra's Set-Cookie must ride through the proxy"
     );
 
-    hydra_delete_client(&client_id).await;
+    oauth_delete_client(&client_id).await;
 }
 
 /// Serve two CIMD documents from one loopback listener, so both share an
@@ -1317,7 +1341,7 @@ async fn cimd_refuses_a_new_client_past_the_per_host_ceiling() {
         "a refused registration must not leave a metadata row"
     );
     assert!(
-        hydra_client_field(&fresh, "client_id").await.is_none(),
+        oauth_client_field(&fresh, "client_id").await.is_none(),
         "a refused registration must not leave a Hydra client"
     );
 
@@ -1332,7 +1356,7 @@ async fn cimd_refuses_a_new_client_past_the_per_host_ceiling() {
         delete_client_metadata(id);
     }
     delete_client_metadata(&known);
-    hydra_delete_client(&known).await;
+    oauth_delete_client(&known).await;
 }
 
 /// A CIMD client's POSTed authorization request materializes the client like
@@ -1364,12 +1388,34 @@ async fn cimd_post_authorize_materializes_and_redirects_303() {
         .and_then(|h| h.to_str().ok())
         .unwrap_or_default()
         .to_string();
+    #[cfg(feature = "oauth-ory")]
     assert!(
         location.contains("/oauth2/auth?") && location.contains("state=cimd-post-test"),
         "the form rides the query: {location}"
     );
+    // Native answers the POST with the same request as a GET, which resolves the client.
+    #[cfg(feature = "oauth-native")]
+    {
+        assert!(
+            location.starts_with(&format!("{}/oauth2/authorize?", oauth_issuer()))
+                && location.contains("state=cimd-post-test"),
+            "the form rides the query: {location}"
+        );
+        let res = manual_redirect_client()
+            .get(&location)
+            .send()
+            .await
+            .expect("GET authorize");
+        assert_eq!(res.status(), proceeds_status());
+        let next = res
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|h| h.to_str().ok())
+            .unwrap_or_default();
+        assert!(next.starts_with(&proceeds_location()), "{next}");
+    }
 
-    let row = hydra_get_client_json(&client_id).await;
+    let row = oauth_get_client_json(&client_id).await;
     assert!(
         client_redirect_uris(&row).iter().any(|u| u == redirect),
         "the CIMD client is materialized: {row}"
@@ -1401,7 +1447,7 @@ async fn registry_scope_is_discovered_on_demand_and_throttled() {
         Some(&prm.resource),
     )
     .await;
-    assert_eq!(status, StatusCode::FOUND, "first flow body: {body}");
+    assert_eq!(status, proceeds_status(), "first flow body: {body}");
     assert_eq!(prm.hits(), 1);
     assert!(client_row_scopes(&url).await.contains(&first));
     assert_eq!(
@@ -1417,7 +1463,7 @@ async fn registry_scope_is_discovered_on_demand_and_throttled() {
         Some(&prm.resource),
     )
     .await;
-    assert_eq!(status, StatusCode::FOUND, "second flow body: {body}");
+    assert_eq!(status, proceeds_status(), "second flow body: {body}");
     assert_eq!(prm.hits(), 1, "a second re-fetch within the window");
     assert!(!client_row_scopes(&url).await.contains(&second));
 
@@ -1457,7 +1503,7 @@ async fn registry_scope_from_an_uncorroborated_document_is_refused() {
             Some(&prm.resource),
         )
         .await;
-        assert_eq!(status, StatusCode::FOUND, "flow body: {body}");
+        assert_eq!(status, proceeds_status(), "flow body: {body}");
         assert_eq!(prm.hits(), 1, "{}", prm.resource);
         assert!(!client_row_scopes(&url).await.contains(&scope));
         assert_eq!(
@@ -1491,7 +1537,7 @@ async fn registry_scope_needs_a_registered_enabled_resource() {
         let (status, _loc, body) =
             shim_authorize_scope_resource(&url, redirect, &format!("openid {scope}"), resource)
                 .await;
-        assert_eq!(status, StatusCode::FOUND, "flow body: {body}");
+        assert_eq!(status, proceeds_status(), "flow body: {body}");
         assert!(
             !client_row_scopes(&url).await.contains(&scope),
             "{resource:?}"
@@ -1519,7 +1565,7 @@ async fn stored_registry_scope_without_resource_is_dropped() {
         None,
     )
     .await;
-    assert_eq!(status, StatusCode::FOUND, "flow body: {body}");
+    assert_eq!(status, proceeds_status(), "flow body: {body}");
     assert!(!client_row_scopes(&url).await.contains(&scope));
     assert_eq!(prm.hits(), 0);
 

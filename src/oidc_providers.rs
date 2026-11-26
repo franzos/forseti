@@ -17,6 +17,20 @@ pub(crate) fn display_name(provider_id: &str) -> String {
     }
 }
 
+/// The discovery document's `idp_hints_supported` value: one `{id, name}` per
+/// provider an `idp_hint` can name. `None` when there are none.
+pub(crate) fn idp_hints_supported(provider_ids: &[String]) -> Option<serde_json::Value> {
+    if provider_ids.is_empty() {
+        return None;
+    }
+    Some(
+        provider_ids
+            .iter()
+            .map(|id| serde_json::json!({ "id": id, "name": display_name(id) }))
+            .collect(),
+    )
+}
+
 /// Origin the browser lands on when a provider button is submitted. Kratos
 /// owns the upstream endpoints and never surfaces them in the flow, so the
 /// four providers `forseti-config oidc enable` supports are pinned here.

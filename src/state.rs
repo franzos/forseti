@@ -8,6 +8,8 @@ use axum::http::HeaderMap;
 use axum::response::Response;
 use tokio::sync::Mutex;
 
+#[cfg(feature = "oauth-native")]
+use crate::backend::OAuthBackend;
 use crate::backend::oauth::OidcDiscovery;
 use crate::backend::{IdentityBackend, IdentityImpl, OAuthImpl};
 use crate::commercial::LicenseHandle;
@@ -27,6 +29,7 @@ struct CachedDiscovery {
     doc: OidcDiscovery,
     /// Full document as Hydra served it; the CIMD discovery augmentation
     /// works on this rather than the typed admin-UI subset.
+    #[cfg_attr(feature = "oauth-native", allow(dead_code))]
     raw: Arc<serde_json::Value>,
 }
 
@@ -82,7 +85,7 @@ impl AppState {
         identity: Arc<IdentityImpl>,
         cookie_secret: &[u8],
     ) -> Self {
-        let oauth = crate::backend::build_oauth(&cfg);
+        let oauth = crate::backend::build_oauth(&cfg, &db, cookie_secret);
         Self {
             cfg: Arc::new(cfg),
             identity,
@@ -118,6 +121,7 @@ impl AppState {
     /// The cached discovery doc exactly as Hydra served it, for consumers that
     /// need fields beyond the [`OidcDiscovery`] subset. `None` only on a cold
     /// cache with Hydra unreachable.
+    #[cfg(feature = "oauth-ory")]
     pub async fn openid_configuration_raw(&self) -> Option<Arc<serde_json::Value>> {
         self.cached_discovery().await.map(|c| c.raw)
     }

@@ -448,6 +448,185 @@ diesel::table! {
 }
 
 diesel::table! {
+    oauth_signing_keys (kid) {
+        kid -> Text,
+        alg -> Text,
+        public_jwk -> Text,
+        private_sealed -> Text,
+        status -> Text,
+        created_at -> Text,
+        retired_at -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
+    oauth_clients (client_id) {
+        client_id -> Text,
+        client_name -> Nullable<Text>,
+        secret_hash -> Nullable<Text>,
+        token_endpoint_auth_method -> Text,
+        redirect_uris -> Nullable<Text>,
+        post_logout_redirect_uris -> Nullable<Text>,
+        grant_types -> Nullable<Text>,
+        response_types -> Nullable<Text>,
+        audience -> Nullable<Text>,
+        scope -> Nullable<Text>,
+        skip_consent -> Nullable<Integer>,
+        logo_uri -> Nullable<Text>,
+        client_uri -> Nullable<Text>,
+        backchannel_logout_uri -> Nullable<Text>,
+        backchannel_logout_session_required -> Nullable<Integer>,
+        frontchannel_logout_uri -> Nullable<Text>,
+        frontchannel_logout_session_required -> Nullable<Integer>,
+        metadata -> Nullable<Text>,
+        extra -> Text,
+        created_at -> Text,
+        updated_at -> Text,
+    }
+}
+
+diesel::table! {
+    oauth_authorize_requests (id) {
+        id -> Text,
+        client_id -> Text,
+        login_challenge_hash -> Text,
+        consent_challenge_hash -> Nullable<Text>,
+        verifier_hash -> Nullable<Text>,
+        state -> Text,
+        request_url -> Text,
+        redirect_uri -> Text,
+        response_mode -> Text,
+        oauth_state -> Nullable<Text>,
+        nonce -> Nullable<Text>,
+        code_challenge -> Nullable<Text>,
+        requested_scope -> Text,
+        requested_audience -> Text,
+        requested_resource -> Text,
+        oidc_context -> Text,
+        session_id -> Text,
+        skip_login -> Integer,
+        subject -> Nullable<Text>,
+        skip_consent -> Nullable<Integer>,
+        login_result -> Nullable<Text>,
+        consent_result -> Nullable<Text>,
+        error -> Nullable<Text>,
+        created_at -> Text,
+        expires_at -> Text,
+    }
+}
+
+diesel::table! {
+    oauth_login_sessions (sid) {
+        sid -> Text,
+        subject -> Text,
+        auth_time -> Text,
+        acr -> Nullable<Text>,
+        amr -> Text,
+        remember -> Integer,
+        created_at -> Text,
+        expires_at -> Text,
+    }
+}
+
+diesel::table! {
+    oauth_consent_grants (id) {
+        id -> Text,
+        client_id -> Text,
+        subject -> Text,
+        session_id -> Text,
+        scope -> Text,
+        audience -> Text,
+        id_token_claims -> Text,
+        access_token_claims -> Text,
+        remember -> Integer,
+        skipped -> Integer,
+        handled_at -> Text,
+        auto_granted -> Integer,
+        tokens_revoked_at -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
+    oauth_authorization_codes (code_hash) {
+        code_hash -> Text,
+        grant_id -> Text,
+        client_id -> Text,
+        subject -> Text,
+        session_id -> Text,
+        redirect_uri -> Text,
+        code_challenge -> Nullable<Text>,
+        nonce -> Nullable<Text>,
+        scope -> Text,
+        audience -> Text,
+        auth_time -> Text,
+        acr -> Nullable<Text>,
+        amr -> Text,
+        family_id -> Text,
+        created_at -> Text,
+        expires_at -> Text,
+        used_at -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
+    oauth_refresh_tokens (id) {
+        id -> Text,
+        token_hash -> Text,
+        family_id -> Text,
+        grant_id -> Text,
+        client_id -> Text,
+        subject -> Text,
+        session_id -> Text,
+        scope -> Text,
+        audience -> Text,
+        auth_time -> Text,
+        acr -> Nullable<Text>,
+        amr -> Text,
+        created_at -> Text,
+        expires_at -> Text,
+        used_at -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
+    oauth_revoked_tokens (jti) {
+        jti -> Text,
+        expires_at -> Text,
+    }
+}
+
+diesel::table! {
+    oauth_logout_requests (id) {
+        id -> Text,
+        challenge_hash -> Text,
+        client_id -> Nullable<Text>,
+        sid -> Text,
+        browser_sid -> Nullable<Text>,
+        subject -> Text,
+        post_logout_redirect_uri -> Nullable<Text>,
+        oauth_state -> Nullable<Text>,
+        accepted_at -> Nullable<Text>,
+        created_at -> Text,
+        expires_at -> Text,
+    }
+}
+
+diesel::table! {
+    oauth_device_codes (device_code_hash) {
+        device_code_hash -> Text,
+        user_code -> Text,
+        client_id -> Text,
+        scope -> Text,
+        status -> Text,
+        flow_id -> Nullable<Text>,
+        interval_secs -> Integer,
+        last_polled_at -> Nullable<Text>,
+        created_at -> Text,
+        expires_at -> Text,
+    }
+}
+
+diesel::table! {
     identity_sessions (id) {
         id -> Text,
         identity_id -> Text,
@@ -531,6 +710,8 @@ diesel::allow_tables_to_appear_in_same_query!(
     identity_webauthn_keys
 );
 diesel::allow_tables_to_appear_in_same_query!(posix_group_members, posix_accounts);
+diesel::allow_tables_to_appear_in_same_query!(oauth_consent_grants, oauth_refresh_tokens);
+diesel::allow_tables_to_appear_in_same_query!(oauth_consent_grants, oauth_login_sessions);
 diesel::allow_tables_to_appear_in_same_query!(
     posix_accounts,
     organization_members,

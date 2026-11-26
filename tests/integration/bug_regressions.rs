@@ -803,13 +803,19 @@ async fn admin_client_secret_rotation() {
         "rotate-test-{}",
         chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
     );
+    // Native serves no `client_credentials`; a junk refresh token tells invalid_client from invalid_grant.
+    let (probe_grant, response_type) = if is_native_oauth() {
+        ("refresh_token", "code")
+    } else {
+        ("client_credentials", "token")
+    };
     let res = admin
         .post(format!("{PORTAL}/admin/clients"))
         .form(&[
             ("_csrf", csrf.as_str()),
             ("name", client_name.as_str()),
-            ("grant_types", "client_credentials"),
-            ("response_types", "token"),
+            ("grant_types", probe_grant),
+            ("response_types", response_type),
             ("scope", "openid"),
             ("redirect_uris", ""),
             ("post_logout_redirect_uris", ""),
@@ -862,17 +868,32 @@ async fn admin_client_secret_rotation() {
     // The old secret must no longer work against Hydra. `client_credentials`
     // is the cheapest probe — issue + check `error=invalid_client`.
     let token_client = browser_client();
+    let probe = |secret: &str| {
+        let mut form = vec![
+            ("grant_type", probe_grant.to_string()),
+            ("client_id", client_id.clone()),
+            ("client_secret", secret.to_string()),
+        ];
+        if is_native_oauth() {
+            form.push(("refresh_token", "not-a-refresh-token".to_string()));
+        } else {
+            form.push(("scope", "openid".to_string()));
+        }
+        form
+    };
     let res = token_client
-        .post(format!("{HYDRA_PUBLIC}/oauth2/token"))
-        .form(&[
-            ("grant_type", "client_credentials"),
-            ("client_id", client_id.as_str()),
-            ("client_secret", old_secret.as_str()),
-            ("scope", "openid"),
-        ])
+        .post(format!("{}/oauth2/token", oauth_public()))
+        .form(&probe(&old_secret))
         .send()
         .await
         .expect("token POST with old secret");
+    if is_native_oauth() {
+        assert_eq!(
+            res.status(),
+            reqwest::StatusCode::UNAUTHORIZED,
+            "old secret status"
+        );
+    }
     assert!(
         !res.status().is_success(),
         "old secret must be rejected; got {}",
@@ -887,22 +908,31 @@ async fn admin_client_secret_rotation() {
 
     // New secret must work.
     let res = token_client
-        .post(format!("{HYDRA_PUBLIC}/oauth2/token"))
-        .form(&[
-            ("grant_type", "client_credentials"),
-            ("client_id", client_id.as_str()),
-            ("client_secret", new_secret.as_str()),
-            ("scope", "openid"),
-        ])
+        .post(format!("{}/oauth2/token", oauth_public()))
+        .form(&probe(&new_secret))
         .send()
         .await
         .expect("token POST with new secret");
-    assert!(
-        res.status().is_success(),
-        "new secret must work; status {} body {}",
-        res.status(),
-        res.text().await.unwrap_or_default()
-    );
+    if is_native_oauth() {
+        assert_eq!(
+            res.status(),
+            reqwest::StatusCode::BAD_REQUEST,
+            "new secret status"
+        );
+        let err: Value = res.json().await.unwrap_or(Value::Null);
+        assert_eq!(
+            err["error"].as_str(),
+            Some("invalid_grant"),
+            "new secret must authenticate the client; got {err}"
+        );
+    } else {
+        assert!(
+            res.status().is_success(),
+            "new secret must work; status {} body {}",
+            res.status(),
+            res.text().await.unwrap_or_default()
+        );
+    }
 
     // Audit row landed.
     assert!(
@@ -911,7 +941,7 @@ async fn admin_client_secret_rotation() {
     );
 
     // Cleanup: delete the client via Hydra admin so we don't leak.
-    hydra_delete_client(&client_id).await;
+    oauth_delete_client(&client_id).await;
 }
 
 // =========================================================================
@@ -932,7 +962,7 @@ async fn admin_client_verify_unverify_toggle() {
 
     // Create a Hydra client via the admin API and seed its metadata row as
     // `verification = unverified`. Saves us walking the admin form.
-    let (client_id, _secret, _redirect) = hydra_create_test_client(&["openid"]).await;
+    let (client_id, _secret, _redirect) = oauth_create_test_client(&["openid"]).await;
     mark_client_unverified(&client_id);
     assert_eq!(
         read_client_verification(&client_id).as_deref(),
@@ -1002,7 +1032,7 @@ async fn admin_client_verify_unverify_toggle() {
         "unverify must write an audit row"
     );
 
-    hydra_delete_client(&client_id).await;
+    oauth_delete_client(&client_id).await;
 }
 
 // =========================================================================
@@ -1107,7 +1137,7 @@ async fn webhook_outbox_requeue_then_discard() {
     // Seed a DEAD outbox row directly via the DB. We need a real Hydra
     // client_id so `enforce_row_scope`'s lookups succeed (the row's
     // `client_id` column must point at something Hydra recognises).
-    let (client_id, _secret, _redirect) = hydra_create_test_client(&["openid"]).await;
+    let (client_id, _secret, _redirect) = oauth_create_test_client(&["openid"]).await;
     let row_id = uuid::Uuid::new_v4().to_string();
     let event_id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
@@ -1197,7 +1227,7 @@ async fn webhook_outbox_requeue_then_discard() {
         "discard must write an audit row"
     );
 
-    hydra_delete_client(&client_id).await;
+    oauth_delete_client(&client_id).await;
 }
 
 // =========================================================================

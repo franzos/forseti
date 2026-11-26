@@ -5,7 +5,8 @@ pub const WEBHOOK_TOKEN_MIN_LEN: usize = 32;
 
 /// Scopes the server's ID token builder acts on, advertised through Hydra's
 /// `webfinger.oidc_discovery.supported_scope` (Hydra adds `openid`,
-/// `offline` and `offline_access` itself).
+/// `offline` and `offline_access` itself) and in the built-in server's
+/// discovery document.
 pub const SUPPORTED_SCOPES: [&str; 6] = [
     "email",
     "profile",
@@ -13,6 +14,38 @@ pub const SUPPORTED_SCOPES: [&str; 6] = [
     "orgs",
     "groups",
     "extended_profile",
+];
+
+/// Claims Forseti and Hydra put in ID tokens, advertised through Hydra's
+/// `webfinger.oidc_discovery.supported_claims` and in the built-in server's
+/// discovery document.
+pub const SUPPORTED_CLAIMS: [&str; 26] = [
+    "sub",
+    "iss",
+    "aud",
+    "exp",
+    "iat",
+    "auth_time",
+    "nonce",
+    "acr",
+    "amr",
+    "sid",
+    "email",
+    "email_verified",
+    "name",
+    "given_name",
+    "family_name",
+    "picture",
+    "website",
+    "preferred_username",
+    "locale",
+    "updated_at",
+    "org",
+    "orgs",
+    "groups",
+    "bio",
+    "pronouns",
+    "links",
 ];
 
 /// A string that is empty, missing, or an obvious placeholder isn't a

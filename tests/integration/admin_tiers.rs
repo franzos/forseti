@@ -233,7 +233,7 @@ async fn org_owner_client_cannot_skip_consent_or_borrow_audience_body() {
         .expect("client_id in show URL path");
 
     assert_eq!(
-        hydra_client_field(&client_id, "skip_consent").await,
+        oauth_client_field(&client_id, "skip_consent").await,
         Some(serde_json::Value::Bool(false)),
         "an org owner must not be able to mint a silent-consent client"
     );
@@ -242,10 +242,10 @@ async fn org_owner_client_cannot_skip_consent_or_borrow_audience_body() {
         Some("org"),
         "an org-owner-created client must be stamped source=org"
     );
-    hydra_delete_client(&client_id).await;
+    oauth_delete_client(&client_id).await;
 
     // An audience the org hasn't registered is refused, and nothing is created.
-    let before = hydra_client_count_by_name("org-scoped-audience").await;
+    let before = oauth_client_count_by_name("org-scoped-audience").await;
     let mut form = base.to_vec();
     form[1] = ("name", "org-scoped-audience");
     form.push(("audience", "https://someone-elses.example/mcp"));
@@ -264,7 +264,7 @@ async fn org_owner_client_cannot_skip_consent_or_borrow_audience_body() {
         body.chars().take(400).collect::<String>()
     );
     assert_eq!(
-        hydra_client_count_by_name("org-scoped-audience").await,
+        oauth_client_count_by_name("org-scoped-audience").await,
         before,
         "a refused create must not leave a Hydra client behind"
     );
@@ -340,7 +340,7 @@ async fn org_client_protocol_body() {
             body.chars().take(400).collect::<String>()
         );
         assert_eq!(
-            hydra_client_count_by_name(&name).await,
+            oauth_client_count_by_name(&name).await,
             0,
             "{field}={value}: a refused create must not leave a Hydra client behind"
         );
@@ -392,7 +392,7 @@ async fn verifying_a_rowless_client_from_an_org_scope_stamps_source_org() {
         .expect("seeded admin identity");
     set_org_member_role("default", &admin_id, "owner");
 
-    let (client_id, _secret, _redirect) = hydra_create_test_client(&["openid"]).await;
+    let (client_id, _secret, _redirect) = oauth_create_test_client(&["openid"]).await;
     assert_eq!(
         client_metadata_source(&client_id),
         None,
@@ -424,7 +424,7 @@ async fn verifying_a_rowless_client_from_an_org_scope_stamps_source_org() {
         "a lazy row written from an org scope must not claim operator provenance"
     );
 
-    hydra_delete_client(&client_id).await;
+    oauth_delete_client(&client_id).await;
     delete_client_metadata(&client_id);
 }
 
@@ -471,7 +471,7 @@ async fn forseti_admin_client_may_still_skip_consent() {
         .expect("client_id in show URL path");
 
     assert_eq!(
-        hydra_client_field(&client_id, "skip_consent").await,
+        oauth_client_field(&client_id, "skip_consent").await,
         Some(serde_json::Value::Bool(true)),
         "a Forseti operator must keep skip_consent"
     );
@@ -480,7 +480,7 @@ async fn forseti_admin_client_may_still_skip_consent() {
         Some("admin"),
         "an operator-created client stays source=admin"
     );
-    hydra_delete_client(&client_id).await;
+    oauth_delete_client(&client_id).await;
 }
 
 /// The Tier-1 operator still reaches both surfaces - the fix narrows who may
@@ -590,7 +590,7 @@ async fn reveal_token_is_hashed_at_rest() {
         "redeeming the reveal must consume the row"
     );
 
-    hydra_delete_client(&client_id).await;
+    oauth_delete_client(&client_id).await;
     delete_client_metadata(&client_id);
 }
 

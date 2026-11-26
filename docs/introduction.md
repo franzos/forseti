@@ -1,6 +1,6 @@
 # Forseti
 
-Forseti is a self-service UI and OAuth2 login / consent / logout bridge. It runs on [Ory Kratos](https://www.ory.sh/kratos/) or on its own native identity backend, with [Ory Hydra](https://www.ory.sh/hydra/) for OAuth2 and OIDC either way. It gives your identity stack the pages it's missing: login, registration, account recovery, MFA, consent, and admin tooling, all server-rendered in Rust.
+Forseti is a self-service UI and OAuth2 login / consent / logout bridge. It runs on [Ory Kratos](https://www.ory.sh/kratos/) or on its own native identity backend, and on [Ory Hydra](https://www.ory.sh/hydra/) or its own built-in server for OAuth2 and OIDC. It gives your identity stack the pages it's missing: login, registration, account recovery, MFA, consent, and admin tooling, all server-rendered in Rust.
 
 These docs are split by what you're here to do:
 
@@ -8,6 +8,7 @@ These docs are split by what you're here to do:
 - [Operator guide](./operator-guide.md) — deployment topology, shared configuration, Hydra, secrets, backups.
 - [Identity: Kratos](./operator-guide-kratos.md) — what only the Kratos build needs: `kratos.yml`, 2FA enforcement, the `forseti-config` tooling.
 - [Identity: native](./operator-guide-native.md) — the build without Kratos: building it, sessions, throttles, upstream providers.
+- [OAuth: built in](./operator-guide-native-oauth.md) - the build without Hydra: the issuer, the signing key, clients, tokens, logout, what it doesn't serve.
 - [Reverse proxy](./operator-guide-proxy.md) — proxy topology, cookies, CSRF, CORS.
 - [Integration guide](./integration-guide.md) — consuming Forseti as an OIDC provider.
 - [Commercial features](./commercial/index.md) — organizations, enterprise SAML SSO, and observability.

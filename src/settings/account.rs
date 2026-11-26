@@ -246,6 +246,10 @@ async fn run_delete_saga(
             tracing::error!(error = %e, user_id = %user_id, "self-delete aborted before destructive call");
             "error-boundary-account-delete-notifications-failed"
         }
+        Err(e @ DeleteError::OpSessions) => {
+            tracing::error!(error = %e, user_id = %user_id, "self-delete aborted before destructive call");
+            "error-boundary-account-delete-failed"
+        }
         Err(e @ DeleteError::Kratos(_)) => {
             tracing::error!(error = %e, actor = %actor_email, user_id = %user_id, "kratos admin delete failed");
             "error-boundary-account-delete-failed"

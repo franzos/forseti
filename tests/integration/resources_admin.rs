@@ -77,7 +77,18 @@ async fn registry_ui_created_resource_binds_audience() {
         "created_by must record the admin's email"
     );
 
-    let aud = crate::cimd::cimd_flow_aud(resource, 43441, "res-ui-bind").await;
+    // Native has no CIMD; a registered client requests the resource instead.
+    let aud = if is_native_oauth() {
+        let user = register_test_user("res-ui-bind").await;
+        let (tokens, client_id, _) = crate::oauth::registry_claims_flow(&user, resource).await;
+        oauth_delete_client(&client_id).await;
+        delete_client_metadata(&client_id);
+        user.cleanup().await;
+        let claims = decode_jwt_claims(tokens["access_token"].as_str().expect("access_token"));
+        crate::cimd::jwt_aud(&claims)
+    } else {
+        crate::cimd::cimd_flow_aud(resource, 43441, "res-ui-bind").await
+    };
     delete_registry_resource(resource);
     assert!(
         aud.iter().any(|a| a == resource),

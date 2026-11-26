@@ -78,7 +78,10 @@ enum Scope {
     /// Every request the router sees, its fallback included (`Router::layer`).
     Router,
     /// Only requests that match one of the router's routes (`Router::route_layer`).
-    #[cfg_attr(not(feature = "identity-native"), allow(dead_code))]
+    #[cfg_attr(
+        not(any(feature = "identity-native", feature = "oauth-native")),
+        allow(dead_code)
+    )]
     Routes,
 }
 
@@ -260,7 +263,8 @@ where
 
 /// Paired per-minute + per-hour per-client buckets on the routes of `r` only, so an unmatched
 /// request (the router's fallback, or another router's route after a merge) never counts.
-#[cfg(feature = "identity-native")]
+#[cfg(any(feature = "identity-native", feature = "oauth-native"))]
+#[cfg_attr(not(feature = "identity-native"), allow(dead_code))]
 pub(crate) fn route_dual_window<F>(
     r: Router<AppState>,
     proxy: &ProxyConfig,
@@ -280,7 +284,8 @@ where
 /// [`route_dual_window`] in front of a global pair: a request the per-client buckets refuse never
 /// reaches the global ones, so one client cannot drain the shared budget. The buckets are returned
 /// as well, so a handler can charge them.
-#[cfg(feature = "identity-native")]
+#[cfg(any(feature = "identity-native", feature = "oauth-native"))]
+#[cfg_attr(not(feature = "identity-native"), allow(dead_code))]
 pub(crate) fn route_dual_window_then_global<F>(
     r: Router<AppState>,
     proxy: &ProxyConfig,
@@ -321,14 +326,16 @@ where
 }
 
 /// Buckets mounted as route layers that a handler charges as well, in the layers' order.
-#[cfg(feature = "identity-native")]
+#[cfg(any(feature = "identity-native", feature = "oauth-native"))]
+#[cfg_attr(not(feature = "identity-native"), allow(dead_code))]
 #[derive(Clone, Default)]
 pub(crate) struct SharedBuckets {
     client: Vec<Take<std::net::IpAddr>>,
     global: Vec<Take<()>>,
 }
 
-#[cfg(feature = "identity-native")]
+#[cfg(any(feature = "identity-native", feature = "oauth-native"))]
+#[cfg_attr(not(feature = "identity-native"), allow(dead_code))]
 impl SharedBuckets {
     /// One token from each bucket for the client at `ip`, stopping at the first refusal as the
     /// layers do. `Err` carries the `Retry-After` seconds; no `ip` is refused like a request
@@ -407,7 +414,7 @@ mod tests {
         assert_eq!(after, before + 4);
     }
 
-    #[cfg(feature = "identity-native")]
+    #[cfg(any(feature = "identity-native", feature = "oauth-native"))]
     #[test]
     fn shared_buckets_charge_the_layers_buckets_per_client_then_global() {
         let _guard = TEST_SERIAL

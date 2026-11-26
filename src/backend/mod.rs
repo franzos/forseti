@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use axum::http::HeaderMap;
+use serde_json::{Map, Value};
 
 use crate::config::AppConfig;
 use crate::db::DbPool;
@@ -14,25 +15,42 @@ use identity::{
     BrowserSession, CourierStatus, FlowFetch, FlowInit, FlowKind, FlowOutcome, Identity,
     IdentityState, RecoveryCode, SelfServiceError, Session, SessionOrigin, WhoamiOutcome,
 };
+use oauth::{
+    ConsentRequest, ConsentSession, DeviceAuthorization, DeviceTokenOutcome, IdTokenClaims,
+    JwkSummary, LoginRequest, LogoutRequest, OAuthClient, OidcDiscovery, RedirectTo,
+};
 
 pub mod identity;
 pub mod oauth;
 
+#[cfg(feature = "oauth-ory")]
 pub use crate::ory::HydraBackend;
 #[cfg(feature = "identity-ory")]
 pub use crate::ory::KratosBackend;
 
 #[cfg(feature = "identity-native")]
 pub use crate::identity_native::NativeBackend;
+#[cfg(feature = "oauth-native")]
+pub use crate::oauth_native::NativeOAuth;
 
 #[cfg(feature = "identity-ory")]
 pub type IdentityImpl = KratosBackend;
 #[cfg(feature = "identity-native")]
 pub type IdentityImpl = NativeBackend;
+#[cfg(feature = "oauth-ory")]
 pub type OAuthImpl = HydraBackend;
+#[cfg(feature = "oauth-native")]
+pub type OAuthImpl = NativeOAuth;
 
-pub fn build_oauth(cfg: &AppConfig) -> Arc<OAuthImpl> {
+/// Hydra keeps its own state, so it ignores the pool and the cookie secret.
+#[cfg(feature = "oauth-ory")]
+pub fn build_oauth(cfg: &AppConfig, _db: &DbPool, _cookie_secret: &[u8]) -> Arc<OAuthImpl> {
     HydraBackend::from_config(cfg)
+}
+
+#[cfg(feature = "oauth-native")]
+pub fn build_oauth(cfg: &AppConfig, db: &DbPool, cookie_secret: &[u8]) -> Arc<OAuthImpl> {
+    NativeOAuth::new(cfg, db, cookie_secret)
 }
 
 /// Kratos keeps its own state, so it ignores the pool and the cookie secret.
@@ -125,11 +143,122 @@ pub trait IdentityBackend: Send + Sync + 'static {
     async fn version(&self) -> Result<String>;
 }
 
+/// OAuth2/OIDC authorization server: login, consent and logout challenges, clients and grants.
+// `HydraBackend`'s inherent methods shadow these at every call site, so the Ory build calls few of them.
+#[allow(async_fn_in_trait, dead_code)]
+pub trait OAuthBackend: Send + Sync + 'static {
+    async fn get_login_request(&self, challenge: &str) -> Result<LoginRequest>;
+    async fn accept_login_request(
+        &self,
+        challenge: &str,
+        subject: &str,
+        remember: bool,
+        remember_for: i64,
+        amr: Vec<String>,
+        acr: Option<String>,
+    ) -> Result<RedirectTo>;
+    async fn reject_login_request(
+        &self,
+        challenge: &str,
+        error: &str,
+        error_description: &str,
+    ) -> Result<RedirectTo>;
+    async fn get_consent_request(&self, challenge: &str) -> Result<ConsentRequest>;
+    async fn accept_consent_request(
+        &self,
+        challenge: &str,
+        grant_scope: Vec<String>,
+        grant_audience: Vec<String>,
+        remember: bool,
+        id_token_session: Value,
+        access_token_session: Map<String, Value>,
+    ) -> Result<RedirectTo>;
+    async fn reject_consent_request(
+        &self,
+        challenge: &str,
+        error: &str,
+        error_description: &str,
+    ) -> Result<RedirectTo>;
+    async fn get_logout_request(&self, challenge: &str) -> Result<LogoutRequest>;
+    async fn accept_logout_request(&self, challenge: &str) -> Result<RedirectTo>;
+
+    async fn device_authorization(
+        &self,
+        client_id: &str,
+        client_secret: &str,
+        scope: &str,
+    ) -> Result<DeviceAuthorization>;
+    async fn poll_device_token(
+        &self,
+        client_id: &str,
+        client_secret: &str,
+        device_code: &str,
+    ) -> Result<DeviceTokenOutcome>;
+    async fn accept_user_code_request(
+        &self,
+        device_challenge: &str,
+        user_code: &str,
+    ) -> Result<RedirectTo>;
+    async fn verify_id_token(
+        &self,
+        id_token: &str,
+        issuer: &str,
+        client_id: &str,
+        iat_window_secs: u64,
+    ) -> Result<IdTokenClaims>;
+
+    async fn list_clients(
+        &self,
+        page_size: i64,
+        page_token: Option<&str>,
+        client_name: Option<&str>,
+    ) -> Result<Vec<OAuthClient>>;
+    async fn get_client(&self, id: &str) -> Result<OAuthClient>;
+    async fn get_client_opt(&self, id: &str) -> Result<Option<OAuthClient>>;
+    async fn create_client(&self, client: OAuthClient) -> Result<OAuthClient>;
+    async fn update_client(&self, id: &str, client: OAuthClient) -> Result<OAuthClient>;
+    async fn delete_client(&self, id: &str) -> Result<()>;
+    async fn add_client_audiences(
+        &self,
+        client_id: &str,
+        on_record: &[String],
+        granted: &[String],
+    ) -> Result<()>;
+    async fn rotate_client_secret(&self, id: &str) -> Result<OAuthClient>;
+
+    async fn list_consent_sessions_by_subject(&self, subject: &str) -> Result<Vec<ConsentSession>>;
+    async fn revoke_consent_sessions_for_subject(&self, subject: &str) -> Result<()>;
+    async fn revoke_consent_sessions_by_request_id(&self, consent_request_id: &str) -> Result<()>;
+    async fn list_consent_sessions_by_login_session(
+        &self,
+        subject: &str,
+        sid: &str,
+    ) -> Result<Vec<ConsentSession>>;
+    async fn revoke_consent_sessions_for_client(
+        &self,
+        subject: &str,
+        client_id: &str,
+    ) -> Result<()>;
+    async fn revoke_login_sessions_for_subject(&self, subject: &str) -> Result<()>;
+    async fn revoke_login_session_by_sid(&self, sid: &str) -> Result<()>;
+
+    async fn health_alive(&self) -> Result<()>;
+    async fn health_ready(&self) -> Result<()>;
+    async fn version(&self) -> Result<String>;
+    async fn signing_keys(&self) -> Result<Vec<JwkSummary>>;
+    async fn fetch_discovery(&self) -> Result<(OidcDiscovery, Value)>;
+
+    /// The issuer RPs see in tokens and discovery.
+    fn issuer(&self) -> &str;
+    /// Origins a browser form submission may pass through on its way to the authorization server.
+    fn form_action_origins(&self) -> Vec<String>;
+}
+
 // Handlers, `tokio::spawn` and `JoinSet` need the futures `Send`; this fails to compile if one is not.
 const _: fn(&IdentityImpl, &OAuthImpl) = |identity, oauth| {
     fn require_send<T: Send>(_: T) {}
     require_send(identity.whoami(None));
     require_send(identity.resolve_flow(FlowKind::Login, None, ""));
-    require_send(oauth.get_login_request(""));
-    require_send(oauth.fetch_discovery());
+    require_send(OAuthBackend::get_login_request(oauth, ""));
+    require_send(OAuthBackend::fetch_discovery(oauth));
 };

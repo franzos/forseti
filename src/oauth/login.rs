@@ -6,6 +6,8 @@ use axum::response::{IntoResponse, Redirect, Response};
 use serde::Deserialize;
 
 use crate::backend::IdentityBackend;
+#[cfg(feature = "oauth-native")]
+use crate::backend::OAuthBackend;
 use crate::backend::identity::{WhoamiOutcome, address_is_verified};
 use crate::backend::oauth::LoginRequest;
 use crate::db::DbPool;
