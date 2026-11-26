@@ -579,8 +579,15 @@ mod tests {
         assert_eq!(err.to_string(), "another forseti-config modify is running");
 
         drop(_guard);
-        // Once released, a fresh acquisition must succeed again.
-        let _guard2 = lock_config_dir(&dir).unwrap();
+        // A sibling test forking a child holds a copy of the descriptor until its exec.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let _guard2 = loop {
+            match lock_config_dir(&dir) {
+                Ok(guard) => break guard,
+                Err(_) if std::time::Instant::now() < deadline => std::thread::yield_now(),
+                Err(e) => panic!("{e}"),
+            }
+        };
 
         fs::remove_dir_all(&dir).ok();
     }
