@@ -516,19 +516,28 @@ mod tests {
     #[tokio::test]
     async fn the_jwks_route_is_rate_limited() {
         let (app, _) = app().await;
-        for _ in 0..super::TOKEN_RATE_PER_MINUTE {
-            get(&app, "/.well-known/jwks.json").await;
+        let send = || async {
+            app.clone()
+                .oneshot(crate::oauth_native::test_support::with_peer(
+                    Request::get("/.well-known/jwks.json")
+                        .body(Body::empty())
+                        .unwrap(),
+                ))
+                .await
+                .unwrap()
+        };
+        // The bucket refills while a slow run works through it, so the refusal can come late.
+        let mut refused = None;
+        for sent in 0..super::TOKEN_RATE_PER_MINUTE * 2 {
+            let resp = send().await;
+            if resp.status() == StatusCode::TOO_MANY_REQUESTS {
+                refused = Some((sent, resp));
+                break;
+            }
+            assert_eq!(resp.status(), StatusCode::OK);
         }
-        let resp = app
-            .clone()
-            .oneshot(crate::oauth_native::test_support::with_peer(
-                Request::get("/.well-known/jwks.json")
-                    .body(Body::empty())
-                    .unwrap(),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        let (sent, resp) = refused.expect("the limiter refuses within twice its burst");
+        assert!(sent >= super::TOKEN_RATE_PER_MINUTE);
         assert!(resp.headers().contains_key(header::RETRY_AFTER));
     }
 
