@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.2.32] - 2026-11-26
+
+### Added
+- Built-in OAuth server: a build that runs without Hydra (`--features oauth-native`)
+- Built-in OAuth: code flow with PKCE, refresh tokens, userinfo, discovery, JWKS
+- Built-in OAuth: CIMD and the device grant behind Linux PAM sign-in
+- Built-in OAuth: token revocation, introspection on the internal listener
+- Built-in OAuth: RP-initiated and back-channel logout
+- Built-in OAuth: `forseti rotate-oauth-key` rotates the signing key
+- Native identity build: passkeys and WebAuthn security keys
+- Native identity build: admins can reset a user's second factors
+- `make check-matrix`, `run-native-oauth`, `stack-up-native-oauth`, `test-integration-native-oauth`
+- Operator guide for the built-in OAuth server
+
+### Changed
+- Native builds name both backends: `--features identity-native,oauth-ory`
+- A consent page opened from another session shows the error page; the request stays pending
+- A session end that leaves OAuth sessions behind says so in its confirmation
+
+### Fixed
+- Failed OAuth session revokes were reported as success
+- Advisories: cookie, url updated
+
 ## [0.2.31] - 2026-11-21
 
 ### Added
