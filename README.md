@@ -61,6 +61,22 @@ The choice is made at compile time with cargo features; a binary carries exactly
 | **How you get it** | Release tarballs, packages, container image | Build from source: `--no-default-features --features identity-native,oauth-ory` |
 | **OAuth: built-in server** | `--features identity-ory,oauth-native`: Forseti and Kratos, no Hydra | `--features identity-native,oauth-native`: Forseti alone |
 
+That table is the identity side. The OAuth side:
+
+| | Hydra | Built-in server |
+| --- | --- | --- |
+| **Services to run** | Hydra and its database, next to Forseti | None: Forseti serves the OAuth2 endpoints at its root |
+| **Issuer** | Hydra's own, e.g. `https://accounts.example.com/hydra` | `[self].url`, no path |
+| **Flows** | Authorization code, device grant (Linux PAM sign-in), client credentials | Authorization code with PKCE, device grant (Linux PAM sign-in) |
+| **Logout** | RP-initiated and back-channel | The same |
+| **Revocation, introspection** | Yes | Yes; introspection on the internal listener |
+| **CIMD (MCP clients onboarding themselves)** | Yes | Yes |
+| **Signing key rotation** | Through Hydra | `forseti rotate-oauth-key` |
+| **Access tokens** | JWT, `typ: JWT` | JWT, `typ: at+jwt` (RFC 9068) |
+| **Request objects, `/hydra` front proxy** | Yes | No |
+| **Existing Hydra clients and consents** | Stay where they are | No import; fresh installs only |
+| **How you get it** | Release tarballs, packages, container image | Build from source: `--no-default-features --features identity-ory,oauth-native` (or `identity-native,oauth-native`) |
+
 The native backends are new in the 0.2 series, and they're my code, not Ory's. The argument under [Why Forseti](#why-forseti) (your auth load sits on Ory's engines) only holds for the side that stays on Ory. What you get in return is a service less to run, configure and back up per side.
 
 If you need sign-in by emailed code, Apple sign-in or another provider that's neither OpenID Connect nor GitHub, or you already have identities in Kratos, stay on Kratos. The built-in OAuth server serves the authorization code flow with PKCE, refresh tokens, userinfo, discovery, JWKS, CIMD, the device grant behind Linux PAM sign-in, revocation, introspection, RP-initiated and back-channel logout, and signing key rotation (`forseti rotate-oauth-key`). It doesn't have the `/hydra` front proxy, the `client_credentials` grant or request objects, and it doesn't import Hydra clients or consents. If you need any of those, or already run Hydra, stay on Hydra. Setup for each: [Kratos](docs/operator-guide-kratos.md), [native identity](docs/operator-guide-native.md), [built-in OAuth](docs/operator-guide-native-oauth.md).
